@@ -487,3 +487,4 @@ research/
 # local runtime data
 .data/
 *.db
+scripts/deploy/.venv/
