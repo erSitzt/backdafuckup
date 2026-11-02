@@ -488,3 +488,9 @@ research/
 .data/
 *.db
 scripts/deploy/.venv/
+
+# OpenTofu lab (deploy/lab): providers, state and variables hold the lab password
+deploy/lab/.terraform/
+deploy/lab/*.tfstate
+deploy/lab/*.tfstate.*
+deploy/lab/*.tfvars

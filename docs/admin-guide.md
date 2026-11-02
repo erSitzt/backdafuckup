@@ -11,6 +11,21 @@
 | XCP-ng / XenServer | XCP-ng 8.3 or XenServer 8, with a pool admin account for the connection. |
 | NBD network | Recommended: a pool network with the NBD purpose that the backup server can reach. Without it, backups fall back to the slower HTTP export. |
 
+### Network ports
+
+| From → to | Port | Used for |
+|---|---|---|
+| Browser → backup server | TCP 9555 (HTTPS) | Web console |
+| Guest agent in the VM → backup server | TCP 9555 (HTTPS) | Agent connection, self-update, file restore into Windows VMs. Outbound from the VM only. |
+| Backup server → XCP-ng hosts | TCP 443 (HTTPS) | XAPI, HTTP export, restore upload |
+| Backup server → XCP-ng hosts on the NBD network | TCP 10809 (TLS) | NBD disk reads |
+| Backup server → Windows VMs | TCP 445 (SMB) | Push installation of the agent |
+| Backup server → file servers, domain controllers, DFS namespace servers | TCP 445 (SMB) | File restore to a network share, DFS referrals |
+| Backup server → Linux VMs | TCP 22 (SSH) | File restore into Linux VMs |
+| Backup server → PostgreSQL | TCP 5432 | Catalog (usually on the same machine) |
+
+The backup server also needs DNS for the host names of pools, shares and VMs.
+
 ### Disk transports
 
 Each job has a **Disk transport** setting (job editor → Storage → Advanced):
@@ -97,6 +112,8 @@ Copy-Item deploy\windows\install-service.ps1 publish\win\
 
 Configuration goes in `%ProgramData%\backdafuckup\appsettings.json`.
 
+To install or update a Windows server remotely from a Linux machine (SMB + WinRM, PostgreSQL included), see [`scripts/deploy/README.md`](../scripts/deploy/README.md).
+
 ## Guest agent (application-consistent backups)
 
 XCP-ng / XenServer removed the quiesced snapshot in 8.1, so a VM snapshot is crash-consistent: like a power failure. For application-consistent backups of Windows VMs (SQL Server, Active Directory, Exchange, other VSS-aware applications) install the **backdafuckup agent** in the VMs and switch on **Guest processing** in the job (Advanced → Guest processing).
@@ -139,7 +156,9 @@ Restore points show their consistency ("application", or "crash" plus the reason
 - **Folder:** `%ProgramFiles%\backdafuckup Agent`, readable by SYSTEM and administrators only. It holds the program, `agent.json` (server address, pin, enrollment secret), `agent.key` (the agent's own key) and `agent.log`.
 - **Service:** `BackdafuckupAgent`, with recovery set to restart. It registers the VSS provider "backdafuckup VSS provider" as COM+ application (Local System).
   - The provider only takes part in backdafuckup's own freeze. Other backup products keep using the Windows system provider.
-- **Server connection:** a long poll to the server (one open HTTPS request). The server only offers the commands *info, prepare, freeze, thaw, abort*; no files and no commands are executed.
+- **Server connection:** a long poll to the server (one open HTTPS request). The server only offers the commands *info, prepare, freeze, thaw, abort* and *restore files*. The agent runs no commands or scripts from the server; the only program it takes from the server is its own update (see *Self-update*).
+  - *Restore files* writes the files that someone restores in the console into this VM, as Local System and with the permissions from the backup (see [File-level restore](#file-level-restore)). Only local fixed volumes are accepted, never the agent's own folder.
+  - So every console user can write files into each VM with the agent (all console users are administrators so far). Give console access accordingly. The same holds for Linux VMs and the stored Linux credentials.
 - **Self-update:** after a server update the agent downloads the new files (SHA-256 checked) and restarts. This never happens during a backup.
 - **Remove:** `"%ProgramFiles%\backdafuckup Agent\backdafuckup-agent.exe" uninstall` removes the service, VSS provider and folder.
 
@@ -182,8 +201,12 @@ Restore points show their consistency ("application", or "crash" plus the reason
   - It stops early when the connection to the share is lost or after 100 errors in a row, for example when the share is full.
   - *Stop* keeps what was restored so far.
 - **Limits:** at most 2 file restores run at the same time (`Engine:MaxConcurrentFileRestoreSessions`). A restore uses its own copy of the restore point, so it goes on when the browser closes.
+- **DFS namespaces:** a path such as `\\corp.example\dfs\Exchange` is resolved like Windows does it, with DFS referrals over `IPC$`:
+  1. a domain controller names the namespace servers;
+  2. a namespace server names the share the link points to;
+  3. the restore works directly on that share.
 
-- **DFS namespaces:** a path such as `\\corp.example\dfs\Exchange` is resolved like Windows does (DFS referral over `IPC$`). The restore then works directly on the share the link points to, and the log shows the resolution (`DFS: … → \\fs01\exchange`).
+  The log shows each step (`DFS: … → \\fs01\exchange`). Use the full DNS name of the domain: short NetBIOS names such as `\\corp\dfs` do not resolve on a Linux backup server. If a file cannot be renamed into place on the target, it is copied to its name instead (not atomic), and the session ends with *Warning*.
 
 **Restore into a Windows VM (guest agent)**
 - *Restore… → Back into the VM* writes the files through the backdafuckup agent in the VM of the restore point. The agent must be online and at least the version that reports file restore (it updates itself after a server update).
@@ -272,6 +295,8 @@ To run a single test, add `--filter-method "*Cbt_bit_order_spike"`; add `--outpu
 - **`Cbt_bit_order_spike`:** takes two snapshots, compares the real block differences with the CBT bitmap, and prints the bit order to configure. Make sure the VM writes some data during the wait, e.g. `dd if=/dev/urandom of=/tmp/x bs=1M count=50; sync`.
 - **`Backup_and_restore_roundtrip`:** backs up the VM with the selected transport into a temporary repository, restores it as `<name>-bdfu-labtest` to the target SR, and compares SHA-256 hashes of the restore point and the restored disks (read back with a raw HTTP export).
 - **`Http_export_vhd_matches_raw`:** exports a snapshot of the VM as VHD (parsed by backdafuckup) and as raw, and checks that both give the same data. It works without NBD.
+
+The manual checks of file-level restore (downloads, shares, Windows and Linux VMs) are in the [lab runbook](lab-runbook.md).
 
 ## Required XAPI permissions
 

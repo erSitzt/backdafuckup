@@ -37,6 +37,14 @@
   - vSphere: the snapshot LUN is mounted on an ESXi host as a resignatured datastore and read through the HotAdd proxy
   - Hyper-V: the array's VSS hardware provider plus transportable shadow copies
 - **More storage array plugins:** vendors to be decided; each must have a publicly documented snapshot API
+- **File-level restore, follow-ups:**
+  - search for files across a restore point (recursive)
+  - versions of a file: the same path in all restore points of the VM (size, modification time, changed or not by
+    comparing the file's chunk ids, so no data is read), with download and restore of a chosen version. Veeam's
+    backup browser offers something similar (user request 2026-11-02).
+  - another VM as restore target in the console (the API already accepts one)
+  - symbolic links, junctions and alternate data streams into Windows VMs
+  - striped and thin LVM volumes, ReFS
 
 ## Backlog (technical)
 

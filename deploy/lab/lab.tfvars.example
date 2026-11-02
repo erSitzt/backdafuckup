@@ -1,0 +1,21 @@
+# Copy to lab.auto.tfvars (not committed) and fill in the names as Xen Orchestra shows them.
+
+pool        = "xcp-pool"
+lab_sr      = "bdfu-lab-sr"  # must carry the tag bdfu-lab
+lab_network = "bdfu-lab-net" # DHCP
+
+# lab_password = "..."       # or TF_VAR_lab_password; at least 12 characters
+
+ssh_public_keys = [
+  # "ssh-ed25519 AAAA... you@workstation",
+]
+
+linux_vms = {
+  ubuntu = { template = "Ubuntu 24.04 cloud-init", data_disks_gib = [10] }
+  rocky  = { template = "Rocky Linux 9 cloud-init", data_disks_gib = [6, 6] }
+}
+
+windows_vms = {
+  # w2022 = { template = "Windows Server 2022 cloudbase-init" }
+  # w2025 = { template = "Windows Server 2025 cloudbase-init" }
+}

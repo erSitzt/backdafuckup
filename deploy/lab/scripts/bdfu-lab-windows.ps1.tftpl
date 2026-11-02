@@ -1,0 +1,29 @@
+#ps1_sysnative
+# Lab VM setup (backdafuckup deploy/lab), run once by cloudbase-init as Local System.
+# Sets the Administrator password, opens SMB for the agent push installation and creates the test data of the lab
+# runbook (docs/lab-runbook.md, "Preparation").
+$ErrorActionPreference = 'Stop'
+
+$password = '${password}'
+net user Administrator $password /active:yes | Out-Null
+
+# File and Printer Sharing (SMB-In), by its language-independent group name.
+Get-NetFirewallRule -Group '@FirewallAPI.dll,-28502' | Enable-NetFirewallRule
+
+New-Item -ItemType Directory C:\bdfu-lab\tree\sub -Force | Out-Null
+fsutil file createnew C:\bdfu-lab\big.bin 4500000000 | Out-Null
+Set-Content C:\bdfu-lab\tree\readonly.txt 'read-only'
+attrib +r C:\bdfu-lab\tree\readonly.txt
+Set-Content C:\bdfu-lab\tree\hidden.txt 'hidden'
+attrib +h C:\bdfu-lab\tree\hidden.txt
+Set-Content ('C:\bdfu-lab\tree\Gr' + [char]0x00FC + [char]0x00DF + 'e mit Leerzeichen.txt') 'umlauts and spaces'
+Set-Content C:\bdfu-lab\tree\locked.txt 'opened exclusively in check C4'
+Set-Content C:\bdfu-lab\tree\sub\acl.txt 'explicit permissions'
+icacls C:\bdfu-lab\tree\sub\acl.txt /inheritance:r /grant:r '*S-1-5-32-544:F' '*S-1-5-18:F' '*S-1-5-32-545:R' | Out-Null
+(Get-Item C:\bdfu-lab\tree\readonly.txt).LastWriteTime = [datetime]'2020-01-02 03:04:05'
+icacls C:\bdfu-lab /save C:\bdfu-lab-acl-before.txt /t /c | Out-Null
+Get-ChildItem -Recurse -File -Force C:\bdfu-lab | Get-FileHash -Algorithm SHA256 | Export-Csv C:\bdfu-lab-hashes-before.csv -NoTypeInformation
+
+# The new name takes effect with the reboot cloudbase-init does after this script (exit code 1001).
+Rename-Computer -NewName '${hostname}' -Force
+exit 1001
