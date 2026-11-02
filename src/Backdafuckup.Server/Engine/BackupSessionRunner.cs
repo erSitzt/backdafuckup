@@ -1,9 +1,13 @@
 using System.Globalization;
+using System.Text.Json;
+using Backdafuckup.Contracts;
 using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Operations;
 using Backdafuckup.Core.Repository;
 using Backdafuckup.DataMover;
+using Backdafuckup.Agent.Protocol;
+using Backdafuckup.Server.Agents;
 using Backdafuckup.Server.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -17,6 +21,7 @@ public sealed class BackupSessionRunner(
     SessionEventWriter events,
     SessionTracker tracker,
     SessionQueue queue,
+    GuestProcessingService guestProcessing,
     TimeProvider time,
     ILogger<BackupSessionRunner> logger)
 {
@@ -63,7 +68,7 @@ public sealed class BackupSessionRunner(
                 await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    var task = new VmBackupTask(dbFactory, events, tracker, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1, repository, hypervisor);
+                    var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1, repository, hypervisor);
                     return (item, State: await task.RunAsync(cancellationToken).ConfigureAwait(false));
                 }
                 finally
@@ -143,6 +148,7 @@ internal sealed class VmBackupTask(
     IDbContextFactory<AppDbContext> dbFactory,
     SessionEventWriter events,
     SessionTracker tracker,
+    GuestProcessingService guestProcessing,
     TimeProvider time,
     ILogger logger,
     BackupJob job,
@@ -157,8 +163,12 @@ internal sealed class VmBackupTask(
     private long _readBytes;
     private long _storedBytes;
     private long _totalBytes = 1;
-    private long _doneBytes;
+    private DateTimeOffset? _transferStarted;
+    private DateTimeOffset? _transferEnded;
     private DateTimeOffset _lastProgress = DateTimeOffset.MinValue;
+    private readonly Lock _metricsLock = new();
+    private readonly RateMeter _rate = new();
+    private List<DiskMetricsDto> _diskMetrics = [];
 
     public async Task<SessionState> RunAsync(CancellationToken cancellationToken)
     {
@@ -212,22 +222,32 @@ internal sealed class VmBackupTask(
                 restorePointCreated = true;
             }
 
+            var guest = await PrepareGuestAsync(cancellationToken).ConfigureAwait(false);
             var ledger = new DbArtifactLedger(dbFactory, job.ConnectionId, session.Id, restorePointId, time);
             await using var writer = repository.BeginWrite(restorePointId, vm.NativeId, basePin);
             var snapshotName = $"{vm.CachedName} backdafuckup {time.GetUtcNow().ToLocalTime():yyyy-MM-dd HH:mm}";
             await using var backup = await hypervisor.BeginBackupAsync(
-                new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName), _log, ledger, cancellationToken).ConfigureAwait(false);
+                new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer), _log, ledger, cancellationToken).ConfigureAwait(false);
+            var (consistency, consistencyReason) = CheckConsistency(guest, backup.GuestFreeze);
 
             _totalBytes = Math.Max(1, backup.Disks.Sum(d => d.CapacityBytes));
-            var warnings = false;
-            var manifestDisks = new List<ManifestDisk>();
-            foreach (var disk in backup.Disks)
+            lock (_metricsLock)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var (manifestDisk, warned) = await BackupDiskAsync(backup, writer, disk, baseline, baseReader, cancellationToken).ConfigureAwait(false);
-                manifestDisks.Add(manifestDisk);
-                warnings |= warned;
+                _diskMetrics = backup.Disks.Select(d => new DiskMetricsDto
+                {
+                    Key = d.Key,
+                    Name = d.Name,
+                    CapacityBytes = d.CapacityBytes,
+                    Metrics = new TransferMetricsDto { TotalBytes = d.CapacityBytes },
+                }).ToList();
             }
+
+            await tracker.UpdateTaskAsync(taskId, t => t.Metrics = CurrentMetrics(), CancellationToken.None).ConfigureAwait(false);
+            var (manifestDisks, warnings) = await BackupDisksAsync(backup, writer, baseline, baseReader, cancellationToken).ConfigureAwait(false);
+            warnings |= consistencyReason is not null;
+            var guestBlob = guest?.Quiescer is { Prepared: { } prepared } quiescer
+                ? await writer.WriteBlobAsync("guest-metadata", GuestMetadataFormat, new MemoryStream(GuestMetadata(prepared, quiescer.Thawed)), cancellationToken).ConfigureAwait(false)
+                : null;
 
             var metadata = await writer.WriteBlobAsync("vm-metadata", backup.Metadata.Format, new MemoryStream(backup.Metadata.Content), cancellationToken).ConfigureAwait(false);
             var kind = manifestDisks.All(d => d.Stats.Mode == DiskBackupMode.Cbt) && manifestDisks.Count > 0 ? RestorePointKind.Incremental : RestorePointKind.Full;
@@ -242,6 +262,9 @@ internal sealed class VmBackupTask(
                 Source = new ManifestSource(job.Connection.Kind, hypervisor.Platform.PlatformId, vm.NativeId, backup.Vm.Name, backup.SnapshotId),
                 Vm = backup.Vm,
                 Metadata = metadata,
+                Consistency = consistency,
+                ConsistencyReason = consistencyReason,
+                Guest = guestBlob,
                 Chunking = new ManifestChunking(repository.Info.ChunkSize, repository.Info.Hash, repository.Info.Compression),
                 Disks = manifestDisks,
             };
@@ -259,18 +282,27 @@ internal sealed class VmBackupTask(
                 await backup.CommitAsync(_log, CancellationToken.None).ConfigureAwait(false);
                 await ReleaseBaseTokensAsync(baseline, manifestDisks).ConfigureAwait(false);
             }
+            catch (SnapshotCleanupDeferredException ex)
+            {
+                warnings = true;
+                _log.Warning(ex.Message);
+                await ReleaseBaseTokensAsync(baseline, manifestDisks).ConfigureAwait(false);
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 warnings = true;
-                _log.Warning($"Cleanup of the snapshot failed ({ex.Message}); it is retried automatically.");
+                _log.Warning(
+                    $"Reducing the snapshot to change tracking data failed ({ex.Message}). The restore point is complete; the snapshot is removed, " +
+                    "so the next backup of this VM reads its disks in full.");
             }
 
-            _log.Info($"Backup finished: read {Format(_readBytes)}, stored {Format(_storedBytes)} new data ({kind}).", "summary");
+            _log.Info($"Backup finished ({kind}): {MetricsText.Describe(CurrentMetrics())}.", "summary");
             await FinishTaskAsync(warnings ? SessionState.Warning : SessionState.Succeeded, null, restorePointId).ConfigureAwait(false);
             return warnings ? SessionState.Warning : SessionState.Succeeded;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            MarkRunningDisks("Failed");
             _log.Warning("Stopped by user.");
             await RemoveRestorePointAsync(restorePointId, restorePointCreated).ConfigureAwait(false);
             await FinishTaskAsync(SessionState.Stopped, "Stopped", null).ConfigureAwait(false);
@@ -278,6 +310,7 @@ internal sealed class VmBackupTask(
         }
         catch (Exception ex)
         {
+            MarkRunningDisks("Failed");
             logger.LogWarning(ex, "Backup of VM {Vm} failed", vm.CachedName);
             _log.Error($"Backup failed: {ex.Message}");
             await RemoveRestorePointAsync(restorePointId, restorePointCreated).ConfigureAwait(false);
@@ -293,6 +326,123 @@ internal sealed class VmBackupTask(
 
             basePin?.Dispose();
         }
+    }
+
+    internal const string GuestMetadataFormat = "backdafuckup-guest-v1";
+
+    /// <summary>
+    /// Guest processing before the snapshot: the agent of the VM (installed first if needed), or the reason why the backup
+    /// will be crash-consistent. With the policy "fail the VM" a missing agent fails the VM before any snapshot.
+    /// </summary>
+    private async Task<GuestPreparation?> PrepareGuestAsync(CancellationToken cancellationToken)
+    {
+        if (!job.GuestProcessing)
+        {
+            return null;
+        }
+
+        var guest = await guestProcessing.PrepareAsync(job, vm, _log, cancellationToken).ConfigureAwait(false);
+        if (guest.Quiescer is null)
+        {
+            if (job.GuestFailurePolicy == GuestFailurePolicy.FailVm)
+            {
+                throw new InvalidOperationException($"Guest processing: {guest.Reason}");
+            }
+
+            // Reported before the snapshot, so the log reads in the order things happen.
+            _log.Warning($"Guest processing: {guest.Reason} The VM is backed up crash-consistently.");
+        }
+
+        return guest;
+    }
+
+    /// <summary>"application" or "crash" plus the reason; with the policy "fail the VM" a failed freeze fails the VM.</summary>
+    private (string Consistency, string? Reason) CheckConsistency(GuestPreparation? guest, GuestFreezeResult? freeze)
+    {
+        if (guest is null)
+        {
+            return ("crash", null);
+        }
+
+        if (freeze is { ApplicationConsistent: true })
+        {
+            return ("application", null);
+        }
+
+        var reason = freeze?.Reason ?? guest.Reason ?? "the guest could not be frozen";
+        if (job.GuestFailurePolicy == GuestFailurePolicy.FailVm)
+        {
+            throw new InvalidOperationException($"Guest processing: the snapshot is not application-consistent: {reason}");
+        }
+
+        // A missing agent was reported before the snapshot, a failed freeze by the hypervisor provider.
+        return ("crash", reason);
+    }
+
+    private static byte[] GuestMetadata(GuestBackupInfo prepared, ThawReport? thawed) =>
+        JsonSerializer.SerializeToUtf8Bytes(new { prepared.Volumes, prepared.SqlDatabases, Writers = thawed?.Writers ?? prepared.Writers }, AgentJson.Options);
+
+    /// <summary>
+    /// Backs up the disks of the VM, up to <see cref="BackupJob.MaxParallelDisks"/> at a time. If one disk fails, the
+    /// others are stopped and that disk's error is reported (not the resulting cancellation of the others).
+    /// </summary>
+    private async Task<(List<ManifestDisk> Disks, bool Warnings)> BackupDisksAsync(
+        IVmBackupSession backup,
+        IRepositoryWriter writer,
+        RestorePointEntity? baseline,
+        IRestorePointReader? baseReader,
+        CancellationToken cancellationToken)
+    {
+        var parallel = Math.Clamp(job.MaxParallelDisks, 1, 8);
+        if (parallel > 1 && backup.Disks.Count > 1)
+        {
+            _log.Info($"Processing up to {Math.Min(parallel, backup.Disks.Count)} of {backup.Disks.Count} disks in parallel.");
+        }
+
+        var results = new (ManifestDisk Disk, bool Warned)[backup.Disks.Count];
+        using var gate = new SemaphoreSlim(parallel);
+        using var failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var tasks = backup.Disks.Select(async (disk, index) =>
+        {
+            await gate.WaitAsync(failed.Token).ConfigureAwait(false);
+            try
+            {
+                results[index] = await BackupDiskAsync(backup, writer, disk, baseline, baseReader, failed.Token).ConfigureAwait(false);
+            }
+            catch
+            {
+                await failed.CancelAsync().ConfigureAwait(false);
+                throw;
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }).ToList();
+
+        try
+        {
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        catch when (!cancellationToken.IsCancellationRequested)
+        {
+            var cause = tasks.Where(t => t.IsFaulted).SelectMany(t => t.Exception!.InnerExceptions).FirstOrDefault(e => e is not OperationCanceledException);
+            if (cause is not null)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(cause);
+            }
+
+            throw;
+        }
+        finally
+        {
+            lock (_metricsLock)
+            {
+                _transferEnded = time.GetUtcNow();
+            }
+        }
+
+        return (results.Select(r => r.Disk).ToList(), results.Any(r => r.Warned));
     }
 
     private async Task<(ManifestDisk Disk, bool Warned)> BackupDiskAsync(
@@ -339,8 +489,14 @@ internal sealed class VmBackupTask(
         }
 
         var key = $"disk-{disk.Key}";
-        var diskStart = Interlocked.Read(ref _doneBytes);
-        await using var reader = await backup.OpenReaderAsync(disk, new DiskReaderOptions(Math.Clamp(job.NbdConnectionsPerDisk, 1, 16), 4), cancellationToken).ConfigureAwait(false);
+        lock (_metricsLock)
+        {
+            _transferStarted ??= time.GetUtcNow();
+        }
+
+        UpdateDisk(disk.Key, d => d with { State = "Running", Mode = changes.IsFull ? nameof(DiskBackupMode.Full) : nameof(DiskBackupMode.Cbt), FullReason = changes.FullReason });
+        await using var reader = await backup.OpenReaderAsync(disk, new DiskReaderOptions(Math.Clamp(job.NbdConnectionsPerDisk, 1, 16), 4, job.TransportMode), cancellationToken).ConfigureAwait(false);
+        UpdateDisk(disk.Key, d => d with { Transport = reader.TransportName });
         var result = await DiskBackupPipeline.RunAsync(
             new DiskBackupJob
             {
@@ -350,16 +506,15 @@ internal sealed class VmBackupTask(
                 Changes = changes,
                 BaseIndex = baseIndex,
                 Parallelism = 8,
-                Progress = new Progress(this, disk, key, diskStart),
+                Progress = new Progress(this, disk, key),
             },
             cancellationToken).ConfigureAwait(false);
 
-        Interlocked.Exchange(ref _doneBytes, diskStart + disk.CapacityBytes);
         Interlocked.Add(ref _readBytes, result.Stats.ReadBytes);
         Interlocked.Add(ref _storedBytes, result.Stats.NewStoredBytes);
-        _log.Info(
-            $"Disk {disk.Name}: {result.Stats.Mode}, read {Format(result.Stats.ReadBytes)}, {result.Stats.NewChunks} new chunk(s), {Format(result.Stats.NewStoredBytes)} stored.",
-            key);
+        var diskMetrics = ToMetrics(result.Counters);
+        UpdateDisk(disk.Key, d => d with { State = "Done", Mode = result.Stats.Mode.ToString(), FullReason = result.Stats.FullReason, Transport = result.Stats.Transport, Metrics = diskMetrics });
+        _log.Info($"Disk {disk.Name}: {result.Stats.Mode} via {result.Stats.Transport}: {MetricsText.Describe(diskMetrics)}.", key);
 
         var indexRef = await writer.WriteDiskIndexAsync(disk.Key, result.Index, cancellationToken).ConfigureAwait(false);
         return (new ManifestDisk
@@ -416,6 +571,8 @@ internal sealed class VmBackupTask(
         entity.VmName = manifest.Vm.Name;
         entity.Vm = manifest.Vm;
         entity.ManifestPath = manifestPath;
+        entity.Consistency = manifest.Consistency;
+        entity.ConsistencyReason = manifest.ConsistencyReason;
         entity.LogicalBytes = manifest.Disks.Sum(d => d.CapacityBytes);
         entity.NewStoredBytes = manifest.Disks.Sum(d => d.Stats.NewStoredBytes);
         entity.Disks = manifest.Disks.Select(d => new RestorePointDisk
@@ -456,37 +613,102 @@ internal sealed class VmBackupTask(
             t.RestorePointId = restorePointId;
             t.ReadBytes = Interlocked.Read(ref _readBytes);
             t.TransferredBytes = Interlocked.Read(ref _storedBytes);
+            t.Metrics = CurrentMetrics() with { CurrentBytesPerSecond = 0 };
             if (state is SessionState.Succeeded or SessionState.Warning)
             {
                 t.Progress = 100;
             }
         }, CancellationToken.None);
 
-    private void ReportProgress(SnapshotDisk disk, string key, long diskStart, DiskBackupProgress progress)
+    private void ReportProgress(SnapshotDisk disk, string key, DiskBackupProgress progress)
     {
         var now = time.GetUtcNow();
         var fraction = progress.TotalChunks == 0 ? 1 : progress.ProcessedChunks / (double)progress.TotalChunks;
-        var overall = Math.Min(99.0, (diskStart + (fraction * disk.CapacityBytes)) * 100.0 / _totalBytes);
-        _log.Info($"Disk {disk.Name}: {fraction:P0} ({Format(progress.ReadBytes)} read)", key);
-        if (now - _lastProgress < TimeSpan.FromSeconds(2) && progress.ProcessedChunks != progress.TotalChunks)
+        var counters = progress.Counters;
+        UpdateDisk(disk.Key, d => d with { State = "Running", Metrics = ToMetrics(counters) });
+        _log.Info(
+            $"Disk {disk.Name}: {fraction:P0} · read {Format(counters.ReadBytes)} at {MetricsText.Rate(counters.Elapsed.TotalSeconds > 0 ? counters.ReadBytes / counters.Elapsed.TotalSeconds : 0)} · stored {Format(counters.StoredBytes)}",
+            key);
+        lock (_metricsLock)
         {
-            return;
+            if (now - _lastProgress < TimeSpan.FromSeconds(2) && progress.ProcessedChunks != progress.TotalChunks)
+            {
+                return;
+            }
+
+            _lastProgress = now;
         }
 
-        _lastProgress = now;
-        _ = UpdateProgressAsync(overall, progress);
+        _ = UpdateProgressAsync();
     }
 
-    private async Task UpdateProgressAsync(double overall, DiskBackupProgress progress)
+    /// <summary>
+    /// Statistics of the whole VM: the disks combined, rates over the wall time of the disk transfers (disks may run in
+    /// parallel), plus the current read rate.
+    /// </summary>
+    private TransferMetricsDto CurrentMetrics()
+    {
+        lock (_metricsLock)
+        {
+            var disks = _diskMetrics.ToList();
+            var seconds = _transferStarted is { } started ? ((_transferEnded ?? time.GetUtcNow()) - started).TotalSeconds : 0;
+            var combined = TransferMetricsDto.Combine(disks.Select(d => d.Metrics), seconds);
+            return combined with { Disks = disks, CurrentBytesPerSecond = _rate.Current };
+        }
+    }
+
+    private void UpdateDisk(string key, Func<DiskMetricsDto, DiskMetricsDto> update)
+    {
+        lock (_metricsLock)
+        {
+            var index = _diskMetrics.FindIndex(d => d.Key == key);
+            if (index >= 0)
+            {
+                _diskMetrics[index] = update(_diskMetrics[index]);
+            }
+        }
+    }
+
+    private void MarkRunningDisks(string state)
+    {
+        lock (_metricsLock)
+        {
+            _diskMetrics = _diskMetrics.Select(d => d.State == "Running" ? d with { State = state } : d).ToList();
+        }
+    }
+
+    private static TransferMetricsDto ToMetrics(DiskBackupCounters c) => new()
+    {
+        TotalBytes = c.CapacityBytes,
+        ProcessedBytes = c.ProcessedBytes,
+        ReadBytes = c.ReadBytes,
+        UnchangedBytes = c.UnchangedBytes,
+        ZeroBytes = c.ZeroBytes,
+        DedupedBytes = c.DedupedBytes,
+        NewDataBytes = c.NewDataBytes,
+        StoredBytes = c.StoredBytes,
+        Seconds = Math.Round(c.Elapsed.TotalSeconds, 3),
+        SourceLoad = c.SourceLoad,
+        ProcessingLoad = c.ProcessingLoad,
+        TargetLoad = c.TargetLoad,
+    };
+
+    private async Task UpdateProgressAsync()
     {
         try
         {
+            var metrics = CurrentMetrics();
+            _rate.Sample(time.GetUtcNow(), metrics.ReadBytes);
+            metrics = metrics with { CurrentBytesPerSecond = _rate.Current };
+            var overall = Math.Min(99.0, metrics.ProcessedBytes * 100.0 / _totalBytes);
             await tracker.UpdateTaskAsync(taskId, t =>
             {
                 t.Progress = Math.Round(overall, 1);
-                t.ReadBytes = Interlocked.Read(ref _readBytes) + progress.ReadBytes;
-                t.TransferredBytes = Interlocked.Read(ref _storedBytes) + progress.StoredBytes;
+                t.ReadBytes = metrics.ReadBytes;
+                t.TransferredBytes = metrics.StoredBytes;
+                t.Metrics = metrics;
             }).ConfigureAwait(false);
+            await tracker.RollUpAsync(session.Id).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException or Npgsql.NpgsqlException)
         {
@@ -502,8 +724,8 @@ internal sealed class VmBackupTask(
         _ => (bytes / 1024.0).ToString("0.0 KB", CultureInfo.InvariantCulture),
     };
 
-    private sealed class Progress(VmBackupTask owner, SnapshotDisk disk, string key, long diskStart) : IProgress<DiskBackupProgress>
+    private sealed class Progress(VmBackupTask owner, SnapshotDisk disk, string key) : IProgress<DiskBackupProgress>
     {
-        public void Report(DiskBackupProgress value) => owner.ReportProgress(disk, key, diskStart, value);
+        public void Report(DiskBackupProgress value) => owner.ReportProgress(disk, key, value);
     }
 }

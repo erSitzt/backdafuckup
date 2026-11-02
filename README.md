@@ -1,5 +1,7 @@
 # backdafuckup
 
+<img src="src/Backdafuckup.Web/wwwroot/img/backdafuckup-banner-512x128.png" alt="backdafuckup" width="512" />
+
 Open-source, self-hosted VM backup for **XCP-ng / XenServer** (VMware vSphere and Hyper-V planned), with a Veeam-like web console.
 
 > Status: early development. Not ready for production use.

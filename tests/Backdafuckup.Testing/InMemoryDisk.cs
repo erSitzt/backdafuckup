@@ -59,9 +59,50 @@ public sealed class InMemoryDisk
     public IDiskReader OpenReader(int maxRequestBytes = 4 * 1024 * 1024, int maxConcurrentRequests = 16) =>
         new Reader(this, maxRequestBytes, maxConcurrentRequests);
 
+    /// <summary>
+    /// A streaming reader like an HTTP export: segments of <paramref name="segmentSize"/> bytes in order. With
+    /// <paramref name="sparse"/>, all-zero segments are left out (like unallocated blocks of a VHD stream).
+    /// </summary>
+    public ISequentialDiskReader OpenSequentialReader(int segmentSize = 3 * 1024 * 1024 / 2, bool sparse = true) =>
+        new SequentialReader(this, segmentSize, sparse);
+
+    private sealed class SequentialReader(InMemoryDisk disk, int segmentSize, bool sparse) : ISequentialDiskReader
+    {
+        private int _streamed;
+
+        public long Capacity => disk.Content.LongLength;
+
+        public string TransportName => "memory-stream";
+
+        public async Task StreamAsync(DiskDataSink sink, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Exchange(ref _streamed, 1) != 0)
+            {
+                throw new InvalidOperationException("The stream can only be read once.");
+            }
+
+            for (long offset = 0; offset < disk.Content.LongLength; offset += segmentSize)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var segment = disk.Content.AsMemory((int)offset, (int)Math.Min(segmentSize, disk.Content.LongLength - offset));
+                if (sparse && !segment.Span.ContainsAnyExcept((byte)0))
+                {
+                    continue;
+                }
+
+                Interlocked.Add(ref disk._bytesRead, segment.Length);
+                await sink(offset, segment, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private sealed class Reader(InMemoryDisk disk, int maxRequestBytes, int maxConcurrentRequests) : IDiskReader
     {
         public long Capacity => disk.Content.LongLength;
+
+        public string TransportName => "memory";
 
         public int MaxRequestBytes => maxRequestBytes;
 

@@ -1,0 +1,6 @@
+debian 13.7
+mke2fs 1.47.2 (1-Jan-2025)
+mkfs.xfs version 6.13.0
+ntfs-3g 2022.10.3 integrated FUSE 28
+  LVM version:     2.03.31(2) (2025-02-27)
+5.15.167.4-microsoft-standard-WSL2

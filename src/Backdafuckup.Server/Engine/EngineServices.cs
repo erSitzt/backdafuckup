@@ -3,6 +3,7 @@ using Backdafuckup.Core.Operations;
 using Backdafuckup.Server.Data;
 using Backdafuckup.Xen;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 
 namespace Backdafuckup.Server.Engine;
@@ -17,6 +18,7 @@ public sealed class SessionRunnerService(
     BackupSessionRunner backups,
     RestoreSessionRunner restores,
     MaintenanceSessionRunner maintenance,
+    Agents.AgentDeploymentRunner deployments,
     StartupRecovery recovery,
     IOptions<EngineOptions> options,
     TimeProvider time,
@@ -88,6 +90,7 @@ public sealed class SessionRunnerService(
         SessionKind.Backup => running.Count(SessionKind.Backup) < options.Value.MaxConcurrentBackupSessions,
         SessionKind.Restore => running.Count(SessionKind.Restore) < options.Value.MaxConcurrentRestoreSessions,
         SessionKind.RepositoryMaintenance => running.Count(SessionKind.RepositoryMaintenance) == 0 && running.Count(SessionKind.Backup) == 0,
+        SessionKind.AgentDeployment => running.Count(SessionKind.AgentDeployment) < 2,
         _ => false,
     };
 
@@ -104,6 +107,7 @@ public sealed class SessionRunnerService(
                 SessionKind.Backup => await backups.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.Restore => await restores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.RepositoryMaintenance => await maintenance.RunAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.AgentDeployment => await deployments.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 _ => (SessionState.Failed, "Unknown session kind."),
             };
 
@@ -254,6 +258,16 @@ public sealed class StartupRecovery(
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         foreach (var session in stale)
         {
+            if (session.Kind == SessionKind.FileBrowse)
+            {
+                // A file browser only reads; it simply ends with the service.
+                session.State = SessionState.Stopped;
+                session.EndedUtc = time.GetUtcNow();
+                session.Summary = "Closed: the backup service was restarted.";
+                db.SessionLog.Add(new SessionLogEntry { SessionId = session.Id, TimestampUtc = time.GetUtcNow(), Severity = LogSeverity.Info, Message = session.Summary });
+                continue;
+            }
+
             session.State = SessionState.Failed;
             session.EndedUtc = time.GetUtcNow();
             session.Summary = "The backup service was restarted while this session was running.";
@@ -298,12 +312,28 @@ public sealed class StartupRecovery(
         }
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        await CleanupArtifactsAsync(db, cancellationToken).ConfigureAwait(false);
+        await CleanupArtifactsAsync(db, _ => true, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task CleanupArtifactsAsync(AppDbContext db, CancellationToken cancellationToken)
+    /// <summary>
+    /// Finishes leftover platform objects (e.g. snapshots whose disk XAPI held too long) of sessions that are no
+    /// longer running. Called periodically while the service runs.
+    /// </summary>
+    public async Task RetryPendingArtifactsAsync(RunningSessions running, CancellationToken cancellationToken)
     {
-        var open = await db.Artifacts.Where(a => a.State != ArtifactState.Done).ToListAsync(cancellationToken).ConfigureAwait(false);
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var settled = time.GetUtcNow() - TimeSpan.FromMinutes(5);
+        await CleanupArtifactsAsync(db, a => a.UpdatedUtc < settled && (a.SessionId is not { } session || !running.IsRunning(session)), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task CleanupArtifactsAsync(AppDbContext db, Func<ProviderArtifactEntity, bool> filter, CancellationToken cancellationToken)
+    {
+        var open = (await db.Artifacts.Where(a => a.State != ArtifactState.Done).ToListAsync(cancellationToken).ConfigureAwait(false)).Where(filter).ToList();
+        if (open.Count == 0)
+        {
+            return;
+        }
+
         foreach (var group in open.GroupBy(a => a.ConnectionId))
         {
             IHypervisorSession session;
@@ -382,6 +412,16 @@ public static class EngineServiceCollectionExtensions
             services.AddSingleton<IHypervisorProvider>(new XenProvider(xen));
         }
 
+        services.Configure<Agents.AgentOptions>(configuration.GetSection("Agent"));
+        services.AddSingleton<Agents.AgentRegistry>();
+        services.AddSingleton<Agents.AgentSettingsStore>();
+        services.AddSingleton<Agents.AgentService>();
+        services.AddSingleton<Agents.AgentPackages>();
+        services.AddSingleton<Agents.GuestProcessingService>();
+        services.TryAddSingleton<Backdafuckup.Smb.IRemoteWindowsConnector, Backdafuckup.Smb.SmbRemoteWindowsConnector>();
+        services.AddSingleton<Agents.AgentDeployer>();
+        services.AddSingleton<Agents.IAgentInstaller>(sp => sp.GetRequiredService<Agents.AgentDeployer>());
+        services.AddSingleton<Agents.AgentDeploymentRunner>();
         services.AddSingleton<ConnectionManager>();
         services.AddSingleton<RepositoryManager>();
         services.AddSingleton<RunningSessions>();
@@ -394,9 +434,20 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<RestoreSessionRunner>();
         services.AddSingleton<MaintenanceSessionRunner>();
         services.AddSingleton<StartupRecovery>();
+        services.AddHostedService<PendingArtifactRetryService>();
         services.AddSingleton<JobScheduler>();
         services.AddHostedService<SessionRunnerService>();
         services.AddHostedService(sp => sp.GetRequiredService<JobScheduler>());
+
+        services.Configure<FileRestore.FileRestoreOptions>(configuration.GetSection("FileRestore"));
+        services.AddSingleton(sp =>
+        {
+            var o = sp.GetRequiredService<IOptions<FileRestore.FileRestoreOptions>>().Value;
+            return new FileLevel.ChunkCache(o.CacheBytes, Math.Max(2, Environment.ProcessorCount / 2));
+        });
+        services.AddSingleton(sp => new FileLevel.FileLevelWorkers(Math.Max(1, sp.GetRequiredService<IOptions<FileRestore.FileRestoreOptions>>().Value.WorkerThreads)));
+        services.AddSingleton<FileRestore.FileRestoreMounts>();
+        services.AddHostedService<FileRestore.FileRestoreSweeper>();
         return services;
     }
 
@@ -419,3 +470,24 @@ public static class EngineServiceCollectionExtensions
         }
     }
 }
+
+/// <summary>Every 10 minutes: finishes snapshot cleanups that could not be completed during a backup.</summary>
+public sealed class PendingArtifactRetryService(StartupRecovery recovery, RunningSessions running, ILogger<PendingArtifactRetryService> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(10));
+        while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
+        {
+            try
+            {
+                await recovery.RetryPendingArtifactsAsync(running, stoppingToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Retrying pending snapshot cleanups failed.");
+            }
+        }
+    }
+}
+

@@ -64,9 +64,42 @@ else
                 <MudNumericField @bind-Value="_retention" Label="Restore points to keep" Min="1" Max="10000" Variant="Variant.Outlined" Class="mb-3" />
                 <MudExpansionPanels>
                     <MudExpansionPanel Text="Advanced">
+                        <MudSelect T="string" @bind-Value="_transport" Label="Disk transport" Variant="Variant.Outlined" Class="mb-1">
+                            <MudSelectItem T="string" Value="@TransportModes.Automatic">Automatic (NBD, otherwise HTTP export)</MudSelectItem>
+                            <MudSelectItem T="string" Value="@TransportModes.NbdOnly">NBD only</MudSelectItem>
+                            <MudSelectItem T="string" Value="@TransportModes.HttpExportOnly">HTTP export only</MudSelectItem>
+                        </MudSelect>
+                        <MudText Typo="Typo.caption" Class="d-block mb-3">
+                            NBD reads disks in parallel and, with change tracking, only the changed blocks. The HTTP export needs no network setup,
+                            but uses one stream per disk and transfers the whole allocated disk on every backup.
+                        </MudText>
                         <MudNumericField @bind-Value="_parallelVms" Label="VMs processed in parallel" Min="1" Max="16" Variant="Variant.Outlined" Class="mb-3" />
+                        <MudNumericField @bind-Value="_parallelDisks" Label="Disks per VM processed in parallel" Min="1" Max="8" Variant="Variant.Outlined" Class="mb-1" />
+                        <MudText Typo="Typo.caption" Class="d-block mb-3">
+                            Each disk is read as its own stream. Parallel streams speed up the HTTP export, which is limited per stream,
+                            until the network is full: on a 1 Gbit/s link about two streams already reach the line rate.
+                        </MudText>
                         <MudNumericField @bind-Value="_nbdConnections" Label="NBD connections per disk" Min="1" Max="12" Variant="Variant.Outlined" Class="mb-3" />
                         <MudNumericField @bind-Value="_retries" Label="Retries for failed VMs" Min="0" Max="10" Variant="Variant.Outlined" />
+                    </MudExpansionPanel>
+                    <MudExpansionPanel Text="@(_guest ? "Guest processing (application-consistent)" : "Guest processing")">
+                        <MudSwitch T="bool" @bind-Value="_guest" Color="Color.Primary" Label="Application-consistent backups through the backdafuckup agent (VSS)" />
+                        <MudText Typo="Typo.caption" Class="d-block mb-3">
+                            The agent freezes SQL Server, Active Directory, Exchange and other VSS-aware applications in Windows VMs while
+                            the snapshot is taken (copy-only: other backup products are not disturbed). Without it, backups are
+                            crash-consistent, like after a power failure.
+                        </MudText>
+                        <MudSelect T="string" @bind-Value="_guestPolicy" Label="If the guest cannot be frozen" Variant="Variant.Outlined" Disabled="!_guest" Class="mb-3">
+                            <MudSelectItem T="string" Value="@GuestFailurePolicies.CrashConsistentWithWarning">Back up crash-consistently and warn</MudSelectItem>
+                            <MudSelectItem T="string" Value="@GuestFailurePolicies.FailVm">Fail the VM</MudSelectItem>
+                        </MudSelect>
+                        <MudSelect T="Guid?" @bind-Value="_guestCredentialId" Label="Install the agent where it is missing, with" Variant="Variant.Outlined" Disabled="!_guest" Clearable="true"
+                                   HelperText="Windows administrator credentials (SMB 445); leave empty to install agents yourself.">
+                            @foreach (var credential in _credentials)
+                            {
+                                <MudSelectItem T="Guid?" Value="credential.Id">@credential.UserName</MudSelectItem>
+                            }
+                        </MudSelect>
                     </MudExpansionPanel>
                 </MudExpansionPanels>
                 break;
@@ -102,6 +135,9 @@ else
                         <tr><td>Repository</td><td>@_repositories.FirstOrDefault(r => r.Id == _repositoryId)?.Name</td></tr>
                         <tr><td>Retention</td><td>@_retention restore points</td></tr>
                         <tr><td>Schedule</td><td>@Jobs.Describe(Schedule())</td></tr>
+                        <tr><td>Disk transport</td><td>@TransportText(_transport)</td></tr>
+                        <tr><td>Parallel processing</td><td>@_parallelVms VM(s), @_parallelDisks disk(s) per VM</td></tr>
+                        <tr><td>Guest processing</td><td>@(_guest ? $"application-consistent (VSS); on failure: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with warning")}" + (_guestCredentialId is null ? "" : "; installs missing agents") : "off (crash-consistent)")</td></tr>
                     </tbody>
                 </MudSimpleTable>
                 <MudCheckBox @bind-Value="_enabled" Label="Job enabled" Class="mt-2" />
@@ -134,6 +170,13 @@ else
 
 @code {
     private static readonly string[] Steps = ["Name", "Virtual machines", "Storage", "Schedule", "Summary"];
+
+    private static string TransportText(string mode) => mode switch
+    {
+        TransportModes.NbdOnly => "NBD only",
+        TransportModes.HttpExportOnly => "HTTP export only",
+        _ => "Automatic (NBD, otherwise HTTP export)",
+    };
     private static readonly DayOfWeek[] WeekDays = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday];
 
     [Parameter] public Guid? Id { get; set; }
@@ -151,6 +194,12 @@ else
     private int _retention = 14;
     private int _parallelVms = 2;
     private int _nbdConnections = 4;
+    private int _parallelDisks = 2;
+    private bool _guest;
+    private string _guestPolicy = GuestFailurePolicies.CrashConsistentWithWarning;
+    private Guid? _guestCredentialId;
+    private List<WindowsCredentialDto> _credentials = [];
+    private string _transport = TransportModes.Automatic;
     private int _retries = 2;
     private string _scheduleKind = "Daily";
     private string _time = "22:00";
@@ -164,6 +213,7 @@ else
     {
         _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections");
         _repositories = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
+        _credentials = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
         if (Id is { } id)
         {
             var job = await Api.GetAsync<JobDto>($"api/jobs/{id}");
@@ -174,6 +224,11 @@ else
             _retention = job.RetentionPoints;
             _parallelVms = job.MaxParallelVms;
             _nbdConnections = job.NbdConnectionsPerDisk;
+            _parallelDisks = job.MaxParallelDisks;
+            _guest = job.GuestProcessing;
+            _guestPolicy = job.GuestFailurePolicy;
+            _guestCredentialId = job.GuestCredentialId;
+            _transport = job.TransportMode;
             _retries = job.RetryCount;
             _enabled = job.Enabled;
             _scheduleKind = job.Schedule.Kind;
@@ -279,7 +334,12 @@ else
             Objects = _selected.Select(kv => new JobObjectDto(kv.Key, kv.Value)).ToList(),
             MaxParallelVms = _parallelVms,
             NbdConnectionsPerDisk = _nbdConnections,
+            MaxParallelDisks = _parallelDisks,
+            GuestProcessing = _guest,
+            GuestFailurePolicy = _guestPolicy,
+            GuestCredentialId = _guest ? _guestCredentialId : null,
             RetryCount = _retries,
+            TransportMode = _transport,
         };
         try
         {

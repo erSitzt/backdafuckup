@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Backdafuckup.Contracts;
 using Backdafuckup.Core.Hypervisor;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
@@ -37,6 +38,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
     public DbSet<ProviderArtifactEntity> Artifacts => Set<ProviderArtifactEntity>();
 
     public DbSet<AppSetting> Settings => Set<AppSetting>();
+
+    public DbSet<AgentEntity> Agents => Set<AgentEntity>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -85,6 +88,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasIndex(x => x.Name).IsUnique();
             e.OwnsOne(x => x.Schedule, s => s.Property(p => p.Kind).HasConversion<string>().HasMaxLength(16));
             e.Property(x => x.LastResult).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.TransportMode).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.GuestFailurePolicy).HasConversion<string>().HasMaxLength(32);
+            e.HasOne<Credential>().WithMany().HasForeignKey(x => x.GuestCredentialId).OnDelete(DeleteBehavior.SetNull);
             e.HasOne(x => x.Connection).WithMany().HasForeignKey(x => x.ConnectionId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Repository).WithMany().HasForeignKey(x => x.RepositoryId).OnDelete(DeleteBehavior.Restrict);
             e.HasMany(x => x.Objects).WithOne().HasForeignKey(x => x.JobId).OnDelete(DeleteBehavior.Cascade);
@@ -114,9 +120,14 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasMany(x => x.Tasks).WithOne().HasForeignKey(x => x.SessionId).OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => x.CreatedUtc);
             e.HasIndex(x => new { x.JobId, x.State });
+            ConfigureMetrics(e.Property(x => x.Metrics));
         });
 
-        builder.Entity<SessionTaskEntity>(e => e.Property(x => x.State).HasConversion<string>().HasMaxLength(16));
+        builder.Entity<SessionTaskEntity>(e =>
+        {
+            e.Property(x => x.State).HasConversion<string>().HasMaxLength(16);
+            ConfigureMetrics(e.Property(x => x.Metrics));
+        });
 
         builder.Entity<SessionLogEntry>(e =>
         {
@@ -135,6 +146,17 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
         builder.Entity<AppSetting>(e => e.HasKey(x => x.Key));
 
+        builder.Entity<Credential>(e => e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(16));
+
+        builder.Entity<AgentEntity>(e =>
+        {
+            e.ToTable("agents");
+            e.HasIndex(x => x.KeyHash).IsUnique();
+            e.HasIndex(x => x.VmNativeId);
+            e.Property(x => x.KeyHash).HasMaxLength(64);
+            e.Property(x => x.Build).HasMaxLength(16);
+        });
+
         // Our entities create their Guid v7 keys client-side. Marking them as never generated lets EF Core treat
         // new children discovered on tracked parents as inserts (instead of updates of existing rows).
         foreach (var entity in builder.Model.GetEntityTypes().Where(t => t.ClrType.Namespace == typeof(AppDbContext).Namespace && t.ClrType != typeof(AppUser)))
@@ -146,4 +168,14 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             }
         }
     }
+
+    /// <summary>Transfer statistics are stored as jsonb; the objects are replaced, never mutated.</summary>
+    private static void ConfigureMetrics(Microsoft.EntityFrameworkCore.Metadata.Builders.PropertyBuilder<TransferMetricsDto?> property) =>
+        property.HasColumnType("jsonb").HasConversion(
+            v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+            v => JsonSerializer.Deserialize<TransferMetricsDto>(v, JsonSerializerOptions.Default),
+            new ValueComparer<TransferMetricsDto?>(
+                (a, b) => JsonSerializer.Serialize(a, JsonSerializerOptions.Default) == JsonSerializer.Serialize(b, JsonSerializerOptions.Default),
+                v => v == null ? 0 : JsonSerializer.Serialize(v, JsonSerializerOptions.Default).GetHashCode(StringComparison.Ordinal),
+                v => v));
 }

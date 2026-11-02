@@ -51,11 +51,11 @@ public static class DtoMapping
 {
     public static SessionSummaryDto ToDto(this SessionEntity s) => new(
         s.Id, s.Kind.ToString(), s.Name, s.State.ToString(), s.TriggeredBy, s.RunMode.ToString(), s.JobId,
-        s.CreatedUtc, s.StartedUtc, s.EndedUtc, s.Progress, s.ReadBytes, s.TransferredBytes, s.Summary);
+        s.CreatedUtc, s.StartedUtc, s.EndedUtc, s.Progress, s.ReadBytes, s.TransferredBytes, s.Summary, s.Metrics);
 
     public static SessionTaskDto ToDto(this SessionTaskEntity t) => new(
         t.Id, t.SessionId, t.ObjectNativeId, t.ObjectName, t.State.ToString(), t.Attempt, t.Progress, t.ReadBytes,
-        t.TransferredBytes, t.StartedUtc, t.EndedUtc, t.RestorePointId, t.Error);
+        t.TransferredBytes, t.StartedUtc, t.EndedUtc, t.RestorePointId, t.Error, t.Metrics);
 
     public static LogEntryDto ToDto(this SessionLogEntry e) => new(e.Id, e.SessionId, e.TaskId, e.TimestampUtc, e.Severity.ToString(), e.Message, e.Key);
 }

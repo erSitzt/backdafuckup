@@ -1,4 +1,7 @@
+using System.Diagnostics;
 using System.Globalization;
+using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Text.Json.Nodes;
 using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Extents;
@@ -23,7 +26,9 @@ internal sealed class XenBackupSession : IVmBackupSession
     private readonly Dictionary<string, DiskState> _disks;
     private readonly string _snapshotRef;
     private readonly Guid _snapshotArtifact;
+    private NbdOverview? _nbdOverview;
     private bool _committed;
+    private bool _commitDeferred;
     private bool _disposed;
 
     private XenBackupSession(
@@ -101,16 +106,37 @@ internal sealed class XenBackupSession : IVmBackupSession
             }
         }
 
+        // Guest processing: freeze the guest as late as possible. Everything slow (CBT, record reads) is done by now,
+        // because VSS holds writes for at most 10 s and only the snapshot itself may run in that window.
+        var (freeze, freezeResult) = await FreezeGuestAsync(request.Quiescer, log, cancellationToken).ConfigureAwait(false);
+
         // Snapshot. The task is recorded before waiting so a crash never leaks the snapshot.
         log.Info($"Creating snapshot of {vm.Str("name_label")}.", "snapshot");
         Guid? taskArtifact = null;
-        var snapshotRef = await xapi.RunTaskAsync(
-            "VM.snapshot",
-            async taskRef => taskArtifact = await ledger.RecordAsync(XenArtifactKinds.XapiTask, string.Empty, taskRef, null, cancellationToken).ConfigureAwait(false),
-            owner.Provider.Options.TaskTimeout,
-            cancellationToken,
-            vmRef,
-            request.SnapshotName).ConfigureAwait(false);
+        var snapshotWatch = Stopwatch.StartNew();
+        string snapshotRef;
+        try
+        {
+            // Polled every 250 ms: with a frozen guest, every second after the snapshot completes counts against the 10 s.
+            snapshotRef = await xapi.RunTaskAsync(
+                "VM.snapshot",
+                async taskRef => taskArtifact = await ledger.RecordAsync(XenArtifactKinds.XapiTask, string.Empty, taskRef, null, cancellationToken).ConfigureAwait(false),
+                owner.Provider.Options.TaskTimeout,
+                TimeSpan.FromMilliseconds(250),
+                cancellationToken,
+                vmRef,
+                request.SnapshotName).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Thaw right away, also when the snapshot failed.
+            freezeResult = await ThawGuestAsync(freeze, freezeResult).ConfigureAwait(false);
+        }
+
+        if (freezeResult is not null)
+        {
+            ReportGuestFreeze(log, freezeResult, snapshotWatch.Elapsed);
+        }
         var snapshot = await xapi.GetRecordAsync("VM", snapshotRef, cancellationToken).ConfigureAwait(false);
         var snapshotUuid = snapshot.Str("uuid");
         var snapshotArtifact = await ledger.RecordAsync(XenArtifactKinds.VmSnapshot, snapshotUuid, snapshotRef, null, cancellationToken).ConfigureAwait(false);
@@ -164,7 +190,10 @@ internal sealed class XenBackupSession : IVmBackupSession
 
             var metadata = await ExportMetadataAsync(xapi, request.VmId, cancellationToken).ConfigureAwait(false);
             var descriptor = await XenInventory.DescribeVmAsync(xapi, vm, cancellationToken).ConfigureAwait(false);
-            session = new XenBackupSession(owner, xapi, log, ledger, descriptor, snapshotRef, snapshotUuid, snapshotArtifact, disks, metadata);
+            session = new XenBackupSession(owner, xapi, log, ledger, descriptor, snapshotRef, snapshotUuid, snapshotArtifact, disks, metadata)
+            {
+                GuestFreeze = freezeResult,
+            };
             return session;
         }
         finally
@@ -175,6 +204,63 @@ internal sealed class XenBackupSession : IVmBackupSession
             }
         }
     }
+
+    public GuestFreezeResult? GuestFreeze { get; private init; }
+
+    private static async Task<(IGuestFreeze? Freeze, GuestFreezeResult? Result)> FreezeGuestAsync(IGuestQuiescer? quiescer, IOperationLog log, CancellationToken cancellationToken)
+    {
+        if (quiescer is null)
+        {
+            return (null, null);
+        }
+
+        try
+        {
+            return (await quiescer.FreezeAsync(log, cancellationToken).ConfigureAwait(false), null);
+        }
+        catch (GuestQuiesceException ex)
+        {
+            return (null, GuestFreezeResult.NotConsistent(ex.Message));
+        }
+    }
+
+    private static async Task<GuestFreezeResult?> ThawGuestAsync(IGuestFreeze? freeze, GuestFreezeResult? result)
+    {
+        if (freeze is null)
+        {
+            return result;
+        }
+
+        await using (freeze.ConfigureAwait(false))
+        {
+            try
+            {
+                return await freeze.ThawAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (GuestQuiesceException ex)
+            {
+                return GuestFreezeResult.NotConsistent(ex.Message);
+            }
+        }
+    }
+
+    private static void ReportGuestFreeze(IOperationLog log, GuestFreezeResult result, TimeSpan snapshotTime)
+    {
+        var writers = result.Writers.Count == 0 ? string.Empty
+            : " Writers: " + string.Join(", ", result.Writers.Select(w => w.Failure is null ? $"{w.Name} ({w.State})" : $"{w.Name} ({w.State}: {w.Failure})")) + ".";
+        if (result.ApplicationConsistent)
+        {
+            log.Info(
+                $"Guest processing: application-consistent snapshot. Writes were held for {Seconds(result.HeldTime)} (VM snapshot {Seconds(snapshotTime)}, " +
+                $"freeze {Seconds(result.FreezeTime)}).{writers}");
+        }
+        else
+        {
+            log.Warning($"Guest processing: the snapshot is only crash-consistent: {result.Reason} VM snapshot took {Seconds(snapshotTime)}.{writers}");
+        }
+    }
+
+    private static string Seconds(TimeSpan time) => time.TotalSeconds.ToString("0.0 s", CultureInfo.InvariantCulture);
 
     public async Task<ChangedExtents> GetChangedExtentsAsync(SnapshotDisk disk, ChangeToken? since, IOperationLog log, CancellationToken cancellationToken)
     {
@@ -232,29 +318,116 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
     }
 
-    public async Task<IDiskReader> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken)
+    public async Task<IDiskSource> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken)
     {
         var state = _disks[disk.Key];
+        _log.Info($"Disk {disk.Name}: selecting the transport ({ModeText(options.Transport)}).");
+        if (options.Transport == DiskTransportMode.HttpExportOnly)
+        {
+            return await XenHttpExport.OpenAsync(_owner, _xapi, _log, disk, state.SnapshotVdiRef, cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
+            return await OpenNbdAsync(disk, state, options, cancellationToken).ConfigureAwait(false);
+        }
+        catch (XenNbdUnavailableException ex) when (options.Transport == DiskTransportMode.Automatic)
+        {
+            _log.Warning(ex.Message);
+            _log.Warning(
+                $"Disk {disk.Name}: falling back to the HTTP export (export_raw_vdi over HTTPS). It uses one stream per disk and transfers the whole " +
+                "allocated disk on every backup, also for incrementals. Set up NBD for faster backups.");
+            return await XenHttpExport.OpenAsync(_owner, _xapi, _log, disk, state.SnapshotVdiRef, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static string ModeText(DiskTransportMode mode) => mode switch
+    {
+        DiskTransportMode.NbdOnly => "mode NBD only",
+        DiskTransportMode.HttpExportOnly => "mode HTTP export only",
+        _ => "mode automatic: NBD, otherwise HTTP export",
+    };
+
+    private async Task<IDiskSource> OpenNbdAsync(SnapshotDisk disk, DiskState state, DiskReaderOptions options, CancellationToken cancellationToken)
+    {
+        var overview = await GetNbdOverviewAsync(cancellationToken).ConfigureAwait(false);
         var infos = await _xapi.CallAsync("VDI.get_nbd_info", cancellationToken, state.SnapshotVdiRef).ConfigureAwait(false) as JsonArray ?? [];
         var candidates = infos.OfType<JsonObject>().ToList();
+        _log.Info(
+            $"Disk {disk.Name}: XAPI VDI.get_nbd_info (snapshot disk {disk.SnapshotDiskId}) returned {candidates.Count} endpoint(s)" +
+            (candidates.Count == 0 ? "." : $": {string.Join(", ", candidates.Select(c => DescribeEndpoint(c, overview.InterfaceNames)))}."));
         if (candidates.Count == 0)
         {
-            throw new XenNbdUnavailableException(
-                $"No NBD-enabled network reaches storage '{disk.StorageName}'. Enable NBD on a network of the pool (Infrastructure → Pool → Networks).");
+            throw new XenNbdUnavailableException(DescribeMissingNbd(disk, overview));
         }
 
         var secure = candidates.Where(c => !string.IsNullOrWhiteSpace(c.Str("cert"))).ToList();
         if (secure.Count == 0 && !_owner.AllowInsecureNbd)
         {
-            throw new XenNbdUnavailableException("Only unencrypted NBD (insecure_nbd) is available; allow it for this pool or enable TLS NBD (purpose nbd).");
+            throw new XenNbdUnavailableException(
+                $"Disk {disk.Name}: the pool offers only unencrypted NBD (purpose insecure_nbd): {string.Join(", ", candidates.Select(c => DescribeEndpoint(c, overview.InterfaceNames)))}. " +
+                "Allow unencrypted NBD for this pool or set the purpose nbd (TLS) on the network.");
         }
 
-        var info = (secure.Count > 0 ? secure : candidates)[Random.Shared.Next(secure.Count > 0 ? secure.Count : candidates.Count)];
+        // Start at a random endpoint to spread disks across hosts, but try every endpoint before giving up.
+        var usable = secure.Count > 0 ? secure : candidates;
+        var start = Random.Shared.Next(usable.Count);
+        var ordered = usable.Skip(start).Concat(usable.Take(start)).ToList();
+
+        var connections = Math.Clamp(options.Connections, 1, 16);
+        var failures = new List<string>();
+        foreach (var info in ordered)
+        {
+            var endpoint = DescribeEndpoint(info, overview.InterfaceNames);
+            var connect = CreateConnectOptions(info, options);
+            _log.Info($"Disk {disk.Name}: NBD: connecting to {endpoint} …");
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            NbdConnectionPool pool;
+            try
+            {
+                pool = await NbdConnectionPool.CreateAsync(ct => NbdClient.ConnectAsync(connect, ct), connections, options.MaxInFlightPerConnection, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or TimeoutException or SocketException or AuthenticationException && !cancellationToken.IsCancellationRequested)
+            {
+                var reason = ConnectFailureReason(ex);
+                failures.Add($"{endpoint}: {reason}");
+                _log.Warning($"Disk {disk.Name}: NBD: connection to {endpoint} failed after {watch.ElapsedMilliseconds} ms: {reason}");
+                continue;
+            }
+
+            if (pool.Size != disk.CapacityBytes)
+            {
+                await pool.DisposeAsync().ConfigureAwait(false);
+                throw new InvalidOperationException($"Disk {disk.Name}: NBD export size {pool.Size} at {endpoint} does not match the disk size {disk.CapacityBytes}.");
+            }
+
+            _log.Info(
+                $"Disk {disk.Name}: NBD: connected to {endpoint} in {watch.ElapsedMilliseconds} ms " +
+                $"({(pool.UsesTls ? $"TLS {TlsVersion(pool.TlsProtocol)}" : "unencrypted")}, {(pool.NegotiatedWithGo ? "NBD_OPT_GO" : "NBD_OPT_EXPORT_NAME")}, " +
+                $"export size {XenFormat.Bytes(pool.Size)}, max request {XenFormat.Bytes(pool.MaxPayload)}, {pool.OpenConnections} of {connections} connection(s) open). Reading via NBD.");
+            return new NbdDiskReader(pool, connections * options.MaxInFlightPerConnection);
+        }
+
+        throw new XenNbdUnavailableException(
+            $"Disk {disk.Name}: no NBD endpoint offered by the pool is usable from this backup server ({Environment.MachineName}). Tried: {string.Join("; ", failures)}. " +
+            "Check that the backup server reaches these addresses on the listed TCP ports, that the service xapi-nbd runs on the hosts (systemctl status xapi-nbd) " +
+            "and that no firewall between them blocks the port.");
+    }
+
+    private static string TlsVersion(SslProtocols protocol) => protocol switch
+    {
+        SslProtocols.Tls13 => "1.3",
+        SslProtocols.Tls12 => "1.2",
+        _ => protocol.ToString(),
+    };
+
+    private static NbdConnectOptions CreateConnectOptions(JsonObject info, DiskReaderOptions options)
+    {
         var pem = info.Str("cert");
-        var connect = new NbdConnectOptions
+        return new NbdConnectOptions
         {
             Host = info.Str("address"),
-            Port = info.Long("port") is > 0 and var port ? (int)port : NbdProtocol.DefaultPort,
+            Port = NbdPort(info),
             ExportName = info.Str("exportname"),
             TlsMode = string.IsNullOrWhiteSpace(pem) ? NbdTlsMode.Disabled : NbdTlsMode.Required,
             TlsTargetHost = string.IsNullOrWhiteSpace(info.Str("subject")) ? info.Str("address") : info.Str("subject"),
@@ -263,18 +436,103 @@ internal sealed class XenBackupSession : IVmBackupSession
                 : CertificatePinning.CreateValidator(TlsTrustMode.Pinned, [CertificatePinning.SpkiSha256FromPem(pem)]),
             MaxInFlight = options.MaxInFlightPerConnection,
         };
+    }
 
-        var connections = Math.Clamp(options.Connections, 1, 16);
-        var pool = await NbdConnectionPool.CreateAsync(ct => NbdClient.ConnectAsync(connect, ct), connections, options.MaxInFlightPerConnection, cancellationToken).ConfigureAwait(false);
-        if (pool.Size != disk.CapacityBytes)
+    private static int NbdPort(JsonObject info) => info.Long("port") is > 0 and var port ? (int)port : NbdProtocol.DefaultPort;
+
+    /// <summary>"10.0.0.5:10809 (host xcp-ng1, network Storage101, TLS)".</summary>
+    private static string DescribeEndpoint(JsonObject info, IReadOnlyDictionary<string, string> interfaceNames)
+    {
+        var address = info.Str("address");
+        var endpoint = address.Contains(':', StringComparison.Ordinal) ? $"[{address}]:{NbdPort(info)}" : $"{address}:{NbdPort(info)}";
+        var tls = string.IsNullOrWhiteSpace(info.Str("cert")) ? "unencrypted" : "TLS";
+        return interfaceNames.TryGetValue(address, out var where) ? $"{endpoint} ({where}, {tls})" : $"{endpoint} ({tls})";
+    }
+
+    private static string ConnectFailureReason(Exception ex) => ex switch
+    {
+        NbdException { InnerException: SocketException socket } => $"{socket.Message} ({socket.SocketErrorCode})",
+        SocketException socket => $"{socket.Message} ({socket.SocketErrorCode})",
+        AuthenticationException => $"TLS handshake failed, the server certificate does not match the one reported by XAPI ({ex.Message})",
+        _ => ex.Message,
+    };
+
+    /// <summary>
+    /// Reads networks, host interfaces and hosts once per session and logs which networks carry NBD and which
+    /// addresses the hosts have on them. Also maps interface addresses to "host X, network Y" for messages.
+    /// </summary>
+    private async Task<NbdOverview> GetNbdOverviewAsync(CancellationToken cancellationToken)
+    {
+        if (_nbdOverview is not null)
         {
-            await pool.DisposeAsync().ConfigureAwait(false);
-            throw new InvalidOperationException($"NBD export size {pool.Size} does not match the disk size {disk.CapacityBytes}.");
+            return _nbdOverview;
         }
 
-        _log.Info($"Disk {disk.Name}: reading via NBD from {connect.Host} ({(connect.TlsMode == NbdTlsMode.Required ? "TLS" : "unencrypted")}, {connections} connections).");
-        return new NbdDiskReader(pool, connections * options.MaxInFlightPerConnection);
+        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var networks = await _xapi.GetAllRecordsAsync("network", cancellationToken).ConfigureAwait(false);
+            var pifs = await _xapi.GetAllRecordsAsync("PIF", cancellationToken).ConfigureAwait(false);
+            var hosts = await _xapi.GetAllRecordsAsync("host", cancellationToken).ConfigureAwait(false);
+            foreach (var pif in pifs.Values)
+            {
+                var where = $"host {NameOf(hosts, pif.Str("host"))}, network {NameOf(networks, pif.Str("network"))}";
+                if (pif.Str("IP") is { Length: > 0 } ip)
+                {
+                    names.TryAdd(ip, where);
+                }
+
+                foreach (var ipv6 in pif.Set("IPv6"))
+                {
+                    names.TryAdd(ipv6.Split('/')[0], where);
+                }
+            }
+
+            var nbdNetworks = networks
+                .Where(n => n.Value.Set("purpose").Any(p => p is "nbd" or "insecure_nbd"))
+                .Select(n =>
+                {
+                    var interfaces = pifs.Values
+                        .Where(p => p.Str("network") == n.Key)
+                        .Select(p => $"{NameOf(hosts, p.Str("host"))}: {(p.Str("IP") is { Length: > 0 } ip ? ip : "no IP address")}")
+                        .ToList();
+                    return $"{n.Value.Str("name_label")} [{string.Join(", ", n.Value.Set("purpose"))}] ({(interfaces.Count == 0 ? "no host interface" : string.Join(", ", interfaces))})";
+                })
+                .ToList();
+            _log.Info(
+                $"NBD check: XAPI network/PIF/host.get_all_records returned {networks.Count} network(s), {pifs.Count} host interface(s), {hosts.Count} host(s). " +
+                $"Networks with NBD purpose: {(nbdNetworks.Count == 0 ? "none" : string.Join("; ", nbdNetworks))}.");
+            return _nbdOverview = new NbdOverview(names, nbdNetworks, true);
+        }
+        catch (Exception ex) when (ex is XapiException or HttpRequestException or IOException && !cancellationToken.IsCancellationRequested)
+        {
+            _log.Warning($"NBD check: the networks of the pool could not be read ({ex.Message}); endpoints are listed by address only.");
+            return _nbdOverview = new NbdOverview(names, [], false);
+        }
     }
+
+    private static string DescribeMissingNbd(SnapshotDisk disk, NbdOverview overview)
+    {
+        const string Command = "xe network-param-add param-name=purpose param-key=nbd uuid=<network-uuid>";
+        if (!overview.NetworksKnown)
+        {
+            return $"Disk {disk.Name}: no NBD-enabled network reaches storage '{disk.StorageName}'. Set the NBD purpose on a network: {Command}";
+        }
+
+        if (overview.NbdNetworks.Count == 0)
+        {
+            return $"Disk {disk.Name}: no network of the pool has the NBD purpose. Set it on a network that the backup server can reach " +
+                   $"and on which the hosts have an IP address: {Command}";
+        }
+
+        return $"Disk {disk.Name}: the pool offers no NBD endpoint for storage '{disk.StorageName}'. Networks with NBD purpose: {string.Join("; ", overview.NbdNetworks)}. " +
+               "XAPI only offers hosts that have an IP address on such a network and can access the storage.";
+    }
+
+    private static string NameOf(Dictionary<string, JsonObject> records, string reference) =>
+        records.TryGetValue(reference, out var record) && record.Str("name_label") is { Length: > 0 } name ? name : "?";
+
+    private sealed record NbdOverview(IReadOnlyDictionary<string, string> InterfaceNames, IReadOnlyList<string> NbdNetworks, bool NetworksKnown);
 
     public ChangeToken? GetNewChangeToken(SnapshotDisk disk) =>
         _disks.TryGetValue(disk.Key, out var state) && state.CbtUsable ? new ChangeToken(XenTags.ChangeTokenKind, state.Disk.SnapshotDiskId) : null;
@@ -288,22 +546,37 @@ internal sealed class XenBackupSession : IVmBackupSession
 
         await _ledger.UpdateAsync(_snapshotArtifact, ArtifactState.CommitPending, null, cancellationToken).ConfigureAwait(false);
 
+        // The snapshot VM goes first: VDI.data_destroy refuses a disk that still has a VBD, also the unattached VBD of
+        // the snapshot VM (VDI_IN_USE). VM.destroy removes the VM and its VBDs but keeps the disks.
+        await _xapi.CallAsync("VM.destroy", cancellationToken, _snapshotRef).ConfigureAwait(false);
+        await _ledger.UpdateAsync(_snapshotArtifact, ArtifactState.Done, null, cancellationToken).ConfigureAwait(false);
+
         foreach (var state in _disks.Values)
         {
-            if (state.CbtUsable)
+            try
             {
-                await XenHypervisorSession.DataDestroyAsync(_xapi, state.SnapshotVdiRef, log, cancellationToken).ConfigureAwait(false);
+                if (state.CbtUsable)
+                {
+                    await XenHypervisorSession.DataDestroyAsync(_xapi, state.SnapshotVdiRef, log, cancellationToken, _owner.Provider.Options.SnapshotReleaseTimeout).ConfigureAwait(false);
+                }
+                else
+                {
+                    await _xapi.CallAsync("VDI.destroy", cancellationToken, state.SnapshotVdiRef).ConfigureAwait(false);
+                }
             }
-            else
+            catch (XenSnapshotInUseException ex)
             {
-                await _xapi.CallAsync("VDI.destroy", cancellationToken, state.SnapshotVdiRef).ConfigureAwait(false);
+                // Keep the snapshot: the ledger rows stay CommitPending and the background retry finishes the job.
+                _commitDeferred = true;
+                throw new SnapshotCleanupDeferredException(
+                    $"Disk {state.Disk.Name}: {ex.Message}. The restore point is complete. The snapshot disk of '{Vm.Name}' is kept for now and reduced to " +
+                    "change tracking data in the background (retried every 10 minutes and at service start).",
+                    ex);
             }
 
             await _ledger.UpdateAsync(state.Artifact, ArtifactState.Done, null, cancellationToken).ConfigureAwait(false);
         }
 
-        await _xapi.CallAsync("VM.destroy", cancellationToken, _snapshotRef).ConfigureAwait(false);
-        await _ledger.UpdateAsync(_snapshotArtifact, ArtifactState.Done, null, cancellationToken).ConfigureAwait(false);
         _committed = true;
         log.Info("Snapshot removed; change tracking data kept for the next incremental backup.");
     }
@@ -316,7 +589,7 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
 
         _disposed = true;
-        if (!_committed)
+        if (!_committed && !_commitDeferred)
         {
             await RollbackAsync(_xapi, _log, _ledger, SnapshotId, _snapshotArtifact, _disks.Values).ConfigureAwait(false);
         }
@@ -377,6 +650,8 @@ internal sealed class XenBackupSession : IVmBackupSession
 internal sealed class NbdDiskReader(NbdConnectionPool pool, int maxConcurrentRequests) : IDiskReader
 {
     public long Capacity => pool.Size;
+
+    public string TransportName => "nbd";
 
     public int MaxRequestBytes => pool.MaxPayload;
 

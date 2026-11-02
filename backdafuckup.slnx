@@ -1,16 +1,27 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/Backdafuckup.Agent/Backdafuckup.Agent.csproj" />
+    <Project Path="src/Backdafuckup.Agent.Core/Backdafuckup.Agent.Core.csproj" />
+    <Project Path="src/Backdafuckup.Agent.Protocol/Backdafuckup.Agent.Protocol.csproj" />
     <Project Path="src/Backdafuckup.Contracts/Backdafuckup.Contracts.csproj" />
     <Project Path="src/Backdafuckup.Core/Backdafuckup.Core.csproj" />
     <Project Path="src/Backdafuckup.DataMover/Backdafuckup.DataMover.csproj" />
+    <Project Path="src/Backdafuckup.FileLevel/Backdafuckup.FileLevel.csproj" />
     <Project Path="src/Backdafuckup.Nbd/Backdafuckup.Nbd.csproj" />
     <Project Path="src/Backdafuckup.Server/Backdafuckup.Server.csproj" />
+    <Project Path="src/Backdafuckup.Smb/Backdafuckup.Smb.csproj" />
     <Project Path="src/Backdafuckup.Storage/Backdafuckup.Storage.csproj" />
     <Project Path="src/Backdafuckup.Web/Backdafuckup.Web.csproj" />
     <Project Path="src/Backdafuckup.Xen/Backdafuckup.Xen.csproj" />
   </Folder>
+  <Folder Name="/src/ThirdParty/">
+    <Project Path="src/ThirdParty/DiscUtils.Ext/DiscUtils.Ext.csproj" />
+    <Project Path="src/ThirdParty/DiscUtils.Xfs/DiscUtils.Xfs.csproj" />
+  </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Backdafuckup.Agent.Tests/Backdafuckup.Agent.Tests.csproj" />
     <Project Path="tests/Backdafuckup.DataMover.Tests/Backdafuckup.DataMover.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.FileLevel.Tests/Backdafuckup.FileLevel.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Lab.Tests/Backdafuckup.Lab.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Nbd.Tests/Backdafuckup.Nbd.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Server.Tests/Backdafuckup.Server.Tests.csproj" />

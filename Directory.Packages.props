@@ -17,6 +17,21 @@
     <PackageVersion Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.14" />
     <PackageVersion Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.14" />
     <PackageVersion Include="MudBlazor" Version="9.12.0" />
+    <!-- Guest agent (netstandard2.0 / net48 / net10.0-windows) -->
+    <PackageVersion Include="System.Text.Json" Version="10.0.0" />
+    <PackageVersion Include="System.Management" Version="10.0.0" />
+    <PackageVersion Include="System.ServiceProcess.ServiceController" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" />
+    <!-- Push installation of the guest agent (SMB 2/3 client, LGPL-3.0) -->
+    <PackageVersion Include="SMBLibrary" Version="1.5.8.1" />
+    <!-- File-level restore: partitions and file systems (MIT). The ext and XFS providers are vendored and patched
+         in src/ThirdParty (see their NOTICE.md); keep their upstream commit in step with these versions. -->
+    <PackageVersion Include="LTRData.DiscUtils.Core" Version="1.0.90" />
+    <PackageVersion Include="LTRData.DiscUtils.Streams" Version="1.0.90" />
+    <PackageVersion Include="LTRData.DiscUtils.Ntfs" Version="1.0.90" />
+    <PackageVersion Include="LTRData.DiscUtils.Fat" Version="1.0.90" />
+    <PackageVersion Include="LTRData.DiscUtils.Lvm" Version="1.0.90" />
+    <PackageVersion Include="LTRData.DiscUtils.Registry" Version="1.0.90" />
   </ItemGroup>
   <ItemGroup Label="Test">
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />

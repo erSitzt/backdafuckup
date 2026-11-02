@@ -22,6 +22,96 @@ namespace Backdafuckup.Server.Data.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.AgentEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("AgentVersion")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("agent_version");
+
+                    b.Property<string>("BiosSerial")
+                        .HasColumnType("text")
+                        .HasColumnName("bios_serial");
+
+                    b.Property<string>("Build")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("build");
+
+                    b.Property<string>("DnsName")
+                        .HasColumnType("text")
+                        .HasColumnName("dns_name");
+
+                    b.Property<DateTimeOffset>("EnrolledUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("enrolled_utc");
+
+                    b.Property<string>("FilesHash")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("files_hash");
+
+                    b.Property<string>("HostName")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("host_name");
+
+                    b.Property<string>("IpAddresses")
+                        .HasColumnType("text")
+                        .HasColumnName("ip_addresses");
+
+                    b.Property<string>("KeyHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("key_hash");
+
+                    b.Property<DateTimeOffset>("LastContactUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_contact_utc");
+
+                    b.Property<string>("OsName")
+                        .HasColumnType("text")
+                        .HasColumnName("os_name");
+
+                    b.Property<string>("OsVersion")
+                        .HasColumnType("text")
+                        .HasColumnName("os_version");
+
+                    b.Property<string>("RemoteAddress")
+                        .HasColumnType("text")
+                        .HasColumnName("remote_address");
+
+                    b.Property<string>("SmbiosUuid")
+                        .HasColumnType("text")
+                        .HasColumnName("smbios_uuid");
+
+                    b.Property<string>("VmNativeId")
+                        .HasColumnType("text")
+                        .HasColumnName("vm_native_id");
+
+                    b.Property<string>("VssProvider")
+                        .HasColumnType("text")
+                        .HasColumnName("vss_provider");
+
+                    b.HasKey("Id")
+                        .HasName("pk_agents");
+
+                    b.HasIndex("KeyHash")
+                        .IsUnique()
+                        .HasDatabaseName("ix_agents_key_hash");
+
+                    b.HasIndex("VmNativeId")
+                        .HasDatabaseName("ix_agents_vm_native_id");
+
+                    b.ToTable("agents", (string)null);
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.AppSetting", b =>
                 {
                     b.Property<string>("Key")
@@ -142,6 +232,20 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("enabled");
 
+                    b.Property<Guid?>("GuestCredentialId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("guest_credential_id");
+
+                    b.Property<string>("GuestFailurePolicy")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("guest_failure_policy");
+
+                    b.Property<bool>("GuestProcessing")
+                        .HasColumnType("boolean")
+                        .HasColumnName("guest_processing");
+
                     b.Property<string>("LastResult")
                         .HasMaxLength(16)
                         .HasColumnType("character varying(16)")
@@ -150,6 +254,10 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<DateTimeOffset?>("LastRunUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_run_utc");
+
+                    b.Property<int>("MaxParallelDisks")
+                        .HasColumnType("integer")
+                        .HasColumnName("max_parallel_disks");
 
                     b.Property<int>("MaxParallelVms")
                         .HasColumnType("integer")
@@ -184,6 +292,12 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("retry_delay_minutes");
 
+                    b.Property<string>("TransportMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("transport_mode");
+
                     b.Property<uint>("Version")
                         .IsConcurrencyToken()
                         .ValueGeneratedOnAddOrUpdate()
@@ -195,6 +309,9 @@ namespace Backdafuckup.Server.Data.Migrations
 
                     b.HasIndex("ConnectionId")
                         .HasDatabaseName("ix_jobs_connection_id");
+
+                    b.HasIndex("GuestCredentialId")
+                        .HasDatabaseName("ix_jobs_guest_credential_id");
 
                     b.HasIndex("Name")
                         .IsUnique()
@@ -376,6 +493,12 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<string>("Description")
                         .HasColumnType("text")
                         .HasColumnName("description");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("kind");
 
                     b.Property<string>("ProtectedSecret")
                         .IsRequired()
@@ -690,6 +813,15 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("connection_id");
 
+                    b.Property<string>("Consistency")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("consistency");
+
+                    b.Property<string>("ConsistencyReason")
+                        .HasColumnType("text")
+                        .HasColumnName("consistency_reason");
+
                     b.Property<DateTimeOffset>("CreatedUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_utc");
@@ -786,6 +918,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)")
                         .HasColumnName("kind");
+
+                    b.Property<string>("Metrics")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("metrics");
 
                     b.Property<string>("Name")
                         .IsRequired()
@@ -922,6 +1058,10 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<string>("Error")
                         .HasColumnType("text")
                         .HasColumnName("error");
+
+                    b.Property<string>("Metrics")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("metrics");
 
                     b.Property<string>("ObjectName")
                         .IsRequired()
@@ -1142,6 +1282,12 @@ namespace Backdafuckup.Server.Data.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_jobs_connections_connection_id");
+
+                    b.HasOne("Backdafuckup.Server.Data.Credential", null)
+                        .WithMany()
+                        .HasForeignKey("GuestCredentialId")
+                        .OnDelete(DeleteBehavior.SetNull)
+                        .HasConstraintName("fk_jobs_credentials_guest_credential_id");
 
                     b.HasOne("Backdafuckup.Server.Data.BackupRepositoryEntity", "Repository")
                         .WithMany()

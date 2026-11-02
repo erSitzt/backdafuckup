@@ -10,7 +10,10 @@
 
 @if (!Auth.Initialized)
 {
-    <div class="boot">Connecting to the backup server…</div>
+    <div class="boot">
+        <img src="img/backdafuckup-banner-512x128.png" alt="backdafuckup" width="512" height="128" />
+        <span>Connecting to the backup server…</span>
+    </div>
 }
 else if (Auth.SetupRequired)
 {
@@ -25,7 +28,7 @@ else
     <MudLayout>
         <MudAppBar Elevation="1" Dense="true">
             <MudIconButton Icon="@Icons.Material.Filled.Menu" Color="Color.Inherit" Edge="Edge.Start" OnClick="@(() => _drawerOpen = !_drawerOpen)" />
-            <MudText Typo="Typo.h6" Class="ml-2">backdafuckup</MudText>
+            <a href="/" class="ml-1" title="Dashboard"><img src="img/backdafuckup-banner-512x128.png" alt="backdafuckup" class="appbar-logo" /></a>
             <MudSpacer />
             <MudText Typo="Typo.body2" Class="mr-2">@Auth.User.UserName</MudText>
             <MudTooltip Text="Sign out">
@@ -52,7 +55,8 @@ else
         {
             Primary = "#00704a",
             Secondary = "#37474f",
-            AppbarBackground = "#1f2a30",
+            // Black like the background of the logo images.
+            AppbarBackground = "#000000",
             DrawerBackground = "#f7f8f8",
         },
     };

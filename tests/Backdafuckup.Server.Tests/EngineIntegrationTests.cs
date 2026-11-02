@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Backdafuckup.Agent.Protocol;
 using Backdafuckup.Contracts;
 using Backdafuckup.Core.Extents;
 using Backdafuckup.Core.Hypervisor;
@@ -32,6 +33,7 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17").Build();
     private readonly string _root = Path.Combine(Path.GetTempPath(), "bdfu-engine-tests", Guid.NewGuid().ToString("N"));
     private readonly FakeXenPool _pool = new();
+    private readonly FakeRemoteWindowsConnector _remote = new();
     private IHost? _host;
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -138,6 +140,255 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Guest_processing_freezes_the_guest_for_the_snapshot_and_stores_the_guest_metadata()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql01", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await using var agent = new FakeGuestAgent(Services, vmUuid);
+        await agent.StartAsync(Ct);
+        var frozenAtSnapshot = false;
+        _pool.OnSnapshot = _ => frozenAtSnapshot = agent.Frozen;
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Succeeded, session.State);
+        Assert.True(frozenAtSnapshot);
+        Assert.False(agent.Frozen);
+        Assert.Equal([AgentCommandKinds.PrepareBackup, AgentCommandKinds.Freeze, AgentCommandKinds.Thaw], agent.Commands);
+        var point = await LatestRestorePointAsync();
+        Assert.Equal("application", point.Consistency);
+        Assert.Null(point.ConsistencyReason);
+        Assert.True(File.Exists(Path.Combine(point.ManifestPath!, "guest-metadata.zst")));
+        await using var db = await DbAsync();
+        var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("VSS prepared by the agent on SQL01 (10.0.0.5)", StringComparison.Ordinal) && m.Contains("1 SQL database(s) in MSSQLSERVER", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains("application-consistent snapshot", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_freeze_that_outlasts_the_vss_limit_gives_a_crash_consistent_backup_with_a_warning()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql02", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { ThawVssResult = unchecked((int)0x80042314) };
+        await agent.StartAsync(Ct);
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Warning, session.State);
+        var point = await LatestRestorePointAsync();
+        Assert.Equal(RestorePointState.Available, point.State);
+        Assert.Equal("crash", point.Consistency);
+        Assert.Contains("10 s (VSS_E_HOLD_WRITES_TIMEOUT)", point.ConsistencyReason, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(GuestFailurePolicy.CrashConsistentWithWarning, SessionState.Warning)]
+    [InlineData(GuestFailurePolicy.FailVm, SessionState.Failed)]
+    public async Task Without_an_agent_the_failure_policy_decides(GuestFailurePolicy policy, SessionState expected)
+    {
+        var (vmUuid, _) = _pool.AddVm("noagent", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        await EnableGuestProcessingAsync(jobId, policy);
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(expected, session.State);
+        await using var db = await DbAsync();
+        var points = await db.RestorePoints.Where(r => r.JobId == jobId).ToListAsync(Ct);
+        if (policy == GuestFailurePolicy.FailVm)
+        {
+            Assert.Empty(points);
+            Assert.DoesNotContain(_pool.Records("VM"), vm => vm.Bool("is_a_snapshot"));
+            Assert.Contains("No backdafuckup agent is installed in VM vm", (await db.SessionTasks.SingleAsync(t => t.SessionId == session.Id, Ct)).Error, StringComparison.Ordinal);
+        }
+        else
+        {
+            var point = Assert.Single(points);
+            Assert.Equal("crash", point.Consistency);
+            Assert.Contains("No backdafuckup agent is installed", point.ConsistencyReason, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task A_push_installation_falls_back_to_the_net48_build_and_waits_for_the_agent()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql03", DiskSize);
+        _pool.SetGuestAddresses(vmUuid, "10.0.0.9", "10.0.0.5");
+        _remote.Reachable.Add("10.0.0.5");
+        _remote.Runs = exe => System.Text.Encoding.UTF8.GetString(exe).Contains("net48", StringComparison.Ordinal);
+        await using var agent = new FakeGuestAgent(Services, vmUuid);
+        _remote.OnStarted = () => agent.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        var credentialId = await AddWindowsCredentialAsync(@"CORP\backup-admin", "secret");
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueAgentDeploymentAsync(
+            new InstallAgentsDto(await ConnectionOfAsync(jobId), [new JobObjectDto(vmUuid, "sql03")], credentialId), "test", Ct));
+
+        Assert.Equal(SessionState.Succeeded, session.State);
+        const string folder = @"C$\Program Files\backdafuckup Agent\";
+        Assert.Equal("agent net48", System.Text.Encoding.UTF8.GetString(_remote.Files[folder + "backdafuckup-agent.exe"]));
+        var config = System.Text.Encoding.UTF8.GetString(_remote.Files[folder + "agent.json"]);
+        Assert.Contains("https://backup.test:9555/", config, StringComparison.Ordinal);
+        Assert.Contains("enrollmentSecret", config, StringComparison.Ordinal);
+        Assert.Equal(
+            ["start BackdafuckupAgent: stopped", "delete BackdafuckupAgent", "start BackdafuckupAgent: running"],
+            _remote.Calls.Where(c => c.StartsWith("start", StringComparison.Ordinal) || c.StartsWith("stop", StringComparison.Ordinal) || c.StartsWith("delete", StringComparison.Ordinal)));
+        Assert.Contains(@"create BackdafuckupAgent: ""C:\Program Files\backdafuckup Agent\backdafuckup-agent.exe"" run", _remote.Calls);
+        var writes = _remote.Calls.Where(c => c.StartsWith("write", StringComparison.Ordinal)).ToList();
+        Assert.EndsWith("agent.json", writes[2], StringComparison.Ordinal); // the secret after the program files
+        await using var db = await DbAsync();
+        var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("No SMB connection to 10.0.0.9:445", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains(@"connected to 10.0.0.5:445 as CORP\backup-admin", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains("The net10 build does not keep running on 10.0.0.5", StringComparison.Ordinal) && m.Contains("Trying the net48 build", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains("The agent on SQL01 (10.0.0.5) is online", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_wrong_windows_password_fails_the_installation_with_the_address()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql04", DiskSize);
+        _pool.SetGuestAddresses(vmUuid, "10.0.0.6");
+        _remote.Reachable.Add("10.0.0.6");
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        var credentialId = await AddWindowsCredentialAsync(@".\Administrator", "wrong");
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueAgentDeploymentAsync(
+            new InstallAgentsDto(await ConnectionOfAsync(jobId), [new JobObjectDto(vmUuid, "sql04")], credentialId), "test", Ct));
+
+        Assert.Equal(SessionState.Failed, session.State);
+        await using var db = await DbAsync();
+        var error = (await db.SessionTasks.SingleAsync(t => t.SessionId == session.Id, Ct)).Error;
+        Assert.Contains(@"Logon as .\Administrator at 10.0.0.6:445 failed: wrong user name or password", error, StringComparison.Ordinal);
+        Assert.Empty(_remote.Services);
+    }
+
+    [Fact]
+    public async Task A_backup_with_guest_processing_installs_a_missing_agent_with_the_job_credentials()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql05", DiskSize);
+        _pool.SetGuestAddresses(vmUuid, "10.0.0.7");
+        _remote.Reachable.Add("10.0.0.7");
+        await using var agent = new FakeGuestAgent(Services, vmUuid);
+        _remote.OnStarted = () => agent.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        var credentialId = await AddWindowsCredentialAsync(@"CORP\backup-admin", "secret");
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await using (var db = await DbAsync())
+        {
+            await db.Jobs.Where(j => j.Id == jobId).ExecuteUpdateAsync(s => s.SetProperty(j => j.GuestCredentialId, credentialId), Ct);
+        }
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Succeeded, session.State);
+        Assert.Equal("application", (await LatestRestorePointAsync()).Consistency);
+        await using var check = await DbAsync();
+        var log = await check.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("installing the agent with the job's Windows credentials", StringComparison.Ordinal));
+    }
+
+    private async Task<Guid> AddWindowsCredentialAsync(string user, string password)
+    {
+        await using var db = await DbAsync();
+        var credential = new Credential
+        {
+            Kind = CredentialKind.Windows,
+            Username = user,
+            ProtectedSecret = Services.GetRequiredService<CredentialProtector>().Protect(password),
+            CreatedUtc = DateTimeOffset.UtcNow,
+            UpdatedUtc = DateTimeOffset.UtcNow,
+        };
+        db.Credentials.Add(credential);
+        await db.SaveChangesAsync(Ct);
+        return credential.Id;
+    }
+
+    private async Task<Guid> ConnectionOfAsync(Guid jobId)
+    {
+        await using var db = await DbAsync();
+        return await db.Jobs.Where(j => j.Id == jobId).Select(j => j.ConnectionId).SingleAsync(Ct);
+    }
+
+    private async Task EnableGuestProcessingAsync(Guid jobId, GuestFailurePolicy policy)
+    {
+        await using var db = await DbAsync();
+        await db.Jobs.Where(j => j.Id == jobId).ExecuteUpdateAsync(s => s.SetProperty(j => j.GuestProcessing, true).SetProperty(j => j.GuestFailurePolicy, policy), Ct);
+    }
+
+    [Fact]
+    public async Task Disks_run_in_parallel_and_a_failing_disk_reports_its_own_error()
+    {
+        // HTTP export: the export of the 6 MiB disk breaks off after 3 MiB, the 2 MiB disk is complete.
+        var (vmUuid, _) = _pool.AddVm("twodisks", DiskSize, DiskSize / 3);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        await using (var db = await DbAsync())
+        {
+            await db.Jobs.Where(j => j.Id == jobId).ExecuteUpdateAsync(s => s.SetProperty(j => j.TransportMode, Backdafuckup.Core.DataMover.DiskTransportMode.HttpExportOnly), Ct);
+        }
+
+        var queue = Services.GetRequiredService<SessionQueue>();
+        _pool.TruncateExportAfterBytes = 3 * 1024 * 1024;
+        var failed = await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+        Assert.Equal(SessionState.Failed, failed.State);
+        await using (var db = await DbAsync())
+        {
+            var log = await db.SessionLog.Where(l => l.SessionId == failed.Id).Select(l => l.Message).ToListAsync(Ct);
+            Assert.Contains(log, m => m.Contains("Processing up to 2 of 2 disks in parallel", StringComparison.Ordinal));
+            var error = (await db.SessionTasks.SingleAsync(t => t.SessionId == failed.Id, Ct)).Error;
+            Assert.Contains("truncated", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("cancel", error, StringComparison.OrdinalIgnoreCase);
+            Assert.False(await db.RestorePoints.AnyAsync(r => r.State == RestorePointState.Available, Ct));
+        }
+
+        _pool.TruncateExportAfterBytes = null;
+        var succeeded = await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+        Assert.Equal(SessionState.Succeeded, succeeded.State);
+        var point = await LatestRestorePointAsync();
+        Assert.Equal([DiskSize, DiskSize / 3], point.Disks.OrderBy(d => d.DiskKey).Select(d => d.CapacityBytes));
+        Assert.Equal(DiskSize + (DiskSize / 3), Assert.IsType<TransferMetricsDto>(succeeded.Metrics).ProcessedBytes);
+    }
+
+    [Fact]
+    public async Task A_held_snapshot_disk_gives_a_warning_and_is_finished_by_the_background_retry()
+    {
+        var (vmUuid, _) = _pool.AddVm("busy", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 5);
+        var queue = Services.GetRequiredService<SessionQueue>();
+        _pool.DataDestroyInUse = int.MaxValue;
+
+        var first = await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+        Assert.Equal(SessionState.Warning, first.State);
+        Assert.Equal(RestorePointState.Available, (await LatestRestorePointAsync()).State);
+        Assert.Contains(_pool.Records("VDI"), v => v.Bool("is_a_snapshot") && v.Str("type") == "user");
+        await using (var db = await DbAsync())
+        {
+            Assert.Contains(await db.SessionLog.Where(l => l.SessionId == first.Id).Select(l => l.Message).ToListAsync(Ct), m => m.Contains("kept for now", StringComparison.Ordinal));
+
+            // The background retry only touches objects that have been left alone for a while.
+            await db.Artifacts.ExecuteUpdateAsync(s => s.SetProperty(a => a.UpdatedUtc, DateTimeOffset.UtcNow.AddMinutes(-10)), Ct);
+        }
+
+        _pool.DataDestroyInUse = 0;
+        await Services.GetRequiredService<StartupRecovery>().RetryPendingArtifactsAsync(Services.GetRequiredService<RunningSessions>(), Ct);
+
+        Assert.DoesNotContain(_pool.Records("VM"), vm => vm.Bool("is_a_snapshot"));
+        Assert.Contains(_pool.Records("VDI"), v => v.Str("type") == "cbt_metadata");
+        await using (var db = await DbAsync())
+        {
+            Assert.False(await db.Artifacts.AnyAsync(a => a.State != ArtifactState.Done, Ct));
+        }
+
+        // The kept change tracking data makes the next backup incremental.
+        var second = await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+        Assert.Equal(SessionState.Succeeded, second.State);
+        Assert.Equal(RestorePointKind.Incremental, (await LatestRestorePointAsync()).Kind);
+    }
+
+    [Fact]
     public async Task Recovery_removes_snapshots_left_behind_by_a_crash()
     {
         var (vmUuid, _) = _pool.AddVm("crashy", DiskSize);
@@ -171,12 +422,31 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         {
             ["ConnectionStrings:Catalog"] = _postgres.GetConnectionString(),
             ["Engine:SchedulerInterval"] = "00:10:00",
+            ["Agent:PackageDirectory"] = Path.Combine(_root, "agent"),
+            ["Agent:ServerUrl"] = "https://backup.test:9555/",
+            ["Agent:ServiceStableTime"] = "00:00:00.200",
+            ["Agent:ServicePollInterval"] = "00:00:00.050",
+            ["Agent:InstallWaitTimeout"] = "00:00:15",
         });
+        foreach (var build in new[] { "net10", "net48" })
+        {
+            Directory.CreateDirectory(Path.Combine(_root, "agent", build));
+            File.WriteAllText(Path.Combine(_root, "agent", build, "backdafuckup-agent.exe"), $"agent {build}");
+            File.WriteAllText(Path.Combine(_root, "agent", build, "bdfu-vss.dll"), "vss");
+        }
+
+        builder.Services.AddSingleton<Backdafuckup.Smb.IRemoteWindowsConnector>(_remote);
         var paths = new ServerPaths(_root, Path.Combine(_root, "data"), Path.Combine(_root, "logs"));
         builder.Services.AddSingleton(paths);
         builder.Services.AddCatalog(builder.Configuration, paths);
         builder.Services.AddSingleton<IHypervisorProvider>(new XenProvider(
-            new XenOptions { CbtBitOrder = CbtBitOrder.MostSignificantBitFirst, XapiRetryAttempts = 1, XapiRetryDelay = TimeSpan.FromMilliseconds(10) },
+            new XenOptions
+            {
+                CbtBitOrder = CbtBitOrder.MostSignificantBitFirst,
+                XapiRetryAttempts = 1,
+                XapiRetryDelay = TimeSpan.FromMilliseconds(10),
+                SnapshotReleaseTimeout = TimeSpan.FromMilliseconds(300),
+            },
             (_, host) => new XapiTransport(new Uri($"https://{host}/"), _pool.CreateHandler())));
         builder.Services.AddBackupEngine(builder.Configuration);
         return builder.Build();

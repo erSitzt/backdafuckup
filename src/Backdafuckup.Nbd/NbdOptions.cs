@@ -30,7 +30,8 @@ public sealed record NbdConnectOptions
 
     public SslProtocols TlsProtocols { get; init; } = SslProtocols.Tls12 | SslProtocols.Tls13;
 
-    public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(30);
+    /// <summary>TCP connect plus NBD/TLS negotiation; on a LAN this takes milliseconds.</summary>
+    public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
     /// <summary>Maximum number of requests in flight on one connection.</summary>
     public int MaxInFlight { get; init; } = 8;

@@ -1,3 +1,4 @@
+using Backdafuckup.Server.Agents;
 using Backdafuckup.Server.Api;
 using Backdafuckup.Server.Data;
 using Backdafuckup.Server.Engine;
@@ -115,6 +116,8 @@ try
     app.MapAuthEndpoints();
     app.MapInfrastructureEndpoints();
     app.MapOperationEndpoints();
+    app.MapAgentEndpoints();
+    app.MapFileRestoreEndpoints();
     app.MapHub<LiveHub>("/hubs/live");
     app.MapFallbackToFile("index.html").AllowAnonymous();
 

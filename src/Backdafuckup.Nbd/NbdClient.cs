@@ -62,6 +62,9 @@ public sealed class NbdClient : IAsyncDisposable
 
     public bool UsesTls { get; }
 
+    /// <summary>Negotiated TLS version (None without TLS).</summary>
+    public System.Security.Authentication.SslProtocols TlsProtocol => _stream is SslStream ssl ? ssl.SslProtocol : System.Security.Authentication.SslProtocols.None;
+
     /// <summary>True if NBD_OPT_GO was used, false if the server needed the NBD_OPT_EXPORT_NAME fallback.</summary>
     public bool NegotiatedWithGo { get; }
 
@@ -95,13 +98,21 @@ public sealed class NbdClient : IAsyncDisposable
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
+            var connected = tcp.Connected;
             tcp.Dispose();
-            throw new TimeoutException($"NBD connection to {options.Host}:{options.Port} timed out after {options.ConnectTimeout}.");
+            throw new TimeoutException(connected
+                ? $"NBD connection to {options.Host}:{options.Port}: the server accepted the TCP connection but did not complete the NBD/TLS handshake within {options.ConnectTimeout.TotalSeconds:0} s."
+                : $"NBD connection to {options.Host}:{options.Port}: no answer to the TCP connection within {options.ConnectTimeout.TotalSeconds:0} s. The connection attempts are dropped, not refused: most likely a firewall between the backup server and the host (or the host's iptables) blocks TCP {options.Port}.");
         }
         catch (EndOfStreamException ex)
         {
             tcp.Dispose();
             throw new NbdException($"NBD server {options.Host}:{options.Port} closed the connection during negotiation.", ex);
+        }
+        catch (SocketException ex)
+        {
+            tcp.Dispose();
+            throw new NbdException($"Cannot connect to NBD server {options.Host}:{options.Port}: {ex.Message} ({ex.SocketErrorCode}).", ex);
         }
         catch
         {

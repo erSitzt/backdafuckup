@@ -133,6 +133,23 @@ public static class Fmt
         return value.ToString(unit == 0 ? "0" : "0.0", CultureInfo.CurrentCulture) + " " + units[unit];
     }
 
+    public static string Rate(double? bytesPerSecond) => bytesPerSecond is > 0 and var rate ? Bytes((long)rate) + "/s" : "–";
+
+    public static string Ratio(double? ratio) => ratio switch
+    {
+        null => "–",
+        double.PositiveInfinity => "∞",
+        { } r => r.ToString("0.0", CultureInfo.CurrentCulture) + "x",
+    };
+
+    public static string Percent(double share) => (share * 100).ToString("0", CultureInfo.CurrentCulture) + " %";
+
+    public static string Seconds(double seconds)
+    {
+        var span = TimeSpan.FromSeconds(seconds);
+        return span.TotalHours >= 1 ? $"{(int)span.TotalHours}:{span.Minutes:00}:{span.Seconds:00}" : $"{span.Minutes:00}:{span.Seconds:00}";
+    }
+
     public static string Time(DateTimeOffset? value) => value?.ToLocalTime().ToString("g", CultureInfo.CurrentCulture) ?? "–";
 
     public static string Duration(DateTimeOffset? start, DateTimeOffset? end)

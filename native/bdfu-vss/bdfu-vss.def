@@ -1,0 +1,13 @@
+LIBRARY bdfu-vss
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE
+    DllRegisterServer PRIVATE
+    DllUnregisterServer PRIVATE
+    bdfu_vss_prepare
+    bdfu_vss_freeze
+    bdfu_vss_thaw
+    bdfu_vss_abort
+    bdfu_vss_provider_state
+    bdfu_vss_register
+    bdfu_vss_unregister

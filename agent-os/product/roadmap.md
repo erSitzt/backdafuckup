@@ -18,10 +18,12 @@
 - **Application awareness:** application-consistent backups of Windows guests (VSS). Needs our own in-guest agent (VSS requester), because XAPI's quiesced snapshots were removed in XenServer / XCP-ng 8.1
 - **Active Directory objects:** application-aware AD backup with object-level restore
 - **MS SQL Server:** application-aware backup and restore of SQL Server databases
+- **File-level restore:** restore single files and folders from guest disks without restoring the whole VM. It moved here from phase 2 as a knock-out criterion (2026-11-02).
+  - Browser download, back into the VM (Windows through the guest agent, Linux over SSH/SFTP with sudo), or to an SMB share.
+  - File systems: NTFS, ext2/3/4, XFS, LVM (linear).
 
 ## Phase 2: Post-Launch
 
-- **File-level restore:** restore individual files from guest disks without restoring the whole VM
 - **Tape out:** move or copy backups to tape on an HPE MSL tape library
 - **Offsite / immutable copy:** backup copies to a secondary site, S3 or immutable storage
 - **SQL transaction log backup & point-in-time recovery:** SQL Server log backups and point-in-time restore, run directly from the backup app
@@ -35,3 +37,15 @@
   - vSphere: the snapshot LUN is mounted on an ESXi host as a resignatured datastore and read through the HotAdd proxy
   - Hyper-V: the array's VSS hardware provider plus transportable shadow copies
 - **More storage array plugins:** vendors to be decided; each must have a publicly documented snapshot API
+
+## Backlog (technical)
+
+- **Repository pack files (before the SMB/NFS/S3 targets and tape out):**
+  - **Problem:** today every chunk is its own file, about 500 KB compressed on average. A 10 TB repository holds about 20 million files.
+    - Inodes are not the problem.
+    - Operations over all files are slow: GC, verify, copying a repository offsite or to tape, SMB/NFS targets, S3 request costs.
+  - **Plan:**
+    - Bundle chunks into pack files (e.g. 64 MiB) with an index, as restic, Kopia and Borg do. Deduplication and forever-incremental stay.
+    - The GC repacks (compaction).
+    - Quick interim option: 4 MiB chunks (4× fewer files; coarser dedup and CBT).
+  - **Comparison:** Proxmox Backup Server uses one file per chunk as we do. Veeam writes large container files per job/VM (`.vbk`/`.vib`); on S3 it writes one object per block.

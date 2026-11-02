@@ -27,7 +27,7 @@ public sealed class FakeXenPool : IAsyncDisposable
 
     public FakeXenPool()
     {
-        foreach (var table in new[] { "pool", "host", "VM", "VBD", "VDI", "SR", "PBD", "network", "VIF", "task" })
+        foreach (var table in new[] { "pool", "host", "VM", "VBD", "VDI", "SR", "PBD", "network", "PIF", "VIF", "task", "VM_guest_metrics" })
         {
             _tables[table] = new(StringComparer.Ordinal);
         }
@@ -44,6 +44,7 @@ public sealed class FakeXenPool : IAsyncDisposable
         SecondSrRef = AddSr("NFS storage", shared: true);
         NetworkRef = Add("network", new JsonObject { ["name_label"] = "Pool-wide network", ["bridge"] = "xenbr0", ["MTU"] = 1500, ["purpose"] = new JsonArray("nbd") });
         SecondNetworkRef = Add("network", new JsonObject { ["name_label"] = "Backup network", ["bridge"] = "xenbr1", ["MTU"] = 1500, ["purpose"] = new JsonArray() });
+        Add("PIF", new JsonObject { ["host"] = HostRef, ["network"] = NetworkRef, ["device"] = "eth0", ["IP"] = "127.0.0.1", ["IPv6"] = new JsonArray() });
     }
 
     public string HostRef { get; }
@@ -65,6 +66,27 @@ public sealed class FakeXenPool : IAsyncDisposable
 
     /// <summary>When false, VDI.get_nbd_info returns an empty list (no NBD network).</summary>
     public bool NbdEnabled { get; set; } = true;
+
+    /// <summary>Extra endpoints returned by VDI.get_nbd_info before the working one, e.g. ports nobody listens on.</summary>
+    public List<(string Address, int Port)> UnreachableNbdEndpoints { get; } = [];
+
+    /// <summary>When false, VDI.get_nbd_info returns only <see cref="UnreachableNbdEndpoints"/>.</summary>
+    public bool NbdReachable { get; set; } = true;
+
+    /// <summary>How export_raw_vdi?format=vhd builds its stream.</summary>
+    public VhdTestOptions VhdExport { get; set; } = new();
+
+    /// <summary>Cuts the body of export_raw_vdi after this many bytes (simulates a broken transfer).</summary>
+    public int? TruncateExportAfterBytes { get; set; }
+
+    /// <summary>Formats requested from export_raw_vdi, in order.</summary>
+    public List<string> ExportRequests { get; } = [];
+
+    /// <summary>import_raw_vdi uploads: format and body size.</summary>
+    public List<(string Format, long Bytes)> ImportRequests { get; } = [];
+
+    /// <summary>VDI.data_destroy answers VDI_IN_USE this many times (int.MaxValue: until changed), like a disk XAPI has not detached yet.</summary>
+    public int DataDestroyInUse { get; set; }
 
     public int ActiveNbdServers
     {
@@ -275,6 +297,7 @@ public sealed class FakeXenPool : IAsyncDisposable
         {
             ("session", "logout") => Logout(S(0)),
             (_, "get_all_records") => new JsonObject(_tables[table].Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value.DeepClone()))),
+            ("VDI", "get_record") => VdiRecord(S(1)),
             (_, "get_record") => Get(table, S(1)).DeepClone(),
             (_, "get_by_uuid") => RefByUuid(table, S(1)),
             (_, "add_to_other_config") => SetMap(Get(table, S(1)), "other_config", S(2), S(3)),
@@ -289,6 +312,7 @@ public sealed class FakeXenPool : IAsyncDisposable
             ("VDI", "enable_cbt") => Set(Get("VDI", S(1)), "cbt_enabled", true),
             ("VDI", "list_changed_blocks") => ListChangedBlocks(S(1), S(2)),
             ("VDI", "data_destroy") => DataDestroy(S(1)),
+            ("VBD", "destroy") => DestroyVbd(S(1)),
             ("VDI", "destroy") => DestroyVdi(S(1)),
             ("VDI", "get_nbd_info") => NbdInfo(S(1)),
             ("VDI", "create") => CreateVdi((JsonObject)p[1]!),
@@ -337,8 +361,28 @@ public sealed class FakeXenPool : IAsyncDisposable
         return null;
     }
 
+    /// <summary>What the guest tools report: the guest's IP addresses (VM_guest_metrics.networks).</summary>
+    public void SetGuestAddresses(string vmUuid, params string[] addresses)
+    {
+        lock (_lock)
+        {
+            var networks = new JsonObject();
+            for (var i = 0; i < addresses.Length; i++)
+            {
+                networks[addresses[i].Contains(':', StringComparison.Ordinal) ? $"{i}/ipv6/0" : $"{i}/ip"] = addresses[i];
+            }
+
+            var metrics = Add("VM_guest_metrics", new JsonObject { ["networks"] = networks });
+            Get("VM", RefByUuid("VM", vmUuid)!)["guest_metrics"] = metrics;
+        }
+    }
+
+    /// <summary>Called when VM.snapshot runs (e.g. to check that the guest is frozen at that moment).</summary>
+    public Action<string>? OnSnapshot { get; set; }
+
     private JsonNode? Snapshot(string vmRef, string name)
     {
+        OnSnapshot?.Invoke(name);
         var vm = Get("VM", vmRef);
         _generation++;
         var snapRef = Add("VM", new JsonObject
@@ -401,12 +445,36 @@ public sealed class FakeXenPool : IAsyncDisposable
         return Convert.ToBase64String(CbtBitmap.Encode(changed, to["virtual_size"]!.GetValue<long>(), CbtBitOrder.MostSignificantBitFirst));
     }
 
+    /// <summary>VDI records list their VBDs like XAPI does (derived from the VBD table).</summary>
+    private JsonNode VdiRecord(string vdiRef)
+    {
+        var record = Get("VDI", vdiRef).DeepClone().AsObject();
+        record["VBDs"] = new JsonArray(_tables["VBD"].Where(v => v.Value["VDI"]?.GetValue<string>() == vdiRef).Select(v => (JsonNode?)v.Key).ToArray());
+        return record;
+    }
+
     private JsonNode? DataDestroy(string vdiRef)
     {
         var vdi = Get("VDI", vdiRef);
         if (!vdi["cbt_enabled"]!.GetValue<bool>())
         {
             throw new FakeXapiError("VDI_NO_CBT_METADATA", vdiRef);
+        }
+
+        // Like XAPI: the VDI must not have any VBD left, attached or not (e.g. the VBD of its snapshot VM).
+        if (_tables["VBD"].Any(v => v.Value["VDI"]?.GetValue<string>() == vdiRef))
+        {
+            throw new FakeXapiError("VDI_IN_USE", vdiRef, "data_destroy");
+        }
+
+        if (DataDestroyInUse > 0)
+        {
+            if (DataDestroyInUse != int.MaxValue)
+            {
+                DataDestroyInUse--;
+            }
+
+            throw new FakeXapiError("VDI_IN_USE", vdiRef, "data_destroy");
         }
 
         if (_nbd.TryGetValue(vdiRef, out var server))
@@ -435,6 +503,26 @@ public sealed class FakeXenPool : IAsyncDisposable
             _ = server.DisposeAsync().AsTask();
         }
 
+        return null;
+    }
+
+    private JsonNode? DestroyVbd(string vbdRef)
+    {
+        var vbd = Get("VBD", vbdRef);
+        if (vbd["currently_attached"]?.GetValue<bool>() == true)
+        {
+            throw new FakeXapiError("OPERATION_NOT_ALLOWED", "VBD is currently attached");
+        }
+
+        if (Get("VM", vbd["VM"]!.GetValue<string>())["VBDs"] is JsonArray vmVbds)
+        {
+            foreach (var item in vmVbds.Where(n => n!.GetValue<string>() == vbdRef).ToList())
+            {
+                vmVbds.Remove(item);
+            }
+        }
+
+        _tables["VBD"].Remove(vbdRef);
         return null;
     }
 
@@ -474,14 +562,26 @@ public sealed class FakeXenPool : IAsyncDisposable
             _nbd[vdiRef] = server;
         }
 
-        return new JsonArray(new JsonObject
+        var cert = server.Certificate.ExportCertificatePem();
+        var endpoints = new JsonArray();
+        foreach (var (address, port) in UnreachableNbdEndpoints)
         {
-            ["address"] = "127.0.0.1",
-            ["port"] = server.Port,
-            ["cert"] = server.Certificate.ExportCertificatePem(),
-            ["exportname"] = $"token-{vdiRef}",
-            ["subject"] = "localhost",
-        });
+            endpoints.Add(new JsonObject { ["address"] = address, ["port"] = port, ["cert"] = cert, ["exportname"] = $"token-{vdiRef}", ["subject"] = "localhost" });
+        }
+
+        if (NbdReachable)
+        {
+            endpoints.Add(new JsonObject
+            {
+                ["address"] = "127.0.0.1",
+                ["port"] = server.Port,
+                ["cert"] = cert,
+                ["exportname"] = $"token-{vdiRef}",
+                ["subject"] = "localhost",
+            });
+        }
+
+        return endpoints;
     }
 
     private JsonNode CreateVdi(JsonObject record)
@@ -620,14 +720,57 @@ public sealed class FakeXenPool : IAsyncDisposable
                     case "export_metadata":
                         return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(pool.ExportMetadata(query["uuid"]!)) };
 
-                    case "import_raw_vdi":
-                        var vdi = pool.Get("VDI", query["vdi"]!);
-                        if (body.LongLength != vdi["virtual_size"]!.GetValue<long>())
+                    case "export_raw_vdi" when request.Method == HttpMethod.Get:
+                        var format = query["format"] ?? "raw";
+                        pool.ExportRequests.Add(format);
+                        var source = pool._data[query["vdi"]!];
+                        var exported = format switch
+                        {
+                            "raw" => (byte[])source.Clone(),
+                            "vhd" => VhdTestImage.Create(source, pool.VhdExport),
+                            _ => null,
+                        };
+                        if (exported is null)
                         {
                             return new HttpResponseMessage(HttpStatusCode.BadRequest);
                         }
 
-                        pool._data[query["vdi"]!] = body;
+                        if (pool.TruncateExportAfterBytes is { } cut && cut < exported.Length)
+                        {
+                            exported = exported[..cut];
+                        }
+                        else if (query["task_id"] is { } exportTask)
+                        {
+                            Complete(exportTask, string.Empty);
+                        }
+
+                        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(exported) };
+
+                    case "import_raw_vdi":
+                        var vdi = pool.Get("VDI", query["vdi"]!);
+                        var importFormat = query["format"] ?? "raw";
+                        pool.ImportRequests.Add((importFormat, body.LongLength));
+                        byte[] imported;
+                        try
+                        {
+                            imported = importFormat switch
+                            {
+                                "raw" => body,
+                                "vhd" => VhdTestImage.Read(body),
+                                _ => throw new InvalidDataException($"Unknown format {importFormat}."),
+                            };
+                        }
+                        catch (InvalidDataException)
+                        {
+                            return new HttpResponseMessage(HttpStatusCode.BadRequest);
+                        }
+
+                        if (imported.LongLength != vdi["virtual_size"]!.GetValue<long>())
+                        {
+                            return new HttpResponseMessage(HttpStatusCode.BadRequest);
+                        }
+
+                        pool._data[query["vdi"]!] = imported;
                         Complete(query["task_id"]!, string.Empty);
                         return new HttpResponseMessage(HttpStatusCode.OK);
 

@@ -123,7 +123,12 @@ public sealed record JobDto(
     bool IsRunning,
     int MaxParallelVms,
     int NbdConnectionsPerDisk,
-    int RetryCount);
+    int RetryCount,
+    string TransportMode,
+    int MaxParallelDisks,
+    bool GuestProcessing,
+    string GuestFailurePolicy,
+    Guid? GuestCredentialId);
 
 public sealed record SaveJobDto
 {
@@ -147,7 +152,29 @@ public sealed record SaveJobDto
 
     public int NbdConnectionsPerDisk { get; init; } = 4;
 
+    /// <summary>Disks of one VM read at the same time (each is its own stream).</summary>
+    public int MaxParallelDisks { get; init; } = 2;
+
+    /// <summary>Application-consistent backups through the guest agent (VSS).</summary>
+    public bool GuestProcessing { get; init; }
+
+    /// <summary><see cref="GuestFailurePolicies"/>: crash-consistent with a warning (default) or fail the VM.</summary>
+    public string GuestFailurePolicy { get; init; } = GuestFailurePolicies.CrashConsistentWithWarning;
+
+    /// <summary>Windows credentials to install the agent where it is missing (optional).</summary>
+    public Guid? GuestCredentialId { get; init; }
+
     public int RetryCount { get; init; } = 2;
+
+    /// <summary>"Automatic" (NBD, otherwise HTTP export), "NbdOnly" or "HttpExportOnly".</summary>
+    public string TransportMode { get; init; } = TransportModes.Automatic;
+}
+
+public static class TransportModes
+{
+    public const string Automatic = "Automatic";
+    public const string NbdOnly = "NbdOnly";
+    public const string HttpExportOnly = "HttpExportOnly";
 }
 
 public sealed record RunJobDto(bool ActiveFull = false);
@@ -179,7 +206,9 @@ public sealed record RestorePointDto(
     IReadOnlyList<RestorePointNicDto> Nics,
     int VCpus,
     long MemoryBytes,
-    string? Firmware);
+    string? Firmware,
+    string Consistency = "crash",
+    string? ConsistencyReason = null);
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 
@@ -193,3 +222,78 @@ public sealed record DashboardDto(
     IReadOnlyList<SessionSummaryDto> RunningSessions,
     IReadOnlyList<SessionSummaryDto> RecentSessions,
     IReadOnlyList<RepositoryDto> Repositories);
+
+/// <summary>A backdafuckup agent in a Windows guest.</summary>
+public sealed record AgentDto
+{
+    public Guid Id { get; init; }
+
+    public required string HostName { get; init; }
+
+    public string? DnsName { get; init; }
+
+    public string? VmNativeId { get; init; }
+
+    public string? VmName { get; init; }
+
+    public string? OsName { get; init; }
+
+    public string? OsVersion { get; init; }
+
+    /// <summary>"net10" or "net48".</summary>
+    public required string Build { get; init; }
+
+    public required string Version { get; init; }
+
+    public string? VssProvider { get; init; }
+
+    public string? IpAddresses { get; init; }
+
+    public string? RemoteAddress { get; init; }
+
+    public bool Online { get; init; }
+
+    /// <summary>False while the agent still runs files older than the server's build (it updates itself).</summary>
+    public bool UpToDate { get; init; }
+
+    public DateTimeOffset EnrolledUtc { get; init; }
+
+    public DateTimeOffset LastContactUtc { get; init; }
+}
+
+public sealed record AgentBuildDto(string Name, string Version, long SizeBytes, string FilesHash);
+
+public sealed record AgentSettingsDto
+{
+    /// <summary>The address under which the guests reach the backup server.</summary>
+    public string? ServerUrl { get; init; }
+
+    /// <summary>Lets new agents enroll; part of the setup package and the push installation.</summary>
+    public required string EnrollmentSecret { get; init; }
+
+    /// <summary>SPKI SHA-256 of the server certificate the agents pin (empty: Windows certificate validation).</summary>
+    public IReadOnlyList<string> ServerPins { get; init; } = [];
+
+    public IReadOnlyList<AgentBuildDto> Builds { get; init; } = [];
+
+    public required string PackageDirectory { get; init; }
+}
+
+public sealed record AgentSettingsUpdateDto(string? ServerUrl);
+
+/// <summary>Push installation of the guest agent into VMs of a pool, with Windows administrator credentials.</summary>
+public sealed record InstallAgentsDto(Guid ConnectionId, IReadOnlyList<JobObjectDto> Vms, Guid CredentialId);
+
+/// <summary>Windows administrator credentials (for the push installation of the agent); the password is never returned.</summary>
+public sealed record WindowsCredentialDto(Guid Id, string UserName, string? Description, DateTimeOffset CreatedUtc);
+
+public sealed record SaveWindowsCredentialDto(string UserName, string Password, string? Description);
+
+public static class GuestFailurePolicies
+{
+    public const string CrashConsistentWithWarning = "CrashConsistentWithWarning";
+    public const string FailVm = "FailVm";
+}
+
+/// <summary>Result of "Test VSS": prepare, freeze and thaw in the guest without a VM snapshot.</summary>
+public sealed record AgentTestResultDto(bool Ok, string Message, IReadOnlyList<string> Log);

@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Extents;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Repository;
@@ -96,14 +97,128 @@ public sealed class DataMoverRoundTripTests : IDisposable
         Assert.Equal(Sha(bigger.Content), Sha(await RestoreAsync(repo, second.RestorePointId)));
     }
 
+    [Fact]
+    public async Task Streaming_source_gives_the_same_restore_points_as_random_access()
+    {
+        await using var repo = await LocalDirectoryRepository.CreateAsync(_root, Ct, ChunkSize);
+        var live = InMemoryDisk.Random((40L * ChunkSize) + 4321, zeroFraction: 0.5);
+        live.Write(5L * ChunkSize, new byte[3 * ChunkSize]);
+
+        var (snap1, _) = live.Snapshot();
+        var streamedFull = await BackupAsync(repo, snap1, ChangedExtents.Full("first backup"), null, streaming: true);
+        var randomFull = await BackupAsync(repo, snap1, ChangedExtents.Full("first backup"), null);
+        Assert.Equal(randomFull.Result.Index.Entries, streamedFull.Result.Index.Entries);
+        Assert.Equal("memory-stream", streamedFull.Result.Stats.Transport);
+        Assert.Equal(randomFull.Result.Stats.ZeroChunks, streamedFull.Result.Stats.ZeroChunks);
+        Assert.True(streamedFull.Result.Stats.ReadBytes < snap1.Content.LongLength, "zero segments are not transferred");
+
+        // Incremental with CBT: the stream still carries the whole disk, but only dirty chunks are processed.
+        var rng = new Random(3);
+        for (var i = 0; i < 12; i++)
+        {
+            var offset = rng.NextInt64(0, live.Content.LongLength / CbtBitmap.BlockSize) * CbtBitmap.BlockSize;
+            live.Write(offset, RandomNumberGenerator.GetBytes((int)Math.Min(CbtBitmap.BlockSize, live.Content.LongLength - offset)));
+        }
+
+        live.Write(6L * ChunkSize, new byte[ChunkSize]);
+        live.Write(20L * ChunkSize, new byte[ChunkSize]);
+        var (snap2, changed) = live.Snapshot();
+        var cbt = CbtBitmap.Decode(CbtBitmap.Encode(changed, snap2.Content.LongLength, CbtBitOrder.MostSignificantBitFirst), snap2.Content.LongLength, CbtBitOrder.MostSignificantBitFirst);
+        var streamedIncremental = await BackupAsync(repo, snap2, new ChangedExtents(false, null, cbt), streamedFull, streaming: true);
+
+        Assert.Equal(DiskBackupMode.Cbt, streamedIncremental.Result.Stats.Mode);
+        Assert.Equal(Sha(snap1.Content), Sha(await RestoreAsync(repo, streamedFull.RestorePointId)));
+        Assert.Equal(Sha(snap2.Content), Sha(await RestoreAsync(repo, streamedIncremental.RestorePointId)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Counters_add_up_and_show_dedupe_and_compression(bool streaming)
+    {
+        await using var repo = await LocalDirectoryRepository.CreateAsync(_root, Ct, ChunkSize);
+        var live = InMemoryDisk.Random(24L * ChunkSize, zeroFraction: 0.3);
+
+        // Compressible data in chunks 0-3: a repeating text pattern.
+        var text = System.Text.Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("backdafuckup compressible data ", 140_000)));
+        live.Write(0, text.AsSpan(0, 4 * ChunkSize).ToArray());
+
+        // Chunks 10 and 11 are identical to chunks 8 and 9: deduplicated within the same backup.
+        live.Write(10L * ChunkSize, live.Content.AsSpan(8 * ChunkSize, 2 * ChunkSize).ToArray());
+        live.Write(16L * ChunkSize, new byte[2 * ChunkSize]);
+
+        var (snap1, _) = live.Snapshot();
+        var full = await BackupAsync(repo, snap1, ChangedExtents.Full("first"), null, streaming);
+        var c = full.Result.Counters;
+        Assert.Equal(snap1.Content.LongLength, c.ProcessedBytes);
+        Assert.Equal(c.ProcessedBytes, c.UnchangedBytes + c.ZeroBytes + c.DedupedBytes + c.NewDataBytes);
+        Assert.Equal(0, c.UnchangedBytes);
+        Assert.True(c.ZeroBytes >= 2L * ChunkSize);
+        Assert.True(c.DedupedBytes >= 2L * ChunkSize, $"deduped {c.DedupedBytes}");
+        Assert.True(c.NewDataBytes > c.StoredBytes, "the text chunks compress");
+        Assert.Equal(c.NewDataBytes, full.Result.Stats.NewDataBytes);
+        Assert.True(c.SourceLoad + c.ProcessingLoad + c.TargetLoad > 0);
+        Assert.InRange(c.SourceLoad, 0, 1);
+
+        // Incremental: two changed chunks; the rest of the disk counts as unchanged.
+        live.Write(5L * ChunkSize, RandomNumberGenerator.GetBytes(ChunkSize));
+        live.Write(6L * ChunkSize, live.Content.AsSpan(6 * ChunkSize, ChunkSize).ToArray());
+        var (snap2, changed) = live.Snapshot();
+        var cbt = CbtBitmap.Decode(CbtBitmap.Encode(changed, snap2.Content.LongLength, CbtBitOrder.MostSignificantBitFirst), snap2.Content.LongLength, CbtBitOrder.MostSignificantBitFirst);
+        var incremental = await BackupAsync(repo, snap2, new ChangedExtents(false, null, cbt), full, streaming);
+        var i = incremental.Result.Counters;
+        Assert.Equal(snap2.Content.LongLength, i.ProcessedBytes);
+        Assert.Equal(i.ProcessedBytes, i.UnchangedBytes + i.ZeroBytes + i.DedupedBytes + i.NewDataBytes);
+        Assert.Equal(ChunkSize, i.NewDataBytes);
+        Assert.Equal(ChunkSize, i.DedupedBytes);
+        Assert.Equal(22L * ChunkSize, i.UnchangedBytes);
+        if (streaming)
+        {
+            // The stream carries the whole disk except empty regions; only the two dirty chunks are processed.
+            Assert.InRange(i.ReadBytes, 20L * ChunkSize, snap2.Content.LongLength);
+        }
+        else
+        {
+            Assert.Equal(2L * ChunkSize, i.ReadBytes);
+        }
+    }
+
+    [Fact]
+    public async Task Streaming_source_with_decreasing_offsets_is_rejected()
+    {
+        await using var repo = await LocalDirectoryRepository.CreateAsync(_root, Ct, ChunkSize);
+        await using var writer = repo.BeginWrite(Guid.CreateVersion7(), "vm", null);
+        var job = new DiskBackupJob { Reader = new BackwardsStream(), Writer = writer, ChunkSize = ChunkSize, Changes = ChangedExtents.Full("test") };
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(() => DiskBackupPipeline.RunAsync(job, Ct));
+        Assert.Contains("offset", ex.Message, StringComparison.Ordinal);
+    }
+
+    private sealed class BackwardsStream : ISequentialDiskReader
+    {
+        public long Capacity => 4L * ChunkSize;
+
+        public string TransportName => "test";
+
+        public async Task StreamAsync(DiskDataSink sink, CancellationToken cancellationToken)
+        {
+            var data = new byte[1000];
+            data[0] = 1;
+            await sink(2L * ChunkSize, data, cancellationToken);
+            await sink(ChunkSize, data, cancellationToken);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private sealed record Backup(Guid RestorePointId, DiskBackupResult Result);
 
-    private static async Task<Backup> BackupAsync(LocalDirectoryRepository repo, InMemoryDisk snapshot, ChangedExtents changes, Backup? baseline)
+    private static async Task<Backup> BackupAsync(LocalDirectoryRepository repo, InMemoryDisk snapshot, ChangedExtents changes, Backup? baseline, bool streaming = false)
     {
         var rpId = Guid.CreateVersion7();
         using var pin = baseline is null ? null : repo.Pin(baseline.RestorePointId);
         await using var writer = repo.BeginWrite(rpId, "vm", pin);
-        await using var reader = snapshot.OpenReader(maxRequestBytes: 256 * 1024);
+        await using IDiskSource reader = streaming ? snapshot.OpenSequentialReader() : snapshot.OpenReader(maxRequestBytes: 256 * 1024);
         var result = await DiskBackupPipeline.RunAsync(
             new DiskBackupJob
             {

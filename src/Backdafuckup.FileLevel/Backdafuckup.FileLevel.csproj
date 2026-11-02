@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- File-level restore: reads partitions and file systems of a restore point disk (no kernel mount, no root). -->
+  <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
+    <ProjectReference Include="..\ThirdParty\DiscUtils.Ext\DiscUtils.Ext.csproj" />
+    <ProjectReference Include="..\ThirdParty\DiscUtils.Xfs\DiscUtils.Xfs.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="LTRData.DiscUtils.Core" />
+    <PackageReference Include="LTRData.DiscUtils.Streams" />
+    <PackageReference Include="LTRData.DiscUtils.Ntfs" />
+    <PackageReference Include="LTRData.DiscUtils.Fat" />
+    <PackageReference Include="LTRData.DiscUtils.Lvm" />
+    <PackageReference Include="LTRData.DiscUtils.Registry" />
+  </ItemGroup>
+</Project>

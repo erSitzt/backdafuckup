@@ -124,7 +124,8 @@ public sealed record ChangedExtents(bool IsFull, string? FullReason, IReadOnlyLi
 /// <summary>Raw provider-specific VM metadata needed to re-create the VM (Xen: export_metadata output).</summary>
 public sealed record VmMetadataBlob(string Format, byte[] Content);
 
-public sealed record VmBackupRequest(string VmId, Guid JobId, Guid SessionId, Guid RestorePointId, string SnapshotName);
+/// <param name="Quiescer">Freezes the guest around the snapshot (application-consistent backup); null: crash-consistent.</param>
+public sealed record VmBackupRequest(string VmId, Guid JobId, Guid SessionId, Guid RestorePointId, string SnapshotName, IGuestQuiescer? Quiescer = null);
 
 public enum RestoreMode
 {

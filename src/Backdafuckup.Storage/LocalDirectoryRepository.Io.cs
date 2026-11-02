@@ -11,51 +11,84 @@ public sealed partial class LocalDirectoryRepository
     {
         public async ValueTask<int> ReadAsync(ChunkId id, Memory<byte> destination, CancellationToken cancellationToken)
         {
+            using var handle = Open(id, FileOptions.Asynchronous);
+            var length = CheckedLength(id, handle);
+            var buffer = ArrayPool<byte>.Shared.Rent(length);
+            try
+            {
+                var read = 0;
+                while (read < length)
+                {
+                    var n = await RandomAccess.ReadAsync(handle, buffer.AsMemory(read, length - read), read, cancellationToken).ConfigureAwait(false);
+                    if (n == 0)
+                    {
+                        throw new ChunkCorruptException(id, "truncated");
+                    }
+
+                    read += n;
+                }
+
+                return ChunkCodec.Decode(id, buffer.AsSpan(0, length), destination.Span);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+
+        public int Read(ChunkId id, Span<byte> destination)
+        {
+            using var handle = Open(id, FileOptions.None);
+            var length = CheckedLength(id, handle);
+            var buffer = ArrayPool<byte>.Shared.Rent(length);
+            try
+            {
+                var read = 0;
+                while (read < length)
+                {
+                    var n = RandomAccess.Read(handle, buffer.AsSpan(read, length - read), read);
+                    if (n == 0)
+                    {
+                        throw new ChunkCorruptException(id, "truncated");
+                    }
+
+                    read += n;
+                }
+
+                return ChunkCodec.Decode(id, buffer.AsSpan(0, length), destination);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+
+        private SafeFileHandle Open(ChunkId id, FileOptions options)
+        {
             if (id.IsZero)
             {
                 throw new ArgumentException("The zero chunk is never stored; fill zeros instead.", nameof(id));
             }
 
-            SafeFileHandle handle;
             try
             {
-                handle = File.OpenHandle(repository.ChunkPath(id.ToHex()), FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.Asynchronous);
+                return File.OpenHandle(repository.ChunkPath(id.ToHex()), FileMode.Open, FileAccess.Read, FileShare.Read, options);
             }
             catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
             {
                 throw new ChunkMissingException(id);
             }
+        }
 
-            using (handle)
+        private int CheckedLength(ChunkId id, SafeFileHandle handle)
+        {
+            var length = RandomAccess.GetLength(handle);
+            if (length > ChunkCodec.HeaderSize + (long)repository._descriptor.ChunkSize + 1024)
             {
-                var length = RandomAccess.GetLength(handle);
-                if (length > ChunkCodec.HeaderSize + (long)repository._descriptor.ChunkSize + 1024)
-                {
-                    throw new ChunkCorruptException(id, "file too large");
-                }
-
-                var buffer = ArrayPool<byte>.Shared.Rent((int)length);
-                try
-                {
-                    var read = 0;
-                    while (read < length)
-                    {
-                        var n = await RandomAccess.ReadAsync(handle, buffer.AsMemory(read, (int)length - read), read, cancellationToken).ConfigureAwait(false);
-                        if (n == 0)
-                        {
-                            throw new ChunkCorruptException(id, "truncated");
-                        }
-
-                        read += n;
-                    }
-
-                    return ChunkCodec.Decode(id, buffer.AsSpan(0, (int)length), destination.Span);
-                }
-                finally
-                {
-                    ArrayPool<byte>.Shared.Return(buffer);
-                }
+                throw new ChunkCorruptException(id, "file too large");
             }
+
+            return (int)length;
         }
     }
 
@@ -161,7 +194,9 @@ public sealed partial class LocalDirectoryRepository
                 repository._knownPrefixDirectories.TryAdd(prefix, 0);
             }
 
+            var compressStart = System.Diagnostics.Stopwatch.GetTimestamp();
             var (buffer, length) = ChunkCodec.Encode(plaintext.Span, repository._descriptor.Compression.Level);
+            var compressTicks = System.Diagnostics.Stopwatch.GetTimestamp() - compressStart;
             var temp = Path.Combine(repository._tempDirectory, $"{hex}.{Guid.NewGuid():N}.tmp");
             try
             {
@@ -184,7 +219,7 @@ public sealed partial class LocalDirectoryRepository
                     }
 
                     File.Move(temp, path);
-                    return new ChunkPutResult(ChunkPutOutcome.Stored, length);
+                    return new ChunkPutResult(ChunkPutOutcome.Stored, length, compressTicks);
                 }
             }
             finally

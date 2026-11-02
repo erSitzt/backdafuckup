@@ -95,9 +95,15 @@ public sealed class XapiTransport : IDisposable
     }
 
     /// <summary>Sends a request to an XAPI HTTP handler (export_metadata, import_raw_vdi ...) without following redirects.</summary>
-    public async Task<HttpResponseMessage> SendHandlerAsync(HttpMethod method, string pathAndQuery, HttpContent? content, CancellationToken cancellationToken)
+    public async Task<HttpResponseMessage> SendHandlerAsync(HttpMethod method, string pathAndQuery, HttpContent? content, CancellationToken cancellationToken, bool closeConnection = false)
     {
         using var request = new HttpRequestMessage(method, pathAndQuery) { Content = content };
+        if (closeConnection)
+        {
+            // The handler's work (e.g. detaching the disk) is tied to this request; do not keep the connection for reuse.
+            request.Headers.ConnectionClose = true;
+        }
+
         if (content is not null && content.Headers.ContentType is null)
         {
             content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");

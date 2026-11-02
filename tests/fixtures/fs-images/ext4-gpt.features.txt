@@ -1,0 +1,4 @@
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Block size:               4096
+Inode size:               256
+Journal features:         journal_64bit journal_checksum_v3

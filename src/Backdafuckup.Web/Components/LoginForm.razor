@@ -1,9 +1,9 @@
 @inject AuthState Auth
 
-<div style="display:flex;min-height:100vh;align-items:center;justify-content:center;background:#eef1f2">
-    <MudPaper Elevation="3" Class="pa-8" Style="width:380px">
-        <MudText Typo="Typo.h5" Class="mb-1">backdafuckup</MudText>
-        <MudText Typo="Typo.body2" Class="mb-6" Color="Color.Secondary">Sign in to the backup console</MudText>
+<div class="auth-page">
+    <img class="logo" src="img/backdafuckup-main-logo.png" alt="backdafuckup" />
+    <MudPaper Elevation="3" Class="pa-8" Style="width:380px;max-width:100%">
+        <MudText Typo="Typo.h6" Class="mb-6">Sign in to the backup console</MudText>
         <EditForm Model="this" OnValidSubmit="LoginAsync">
             <MudTextField @bind-Value="_userName" Label="User name" Variant="Variant.Outlined" AutoFocus="true" Class="mb-3" />
             <MudTextField @bind-Value="_password" Label="Password" InputType="InputType.Password" Variant="Variant.Outlined" Class="mb-3" />

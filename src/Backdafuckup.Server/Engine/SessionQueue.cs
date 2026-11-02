@@ -57,6 +57,22 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Queues a push installation of the guest agent into the given VMs.</summary>
+    public async Task<Guid> EnqueueAgentDeploymentAsync(InstallAgentsDto request, string triggeredBy, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var session = new SessionEntity
+        {
+            Kind = SessionKind.AgentDeployment,
+            Name = request.Vms.Count == 1 ? $"Install agent {request.Vms[0].Name}" : $"Install agent ({request.Vms.Count} VMs)",
+            TriggeredBy = triggeredBy,
+            State = SessionState.Queued,
+            CreatedUtc = time.GetUtcNow(),
+            Parameters = JsonSerializer.Serialize(request),
+        };
+        return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Queues garbage collection of a repository unless one is already waiting.</summary>
     public async Task<Guid> EnqueueMaintenanceAsync(Guid repositoryId, string repositoryName, string triggeredBy, CancellationToken cancellationToken)
     {
@@ -121,7 +137,7 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
 }
 
 /// <summary>Updates session and task rows and pushes the changes to live clients.</summary>
-public sealed class SessionTracker(IDbContextFactory<AppDbContext> dbFactory, ILiveNotifier notifier)
+public sealed class SessionTracker(IDbContextFactory<AppDbContext> dbFactory, ILiveNotifier notifier, TimeProvider time)
 {
     public async Task UpdateSessionAsync(Guid sessionId, Action<SessionEntity> update, CancellationToken cancellationToken = default)
     {
@@ -177,6 +193,17 @@ public sealed class SessionTracker(IDbContextFactory<AppDbContext> dbFactory, IL
             session.Progress = tasks.Average(t => t.Progress);
             session.ReadBytes = tasks.Sum(t => t.ReadBytes);
             session.TransferredBytes = tasks.Sum(t => t.TransferredBytes);
+            if (tasks.Any(t => t.Metrics is not null))
+            {
+                // Session rates refer to the run time of the session (VMs may run in parallel).
+                var started = session.StartedUtc ?? session.CreatedUtc;
+                var seconds = Math.Max(0, ((session.EndedUtc ?? time.GetUtcNow()) - started).TotalSeconds);
+                var running = tasks.Where(t => t.State == SessionState.Running).Select(t => t.Metrics);
+                session.Metrics = TransferMetricsDto.Combine(tasks.Select(t => t.Metrics), seconds) with
+                {
+                    CurrentBytesPerSecond = running.Sum(m => m?.CurrentBytesPerSecond ?? 0),
+                };
+            }
         }
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);

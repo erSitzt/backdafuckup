@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Vendored from LTRData/DiscUtils (MIT), see NOTICE.md. The assembly keeps the upstream name, because
+       DiscUtils.Core grants it access to its internals (InternalsVisibleTo("DiscUtils.Ext")). -->
+  <PropertyGroup>
+    <AssemblyName>DiscUtils.Ext</AssemblyName>
+    <RootNamespace>DiscUtils.Ext</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>preview</LangVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <EnableNETAnalyzers>false</EnableNETAnalyzers>
+    <NoWarn>$(NoWarn);CS1591;CS0618</NoWarn>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="LTRData.DiscUtils.Core" />
+    <PackageReference Include="LTRData.DiscUtils.Streams" />
+  </ItemGroup>
+</Project>

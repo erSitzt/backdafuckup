@@ -90,6 +90,21 @@ public sealed class RestoreSessionRunner(
 
             var total = Math.Max(1, manifest.Disks.Sum(d => d.CapacityBytes));
             long done = 0;
+            long transferred = 0;
+            var transferStarted = time.GetUtcNow();
+            var rate = new RateMeter();
+
+            // Processed: disk bytes restored; Transferred (StoredBytes): bytes sent to the host. The current rate is the
+            // network rate, as for backups.
+            TransferMetricsDto Metrics(long bytes, long sent) => new()
+            {
+                TotalBytes = total,
+                ProcessedBytes = bytes,
+                ReadBytes = bytes,
+                StoredBytes = sent,
+                Seconds = Math.Round((time.GetUtcNow() - transferStarted).TotalSeconds, 3),
+                CurrentBytesPerSecond = rate.Current,
+            };
             var mapping = new Dictionary<string, string>();
             foreach (var disk in manifest.Disks)
             {
@@ -97,6 +112,7 @@ public sealed class RestoreSessionRunner(
                 await using var writer = await restore.CreateDiskAsync(new RestoreDiskTarget(disk.Key, disk.SourceDiskId, disk.Name, disk.CapacityBytes, plan.DiskStorage[disk.Key]), cancellationToken).ConfigureAwait(false);
                 var image = await RestorePointDiskImage.OpenAsync(reader, disk.Key, cancellationToken).ConfigureAwait(false);
                 var start = done;
+                var sentBefore = transferred;
                 var lastUpdate = DateTimeOffset.MinValue;
                 var progress = new Progress<long>(bytes =>
                 {
@@ -104,19 +120,26 @@ public sealed class RestoreSessionRunner(
                     if (time.GetUtcNow() - lastUpdate > TimeSpan.FromSeconds(2))
                     {
                         lastUpdate = time.GetUtcNow();
-                        _ = tracker.UpdateTaskAsync(task.Id, t => { t.Progress = Math.Round((start + bytes) * 100.0 / total, 1); t.TransferredBytes = start + bytes; });
+                        var sent = sentBefore + writer.TransferredBytes;
+                        rate.Sample(lastUpdate, sent);
+                        var metrics = Metrics(start + bytes, sent);
+                        _ = PushProgressAsync(task.Id, session.Id, Math.Round((start + bytes) * 100.0 / total, 1), start + bytes, metrics);
                     }
                 });
                 await writer.WriteAsync(image, progress, cancellationToken).ConfigureAwait(false);
                 done += disk.CapacityBytes;
+                transferred += writer.TransferredBytes;
                 mapping[disk.SourceDiskId] = writer.DiskId;
-                log.Info($"Disk {disk.Name}: restored ({BackupFormat(disk.CapacityBytes)}).", $"disk-{disk.Key}");
+                log.Info($"Disk {disk.Name}: restored ({BackupFormat(disk.CapacityBytes)}, {BackupFormat(writer.TransferredBytes)} transferred).", $"disk-{disk.Key}");
             }
 
             await restore.CreateVmAsync(mapping, cancellationToken).ConfigureAwait(false);
             var restored = await restore.CompleteAsync(cancellationToken).ConfigureAwait(false);
-            log.Info($"Restore finished: VM '{restored.Name}' ({restored.VmId}).");
-            await FinishAsync(task.Id, SessionState.Succeeded, null, done).ConfigureAwait(false);
+            var final = Metrics(done, transferred) with { CurrentBytesPerSecond = 0 };
+            log.Info(
+                $"Restore finished: VM '{restored.Name}' ({restored.VmId}), {VmBackupTask.Format(done)} restored in {MetricsText.Duration(final.Seconds)} " +
+                $"({MetricsText.Rate(final.ProcessingRate)}), {VmBackupTask.Format(transferred)} transferred ({MetricsText.Rate(transferred / Math.Max(0.001, final.Seconds))}).");
+            await FinishAsync(task.Id, SessionState.Succeeded, null, done, final).ConfigureAwait(false);
             return (validation.Warnings.Count > 0 ? SessionState.Warning : SessionState.Succeeded, $"Restored as '{restored.Name}'.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -133,16 +156,35 @@ public sealed class RestoreSessionRunner(
         }
     }
 
-    private Task FinishAsync(Guid taskId, SessionState state, string? error, long bytes) =>
+    private async Task PushProgressAsync(Guid taskId, Guid sessionId, double progress, long bytes, TransferMetricsDto metrics)
+    {
+        try
+        {
+            await tracker.UpdateTaskAsync(taskId, t => { t.Progress = progress; t.TransferredBytes = bytes; t.Metrics = metrics; }).ConfigureAwait(false);
+            await tracker.RollUpAsync(sessionId).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException or Npgsql.NpgsqlException)
+        {
+            // Progress is informational; the final state is written when the restore ends.
+        }
+    }
+
+    private Task FinishAsync(Guid taskId, SessionState state, string? error, long bytes, TransferMetricsDto? metrics = null) =>
         tracker.UpdateTaskAsync(taskId, t =>
         {
             t.State = state;
             t.Error = error;
             t.EndedUtc = time.GetUtcNow();
+            if (t.Metrics is { } running)
+            {
+                t.Metrics = running with { CurrentBytesPerSecond = 0 };
+            }
+
             if (state == SessionState.Succeeded)
             {
                 t.Progress = 100;
                 t.TransferredBytes = bytes;
+                t.Metrics = metrics ?? t.Metrics;
             }
         }, CancellationToken.None);
 

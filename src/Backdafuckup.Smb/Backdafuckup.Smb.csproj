@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Push installation of the guest agent from Linux or Windows: SMB 2/3 (SMBLibrary, LGPL-3.0) plus our own
+       Service Control Manager client (MS-SCMR over the svcctl named pipe). -->
+  <ItemGroup>
+    <PackageReference Include="SMBLibrary" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Backdafuckup.Server.Tests" />
+  </ItemGroup>
+</Project>

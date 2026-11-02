@@ -297,6 +297,11 @@ public static class OperationEndpoints
             errors["repositoryId"] = ["Unknown repository."];
         }
 
+        if (!Enum.TryParse<Backdafuckup.Core.DataMover.DiskTransportMode>(request.TransportMode, true, out _) || int.TryParse(request.TransportMode, out _))
+        {
+            errors["transportMode"] = [$"Unknown transport mode '{request.TransportMode}'. Use Automatic, NbdOnly or HttpExportOnly."];
+        }
+
         if (request.Schedule.Kind.Equals("Weekly", StringComparison.OrdinalIgnoreCase) && request.Schedule.Days.Count == 0)
         {
             errors["schedule"] = ["Select at least one weekday."];
@@ -316,7 +321,12 @@ public static class OperationEndpoints
         job.Schedule = request.Schedule.FromDto();
         job.MaxParallelVms = Math.Clamp(request.MaxParallelVms, 1, 16);
         job.NbdConnectionsPerDisk = Math.Clamp(request.NbdConnectionsPerDisk, 1, 12);
+        job.MaxParallelDisks = Math.Clamp(request.MaxParallelDisks, 1, 8);
+        job.GuestProcessing = request.GuestProcessing;
+        job.GuestFailurePolicy = Enum.TryParse<GuestFailurePolicy>(request.GuestFailurePolicy, true, out var policy) ? policy : GuestFailurePolicy.CrashConsistentWithWarning;
+        job.GuestCredentialId = request.GuestCredentialId;
         job.RetryCount = Math.Clamp(request.RetryCount, 0, 10);
+        job.TransportMode = Enum.TryParse<Backdafuckup.Core.DataMover.DiskTransportMode>(request.TransportMode, true, out var transport) ? transport : Backdafuckup.Core.DataMover.DiskTransportMode.Automatic;
         job.Objects = request.Objects.Select((o, i) => new BackupJobObject { JobId = job.Id, NativeId = o.NativeId, CachedName = o.Name, Order = i }).ToList();
         job.NextRunUtc = job.Enabled ? ScheduleCalculator.Next(job.Schedule, time.GetUtcNow()) : null;
     }
@@ -353,7 +363,9 @@ public sealed class CsrfHeaderMiddleware(RequestDelegate next)
     public Task InvokeAsync(HttpContext context)
     {
         var request = context.Request;
-        if (request.Path.StartsWithSegments("/api") && !HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method)
+        // The agent interface (/api/agent/*) authenticates with the agent key, not with a cookie: no CSRF header needed.
+        if (request.Path.StartsWithSegments("/api") && !request.Path.StartsWithSegments("/api/agent")
+            && !HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method)
             && !request.Headers.ContainsKey(ApiHeaders.Csrf))
         {
             context.Response.StatusCode = StatusCodes.Status400BadRequest;

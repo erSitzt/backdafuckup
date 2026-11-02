@@ -31,18 +31,31 @@ else
                 </TitleContent>
                 <ChildContent>
                     <MudSimpleTable Dense="true" Hover="true" Elevation="0">
-                        <thead><tr><th>Created</th><th>Type</th><th>Disks</th><th>New data</th><th>Job</th><th></th></tr></thead>
+                        <thead><tr><th>Created</th><th>Type</th><th>Consistency</th><th>Disks</th><th>New data</th><th>Job</th><th></th></tr></thead>
                         <tbody>
                             @foreach (var p in vm.OrderByDescending(p => p.CreatedUtc))
                             {
                                 <tr>
                                     <td>@Fmt.Time(p.CreatedUtc)</td>
                                     <td>@p.Kind</td>
+                                    <td>
+                                        @if (p.Consistency == "application")
+                                        {
+                                            <MudChip T="string" Size="Size.Small" Color="Color.Success" Icon="@Icons.Material.Filled.VerifiedUser">application</MudChip>
+                                        }
+                                        else
+                                        {
+                                            <MudTooltip Text="@(p.ConsistencyReason ?? "Without guest processing: like a power failure; most applications recover by themselves.")">
+                                                <MudChip T="string" Size="Size.Small" Color="@(p.ConsistencyReason is null ? Color.Default : Color.Warning)">crash</MudChip>
+                                            </MudTooltip>
+                                        }
+                                    </td>
                                     <td>@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))</td>
                                     <td>@Fmt.Bytes(p.NewStoredBytes)</td>
                                     <td>@p.JobName</td>
                                     <td style="text-align:right;white-space:nowrap">
                                         <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Restore" Href="@($"/restore/{p.Id}")">Restore VM</MudButton>
+                                        <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.FolderOpen" Href="@($"/files/{p.Id}")" Class="ml-1">Restore files</MudButton>
                                         <MudTooltip Text="Verify all data"><MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.FactCheck" OnClick="@(() => VerifyAsync(p))" /></MudTooltip>
                                         <MudTooltip Text="Delete restore point"><MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete" Color="Color.Error" OnClick="@(() => DeleteAsync(p))" /></MudTooltip>
                                     </td>

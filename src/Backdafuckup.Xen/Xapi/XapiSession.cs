@@ -127,7 +127,14 @@ public sealed partial class XapiSession : IAsyncDisposable
     }
 
     /// <summary>Starts an Async.* call and waits for the task; returns the task result (decoded reference or raw value).</summary>
-    public async Task<string> RunTaskAsync(string method, Func<string, Task>? onTaskCreated, TimeSpan timeout, CancellationToken cancellationToken, params JsonNode?[] args)
+    public Task<string> RunTaskAsync(string method, Func<string, Task>? onTaskCreated, TimeSpan timeout, CancellationToken cancellationToken, params JsonNode?[] args) =>
+        RunTaskAsync(method, onTaskCreated, timeout, DefaultTaskPollInterval, cancellationToken, args);
+
+    /// <summary>
+    /// As above, polling the task every <paramref name="pollInterval"/>: short while every second counts (the VM snapshot
+    /// inside the guest freeze, where VSS holds the writes for at most 10 s).
+    /// </summary>
+    public async Task<string> RunTaskAsync(string method, Func<string, Task>? onTaskCreated, TimeSpan timeout, TimeSpan pollInterval, CancellationToken cancellationToken, params JsonNode?[] args)
     {
         var taskRef = await CallStringAsync($"Async.{method}", cancellationToken, args).ConfigureAwait(false);
         if (onTaskCreated is not null)
@@ -137,7 +144,7 @@ public sealed partial class XapiSession : IAsyncDisposable
 
         try
         {
-            return await WaitForTaskAsync(taskRef, timeout, null, cancellationToken).ConfigureAwait(false);
+            return await WaitForTaskAsync(taskRef, timeout, null, cancellationToken, pollInterval).ConfigureAwait(false);
         }
         finally
         {
@@ -145,8 +152,10 @@ public sealed partial class XapiSession : IAsyncDisposable
         }
     }
 
+    public static readonly TimeSpan DefaultTaskPollInterval = TimeSpan.FromSeconds(2);
+
     /// <summary>Polls a task until it finishes. Returns the decoded result; throws XapiException on failure.</summary>
-    public async Task<string> WaitForTaskAsync(string taskRef, TimeSpan timeout, IProgress<double>? progress, CancellationToken cancellationToken)
+    public async Task<string> WaitForTaskAsync(string taskRef, TimeSpan timeout, IProgress<double>? progress, CancellationToken cancellationToken, TimeSpan? pollInterval = null)
     {
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(timeout);
@@ -178,7 +187,7 @@ public sealed partial class XapiSession : IAsyncDisposable
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(2), timeoutCts.Token).ConfigureAwait(false);
+                await Task.Delay(pollInterval ?? DefaultTaskPollInterval, timeoutCts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {

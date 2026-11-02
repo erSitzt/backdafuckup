@@ -12,3 +12,11 @@ services:
       - bdfu-pgdata:/var/lib/postgresql/data
 volumes:
   bdfu-pgdata:
+# Fixed subnet: Docker's automatic pool hands out 172.16-31.x, which collides
+# with a corporate LAN in that range (Grafana ingress, rke2 nodes) and makes those
+# hosts unreachable from every container while this network exists.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 11.101.0.0/24

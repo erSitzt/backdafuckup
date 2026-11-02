@@ -194,11 +194,16 @@ public static class InfrastructureEndpoints
             return Results.Ok(new { imported });
         });
 
-        repositories.MapDelete("/{id:guid}", async (Guid id, AppDbContext db, RepositoryManager manager, CancellationToken ct) =>
+        repositories.MapDelete("/{id:guid}", async (Guid id, AppDbContext db, RepositoryManager manager, FileRestore.FileRestoreMounts mounts, CancellationToken ct) =>
         {
             if (await db.Jobs.AnyAsync(j => j.RepositoryId == id, ct))
             {
                 return Results.Problem("The repository is still used by backup jobs.", statusCode: StatusCodes.Status409Conflict);
+            }
+
+            if (mounts.HasMounts(id))
+            {
+                return Results.Problem("File browsers are open on restore points of this repository; close them under Sessions first.", statusCode: StatusCodes.Status409Conflict);
             }
 
             await manager.CloseAsync(id);

@@ -34,8 +34,14 @@ public sealed record RestorePointManifest
 
     public required RestorePointKind Kind { get; init; }
 
-    /// <summary>"crash" for now; "application" once the guest agent exists.</summary>
+    /// <summary>"crash" or "application" (guest frozen through the agent while the snapshot was taken).</summary>
     public string Consistency { get; init; } = "crash";
+
+    /// <summary>Why a backup with guest processing is only crash-consistent.</summary>
+    public string? ConsistencyReason { get; init; }
+
+    /// <summary>What the guest contained (volumes, VSS writers, SQL databases), as reported by the agent.</summary>
+    public ManifestBlob? Guest { get; init; }
 
     /// <summary>Informational only: the restore point whose indexes were reused for unchanged chunks.</summary>
     public Guid? BaseRestorePointId { get; init; }
@@ -108,6 +114,18 @@ public sealed record DiskBackupStats
     public long ZeroChunks { get; init; }
 
     public long UnchangedChunks { get; init; }
+
+    /// <summary>Transport the disk was read with ("nbd", "http-export-vhd", ...); null in restore points of older versions.</summary>
+    public string? Transport { get; init; }
+
+    /// <summary>Non-zero chunks that were already in the repository (or identical to the previous restore point).</summary>
+    public long DedupedChunks { get; init; }
+
+    /// <summary>Uncompressed size of the chunks stored new (compression ratio = NewDataBytes / NewStoredBytes).</summary>
+    public long NewDataBytes { get; init; }
+
+    /// <summary>Time the disk transfer took.</summary>
+    public double DurationSeconds { get; init; }
 }
 
 [JsonSourceGenerationOptions(

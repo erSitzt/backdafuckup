@@ -17,6 +17,9 @@ public sealed class NbdConnectionPool : IAsyncDisposable
         _maxRetries = maxRetries;
         Size = first.Size;
         MaxPayload = first.MaxPayload;
+        UsesTls = first.UsesTls;
+        TlsProtocol = first.TlsProtocol;
+        NegotiatedWithGo = first.NegotiatedWithGo;
         MaxInFlightPerConnection = 1;
         _slots = new Slot[connections];
         _slots[0] = new Slot(first);
@@ -29,6 +32,16 @@ public sealed class NbdConnectionPool : IAsyncDisposable
     public long Size { get; }
 
     public int MaxPayload { get; }
+
+    public bool UsesTls { get; }
+
+    public System.Security.Authentication.SslProtocols TlsProtocol { get; }
+
+    /// <summary>True if the server supported NBD_OPT_GO (otherwise NBD_OPT_EXPORT_NAME was used).</summary>
+    public bool NegotiatedWithGo { get; }
+
+    /// <summary>Connections that are currently established.</summary>
+    public int OpenConnections => _slots.Count(s => s.Client is { IsFaulted: false });
 
     public int Connections => _slots.Length;
 

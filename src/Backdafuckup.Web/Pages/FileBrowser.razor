@@ -1,0 +1,366 @@
+@page "/files/{RestorePointId:guid}"
+@implements IAsyncDisposable
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+
+<PageTitle>Restore files – backdafuckup</PageTitle>
+
+@if (_error is not null)
+{
+    <MudAlert Severity="Severity.Error" Class="mb-3">@_error</MudAlert>
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="OpenAsync" StartIcon="@Icons.Material.Filled.FolderOpen">Open again</MudButton>
+    <MudButton Variant="Variant.Text" Href="/backups" Class="ml-2">Back to backups</MudButton>
+}
+else if (_mount is null)
+{
+    <MudText Typo="Typo.h5" Class="mb-2">Restore files</MudText>
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+    <MudText Typo="Typo.body2">Opening the restore point: reading partitions and file systems…</MudText>
+}
+else
+{
+    <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3" Wrap="Wrap.Wrap">
+        <MudText Typo="Typo.h5">Restore files: @_mount.VmName</MudText>
+        <MudChip T="string" Size="Size.Small" Color="Color.Default">@_mount.RestorePointCreatedUtc.ToLocalTime().ToString("g")</MudChip>
+        @if (_mount.Consistency == "application")
+        {
+            <MudChip T="string" Size="Size.Small" Color="Color.Success" Icon="@Icons.Material.Filled.VerifiedUser">application-consistent</MudChip>
+        }
+        else
+        {
+            <MudTooltip Text="@($"The newest changes before the snapshot may be missing in some files. {_mount.ConsistencyReason}")">
+                <MudChip T="string" Size="Size.Small" Color="Color.Warning" Icon="@Icons.Material.Filled.Warning">crash-consistent</MudChip>
+            </MudTooltip>
+        }
+        <MudSpacer />
+        <MudText Typo="Typo.caption">Closes after @_mount.IdleTimeoutMinutes minutes without use.</MudText>
+        <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="CloseAsync" StartIcon="@Icons.Material.Filled.Close">Close</MudButton>
+    </MudStack>
+
+    @foreach (var warning in _mount.Warnings)
+    {
+        <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-2">@warning</MudAlert>
+    }
+
+    <MudGrid Spacing="2">
+        <MudItem xs="12" md="3">
+            <MudPaper Class="pa-2" Elevation="1" Style="min-height:60vh;overflow:auto">
+                <MudTreeView T="string" Items="_tree" ServerData="LoadFoldersAsync" SelectedValue="_selectedNode" SelectedValueChanged="OnNodeSelectedAsync" Dense="true" Hover="true" />
+                @foreach (var volume in _mount.Volumes.Where(v => !v.Readable))
+                {
+                    <MudTooltip Text="@volume.Reason">
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Class="pa-2">
+                            <MudIcon Icon="@Icons.Material.Filled.Block" Size="Size.Small" Color="Color.Default" />
+                            <MudText Typo="Typo.body2" Style="color:var(--mud-palette-text-disabled)">@volume.Title (@Fmt.Bytes(volume.Length))</MudText>
+                        </MudStack>
+                    </MudTooltip>
+                }
+            </MudPaper>
+        </MudItem>
+        <MudItem xs="12" md="9">
+            <MudPaper Class="pa-2" Elevation="1" Style="min-height:60vh">
+                @if (_volume is null)
+                {
+                    <MudText Typo="Typo.body2" Class="pa-4">Choose a volume on the left.</MudText>
+                }
+                else
+                {
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Wrap="Wrap.Wrap" Class="mb-1">
+                        <MudIconButton Icon="@Icons.Material.Filled.ArrowUpward" Size="Size.Small" Disabled="@(_path.Count == 0)" OnClick="UpAsync" />
+                        <MudBreadcrumbs Items="Breadcrumbs" Class="pa-0" />
+                        <MudSpacer />
+                        <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Download"
+                                   Disabled="@(SingleDownload is null)" Href="@SingleDownload" Target="_blank">Download</MudButton>
+                        <MudTooltip Text="Restore into the VM or onto a share: coming next">
+                            <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Restore" Disabled="true">Restore…</MudButton>
+                        </MudTooltip>
+                    </MudStack>
+                    @if (_loading)
+                    {
+                        <MudProgressLinear Color="Color.Primary" Indeterminate="true" />
+                    }
+                    <MudTable T="GuestEntryDto" Items="_entries" Dense="true" Hover="true" Elevation="0" MultiSelection="true" @bind-SelectedItems="_selected"
+                              OnRowClick="@(args => args.Item is null ? Task.CompletedTask : OnRowClickAsync(args.Item))" RowClass="cursor-pointer">
+                        <HeaderContent>
+                            <MudTh>Name</MudTh>
+                            <MudTh Style="text-align:right">Size</MudTh>
+                            <MudTh>Modified</MudTh>
+                            <MudTh>@(_volume.Family == "unix" ? "Mode / owner" : "Attributes")</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd>
+                                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+                                    <MudIcon Icon="@IconFor(context)" Size="Size.Small" Color="@(context.Kind == "directory" ? Color.Warning : Color.Default)" />
+                                    <span>@context.Name</span>
+                                    @if (context.LinkTarget is not null)
+                                    {
+                                        <MudText Typo="Typo.caption" Class="mono">→ @context.LinkTarget</MudText>
+                                    }
+                                    @if (context.Unsupported is not null)
+                                    {
+                                        <MudTooltip Text="@($"Cannot be restored: {context.Unsupported}")">
+                                            <MudIcon Icon="@Icons.Material.Filled.Block" Size="Size.Small" Color="Color.Error" />
+                                        </MudTooltip>
+                                    }
+                                </MudStack>
+                            </MudTd>
+                            <MudTd Style="text-align:right">@(context.Kind == "file" ? Fmt.Bytes(context.Size) : "")</MudTd>
+                            <MudTd>@context.ModifiedUtc?.ToLocalTime().ToString("g")</MudTd>
+                            <MudTd><span class="mono">@(_volume.Family == "unix" ? $"{context.Mode} {context.UserId}:{context.GroupId}" : ShortAttributes(context.Attributes))</span></MudTd>
+                        </RowTemplate>
+                        <NoRecordsContent>
+                            <MudText Typo="Typo.body2">@(_loading ? "Loading…" : "This folder is empty.")</MudText>
+                        </NoRecordsContent>
+                    </MudTable>
+                    @if (_entries.Count < _total)
+                    {
+                        <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="LoadMoreAsync" Class="mt-1">Show more (@_entries.Count of @_total)</MudButton>
+                    }
+                }
+            </MudPaper>
+        </MudItem>
+    </MudGrid>
+}
+
+@code {
+    private const char Separator = '\u0001';
+    private const int PageSize = 500;
+
+    [Parameter]
+    public Guid RestorePointId { get; set; }
+
+    private FileMountDto? _mount;
+    private string? _error;
+    private List<TreeItemData<string>> _tree = [];
+    private string? _selectedNode;
+    private GuestVolumeDto? _volume;
+    private List<string> _path = [];
+    private List<GuestEntryDto> _entries = [];
+    private HashSet<GuestEntryDto> _selected = [];
+    private int _total;
+    private bool _loading;
+    private bool _closed;
+
+    protected override Task OnInitializedAsync() => OpenAsync();
+
+    private async Task OpenAsync()
+    {
+        _error = null;
+        _mount = null;
+        try
+        {
+            _mount = await Api.PostAsync<FileMountDto>("api/file-restore/mounts", new OpenFileMountRequestDto(RestorePointId));
+            _closed = false;
+            _tree = [.. _mount.Volumes.Where(v => v.Readable).Select(v => new TreeItemData<string>
+            {
+                Value = Node(v.Id, []),
+                Text = $"{v.Title}  ·  {v.FileSystem}, {Fmt.Bytes(v.Length)}",
+                Icon = Icons.Material.Filled.Storage,
+                Expandable = true,
+            })];
+            var first = _mount.Volumes.FirstOrDefault(v => v.Readable && v.MountPoint is "C:" or "/") ?? _mount.Volumes.FirstOrDefault(v => v.Readable);
+            if (first is not null)
+            {
+                await NavigateAsync(first, []);
+            }
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task<IReadOnlyCollection<TreeItemData<string>>> LoadFoldersAsync(string? parent)
+    {
+        if (_mount is null || parent is null)
+        {
+            return _tree;
+        }
+
+        var (volumeId, path) = Parse(parent);
+        try
+        {
+            var page = await Api.GetAsync<GuestEntryPageDto>(EntriesUrl(volumeId, path, 0, 1000));
+            var folders = page.Entries.Where(e => e.Kind == "directory").Select(e => new TreeItemData<string>
+            {
+                Value = Node(volumeId, [.. path, e.Name]),
+                Text = e.Name,
+                Icon = Icons.Material.Filled.Folder,
+                Expandable = true,
+            }).ToList();
+            if (page.Total > page.Entries.Count)
+            {
+                folders.Add(new TreeItemData<string> { Value = parent + Separator + "…", Text = $"… ({page.Total:N0} entries, see the list)", Expandable = false });
+            }
+
+            return folders;
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+            return [];
+        }
+    }
+
+    private async Task OnNodeSelectedAsync(string? node)
+    {
+        _selectedNode = node;
+        if (_mount is null || node is null || node.EndsWith(Separator + "…", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var (volumeId, path) = Parse(node);
+        var volume = _mount.Volumes.FirstOrDefault(v => v.Id == volumeId);
+        if (volume is not null)
+        {
+            await NavigateAsync(volume, path);
+        }
+    }
+
+    private async Task NavigateAsync(GuestVolumeDto volume, List<string> path)
+    {
+        _volume = volume;
+        _path = path;
+        _entries = [];
+        _selected = [];
+        _total = 0;
+        await LoadMoreAsync();
+    }
+
+    private async Task LoadMoreAsync()
+    {
+        if (_volume is null)
+        {
+            return;
+        }
+
+        _loading = true;
+        try
+        {
+            var page = await Api.GetAsync<GuestEntryPageDto>(EntriesUrl(_volume.Id, _path, _entries.Count, PageSize));
+            _entries.AddRange(page.Entries);
+            _total = page.Total;
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task OnRowClickAsync(GuestEntryDto entry)
+    {
+        if (entry.Kind == "directory" && _volume is not null)
+        {
+            await NavigateAsync(_volume, [.. _path, entry.Name]);
+        }
+    }
+
+    private async Task UpAsync()
+    {
+        if (_volume is not null && _path.Count > 0)
+        {
+            await NavigateAsync(_volume, _path[..^1]);
+        }
+    }
+
+    private List<BreadcrumbItem> Breadcrumbs
+    {
+        get
+        {
+            var items = new List<BreadcrumbItem> { new(_volume?.Title ?? string.Empty, href: null) };
+            items.AddRange(_path.Select(p => new BreadcrumbItem(p, href: null)));
+            return items;
+        }
+    }
+
+    private string? SingleDownload
+    {
+        get
+        {
+            if (_mount is null || _volume is null || _selected.Count != 1)
+            {
+                return null;
+            }
+
+            var entry = _selected.First();
+            if (entry.Kind != "file" || entry.Unsupported is not null)
+            {
+                return null;
+            }
+
+            var path = string.Join('/', _path.Append(entry.Name));
+            return $"api/file-restore/mounts/{_mount.Id}/file?volume={Uri.EscapeDataString(_volume.Id)}&path={Uri.EscapeDataString(path)}";
+        }
+    }
+
+    private async Task CloseAsync()
+    {
+        await UnmountAsync();
+        _mount = null;
+        _error = "The file browser is closed.";
+    }
+
+    private async Task UnmountAsync()
+    {
+        if (_mount is null || _closed)
+        {
+            return;
+        }
+
+        _closed = true;
+        try
+        {
+            await Api.DeleteAsync($"api/file-restore/mounts/{_mount.Id}");
+        }
+        catch (ApiException)
+        {
+            // Already closed (idle timeout or restart).
+        }
+    }
+
+    public async ValueTask DisposeAsync() => await UnmountAsync();
+
+    private string EntriesUrl(string volumeId, IEnumerable<string> path, int offset, int limit) =>
+        $"api/file-restore/mounts/{_mount!.Id}/entries?volume={Uri.EscapeDataString(volumeId)}&path={Uri.EscapeDataString(string.Join('/', path))}&offset={offset}&limit={limit}";
+
+    private static string Node(string volumeId, IEnumerable<string> path) => string.Join(Separator, path.Prepend(volumeId));
+
+    private static (string Volume, List<string> Path) Parse(string node)
+    {
+        var parts = node.Split(Separator);
+        return (parts[0], [.. parts.Skip(1)]);
+    }
+
+    private static string IconFor(GuestEntryDto entry) => entry.Kind switch
+    {
+        "directory" => Icons.Material.Filled.Folder,
+        "symlink" or "junction" => Icons.Material.Filled.Link,
+        "file" => Icons.Material.Outlined.InsertDriveFile,
+        _ => Icons.Material.Outlined.HelpOutline,
+    };
+
+    private static string ShortAttributes(string? attributes)
+    {
+        if (string.IsNullOrEmpty(attributes))
+        {
+            return string.Empty;
+        }
+
+        var flags = attributes.Split(", ");
+        var letters = new List<string>();
+        if (flags.Contains("ReadOnly")) letters.Add("R");
+        if (flags.Contains("Hidden")) letters.Add("H");
+        if (flags.Contains("System")) letters.Add("S");
+        if (flags.Contains("Archive")) letters.Add("A");
+        if (flags.Contains("Compressed")) letters.Add("C");
+        if (flags.Contains("Encrypted")) letters.Add("E");
+        if (flags.Contains("SparseFile")) letters.Add("P");
+        if (flags.Contains("ReparsePoint")) letters.Add("L");
+        return string.Concat(letters);
+    }
+}

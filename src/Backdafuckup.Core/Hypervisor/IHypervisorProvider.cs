@@ -23,6 +23,9 @@ public interface IHypervisorSession : IAsyncDisposable
 
     Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken);
 
+    /// <summary>The IP addresses the guest reports through its guest tools (IPv4 first); empty if unknown.</summary>
+    Task<IReadOnlyList<string>> GetGuestAddressesAsync(string vmId, CancellationToken cancellationToken);
+
     /// <summary>Creates the VM snapshot and returns a session to read its disks. Disposing without commit rolls back.</summary>
     Task<IVmBackupSession> BeginBackupAsync(VmBackupRequest request, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken);
 
@@ -54,12 +57,22 @@ public interface IVmBackupSession : IAsyncDisposable
     string SnapshotId { get; }
 
     /// <summary>
+    /// Result of the guest freeze around the snapshot; null when the request had no quiescer (crash-consistent by
+    /// choice). A failed freeze still gives a usable, crash-consistent snapshot.
+    /// </summary>
+    GuestFreezeResult? GuestFreeze { get; }
+
+    /// <summary>
     /// Returns the changed extents of <paramref name="disk"/> since <paramref name="since"/>, or a full read with a reason.
     /// Must be called before <see cref="OpenReaderAsync"/> for the same disk.
     /// </summary>
     Task<ChangedExtents> GetChangedExtentsAsync(SnapshotDisk disk, ChangeToken? since, IOperationLog log, CancellationToken cancellationToken);
 
-    Task<IDiskReader> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken);
+    /// <summary>
+    /// Opens the disk with the transport selected by <see cref="DiskReaderOptions.Transport"/>. Implementations log the
+    /// transport selection (queries, endpoints, connection attempts) to the operation log of the session.
+    /// </summary>
+    Task<IDiskSource> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken);
 
     /// <summary>Token for the next incremental backup of this disk (null if the platform cannot track changes for it).</summary>
     ChangeToken? GetNewChangeToken(SnapshotDisk disk);
@@ -81,3 +94,10 @@ public interface IVmRestoreSession : IAsyncDisposable
     /// <summary>Final touches (name, NICs, affinity, power state). After this the restore is not rolled back anymore.</summary>
     Task<RestoredVm> CompleteAsync(CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// The restore point is complete, but the snapshot could not be reduced to change-tracking data yet (e.g. the
+/// platform still holds the snapshot disk). The snapshot is kept and finished later in the background.
+/// </summary>
+public sealed class SnapshotCleanupDeferredException(string message, Exception? inner = null) : Exception(message, inner);
+

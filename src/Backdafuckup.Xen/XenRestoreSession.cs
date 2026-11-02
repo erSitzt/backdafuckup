@@ -143,8 +143,10 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         _createdVdis.Add((vdiRef, vdi.Str("uuid"), artifact));
 
         var importHost = await ResolveImportHostAsync(srRef, cancellationToken).ConfigureAwait(false);
-        log.Info($"Created disk {target.Name} ({target.CapacityBytes / (1L << 30)} GiB) on {target.StorageId}.");
-        return new XenRawImportWriter(owner, xapi, importHost, vdiRef, vdi.Str("uuid"), target.CapacityBytes, owner.Provider.Options.ImportTimeout);
+        var srName = (await xapi.GetRecordAsync("SR", srRef, cancellationToken).ConfigureAwait(false)).Str("name_label");
+        log.Info($"Created disk {target.Name} ({XenFormat.Bytes(target.CapacityBytes)}) on storage '{srName}' ({target.StorageId}).");
+        return new XenImportWriter(
+            owner, xapi, log, target.Name, importHost, vdiRef, vdi.Str("uuid"), target.CapacityBytes, owner.Provider.Options.HttpImportFormat, owner.Provider.Options.ImportTimeout);
     }
 
     public async Task<RestoredVm> CreateVmAsync(IReadOnlyDictionary<string, string> sourceToNewDiskId, CancellationToken cancellationToken)
@@ -401,50 +403,49 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
     }
 
     /// <summary>Shared SRs are imported through the master; local SRs through the host that has them attached.</summary>
-    private async Task<string> ResolveImportHostAsync(string srRef, CancellationToken cancellationToken)
-    {
-        var sr = await xapi.GetRecordAsync("SR", srRef, cancellationToken).ConfigureAwait(false);
-        if (sr.Bool("shared"))
-        {
-            return xapi.MasterAddress;
-        }
-
-        foreach (var pbdRef in sr.Set("PBDs"))
-        {
-            var pbd = await xapi.GetRecordAsync("PBD", pbdRef, cancellationToken).ConfigureAwait(false);
-            if (pbd.Bool("currently_attached"))
-            {
-                var host = await xapi.GetRecordAsync("host", pbd.Str("host"), cancellationToken).ConfigureAwait(false);
-                return host.Str("address");
-            }
-        }
-
-        return xapi.MasterAddress;
-    }
+    private async Task<string> ResolveImportHostAsync(string srRef, CancellationToken cancellationToken) =>
+        (await XenSrHosts.ResolveAsync(xapi, srRef, cancellationToken).ConfigureAwait(false)).Address;
 }
 
-/// <summary>Streams a restore-point disk into a new VDI with PUT /import_raw_vdi (format=raw).</summary>
-internal sealed class XenRawImportWriter(
+/// <summary>
+/// Streams a restore-point disk into a new VDI with PUT /import_raw_vdi: as a dynamic VHD with only the blocks that
+/// contain data (default), or raw with every byte of the disk (<see cref="XenOptions.HttpImportFormat"/>).
+/// </summary>
+internal sealed class XenImportWriter(
     XenHypervisorSession owner,
     XapiSession xapi,
+    IOperationLog log,
+    string diskName,
     string importHost,
     string vdiRef,
     string vdiUuid,
     long capacity,
+    XenHttpImportFormat format,
     TimeSpan timeout) : IDiskWriter
 {
+    private Func<long>? _sent;
+
     public string DiskId => vdiUuid;
 
     public long Capacity => capacity;
 
-    public DiskWriterCapabilities Capabilities => DiskWriterCapabilities.Sequential;
+    public DiskWriterCapabilities Capabilities =>
+        format == XenHttpImportFormat.Vhd ? DiskWriterCapabilities.Sequential | DiskWriterCapabilities.SkipsZeroRegions : DiskWriterCapabilities.Sequential;
 
-    public async Task WriteAsync(IDiskImageSource image, IProgress<long>? bytesWritten, CancellationToken cancellationToken)
+    public long TransferredBytes => _sent?.Invoke() ?? 0;
+
+    public async Task WriteAsync(IDiskImageSource image, IProgress<long>? processed, CancellationToken cancellationToken)
     {
         if (image.Capacity != capacity)
         {
             throw new ArgumentException($"Image size {image.Capacity} does not match the disk size {capacity}.", nameof(image));
         }
+
+        var vhd = format == XenHttpImportFormat.Vhd ? VhdImageWriter.Create(capacity, image.DataExtents) : null;
+        log.Info(vhd is null
+            ? $"Disk {diskName}: import_raw_vdi to {importHost} as raw, {XenFormat.Bytes(capacity)} to transfer."
+            : $"Disk {diskName}: import_raw_vdi to {importHost} as VHD, {vhd.AllocatedBlocks} of {vhd.BlockCount} blocks (2 MiB) contain data, " +
+              $"{XenFormat.Bytes(vhd.Length)} to transfer instead of {XenFormat.Bytes(capacity)}.");
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(timeout);
@@ -457,20 +458,31 @@ internal sealed class XenRawImportWriter(
                 var transport = host == xapi.MasterAddress ? xapi.Transport : owner.CreateTransport(host);
                 try
                 {
-                    var query = $"import_raw_vdi?session_id={Uri.EscapeDataString(xapi.SessionRef)}&task_id={Uri.EscapeDataString(taskRef)}&vdi={Uri.EscapeDataString(vdiRef)}&format=raw";
-                    using var content = new DiskImageContent(image, bytesWritten);
+                    var query = $"import_raw_vdi?session_id={Uri.EscapeDataString(xapi.SessionRef)}&task_id={Uri.EscapeDataString(taskRef)}" +
+                        $"&vdi={Uri.EscapeDataString(vdiRef)}&format={(vhd is null ? "raw" : "vhd")}";
+                    using HttpContent content = vhd is null ? new DiskImageContent(image, processed) : new VhdImageContent(vhd, image, processed);
+                    _sent = content switch
+                    {
+                        VhdImageContent v => () => v.Writer.BytesWritten,
+                        DiskImageContent d => () => d.BytesWritten,
+                        _ => null,
+                    };
                     using var response = await transport.SendHandlerAsync(HttpMethod.Put, query, content, timeoutCts.Token).ConfigureAwait(false);
                     if (response.StatusCode is HttpStatusCode.Redirect or HttpStatusCode.TemporaryRedirect && response.Headers.Location is { } location && redirects < 3)
                     {
+                        log.Info($"Disk {diskName}: import_raw_vdi redirected from {host} to {location.Host}.");
                         host = location.Host;
                         continue;
                     }
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        throw new HttpRequestException($"import_raw_vdi failed: HTTP {(int)response.StatusCode}", null, response.StatusCode);
+                        throw new HttpRequestException(
+                            $"import_raw_vdi of disk {diskName} to {host} ({(vhd is null ? "raw" : "vhd")}) failed: HTTP {(int)response.StatusCode}", null, response.StatusCode);
                     }
 
+                    var sent = TransferredBytes;
+                    _sent = () => sent;
                     break;
                 }
                 finally
@@ -493,10 +505,34 @@ internal sealed class XenRawImportWriter(
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
+/// <summary>HTTP body with a disk image as dynamic VHD (<see cref="VhdImageWriter"/>).</summary>
+internal sealed class VhdImageContent(VhdImageWriter writer, IDiskImageSource image, IProgress<long>? progress) : HttpContent
+{
+    public VhdImageWriter Writer => writer;
+
+    protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+        SerializeToStreamAsync(stream, context, CancellationToken.None);
+
+    protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken)
+    {
+        await using var source = image.OpenSequential(prefetchChunks: 32, workers: 8);
+        await writer.WriteAsync(stream, source, progress, cancellationToken).ConfigureAwait(false);
+    }
+
+    protected override bool TryComputeLength(out long length)
+    {
+        length = writer.Length;
+        return true;
+    }
+}
+
 /// <summary>HTTP body that streams a disk image in 4 MiB writes.</summary>
 internal sealed class DiskImageContent(IDiskImageSource image, IProgress<long>? progress) : HttpContent
 {
     private const int WriteSize = 4 * 1024 * 1024;
+    private long _written;
+
+    public long BytesWritten => Interlocked.Read(ref _written);
 
     protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
         SerializeToStreamAsync(stream, context, CancellationToken.None);
@@ -529,6 +565,7 @@ internal sealed class DiskImageContent(IDiskImageSource image, IProgress<long>? 
 
                 await stream.WriteAsync(buffer.AsMemory(0, filled), cancellationToken).ConfigureAwait(false);
                 total += filled;
+                Interlocked.Exchange(ref _written, total);
                 progress?.Report(total);
             }
         }

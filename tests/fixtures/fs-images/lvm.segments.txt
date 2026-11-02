@@ -1,0 +1,4 @@
+  LV   Start   SSize   Devices       
+  data      0  444.00m /dev/loop8(0) 
+  data 444.00m  36.00m /dev/loop7(45)
+  root      0  180.00m /dev/loop7(0) 

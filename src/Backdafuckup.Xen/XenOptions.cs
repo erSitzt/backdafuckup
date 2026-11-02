@@ -23,6 +23,36 @@ public sealed record XenOptions
 
     /// <summary>Pass force=true to import_metadata (needed when the target lacks e.g. the original ISO).</summary>
     public bool ForceMetadataImport { get; init; } = true;
+
+    /// <summary>
+    /// Format of the HTTP export (export_raw_vdi) used when NBD is not available: <see cref="XenHttpExportFormat.Vhd"/>
+    /// transfers only allocated blocks, <see cref="XenHttpExportFormat.Raw"/> every byte of the disk (slowest, simplest).
+    /// </summary>
+    public XenHttpExportFormat HttpExportFormat { get; init; } = XenHttpExportFormat.Vhd;
+
+    /// <summary>
+    /// Format of the restore upload (import_raw_vdi): <see cref="XenHttpImportFormat.Vhd"/> sends only the 2 MiB blocks
+    /// that contain data, <see cref="XenHttpImportFormat.Raw"/> every byte of the disk (slowest, simplest).
+    /// </summary>
+    public XenHttpImportFormat HttpImportFormat { get; init; } = XenHttpImportFormat.Vhd;
+
+    /// <summary>
+    /// How long a backup waits for XAPI to release a snapshot disk (VDI_IN_USE) before it reduces the snapshot to
+    /// change-tracking data. After that the snapshot is kept and finished in the background.
+    /// </summary>
+    public TimeSpan SnapshotReleaseTimeout { get; init; } = TimeSpan.FromMinutes(5);
+}
+
+public enum XenHttpExportFormat
+{
+    Vhd,
+    Raw,
+}
+
+public enum XenHttpImportFormat
+{
+    Vhd,
+    Raw,
 }
 
 /// <summary>Per-connection option keys stored with the connection (ConnectionSettings.Options).</summary>
@@ -53,3 +83,9 @@ public static class XenTags
 
 /// <summary>No NBD-enabled network reaches the storage of a disk.</summary>
 public sealed class XenNbdUnavailableException(string message) : InvalidOperationException(message);
+
+/// <summary>XAPI kept reporting VDI_IN_USE for a snapshot disk until the wait timed out.</summary>
+public sealed class XenSnapshotInUseException(string message, Exception? inner = null) : InvalidOperationException(message, inner);
+
+/// <summary>The HTTP export (export_raw_vdi) of a disk failed.</summary>
+public sealed class XenHttpExportException(string message, Exception? inner = null) : IOException(message, inner);

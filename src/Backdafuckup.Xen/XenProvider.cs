@@ -170,6 +170,29 @@ internal sealed partial class XenHypervisorSession(XenProvider provider, Connect
 
     public Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken) => XenInventory.GetAsync(Xapi, Platform, cancellationToken);
 
+    public async Task<IReadOnlyList<string>> GetGuestAddressesAsync(string vmId, CancellationToken cancellationToken)
+    {
+        var vmRef = await Xapi.TryGetByUuidAsync("VM", vmId, cancellationToken).ConfigureAwait(false);
+        if (vmRef is null)
+        {
+            return [];
+        }
+
+        var metricsRef = (await Xapi.GetRecordAsync("VM", vmRef, cancellationToken).ConfigureAwait(false)).Str("guest_metrics");
+        if (XapiRecord.IsNullRef(metricsRef))
+        {
+            return [];
+        }
+
+        // networks: {"0/ip": "10.0.0.5", "0/ipv4/0": "10.0.0.5", "0/ipv6/0": "fe80::…"}
+        var networks = (await Xapi.GetRecordAsync("VM_guest_metrics", metricsRef, cancellationToken).ConfigureAwait(false)).Map("networks");
+        return networks.OrderBy(n => n.Key, StringComparer.Ordinal).Select(n => n.Value)
+            .Where(a => System.Net.IPAddress.TryParse(a, out var ip) && !ip.IsIPv6LinkLocal && !System.Net.IPAddress.IsLoopback(ip))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(a => a.Contains(':', StringComparison.Ordinal))
+            .ToList();
+    }
+
     /// <summary>Opens a dedicated XAPI session (each VM task gets its own; NBD export names are bound to it).</summary>
     internal Task<XapiSession> OpenDedicatedSessionAsync(CancellationToken cancellationToken) =>
         XapiSession.LoginAsync(Provider.CreateLoginOptions(Settings, null) with { Address = Xapi.MasterAddress }, cancellationToken);

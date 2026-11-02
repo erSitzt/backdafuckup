@@ -27,16 +27,100 @@ else
     </MudText>
     <MudProgressLinear Color="Color.Primary" Value="@_session.Progress" Size="Size.Large" Class="mb-4">@($"{_session.Progress:0}%")</MudProgressLinear>
 
-    <MudGrid>
-        <MudItem xs="12" sm="4"><StatTile Title="Read" Value="@Fmt.Bytes(_session.ReadBytes)" Icon="@Icons.Material.Filled.Download" Color="Color.Primary" /></MudItem>
-        <MudItem xs="12" sm="4"><StatTile Title="Stored (new data)" Value="@Fmt.Bytes(_session.TransferredBytes)" Icon="@Icons.Material.Filled.Save" Color="Color.Primary" /></MudItem>
-        <MudItem xs="12" sm="4"><StatTile Title="Objects" Value="@_tasks.Count.ToString()" Icon="@Icons.Material.Filled.Computer" Color="Color.Primary" /></MudItem>
+    var m = _session.Metrics ?? new TransferMetricsDto { ReadBytes = _session.ReadBytes, StoredBytes = _session.TransferredBytes };
+    var running = _session.State is "Running" or "Stopping";
+    @if (_session.Kind == "Restore")
+    {
+        <MudGrid Spacing="2" Class="mb-2">
+            <MudItem xs="6" md="3"><StatTile Title="Duration" Value="@Fmt.Duration(_session.StartedUtc, _session.EndedUtc)" Detail="@($"{_tasks.Count} object(s)")" Icon="@Icons.Material.Filled.Timer" Color="Color.Primary" /></MudItem>
+            <MudItem xs="6" md="3"><StatTile Title="Restore rate" Value="@Fmt.Rate(m.ProcessingRate)" Detail="@(running ? $"current network rate {Fmt.Rate(m.CurrentBytesPerSecond)}" : $"network {Fmt.Rate(m.Seconds > 0 ? m.StoredBytes / m.Seconds : null)}")" Icon="@Icons.Material.Filled.Speed" Color="Color.Primary" /></MudItem>
+            <MudItem xs="6" md="3"><StatTile Title="Restored" Value="@Fmt.Bytes(m.ProcessedBytes)" Detail="@($"of {Fmt.Bytes(m.TotalBytes)} disk size")" Icon="@Icons.Material.Filled.Storage" Color="Color.Primary" /></MudItem>
+            <MudItem xs="6" md="3"><StatTile Title="Transferred" Value="@Fmt.Bytes(m.StoredBytes)" Detail="@($"sent to the host, {Fmt.Bytes(Math.Max(0, m.ProcessedBytes - m.StoredBytes))} empty blocks skipped")" Icon="@Icons.Material.Filled.Upload" Color="Color.Primary" /></MudItem>
+        </MudGrid>
+    }
+    else
+    {
+    <MudGrid Spacing="2" Class="mb-2">
+        <MudItem xs="6" md="3"><StatTile Title="Duration" Value="@Fmt.Duration(_session.StartedUtc, _session.EndedUtc)" Detail="@($"{_tasks.Count} object(s)")" Icon="@Icons.Material.Filled.Timer" Color="Color.Primary" /></MudItem>
+        <MudItem xs="6" md="3"><StatTile Title="Processing rate" Value="@Fmt.Rate(m.ProcessingRate)" Detail="@(running ? $"current read rate {Fmt.Rate(m.CurrentBytesPerSecond)}" : $"read rate {Fmt.Rate(m.ReadRate)}")" Icon="@Icons.Material.Filled.Speed" Color="Color.Primary" /></MudItem>
+        <MudItem xs="6" md="3"><StatTile Title="Processed" Value="@Fmt.Bytes(m.ProcessedBytes)" Detail="@($"of {Fmt.Bytes(m.TotalBytes)} provisioned")" Icon="@Icons.Material.Filled.Storage" Color="Color.Primary" /></MudItem>
+        <MudItem xs="6" md="3"><StatTile Title="Read" Value="@Fmt.Bytes(m.ReadBytes)" Detail="from the source" Icon="@Icons.Material.Filled.Download" Color="Color.Primary" /></MudItem>
+        <MudItem xs="6" md="3"><StatTile Title="Transferred" Value="@Fmt.Bytes(m.StoredBytes)" Detail="@($"written to the repository, new data {Fmt.Bytes(m.NewDataBytes)}")" Icon="@Icons.Material.Filled.Save" Color="Color.Primary" /></MudItem>
+        <MudItem xs="6" md="3"><StatTile Title="Dedupe" Value="@Fmt.Ratio(m.DedupeRatio)" Detail="@($"{Fmt.Bytes(m.DedupedBytes)} already stored")" Icon="@Icons.Material.Filled.ContentCopy" Color="Color.Primary" /></MudItem>
+        <MudItem xs="6" md="3"><StatTile Title="Compression" Value="@Fmt.Ratio(m.CompressionRatio)" Detail="@($"{Fmt.Bytes(m.NewDataBytes)} → {Fmt.Bytes(m.StoredBytes)}")" Icon="@Icons.Material.Filled.Compress" Color="Color.Primary" /></MudItem>
+        <MudItem xs="6" md="3"><StatTile Title="Bottleneck" Value="@(m.Bottleneck ?? "–")" Detail="@($"source {Fmt.Percent(m.SourceLoad)} · processing {Fmt.Percent(m.ProcessingLoad)} · target {Fmt.Percent(m.TargetLoad)}")" Icon="@Icons.Material.Filled.FilterAlt" Color="Color.Primary" /></MudItem>
+    </MudGrid>
 
+    @if (m.ProcessedBytes > 0)
+    {
+        <MudPaper Class="pa-3 mb-3" Elevation="1">
+            <MudText Typo="Typo.subtitle2" Class="mb-1">Processed data</MudText>
+            <div class="data-bar">
+                @foreach (var (label, bytes, css) in Breakdown(m))
+                {
+                    if (bytes > 0)
+                    {
+                        <div class="@css" style="@($"width:{bytes * 100.0 / m.ProcessedBytes:0.##}%".Replace(',', '.'))" title="@($"{label}: {Fmt.Bytes(bytes)}")"></div>
+                    }
+                }
+            </div>
+            <div class="d-flex flex-wrap gap-4 mt-1">
+                @foreach (var (label, bytes, css) in Breakdown(m))
+                {
+                    <MudText Typo="Typo.caption"><span class="@($"legend {css}")"></span>@label @Fmt.Bytes(bytes)</MudText>
+                }
+            </div>
+        </MudPaper>
+    }
+    }
+
+    @if (_tasks.Values.Any(t => t.Metrics?.Disks is { Count: > 0 }))
+    {
+    <MudPaper Class="pa-3 mb-3" Elevation="1">
+        <MudText Typo="Typo.h6" Class="mb-2">Disks</MudText>
+        <MudSimpleTable Dense="true" Elevation="0" Style="overflow-x:auto">
+            <thead>
+                <tr>
+                    <th>Object</th><th>Disk</th><th>State</th><th>Mode</th><th>Transport</th><th>Processed</th><th>Read</th>
+                    <th>New → stored</th><th>Dedupe</th><th>Compression</th><th>Rate</th><th>Duration</th><th>Bottleneck</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var t in _tasks.Values.OrderBy(t => t.ObjectName))
+                {
+                    @foreach (var d in t.Metrics?.Disks ?? [])
+                    {
+                        var dm = d.Metrics;
+                        <tr>
+                            <td>@t.ObjectName</td>
+                            <td>@d.Name <MudText Typo="Typo.caption" Color="Color.Secondary">@Fmt.Bytes(d.CapacityBytes)</MudText></td>
+                            <td>@d.State</td>
+                            <td title="@d.FullReason">@(d.Mode ?? "–")@(d.Mode == "Full" && d.FullReason is not null ? " *" : "")</td>
+                            <td>@(d.Transport ?? "–")</td>
+                            <td>@Fmt.Bytes(dm.ProcessedBytes)</td>
+                            <td>@Fmt.Bytes(dm.ReadBytes)</td>
+                            <td>@Fmt.Bytes(dm.NewDataBytes) → @Fmt.Bytes(dm.StoredBytes)</td>
+                            <td>@Fmt.Ratio(dm.DedupeRatio)</td>
+                            <td>@Fmt.Ratio(dm.CompressionRatio)</td>
+                            <td>@Fmt.Rate(dm.ProcessingRate)</td>
+                            <td>@(dm.Seconds > 0 ? Fmt.Seconds(dm.Seconds) : "–")</td>
+                            <td>@(dm.Bottleneck is { } b ? $"{b} ({Fmt.Percent(Math.Max(dm.SourceLoad, Math.Max(dm.ProcessingLoad, dm.TargetLoad)))})" : "–")</td>
+                        </tr>
+                    }
+                }
+            </tbody>
+        </MudSimpleTable>
+        <MudText Typo="Typo.caption" Color="Color.Secondary">* Full read; hover for the reason. Rates refer to the transfer time of the disk.</MudText>
+    </MudPaper>
+    }
+
+    <MudGrid>
         <MudItem xs="12" md="5">
             <MudPaper Class="pa-3" Elevation="1">
                 <MudText Typo="Typo.h6" Class="mb-2">Objects</MudText>
                 @foreach (var t in _tasks.Values.OrderBy(t => t.ObjectName))
                 {
+                    var tm = t.Metrics;
                     <div class="d-flex align-center">
                         <MudText Typo="Typo.body1">@t.ObjectName</MudText>
                         <MudSpacer />
@@ -44,7 +128,9 @@ else
                     </div>
                     <MudProgressLinear Value="@t.Progress" Color="@Fmt.StateColor(t.State)" />
                     <MudText Typo="Typo.caption" Class="d-block mb-3">
-                        @Fmt.Bytes(t.ReadBytes) read · @Fmt.Bytes(t.TransferredBytes) stored · @Fmt.Duration(t.StartedUtc, t.EndedUtc)
+                        @Fmt.Bytes(t.ReadBytes) read · @Fmt.Bytes(t.TransferredBytes) transferred · @Fmt.Rate(tm?.ProcessingRate)
+                        @if (t.State == "Running" && tm is not null) { <span> (now @Fmt.Rate(tm.CurrentBytesPerSecond))</span> }
+                        · dedupe @Fmt.Ratio(tm?.DedupeRatio) · compression @Fmt.Ratio(tm?.CompressionRatio) · @Fmt.Duration(t.StartedUtc, t.EndedUtc)
                         @if (t.Error is not null) { <span style="color:#c62828"> · @t.Error</span> }
                     </MudText>
                 }
@@ -68,6 +154,14 @@ else
     [Parameter] public Guid Id { get; set; }
 
     private SessionSummaryDto? _session;
+
+    private static IEnumerable<(string Label, long Bytes, string Css)> Breakdown(TransferMetricsDto m) =>
+    [
+        ("Unchanged", m.UnchangedBytes, "seg-unchanged"),
+        ("Empty", m.ZeroBytes, "seg-zero"),
+        ("Already stored", m.DedupedBytes, "seg-dedupe"),
+        ("New", m.NewDataBytes, "seg-new"),
+    ];
     private readonly Dictionary<Guid, SessionTaskDto> _tasks = [];
     private readonly SortedDictionary<long, LogEntryDto> _log = [];
 

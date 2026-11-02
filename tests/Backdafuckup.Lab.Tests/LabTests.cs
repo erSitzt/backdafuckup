@@ -24,7 +24,11 @@ public sealed class LabTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    private static string? Env(string name) => Environment.GetEnvironmentVariable(name);
+    private static string? Env(string name) => LabEnvironment.Get(name);
+
+    /// <summary>BDFU_LAB_TRANSPORT = Automatic (default), NbdOnly or HttpExportOnly.</summary>
+    private static DiskTransportMode Transport =>
+        Enum.TryParse<DiskTransportMode>(Env("BDFU_LAB_TRANSPORT"), true, out var mode) ? mode : DiskTransportMode.Automatic;
 
     /// <summary>
     /// Determines the bit order of VDI.list_changed_blocks: compares the blocks that really differ between two snapshots
@@ -40,19 +44,21 @@ public sealed class LabTests
 
         ChangeToken token1;
         byte[][] before;
-        await using (var first = await session.BeginBackupAsync(Request(vm), log, new InMemoryArtifactLedger(), Ct))
+        var ledger1 = new InMemoryArtifactLedger();
+        await using (var first = await session.BeginBackupAsync(Request(vm), log, ledger1, Ct))
         {
             var disk = first.Disks[0];
             before = await HashBlocksAsync(first, disk);
             token1 = first.GetNewChangeToken(disk) ?? throw new InvalidOperationException("CBT is not available for this disk.");
-            await first.CommitAsync(log, Ct);
+            await CommitAsync(session, first, ledger1, log);
         }
 
         var wait = int.TryParse(Env("BDFU_LAB_WAIT_SECONDS"), out var seconds) ? seconds : 120;
-        TestContext.Current.SendDiagnosticMessage($"Waiting {wait} s – write some data inside the VM now (e.g. dd if=/dev/urandom of=/tmp/x bs=1M count=50; sync).");
+        LabEnvironment.Say($"Waiting {wait} s – write some data inside the VM now (e.g. dd if=/dev/urandom of=/tmp/x bs=1M count=50; sync).");
         await Task.Delay(TimeSpan.FromSeconds(wait), Ct);
 
-        await using var second = await session.BeginBackupAsync(Request(vm), log, new InMemoryArtifactLedger(), Ct);
+        var ledger2 = new InMemoryArtifactLedger();
+        await using var second = await session.BeginBackupAsync(Request(vm), log, ledger2, Ct);
         var disk2 = second.Disks[0];
         string bitmap;
         await using (var xapi = await lab.LoginAsync())
@@ -67,19 +73,19 @@ public sealed class LabTests
         var msb = Blocks(CbtBitmap.DecodeBase64(bitmap, disk2.CapacityBytes, CbtBitOrder.MostSignificantBitFirst));
         var lsb = Blocks(CbtBitmap.DecodeBase64(bitmap, disk2.CapacityBytes, CbtBitOrder.LeastSignificantBitFirst));
         var token2 = second.GetNewChangeToken(disk2);
-        await second.CommitAsync(log, Ct);
+        await CommitAsync(session, second, ledger2, log);
         await session.ReleaseChangeTokensAsync(new[] { token1, token2 }.OfType<ChangeToken>(), log, Ct);
 
         Assert.SkipWhen(actual.Count == 0, "The VM did not change any data between the snapshots; write data during the wait and run again.");
         var msbCovers = actual.IsSubsetOf(msb);
         var lsbCovers = actual.IsSubsetOf(lsb);
         var report = $"Changed 64 KiB blocks: {actual.Count}; bitmap marks {msb.Count}. MSB-first covers all: {msbCovers}; LSB-first covers all: {lsbCovers}.";
-        TestContext.Current.SendDiagnosticMessage(report);
+        LabEnvironment.Say(report);
         Assert.True(msbCovers ^ lsbCovers, "Inconclusive: " + report);
-        TestContext.Current.SendDiagnosticMessage($"==> Configure \"Xen\": {{ \"CbtBitOrder\": \"{(msbCovers ? nameof(CbtBitOrder.MostSignificantBitFirst) : nameof(CbtBitOrder.LeastSignificantBitFirst))}\" }}");
+        LabEnvironment.Say($"==> Configure \"Xen\": {{ \"CbtBitOrder\": \"{(msbCovers ? nameof(CbtBitOrder.MostSignificantBitFirst) : nameof(CbtBitOrder.LeastSignificantBitFirst))}\" }}");
     }
 
-    /// <summary>Full backup over NBD into a temporary repository, restore to another SR, compare disk hashes.</summary>
+    /// <summary>Full backup (transport from BDFU_LAB_TRANSPORT) into a temporary repository, restore to another SR, compare disk hashes.</summary>
     [Fact]
     public async Task Backup_and_restore_roundtrip()
     {
@@ -95,18 +101,19 @@ public sealed class LabTests
         RestorePointManifest manifest;
         VmMetadataBlob metadata;
 
-        await using (var backup = await session.BeginBackupAsync(Request(Env("BDFU_LAB_VM")!, rpId), log, new InMemoryArtifactLedger(), Ct))
+        var ledger = new InMemoryArtifactLedger();
+        await using (var backup = await session.BeginBackupAsync(Request(Env("BDFU_LAB_VM")!, rpId), log, ledger, Ct))
         await using (var writer = repository.BeginWrite(rpId, backup.Vm.VmId, null))
         {
             var disks = new List<ManifestDisk>();
             foreach (var disk in backup.Disks)
             {
-                await using var reader = await backup.OpenReaderAsync(disk, new DiskReaderOptions(4, 4), Ct);
-                TestContext.Current.SendDiagnosticMessage($"Disk {disk.Name}: {disk.CapacityBytes} bytes, NBD max request {reader.MaxRequestBytes} bytes.");
+                await using var reader = await backup.OpenReaderAsync(disk, new DiskReaderOptions(4, 4, Transport), Ct);
+                LabEnvironment.Say($"Disk {disk.Name}: {disk.CapacityBytes} bytes via {reader.TransportName}.");
                 var started = DateTime.UtcNow;
                 var result = await DiskBackupPipeline.RunAsync(new DiskBackupJob { Reader = reader, Writer = writer, ChunkSize = repository.Info.ChunkSize, Changes = ChangedExtents.Full("lab") }, Ct);
                 var seconds = Math.Max(0.001, (DateTime.UtcNow - started).TotalSeconds);
-                TestContext.Current.SendDiagnosticMessage($"Disk {disk.Name}: read {result.Stats.ReadBytes / 1048576.0:0} MiB in {seconds:0.0} s ({result.Stats.ReadBytes / 1048576.0 / seconds:0} MiB/s), stored {result.Stats.NewStoredBytes / 1048576.0:0} MiB.");
+                LabEnvironment.Say($"Disk {disk.Name}: read {result.Stats.ReadBytes / 1048576.0:0} MiB in {seconds:0.0} s ({result.Stats.ReadBytes / 1048576.0 / seconds:0} MiB/s), stored {result.Stats.NewStoredBytes / 1048576.0:0} MiB.");
                 disks.Add(new ManifestDisk
                 {
                     Key = disk.Key, SourceDiskId = disk.SourceDiskId, Name = disk.Name, CapacityBytes = disk.CapacityBytes, StorageId = disk.StorageId,
@@ -122,7 +129,7 @@ public sealed class LabTests
                 Vm = backup.Vm, Chunking = new ManifestChunking(repository.Info.ChunkSize, "sha256", "zstd"), Disks = disks,
             };
             await writer.CommitAsync(manifest, Ct);
-            await backup.CommitAsync(log, Ct);
+            await CommitAsync(session, backup, ledger, log);
             tokens.AddRange(disks.Select(d => d.ChangeToken).OfType<ChangeToken>());
         }
 
@@ -163,10 +170,10 @@ public sealed class LabTests
             await using var xapi = await lab.LoginAsync();
             foreach (var (source, restoredDisk) in mapping)
             {
-                Assert.Equal(expected[source], await HashVdiOverNbdAsync(xapi, lab, restoredDisk));
+                Assert.Equal(expected[source], await HashVdiAsync(xapi, restoredDisk));
             }
 
-            TestContext.Current.SendDiagnosticMessage($"Restored VM '{restored.Name}' matches the backup bit for bit.");
+            LabEnvironment.Say($"Restored VM '{restored.Name}' matches the backup bit for bit.");
         }
         finally
         {
@@ -174,6 +181,72 @@ public sealed class LabTests
             await session.ReleaseChangeTokensAsync(tokens, log, Ct);
             await reader2.DisposeAsync();
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// Checks the VHD stream parser against the real export: the same snapshot disk exported as VHD (parsed by
+    /// backdafuckup) and as raw must give identical 1 MiB block hashes. Works without NBD.
+    /// </summary>
+    [Fact]
+    public async Task Http_export_vhd_matches_raw()
+    {
+        var lab = await LabConnection.ConnectAsync();
+        var log = new ConsoleLog();
+        await using var session = lab.Session;
+        await using var backup = await session.BeginBackupAsync(Request(Env("BDFU_LAB_VM")!), log, new InMemoryArtifactLedger(), Ct);
+        await using var xapi = await lab.LoginAsync();
+        foreach (var disk in backup.Disks)
+        {
+            string[] vhd;
+            await using (var source = await backup.OpenReaderAsync(disk, new DiskReaderOptions(Transport: DiskTransportMode.HttpExportOnly), Ct))
+            {
+                vhd = await HashChunksAsync(Assert.IsAssignableFrom<ISequentialDiskReader>(source));
+            }
+
+            var raw = await HashRawExportChunksAsync(xapi, disk.SnapshotDiskId, disk.CapacityBytes);
+            var differing = Enumerable.Range(0, raw.Length).Where(i => raw[i] != vhd[i]).ToList();
+            Assert.True(differing.Count == 0, $"Disk {disk.Name}: {differing.Count} of {raw.Length} MiB differ between VHD and raw export, first at MiB {differing.FirstOrDefault()}.");
+            LabEnvironment.Say($"Disk {disk.Name}: VHD and raw export are identical ({raw.Length} MiB).");
+        }
+    }
+
+    /// <summary>
+    /// Commits the backup like the service does. If XAPI still reports the snapshot disk in use (VDI_IN_USE), the service
+    /// defers the cleanup to its background retry; here the test finishes it and reports how long the disk stayed in use.
+    /// </summary>
+    private static async Task CommitAsync(IHypervisorSession session, IVmBackupSession backup, InMemoryArtifactLedger ledger, IOperationLog log)
+    {
+        var started = DateTime.UtcNow;
+        try
+        {
+            await backup.CommitAsync(log, Ct);
+            return;
+        }
+        catch (SnapshotCleanupDeferredException ex)
+        {
+            LabEnvironment.Say($"Commit deferred: {ex.Message}");
+        }
+
+        // Snapshot disks first (data_destroy), then the snapshot VM, as in XenBackupSession.CommitAsync.
+        var pending = ledger.Items.Where(a => a.State == ArtifactState.CommitPending).OrderBy(a => a.Kind == XenArtifactKinds.VmSnapshot).ToList();
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                foreach (var artifact in pending.ToList())
+                {
+                    await session.CommitArtifactAsync(artifact, log, Ct);
+                    pending.Remove(artifact);
+                }
+
+                LabEnvironment.Say($"Snapshot committed {(DateTime.UtcNow - started).TotalSeconds:0} s after the backup finished reading.");
+                return;
+            }
+            catch (XenSnapshotInUseException ex) when (attempt < 3)
+            {
+                LabEnvironment.Say($"Attempt {attempt}: {ex.Message}");
+            }
         }
     }
 
@@ -185,9 +258,15 @@ public sealed class LabTests
 
     private static async Task<byte[][]> HashBlocksAsync(IVmBackupSession backup, SnapshotDisk disk)
     {
-        await using var reader = await backup.OpenReaderAsync(disk, new DiskReaderOptions(4, 4), Ct);
+        await using var source = await backup.OpenReaderAsync(disk, new DiskReaderOptions(4, 4, Transport), Ct);
         var count = (int)((disk.CapacityBytes + CbtBitmap.BlockSize - 1) / CbtBitmap.BlockSize);
         var hashes = new byte[count][];
+        if (source is ISequentialDiskReader sequential)
+        {
+            return await HashStreamBlocksAsync(sequential, CbtBitmap.BlockSize);
+        }
+
+        var reader = (IDiskReader)source;
         await Parallel.ForAsync(0, count, new ParallelOptions { MaxDegreeOfParallelism = 16, CancellationToken = Ct }, async (i, ct) =>
         {
             var length = (int)Math.Min(CbtBitmap.BlockSize, disk.CapacityBytes - ((long)i * CbtBitmap.BlockSize));
@@ -198,36 +277,110 @@ public sealed class LabTests
         return hashes;
     }
 
-    private static async Task<string> HashVdiOverNbdAsync(XapiSession xapi, LabConnection lab, string vdiUuid)
+    /// <summary>SHA-256 of a whole VDI, read with a raw HTTP export (works with and without NBD).</summary>
+    private static async Task<string> HashVdiAsync(XapiSession xapi, string vdiUuid)
     {
-        var vdiRef = await xapi.TryGetByUuidAsync("VDI", vdiUuid, Ct) ?? throw new InvalidOperationException("Restored disk not found.");
-        var info = ((JsonArray)(await xapi.CallAsync("VDI.get_nbd_info", Ct, vdiRef))!).OfType<JsonObject>().First();
-        var pem = info.Str("cert");
-        var options = new NbdConnectOptions
-        {
-            Host = info.Str("address"),
-            Port = (int)info.Long("port"),
-            ExportName = info.Str("exportname"),
-            TlsMode = string.IsNullOrEmpty(pem) ? NbdTlsMode.Disabled : NbdTlsMode.Required,
-            TlsTargetHost = info.Str("subject"),
-            ServerCertificateValidation = string.IsNullOrEmpty(pem) ? null : CertificatePinning.CreateValidator(TlsTrustMode.Pinned, [CertificatePinning.SpkiSha256FromPem(pem)]),
-        };
-        await using var client = await NbdClient.ConnectAsync(options, Ct);
         using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        var buffer = new byte[4 * 1024 * 1024];
-        for (long offset = 0; offset < client.Size; offset += buffer.Length)
+        await foreach (var block in RawExportBlocksAsync(xapi, vdiUuid))
         {
-            var length = (int)Math.Min(buffer.Length, client.Size - offset);
-            await client.ReadAsync(offset, buffer.AsMemory(0, length), Ct);
-            sha.AppendData(buffer, 0, length);
+            sha.AppendData(block.Span);
         }
 
         return Convert.ToHexString(sha.GetHashAndReset());
     }
 
+    private static async Task<string[]> HashRawExportChunksAsync(XapiSession xapi, string vdiUuid, long capacity)
+    {
+        var hashes = new List<string>();
+        await foreach (var block in RawExportBlocksAsync(xapi, vdiUuid))
+        {
+            hashes.Add(Convert.ToHexString(SHA256.HashData(block.Span)));
+        }
+
+        Assert.Equal((capacity + 1048575) / 1048576, hashes.Count);
+        return hashes.ToArray();
+    }
+
+    /// <summary>The disk in 1 MiB blocks from GET /export_raw_vdi?format=raw (the last block may be shorter).</summary>
+    private static async IAsyncEnumerable<ReadOnlyMemory<byte>> RawExportBlocksAsync(XapiSession xapi, string vdiUuid)
+    {
+        var vdiRef = await xapi.TryGetByUuidAsync("VDI", vdiUuid, Ct) ?? throw new InvalidOperationException($"VDI {vdiUuid} not found.");
+        using var response = await xapi.Transport.SendHandlerAsync(
+            HttpMethod.Get, $"export_raw_vdi?session_id={Uri.EscapeDataString(xapi.SessionRef)}&vdi={Uri.EscapeDataString(vdiRef)}&format=raw", null, Ct);
+        Assert.True(response.IsSuccessStatusCode, $"export_raw_vdi of {vdiUuid} answered HTTP {(int)response.StatusCode}.");
+        await using var body = await response.Content.ReadAsStreamAsync(Ct);
+        var buffer = new byte[1024 * 1024];
+        while (true)
+        {
+            var read = await body.ReadAtLeastAsync(buffer, buffer.Length, throwOnEndOfStream: false, Ct);
+            if (read == 0)
+            {
+                yield break;
+            }
+
+            yield return buffer.AsMemory(0, read);
+        }
+    }
+
+    private static async Task<string[]> HashChunksAsync(ISequentialDiskReader reader) =>
+        (await HashStreamBlocksAsync(reader, 1024 * 1024)).Select(Convert.ToHexString).ToArray();
+
+    /// <summary>SHA-256 per block of a streamed disk without holding the disk in memory; blocks never streamed are zeros.</summary>
+    private static async Task<byte[][]> HashStreamBlocksAsync(ISequentialDiskReader reader, int blockSize)
+    {
+        var capacity = reader.Capacity;
+        var count = (int)((capacity + blockSize - 1) / blockSize);
+        var hashes = new byte[count][];
+        var buffer = new byte[blockSize];
+        long current = -1;
+
+        int Length(long block) => (int)Math.Min(blockSize, capacity - (block * blockSize));
+
+        void Flush()
+        {
+            if (current >= 0)
+            {
+                hashes[current] = SHA256.HashData(buffer.AsSpan(0, Length(current)));
+                Array.Clear(buffer);
+                current = -1;
+            }
+        }
+
+        await reader.StreamAsync(
+            (offset, data, _) =>
+            {
+                while (!data.IsEmpty)
+                {
+                    var block = offset / blockSize;
+                    if (block != current)
+                    {
+                        Flush();
+                        current = block;
+                    }
+
+                    var within = (int)(offset - (block * blockSize));
+                    var take = Math.Min(data.Length, blockSize - within);
+                    data.Span[..take].CopyTo(buffer.AsSpan(within));
+                    offset += take;
+                    data = data[take..];
+                }
+
+                return ValueTask.CompletedTask;
+            },
+            Ct);
+        Flush();
+
+        for (var i = 0; i < count; i++)
+        {
+            hashes[i] ??= SHA256.HashData(new byte[Length(i)]);
+        }
+
+        return hashes;
+    }
+
     private sealed class ConsoleLog : IOperationLog
     {
-        public void Write(LogSeverity severity, string message, string? key = null) => TestContext.Current.SendDiagnosticMessage($"{severity}: {message}");
+        public void Write(LogSeverity severity, string message, string? key = null) => LabEnvironment.Say($"{severity}: {message}");
     }
 }
 
@@ -236,11 +389,21 @@ internal sealed record LabConnection(XenProvider Provider, ConnectionSettings Se
 {
     public static async Task<LabConnection> ConnectAsync()
     {
-        var host = Environment.GetEnvironmentVariable("BDFU_LAB_HOST");
-        Assert.SkipWhen(string.IsNullOrEmpty(host) || string.IsNullOrEmpty(Environment.GetEnvironmentVariable("BDFU_LAB_VM")),
-            "Lab tests need BDFU_LAB_HOST, BDFU_LAB_USER, BDFU_LAB_PASSWORD and BDFU_LAB_VM.");
-        var provider = new XenProvider(new XenOptions { CbtBitOrder = CbtBitOrder.MostSignificantBitFirst });
-        var credential = new NetworkCredential(Environment.GetEnvironmentVariable("BDFU_LAB_USER") ?? "root", Environment.GetEnvironmentVariable("BDFU_LAB_PASSWORD"));
+        // Explicit opt-in per run, never from the settings file: a solution-wide test run must not touch a real pool.
+        Assert.SkipUnless(
+            Environment.GetEnvironmentVariable("BDFU_LAB_RUN") == "1",
+            "Lab tests run against a real pool and create and remove snapshots and a VM copy. Set BDFU_LAB_RUN=1 for the run to enable them.");
+        var host = LabEnvironment.Get("BDFU_LAB_HOST");
+        LabEnvironment.Say($"Lab pool {host ?? "(not set)"}, VM {LabEnvironment.Get("BDFU_LAB_VM") ?? "(not set)"}, transport {LabEnvironment.Get("BDFU_LAB_TRANSPORT") ?? "Automatic"}.");
+        Assert.SkipWhen(
+            string.IsNullOrEmpty(host) || string.IsNullOrEmpty(LabEnvironment.Get("BDFU_LAB_VM")) || string.IsNullOrEmpty(LabEnvironment.Get("BDFU_LAB_PASSWORD")),
+            $"Lab tests need BDFU_LAB_HOST, BDFU_LAB_USER, BDFU_LAB_PASSWORD and BDFU_LAB_VM (environment or {LabEnvironment.FilePath}).");
+        var provider = new XenProvider(new XenOptions
+        {
+            CbtBitOrder = CbtBitOrder.MostSignificantBitFirst,
+            HttpImportFormat = Enum.TryParse<XenHttpImportFormat>(LabEnvironment.Get("BDFU_LAB_IMPORT_FORMAT"), true, out var import) ? import : XenHttpImportFormat.Vhd,
+        });
+        var credential = new NetworkCredential(LabEnvironment.Get("BDFU_LAB_USER") ?? "root", LabEnvironment.Get("BDFU_LAB_PASSWORD"));
         var pins = new List<PinnedCertificate>();
         var probe = await provider.ProbeCertificateAsync(host!, 443, TestContext.Current.CancellationToken);
         pins.Add(new PinnedCertificate(probe.HostAddress, probe.SpkiSha256, probe.Sha256Thumbprint, probe.Pem));
@@ -252,7 +415,7 @@ internal sealed record LabConnection(XenProvider Provider, ConnectionSettings Se
             if (result.Success)
             {
                 settings = settings with { Pins = [.. pins, .. result.HostPins] };
-                TestContext.Current.SendDiagnosticMessage($"Connected to {result.Platform!.PlatformName} ({result.Platform.ProductName} {result.Platform.ProductVersion}).");
+                LabEnvironment.Say($"Connected to {result.Platform!.PlatformName} ({result.Platform.ProductName} {result.Platform.ProductVersion}).");
                 return new LabConnection(provider, settings, await provider.OpenAsync(settings, TestContext.Current.CancellationToken));
             }
 

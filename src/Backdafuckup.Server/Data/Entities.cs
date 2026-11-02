@@ -1,3 +1,5 @@
+using Backdafuckup.Contracts;
+using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Operations;
 using Backdafuckup.Core.Repository;
@@ -83,6 +85,9 @@ public sealed class Credential
 {
     public Guid Id { get; set; } = Guid.CreateVersion7();
 
+    /// <summary>Hypervisor credentials belong to a pool connection; Windows credentials are managed on their own.</summary>
+    public CredentialKind Kind { get; set; } = CredentialKind.Hypervisor;
+
     public required string Username { get; set; }
 
     /// <summary>Password protected with ASP.NET Data Protection. Never returned by the API.</summary>
@@ -93,6 +98,57 @@ public sealed class Credential
     public DateTimeOffset CreatedUtc { get; set; }
 
     public DateTimeOffset UpdatedUtc { get; set; }
+}
+
+public enum CredentialKind
+{
+    Hypervisor,
+
+    /// <summary>Windows administrator for the push installation of the guest agent (DOMAIN\user or .\user).</summary>
+    Windows,
+}
+
+/// <summary>A backdafuckup agent in a Windows guest (enrolled with the enrollment secret, then known by its key).</summary>
+public sealed class AgentEntity
+{
+    public Guid Id { get; set; } = Guid.CreateVersion7();
+
+    /// <summary>SHA-256 (hex) of the agent's key; the key itself is only known to the agent.</summary>
+    public required string KeyHash { get; set; }
+
+    public required string HostName { get; set; }
+
+    public string? DnsName { get; set; }
+
+    public string? BiosSerial { get; set; }
+
+    public string? SmbiosUuid { get; set; }
+
+    /// <summary>The VM this agent runs in (matched by BIOS serial / SMBIOS UUID); null while unknown.</summary>
+    public string? VmNativeId { get; set; }
+
+    public string? OsName { get; set; }
+
+    public string? OsVersion { get; set; }
+
+    /// <summary>"net10" or "net48".</summary>
+    public string Build { get; set; } = string.Empty;
+
+    public string AgentVersion { get; set; } = string.Empty;
+
+    public string FilesHash { get; set; } = string.Empty;
+
+    public string? VssProvider { get; set; }
+
+    /// <summary>The guest's own addresses, comma separated.</summary>
+    public string? IpAddresses { get; set; }
+
+    /// <summary>The address the server saw the last request from.</summary>
+    public string? RemoteAddress { get; set; }
+
+    public DateTimeOffset EnrolledUtc { get; set; }
+
+    public DateTimeOffset LastContactUtc { get; set; }
 }
 
 public sealed class InventoryEntry
@@ -210,9 +266,23 @@ public sealed class BackupJob
 
     public int NbdConnectionsPerDisk { get; set; } = 4;
 
+    /// <summary>Disks of one VM read at the same time. Each disk is its own stream (NBD connections or one HTTP export).</summary>
+    public int MaxParallelDisks { get; set; } = 2;
+
+    /// <summary>How disks are read: NBD with HTTP-export fallback (default), NBD only, or HTTP export only.</summary>
+    public DiskTransportMode TransportMode { get; set; } = DiskTransportMode.Automatic;
+
     public int RetryCount { get; set; } = 2;
 
     public int RetryDelayMinutes { get; set; } = 5;
+
+    /// <summary>Application-consistent backups: freeze the guest through the backdafuckup agent (VSS) for the snapshot.</summary>
+    public bool GuestProcessing { get; set; }
+
+    public GuestFailurePolicy GuestFailurePolicy { get; set; } = GuestFailurePolicy.CrashConsistentWithWarning;
+
+    /// <summary>Windows credentials to install the agent automatically where it is missing (optional).</summary>
+    public Guid? GuestCredentialId { get; set; }
 
     public DateTimeOffset? NextRunUtc { get; set; }
 
@@ -278,6 +348,11 @@ public sealed class RestorePointEntity
 
     public string? ManifestPath { get; set; }
 
+    /// <summary>"crash" or "application".</summary>
+    public string Consistency { get; set; } = "crash";
+
+    public string? ConsistencyReason { get; set; }
+
     public VmDescriptor? Vm { get; set; }
 
     public List<RestorePointDisk> Disks { get; set; } = [];
@@ -319,6 +394,22 @@ public enum SessionKind
     Backup,
     Restore,
     RepositoryMaintenance,
+    AgentDeployment,
+
+    /// <summary>An open file browser (file-level restore); not queued, its log is the audit trail.</summary>
+    FileBrowse,
+
+    /// <summary>Restore of single files into a VM or onto a share.</summary>
+    FileRestore,
+}
+
+public enum GuestFailurePolicy
+{
+    /// <summary>Back up the VM crash-consistently and end with a warning.</summary>
+    CrashConsistentWithWarning,
+
+    /// <summary>Fail the VM (retried like other failures).</summary>
+    FailVm,
 }
 
 public enum SessionRunMode
@@ -372,6 +463,9 @@ public sealed class SessionEntity
 
     public string? ServerInstanceId { get; set; }
 
+    /// <summary>Transfer statistics (rates, data reduction, bottleneck), rolled up from the tasks.</summary>
+    public TransferMetricsDto? Metrics { get; set; }
+
     public string? Summary { get; set; }
 
     /// <summary>Kind-specific parameters (e.g. the restore request) as JSON.</summary>
@@ -407,6 +501,9 @@ public sealed class SessionTaskEntity
     public Guid? RestorePointId { get; set; }
 
     public string? Error { get; set; }
+
+    /// <summary>Transfer statistics of this object, including per-disk details.</summary>
+    public TransferMetricsDto? Metrics { get; set; }
 }
 
 public sealed class SessionLogEntry

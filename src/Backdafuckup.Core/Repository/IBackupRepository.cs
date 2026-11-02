@@ -37,7 +37,10 @@ public enum ChunkPutOutcome
     Deduplicated,
 }
 
-public readonly record struct ChunkPutResult(ChunkPutOutcome Outcome, long StoredBytes);
+/// <param name="Outcome">Whether the chunk was new or already present.</param>
+/// <param name="StoredBytes">Bytes written to the repository (after compression).</param>
+/// <param name="CompressTicks">Time spent compressing, in <see cref="System.Diagnostics.Stopwatch"/> ticks (for load statistics).</param>
+public readonly record struct ChunkPutResult(ChunkPutOutcome Outcome, long StoredBytes, long CompressTicks = 0);
 
 public sealed record ManifestInfo(Guid RestorePointId, string Path, RestorePointManifest Manifest);
 
@@ -67,6 +70,12 @@ public interface IChunkReader
 {
     /// <summary>Reads chunk <paramref name="id"/> into <paramref name="destination"/> and returns its length.</summary>
     ValueTask<int> ReadAsync(ChunkId id, Memory<byte> destination, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Synchronous variant for synchronous consumers (file system parsers for file-level restore). It blocks only on
+    /// its own file read, never on work queued to the thread pool, so it is safe on dedicated worker threads.
+    /// </summary>
+    int Read(ChunkId id, Span<byte> destination);
 }
 
 public interface IRestorePointReader : IAsyncDisposable

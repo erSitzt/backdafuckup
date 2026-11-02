@@ -292,3 +292,26 @@ Tasks 1–16 are implemented. 62 automated tests pass: unit tests, plus integrat
 - Check `import_metadata` edge cases: vTPM, ISO devices, cross-pool networks.
 
 See `docs/admin-guide.md`.
+
+### Follow-up 2026-11-02 (first test against the team's pool)
+
+- **HTTP export fallback.** Added `export_raw_vdi` as a second transport. Jobs have a transport setting: Automatic (NBD, otherwise HTTP export) / NBD only / HTTP export only; new column `jobs.transport_mode`.
+  - The data path is `ISequentialDiskReader` plus a streaming path in `DiskBackupPipeline`.
+  - VHD streams are parsed by our own `VhdStreamReader`, written from the public VHD specification. Sectors marked unused must be zero, otherwise the stream is rejected.
+  - `Xen:HttpExportFormat=Raw` is the escape hatch. The lab test `Http_export_vhd_matches_raw` checks the parser against the real export.
+- **Transport check in the session log.**
+  - Logged: the NBD networks with host IPs, the result of `VDI.get_nbd_info`, every NBD connection attempt (address, port, host, network, duration, error), and the HTTP request and stream format.
+  - All NBD endpoints offered by XAPI are tried before giving up.
+  - Error messages always name the concrete addresses.
+- **Setup token.** A rejected password no longer invalidates the setup token.
+- **Transfer statistics.**
+  - The pipeline counts processed, unchanged, empty, deduplicated, new and stored bytes, and measures the busy time of source, processing and target.
+  - Tasks and sessions keep `TransferMetricsDto` (jsonb columns `metrics`), with per-disk details on tasks. The current read rate, dedupe and compression ratios and the bottleneck are shown live on the session page and in the session list.
+- **Snapshot release after the export.** On the team's pool, `VDI.data_destroy` returned VDI_IN_USE for more than a minute after an HTTP export, and the rollback then deleted the snapshot together with its change tracking data.
+  - Now the backup waits up to `Xen:SnapshotReleaseTimeout` (default 5 min) and logs who holds the disk (VDI operations, VBDs with their VMs).
+  - After the timeout the snapshot is kept and the ledger rows stay CommitPending. `PendingArtifactRetryService` retries every 10 minutes; startup recovery retries too.
+  - The HTTP export uses its own connection and closes it afterwards (`Connection: close`).
+- **Lab tests without NBD.** The lab settings can come from `~/.config/backdafuckup/lab.env` (or `BDFU_LAB_ENV_FILE`) instead of environment variables, so the password stays off the command line. The tests finish a deferred snapshot commit themselves and report how long the disk stayed in use. Test output is shown live (`xunit.runner.json`). They only run with `BDFU_LAB_RUN=1` set for the run; the file alone never enables them.
+- **Snapshot cleanup order (root cause of VDI_IN_USE).** On the pool, `VDI.data_destroy` failed for as long as the snapshot VM's unattached VBD referenced the disk; nothing else used it. The commit now destroys the snapshot VM first (`VM.destroy` keeps the disks) and then reduces the disks. For older ledger rows, the disk is first detached from backdafuckup's own tagged snapshot VM. Confirmed on the pool: the kept snapshot was cleaned up at the next start without VDI_IN_USE.
+- **Sparse restore upload (risk 3).** `import_raw_vdi?format=vhd` with a dynamic VHD written by our own `VhdImageWriter`. It sends only the 2 MiB blocks that contain data, as taken from the restore point's data extents. A block outside the extents must read as zero, otherwise the upload stops. `Xen:HttpImportFormat=Raw` is the escape hatch. The session page shows restored and transferred bytes. Not yet verified against a real host; the lab roundtrip test covers it.
+- **Parallel disks per VM.** New job setting `MaxParallelDisks` (default 2, column `jobs.max_parallel_disks`). One HTTP export stream is limited by the host to about 60 MB/s, while our VHD parser handles several GB/s. A failing disk stops the others, and its own error is reported. VM rates use the wall time of the disk transfers. The default respects a 1 Gbit/s link, where two streams already reach the line rate.
