@@ -18,6 +18,9 @@ public sealed class EngineOptions
 
     public int MaxConcurrentRestoreSessions { get; set; } = 2;
 
+    /// <summary>File-level restores at the same time (each holds a share or guest connection and a reader thread).</summary>
+    public int MaxConcurrentFileRestoreSessions { get; set; } = 2;
+
     public TimeSpan SchedulerInterval { get; set; } = TimeSpan.FromSeconds(30);
 
     public TimeSpan MisfireGrace { get; set; } = TimeSpan.FromHours(1);
@@ -261,7 +264,8 @@ public sealed class SessionEventWriter(IDbContextFactory<AppDbContext> dbFactory
                 }
             }
 
-            if (stoppingToken.IsCancellationRequested && _entries.Reader.Count == 0)
+            // A single-reader channel cannot count (Count throws NotSupportedException), but it can peek.
+            if (stoppingToken.IsCancellationRequested && !_entries.Reader.TryPeek(out _))
             {
                 break;
             }

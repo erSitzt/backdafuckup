@@ -67,6 +67,50 @@ public sealed class AgentCoreTests : IDisposable
     }
 
     [Fact]
+    public void An_unknown_command_fails_without_aborting_a_frozen_backup()
+    {
+        // A newer server may send commands this agent does not know; the running backup must not notice.
+        var vss = new FakeVss();
+        var executor = new CommandExecutor(vss, new FakeHost(), new AgentLog(Path.Combine(_root, "agent.log")));
+        var operation = Guid.NewGuid();
+        Assert.True(executor.Execute(Command(AgentCommandKinds.PrepareBackup, operation)).Success);
+        Assert.True(executor.Execute(Command(AgentCommandKinds.Freeze, operation)).Success);
+
+        var unknown = executor.Execute(Command("SomethingNew", Guid.NewGuid()));
+        Assert.False(unknown.Success);
+        Assert.Contains("Unknown command SomethingNew", unknown.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("abort", vss.Calls);
+        Assert.True(executor.Execute(Command(AgentCommandKinds.Thaw, operation)).Success);
+    }
+
+    [Theory]
+    [InlineData(@"C:\Users\x\a.txt", @"C:\Users\x")]
+    [InlineData(@"C:\Users", @"C:\")]
+    [InlineData(@"C:\", @"C:\")]
+    [InlineData(@"D:\Restore\", @"D:\")]
+    public void Windows_paths_have_parents_on_every_platform(string path, string parent) => Assert.Equal(parent, WindowsPath.Parent(path));
+
+    [Theory]
+    [InlineData(@"C:\Users\x", @"C:\", true)]
+    [InlineData(@"C:\users\X", @"c:\Users", true)]
+    [InlineData(@"C:\Users2\x", @"C:\Users", false)]
+    [InlineData(@"D:\Restore", @"D:\Restore\", true)]
+    [InlineData(@"E:\Restore", @"D:\Restore", false)]
+    public void Below_compares_whole_components_without_case(string path, string root, bool below) => Assert.Equal(below, WindowsPath.IsBelow(path, root));
+
+    [Theory]
+    [InlineData(@"C:\", true)]
+    [InlineData(@"D:\Restore\Sub dir\file.txt", true)]
+    [InlineData(@"D:\Restore\..\Windows", false)]
+    [InlineData(@"D:\Restore\.\x", false)]
+    [InlineData(@"D:\Restore\\x", false)]
+    [InlineData(@"D:\Restore\file.txt:stream", false)]
+    [InlineData(@"\\server\share\x", false)]
+    [InlineData(@"Restore\x", false)]
+    [InlineData(@"D:Restore", false)]
+    public void Only_plain_absolute_local_paths_are_valid(string path, bool valid) => Assert.Equal(valid, WindowsPath.IsValidAbsolute(path));
+
+    [Fact]
     public void Nothing_is_written_to_disk_while_the_guest_is_frozen()
     {
         // A write to the frozen volume would block until Windows releases the hold (10 s): the agent would freeze itself.

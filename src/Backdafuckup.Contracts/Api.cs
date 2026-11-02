@@ -256,6 +256,9 @@ public sealed record AgentDto
     /// <summary>False while the agent still runs files older than the server's build (it updates itself).</summary>
     public bool UpToDate { get; init; }
 
+    /// <summary>The agent can restore files into its guest (reported with its last poll).</summary>
+    public bool CanRestoreFiles { get; init; }
+
     public DateTimeOffset EnrolledUtc { get; init; }
 
     public DateTimeOffset LastContactUtc { get; init; }

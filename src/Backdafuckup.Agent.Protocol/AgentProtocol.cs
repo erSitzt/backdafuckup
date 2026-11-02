@@ -29,6 +29,15 @@ public static class AgentProtocol
 
     public const int PollHoldSeconds = 50;
 
+    /// <summary>
+    /// File-level restore into the guest: <c>GET {id}</c> (what to do), <c>GET {id}/items?offset=&amp;limit=</c>,
+    /// <c>GET {id}/items/{index}/content</c>, <c>POST {id}/progress</c>.
+    /// </summary>
+    public const string TransfersPath = "api/agent/transfers";
+
+    /// <summary>The agent restores files (<see cref="AgentCommandKinds.RestoreFiles"/>); older agents are asked to update first.</summary>
+    public const string CapabilityRestoreFiles = "restore-files-v1";
+
     public const string ServiceName = "BackdafuckupAgent";
     public const string ServiceDisplayName = "backdafuckup Agent";
     public const string ExecutableName = "backdafuckup-agent.exe";
@@ -101,6 +110,9 @@ public sealed class AgentHostInfo
 
     /// <summary>"registered", "missing" or an error text.</summary>
     public string VssProvider { get; set; } = string.Empty;
+
+    /// <summary>What this agent can do beyond VSS, e.g. <see cref="AgentProtocol.CapabilityRestoreFiles"/>.</summary>
+    public List<string> Capabilities { get; set; } = new List<string>();
 }
 
 public sealed class AgentPollRequest
@@ -132,6 +144,12 @@ public static class AgentCommandKinds
 
     /// <summary>Abort a prepared or frozen backup (no thaw result needed).</summary>
     public const string Abort = "Abort";
+
+    /// <summary>
+    /// Start restoring the files of transfer <see cref="AgentCommand.TransferId"/>. Answered at once; the agent then fetches
+    /// the items and reports through <see cref="AgentProtocol.TransfersPath"/>.
+    /// </summary>
+    public const string RestoreFiles = "RestoreFiles";
 }
 
 public sealed class AgentCommand
@@ -149,6 +167,9 @@ public sealed class AgentCommand
 
     /// <summary>VSS_BT_COPY: leaves the backup history of other products untouched (default).</summary>
     public bool CopyOnly { get; set; } = true;
+
+    /// <summary>RestoreFiles: the transfer to fetch.</summary>
+    public Guid TransferId { get; set; }
 }
 
 public sealed class AgentCommandResult
@@ -262,4 +283,123 @@ public sealed class AgentFile
 
     /// <summary>SHA-256, hex.</summary>
     public string Sha256 { get; set; } = string.Empty;
+}
+
+/// <summary>What a file restore transfer asks of the agent (<c>GET api/agent/transfers/{id}</c>).</summary>
+public sealed class FileTransferInfo
+{
+    public Guid TransferId { get; set; }
+
+    /// <summary>Folders the transfer writes below, e.g. <c>C:\</c> or <c>D:\Restore</c>. The agent refuses anything else.</summary>
+    public List<string> Roots { get; set; } = new List<string>();
+
+    /// <summary>True: replace existing files. False: keep them and write <see cref="KeepPrefix"/>&lt;name&gt;.</summary>
+    public bool Overwrite { get; set; }
+
+    public string KeepPrefix { get; set; } = "RESTORED-";
+
+    /// <summary>Apply the stored security descriptors (owner, group, DACL).</summary>
+    public bool RestorePermissions { get; set; }
+
+    public int ItemCount { get; set; }
+
+    public long TotalBytes { get; set; }
+}
+
+public static class FileTransferItemKinds
+{
+    public const string Directory = "dir";
+
+    public const string File = "file";
+
+    /// <summary>After the content of a folder: set its times, attributes and permissions now.</summary>
+    public const string EndDirectory = "end";
+}
+
+/// <summary>One step of a transfer, in order: a folder comes before its content and its end after it.</summary>
+public sealed class FileTransferItem
+{
+    public int Index { get; set; }
+
+    /// <summary>One of <see cref="FileTransferItemKinds"/>.</summary>
+    public string Kind { get; set; } = string.Empty;
+
+    /// <summary>Absolute path in the guest, e.g. <c>C:\Users\x\report.docx</c>.</summary>
+    public string Path { get; set; } = string.Empty;
+
+    public long Size { get; set; }
+
+    public DateTime? CreatedUtc { get; set; }
+
+    public DateTime? ModifiedUtc { get; set; }
+
+    public DateTime? AccessedUtc { get; set; }
+
+    /// <summary>FileAttributes to set: read-only, hidden, system, archive (0: none).</summary>
+    public int Attributes { get; set; }
+
+    /// <summary>Key into <see cref="FileTransferItemsPage.Security"/>, or -1.</summary>
+    public int Security { get; set; } = -1;
+}
+
+public sealed class FileTransferItemsPage
+{
+    public List<FileTransferItem> Items { get; set; } = new List<FileTransferItem>();
+
+    /// <summary>Self-relative security descriptors (base64) used by the items of this page.</summary>
+    public Dictionary<int, string> Security { get; set; } = new Dictionary<int, string>();
+
+    /// <summary>True when no items follow this page.</summary>
+    public bool End { get; set; }
+}
+
+public static class FileTransferStatus
+{
+    public const string Ok = "ok";
+
+    /// <summary>Written under another name (keep mode): see <see cref="FileTransferResult.FinalPath"/>.</summary>
+    public const string Renamed = "renamed";
+
+    public const string Failed = "failed";
+
+    /// <summary>Written, but times, attributes or permissions could not be set.</summary>
+    public const string Incomplete = "incomplete";
+}
+
+public sealed class FileTransferResult
+{
+    public int Index { get; set; }
+
+    /// <summary>One of <see cref="FileTransferStatus"/>.</summary>
+    public string Status { get; set; } = string.Empty;
+
+    public string? Message { get; set; }
+
+    public string? FinalPath { get; set; }
+
+    /// <summary>Files: SHA-256 (hex) of what was written; the server compares it with what it sent.</summary>
+    public string? Sha256 { get; set; }
+}
+
+/// <summary>Results since the last report; also the heartbeat of the transfer (<c>POST api/agent/transfers/{id}/progress</c>).</summary>
+public sealed class FileTransferProgress
+{
+    /// <summary>Items processed so far (the next index).</summary>
+    public int Done { get; set; }
+
+    /// <summary>Bytes of file content written so far.</summary>
+    public long Bytes { get; set; }
+
+    public List<FileTransferResult> Results { get; set; } = new List<FileTransferResult>();
+
+    public bool Finished { get; set; }
+
+    /// <summary>Why the agent gave up on the whole transfer, if it did.</summary>
+    public string? Error { get; set; }
+}
+
+public sealed class FileTransferProgressResponse
+{
+    /// <summary>The restore was stopped on the server: finish the current file and report Finished.</summary>
+    public bool Cancel { get; set; }
 }

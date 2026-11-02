@@ -32,6 +32,7 @@ public static class AgentEndpoints
             }
 
             await agents.UpdateAsync(agentId, request.Host ?? new AgentHostInfo(), http.Connection.RemoteIpAddress?.ToString(), ct);
+            registry.SetCapabilities(agentId, request.Host?.Capabilities);
 
             // A different set of files on the server (after a server update): offer the update, but never during a backup
             // operation or while commands wait (a restart between freeze and thaw would break the freeze).
@@ -66,13 +67,16 @@ public static class AgentEndpoints
             return packages.FilePath(build, name) is { } path ? Results.File(path, "application/octet-stream") : Results.NotFound();
         });
 
+        MapTransfers(agent);
+
         var console = app.MapGroup("/api/agents");
 
-        console.MapGet("/", async (AppDbContext db, AgentService agents, AgentPackages packages, CancellationToken ct) =>
+        console.MapGet("/", async (AppDbContext db, AgentService agents, AgentRegistry registry, AgentPackages packages, CancellationToken ct) =>
         {
             var vms = await db.Inventory.AsNoTracking().Where(i => i.Kind == InventoryKind.Vm).ToListAsync(ct);
             var list = await db.Agents.AsNoTracking().OrderBy(a => a.HostName).ToListAsync(ct);
-            return list.Select(a => a.ToDto(agents.IsOnline(a.Id), vms.FirstOrDefault(v => v.NativeId == a.VmNativeId)?.Name, packages.Get(a.Build)?.FilesHash)).ToList();
+            return list.Select(a => a.ToDto(
+                agents.IsOnline(a.Id), vms.FirstOrDefault(v => v.NativeId == a.VmNativeId)?.Name, packages.Get(a.Build)?.FilesHash, registry.HasCapability(a.Id, AgentProtocol.CapabilityRestoreFiles))).ToList();
         });
 
         console.MapGet("/settings", async (AgentSettingsStore settings, AgentPackages packages, CancellationToken ct) => new AgentSettingsDto
@@ -239,7 +243,74 @@ public static class AgentEndpoints
         }
     }
 
-    private static AgentDto ToDto(this AgentEntity a, bool online, string? vmName, string? currentFilesHash) => new()
+    /// <summary>File restores into the guest (<see cref="AgentProtocol.TransfersPath"/>); only for the agent the transfer belongs to.</summary>
+    private static void MapTransfers(RouteGroupBuilder agent)
+    {
+        static async Task<(IResult? Error, FileRestore.AgentTransfer? Transfer)> FindAsync(Guid id, AgentService agents, FileRestore.AgentTransfers transfers, HttpContext http, CancellationToken ct)
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return (Results.Unauthorized(), null);
+            }
+
+            return transfers.Get(id, agentId) is { } transfer
+                ? (null, transfer)
+                : (Results.Problem("The restore is not running (any more): stopped, finished, or the server was restarted.", statusCode: StatusCodes.Status404NotFound), null);
+        }
+
+        agent.MapGet("/transfers/{id:guid}", async (Guid id, AgentService agents, FileRestore.AgentTransfers transfers, HttpContext http, CancellationToken ct) =>
+        {
+            var (error, transfer) = await FindAsync(id, agents, transfers, http, ct);
+            if (transfer is null)
+            {
+                return error!;
+            }
+
+            transfer.LastHeartbeat = transfers.Time.GetUtcNow();
+            return Results.Json(transfer.Info, AgentJson.Options);
+        });
+
+        agent.MapGet("/transfers/{id:guid}/items", async (Guid id, int? offset, int? limit, AgentService agents, FileRestore.AgentTransfers transfers, HttpContext http, CancellationToken ct) =>
+        {
+            var (error, transfer) = await FindAsync(id, agents, transfers, http, ct);
+            return transfer is null ? error! : Results.Json(transfers.Page(transfer, offset ?? 0, limit ?? 500), AgentJson.Options);
+        });
+
+        agent.MapGet("/transfers/{id:guid}/items/{index:int}/content", async (Guid id, int index, AgentService agents, FileRestore.AgentTransfers transfers, HttpContext http, CancellationToken ct) =>
+        {
+            var (error, transfer) = await FindAsync(id, agents, transfers, http, ct);
+            if (transfer is null)
+            {
+                return error!;
+            }
+
+            try
+            {
+                await transfers.StreamContentAsync(transfer, index, http.Response, ct);
+                return Results.Empty;
+            }
+            catch (Exception ex) when (ex is KeyNotFoundException or FileNotFoundException)
+            {
+                return Results.Problem(ex.Message, statusCode: StatusCodes.Status404NotFound);
+            }
+            catch (FileLevel.GuestFileUnsupportedException ex)
+            {
+                return Results.Problem($"{ex.Path} cannot be restored: {ex.Reason}.", statusCode: StatusCodes.Status409Conflict);
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or ObjectDisposedException)
+            {
+                return Results.Problem($"Reading it from the backup failed: {ex.Message}", statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
+        });
+
+        agent.MapPost("/transfers/{id:guid}/progress", async (Guid id, FileTransferProgress progress, AgentService agents, FileRestore.AgentTransfers transfers, HttpContext http, CancellationToken ct) =>
+        {
+            var (error, transfer) = await FindAsync(id, agents, transfers, http, ct);
+            return transfer is null ? error! : Results.Json(transfers.Report(transfer, progress), AgentJson.Options);
+        });
+    }
+
+    private static AgentDto ToDto(this AgentEntity a, bool online, string? vmName, string? currentFilesHash, bool canRestoreFiles) => new()
     {
         Id = a.Id,
         HostName = a.HostName,
@@ -257,5 +328,6 @@ public static class AgentEndpoints
         UpToDate = currentFilesHash is null || currentFilesHash == a.FilesHash,
         EnrolledUtc = a.EnrolledUtc,
         LastContactUtc = a.LastContactUtc,
+        CanRestoreFiles = canRestoreFiles,
     };
 }

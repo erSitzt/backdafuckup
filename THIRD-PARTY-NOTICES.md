@@ -14,6 +14,9 @@ backdafuckup uses the following third-party components. Keep this list in sync w
 | SMBLibrary (Tal Aloni) | LGPL-3.0 (used as unmodified library) | Smb (push installation of the guest agent over SMB 2/3) |
 | System.Text.Json, System.Management, System.ServiceProcess.ServiceController (Microsoft) | MIT | Guest agent |
 | Microsoft.NETFramework.ReferenceAssemblies | MIT | Guest agent (build of the .NET Framework 4.8 variant) |
+| LTRData.DiscUtils (Core, Streams, Ntfs, Fat, Lvm, Registry) | MIT | FileLevel (reading partitions and file systems of restore points) |
+| DiscUtils.Ext and DiscUtils.Xfs, vendored with changes in `src/ThirdParty` (see their `NOTICE.md`) | MIT | FileLevel (ext2/3/4 and XFS) |
+| System.IO.Hashing (Microsoft) | MIT | FileLevel (CRC-32 for ZIP downloads) |
 | mingw-w64 runtime (headers, libraries) and GCC runtime libraries | mingw-w64: ZPL / public domain; libgcc, libstdc++: GPL-3.0 with GCC Runtime Library Exception | bdfu-vss.dll (statically linked runtime) |
 
 Build tools (not shipped): mingw-w64 GCC (GPL-3.0) and osslsigncode (GPL-3.0) in the Docker image of `native/bdfu-vss`.
@@ -26,3 +29,4 @@ Specifications implemented from public documents (no code copied):
 - Microsoft Volume Shadow Copy Service documentation (requester, provider, COM+ registration)
 - MS-SCMR (Service Control Manager Remote Protocol) and MS-RPCE (NDR), for the svcctl client of the push installation
 - Microsoft VHD image format specification (VHD stream reader and writer)
+- PKWARE APPNOTE.TXT (ZIP and ZIP64 format), for the streaming ZIP writer of file-level restore downloads

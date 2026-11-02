@@ -16,4 +16,13 @@ public sealed class FileRestoreOptions
     public int WorkerThreads { get; set; } = 4;
 
     public int MaxPageSize { get; set; } = 1000;
+
+    /// <summary>How long a ZIP download link works (it also works only once and only for the user who made it).</summary>
+    public TimeSpan DownloadLinkLifetime { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>Files and folders in one ZIP download; larger selections should be restored to a share.</summary>
+    public long MaxZipEntries { get; set; } = 1_000_000;
+
+    /// <summary>Files and folders in one restore into a VM (the plan is kept in memory while the agent works).</summary>
+    public long MaxAgentTransferItems { get; set; } = 1_000_000;
 }

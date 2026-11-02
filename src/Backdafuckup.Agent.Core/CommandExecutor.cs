@@ -112,7 +112,10 @@ public sealed class CommandExecutor
                         (result.Thaw.Consistent ? "application-consistent." : $"not consistent (0x{result.Thaw.VssResult:X8})."));
                     break;
                 default:
-                    throw new InvalidOperationException("Unknown command " + command.Kind + " (agent older than the server?).");
+                    // Not Fail(): an unknown command must not abort a backup that is prepared or frozen right now.
+                    result.Error = "Unknown command " + command.Kind + " (agent older than the server?).";
+                    _log.Write(result.Error);
+                    return result;
             }
 
             result.Success = true;

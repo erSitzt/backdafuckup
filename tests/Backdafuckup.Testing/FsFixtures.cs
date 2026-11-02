@@ -59,17 +59,24 @@ public static class FsFixtures
     public static IReadOnlyList<string[]> Manifest(string name) =>
         [.. File.ReadAllLines(Path.Combine(Directory, name + ".manifest")).Where(l => l.Length > 0).Select(l => l.Split('\t'))];
 
+    /// <summary>Above the test binaries, or (for a separate output folder, --artifacts-path) next to this source file.</summary>
     private static string FindDirectory()
     {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        var starts = new[] { AppContext.BaseDirectory, Path.GetDirectoryName(SourceFile()) };
+        foreach (var start in starts.OfType<string>())
         {
-            var candidate = Path.Combine(dir.FullName, "tests", "fixtures", "fs-images");
-            if (File.Exists(Path.Combine(dir.FullName, "backdafuckup.slnx")) && System.IO.Directory.Exists(candidate))
+            for (var dir = new DirectoryInfo(start); dir is not null; dir = dir.Parent)
             {
-                return candidate;
+                var candidate = Path.Combine(dir.FullName, "tests", "fixtures", "fs-images");
+                if (File.Exists(Path.Combine(dir.FullName, "backdafuckup.slnx")) && System.IO.Directory.Exists(candidate))
+                {
+                    return candidate;
+                }
             }
         }
 
-        throw new DirectoryNotFoundException("tests/fixtures/fs-images not found above " + AppContext.BaseDirectory);
+        throw new DirectoryNotFoundException($"tests/fixtures/fs-images not found above {AppContext.BaseDirectory} or {SourceFile()}");
     }
+
+    private static string SourceFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
 }

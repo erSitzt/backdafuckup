@@ -145,6 +145,67 @@ Restore points show their consistency ("application", or "crash" plus the reason
 
 **Endpoint protection:** a push installation looks like lateral movement to EDR products (file copied to an admin share, service created remotely). See [Microsoft Defender for Endpoint](defender.md).
 
+## File-level restore
+
+*Backups & Restore → Restore files* opens a restore point in a file browser: volumes and folders on the left, the folder content on the right.
+
+**How it works**
+- The server reads the file systems straight from the repository. Nothing is mounted, no VM is started, and the backup is never changed.
+- It finds partitions (MBR, GPT) and LVM volume groups, also across several disks.
+- **Drive letters and mount points** come from the backup itself: Windows from the registry (`MountedDevices`), Linux from `/etc/fstab`. This also works for restore points taken without the agent.
+- **Readable:** NTFS, FAT, ext2/3/4 and XFS, also on linear LVM volumes.
+- **Not readable:** BitLocker, LUKS, ReFS, Btrfs, Storage Spaces, dynamic disks and striped or thin LVM volumes. The browser lists them with the reason.
+- **Crash-consistent restore points:** the file system journal is not replayed, so the newest changes before the snapshot can be missing. The browser shows a hint.
+
+**Downloads**
+- **One file** downloads as it is.
+- **Several files or folders** download as one ZIP file.
+  - The ZIP uses ZIP64, so files over 4 GiB and more than 65,535 entries work. One ZIP holds at most 1,000,000 files and folders (`FileRestore:MaxZipEntries`).
+  - It keeps modification times, Windows attributes (read-only, hidden, system) and Unix permissions.
+  - **Not in the ZIP:** symbolic links, junctions, special files and files whose content cannot be read correctly (deduplicated, EFS-encrypted, cloud placeholders). They are listed with the reason in `_backdafuckup-skipped.txt` inside the ZIP.
+  - **Changed names:** names that could leave the target folder when extracted get `_` instead: `\`, a leading drive letter such as `C:`, control characters, and names of only dots and spaces. A name that then collides gets ` (2)`.
+- **Errors while reading:** if a file cannot be read in the middle of a download (damaged repository), the download breaks off. The browser reports it as failed instead of saving a short file, and the session log names the file.
+- **Download links:** the browser first sends the selection and gets a link back. The link works once, for the same user, for 60 seconds (`FileRestore:DownloadLinkLifetime`).
+
+**Restore to a network share**
+- Select files or folders, choose *Restore… → Copy to a network share*, and enter the folder as `\\server\share\folder`. Missing folders are created, and the selected items go directly into that folder.
+- The account is a *Windows Credential* (`DOMAIN\user`) with write access to the folder.
+- The backup server connects over **SMB 445** (SMB 2/3, NTLMv2). The log names the server with its address, e.g. `fs01 (10.0.0.5):445`.
+- **Replace existing files** overwrites files of the same name. **Keep existing files** writes the restored file as `RESTORED-<name>` (then `RESTORED-<name> (2)`, …). Folders are merged in both modes.
+- **Kept:** content, modification and access times, the creation time of Windows files, and the attributes read-only, hidden, system and archive.
+- **Not kept:** permissions, owners, alternate data streams, and Linux permission bits. Hard links become separate copies.
+- **Left out and reported:** links and special files, files whose content cannot be read correctly, and Linux names that Windows does not allow (`\ : * ? " < > |`, a trailing dot or space, device names such as `CON`).
+- **Safe writes:** every file is written as `.bdfu-restore-<id>.tmp` and renamed when complete. A failed file never leaves half a file behind. If the backup service stops in the middle of a file, the temporary file can remain.
+- **Links on the share:** a link or junction in the way is never written through. Windows servers report them; Samba follows its own symbolic links on the server (`follow symlinks`, `wide links`) and shows them as normal folders.
+- **Progress and problems:** every restore is a session of type *FileRestore* under *Sessions*, with progress and one line per problem (the first 500).
+  - The session ends with *Warning* when something was left out.
+  - It stops early when the connection to the share is lost or after 100 errors in a row, for example when the share is full.
+  - *Stop* keeps what was restored so far.
+- **Limits:** at most 2 file restores run at the same time (`Engine:MaxConcurrentFileRestoreSessions`). A restore uses its own copy of the restore point, so it goes on when the browser closes.
+
+- **DFS namespaces:** a path such as `\\corp.example\dfs\Exchange` is resolved like Windows does (DFS referral over `IPC$`). The restore then works directly on the share the link points to, and the log shows the resolution (`DFS: … → \\fs01\exchange`).
+
+**Restore into a Windows VM (guest agent)**
+- *Restore… → Back into the VM* writes the files through the backdafuckup agent in the VM of the restore point. The agent must be online and at least the version that reports file restore (it updates itself after a server update).
+- **Original location:** the drive letter from the backup plus the original folder, e.g. `C:\Users\x\Documents`. Not available for volumes without a drive letter in the backup.
+- **Another folder:** e.g. `D:\Restore`; the selected items go directly into it. Missing folders are created.
+- **Permissions:** with *Restore owner and permissions*, owner, group and the explicit access rights (DACL) come from the backup. Inherited entries are taken from the target folder, as when copying in Windows. This is on by default for the original location and off for another folder, where local accounts and inheritance may not fit. The audit list (SACL) is not restored.
+- **How it works:** the server plans the items and the agent fetches them over its own HTTPS connection to the server (port 9555, outbound from the VM as for backups).
+  - Every file is written as `.bdfu-restore-<id>.tmp` next to its target and replaces the old file only when complete. A read-only, hidden or system file is replaced too.
+  - The agent reports the SHA-256 of every written file; the server compares it with what it sent.
+  - Files in use in the VM fail one by one and are listed; the rest goes on.
+- **Never written:** through links or junctions on the target (the item fails), into the agent's own folder, or outside the chosen location. Only local fixed volumes are accepted, no network or removable drives.
+- **Not restored yet:** symbolic links and junctions of the backup, alternate data streams, the sparse flag. Hard links become separate copies.
+- **Stop** lets the agent finish the current file. If the agent neither downloads nor reports for 5 minutes (`Agent:TransferSilenceLimit`), the restore fails; what was written stays. During the restore the agent does not update itself.
+
+**Audit trail:** every opened browser is a session of type *FileBrowse* under *Sessions*. Its log shows who opened which restore point, every download (files, folders and size, plus skipped items) and every restore started from it. *Stop* in the session closes the browser.
+
+**Limits and resources**
+- **Closing:** a browser closes after 30 minutes without use (`FileRestore:IdleTimeout`) and when the service restarts. At most 4 browsers are open at the same time (`FileRestore:MaxMounts`).
+- **Retention:** while a browser is open, its restore point is not deleted. Retention removes it at the next job run.
+- **Repositories:** a repository cannot be removed while a browser on it is open.
+- **Memory:** the browsers share a cache of 512 MiB (`FileRestore:CacheBytes`).
+
 ## Data and backups of the server itself
 
 | Path (Linux / Windows) | Content |

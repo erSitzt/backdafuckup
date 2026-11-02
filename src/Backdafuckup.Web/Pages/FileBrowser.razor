@@ -2,6 +2,8 @@
 @implements IAsyncDisposable
 @inject ApiClient Api
 @inject ISnackbar Snackbar
+@inject IJSRuntime JS
+@inject NavigationManager Navigation
 
 <PageTitle>Restore files – backdafuckup</PageTitle>
 
@@ -69,11 +71,20 @@ else
                         <MudIconButton Icon="@Icons.Material.Filled.ArrowUpward" Size="Size.Small" Disabled="@(_path.Count == 0)" OnClick="UpAsync" />
                         <MudBreadcrumbs Items="Breadcrumbs" Class="pa-0" />
                         <MudSpacer />
-                        <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Download"
-                                   Disabled="@(SingleDownload is null)" Href="@SingleDownload" Target="_blank">Download</MudButton>
-                        <MudTooltip Text="Restore into the VM or onto a share: coming next">
-                            <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Restore" Disabled="true">Restore…</MudButton>
+                        <MudTooltip Text="One file downloads as it is; several files or folders as a ZIP file.">
+                            @if (SingleDownload is { } single)
+                            {
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Download"
+                                           Href="@single" Target="_blank">Download</MudButton>
+                            }
+                            else
+                            {
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.FolderZip"
+                                           Disabled="@(_selected.Count == 0 || _preparing)" OnClick="DownloadZipAsync">@(_selected.Count > 0 ? $"Download ZIP ({_selected.Count})" : "Download")</MudButton>
+                            }
                         </MudTooltip>
+                        <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Restore"
+                                   Disabled="@(_selected.Count == 0)" OnClick="OpenRestoreAsync">Restore…</MudButton>
                     </MudStack>
                     @if (_loading)
                     {
@@ -122,6 +133,94 @@ else
     </MudGrid>
 }
 
+<MudDialog @bind-Visible="_restoreOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Small, FullWidth = true, CloseOnEscapeKey = true })">
+    <TitleContent>
+        <MudText Typo="Typo.h6">Restore @_selected.Count item(s)</MudText>
+        <MudText Typo="Typo.body2" Class="mono">@SelectionText</MudText>
+    </TitleContent>
+    <DialogContent>
+        <MudStack Spacing="3">
+            <MudRadioGroup T="string" Value="_restoreTarget" ValueChanged="OnTargetChanged">
+                <MudRadio T="string" Value="@("share")" Color="Color.Primary">Copy to a network share (SMB)</MudRadio>
+                @if (_volume?.Family == "windows")
+                {
+                    <MudRadio T="string" Value="@("vm")" Color="Color.Primary">Back into the VM @_mount?.VmName (guest agent)</MudRadio>
+                }
+                else
+                {
+                    <MudTooltip Text="Linux files go back into the VM over SSH: coming next">
+                        <MudRadio T="string" Value="@("vm")" Disabled="true">Back into the VM (SSH)</MudRadio>
+                    </MudTooltip>
+                }
+            </MudRadioGroup>
+            @if (_restoreTarget == "share")
+            {
+                <MudTextField T="string" @bind-Value="_sharePath" Label="Folder on the share" Placeholder="\\server\share\folder" Variant="Variant.Outlined"
+                              HelperText="The selected items go directly into this folder. Missing folders are created." />
+                @if (_credentials is { Count: 0 })
+                {
+                    <MudAlert Severity="Severity.Info" Dense="true">No Windows credential yet. Add one with write access to the share under <MudLink Href="/credentials">Windows Credentials</MudLink>.</MudAlert>
+                }
+                else
+                {
+                    <MudSelect T="Guid?" @bind-Value="_credentialId" Label="Account for the share" Variant="Variant.Outlined" HelperText="DOMAIN\user with write access to the folder.">
+                        @foreach (var credential in _credentials ?? [])
+                        {
+                            <MudSelectItem T="Guid?" Value="@credential.Id">@credential.UserName@(string.IsNullOrEmpty(credential.Description) ? "" : $" – {credential.Description}")</MudSelectItem>
+                        }
+                    </MudSelect>
+                }
+            }
+            else
+            {
+                @if (AgentProblem is { } problem)
+                {
+                    <MudAlert Severity="Severity.Warning" Dense="true">@problem</MudAlert>
+                }
+                else
+                {
+                    <MudText Typo="Typo.body2">Agent in @_agent!.HostName (@(_agent.IpAddresses ?? _agent.RemoteAddress)) is online.</MudText>
+                }
+                <MudRadioGroup T="bool" Value="_toOriginal" ValueChanged="OnLocationChanged">
+                    <MudRadio T="bool" Value="true" Color="Color.Primary" Disabled="@(OriginalLocation is null)">
+                        Original location@(OriginalLocation is { } original ? $": {original}" : " (the volume had no drive letter)")
+                    </MudRadio>
+                    <MudRadio T="bool" Value="false" Color="Color.Primary">Another folder in the VM</MudRadio>
+                </MudRadioGroup>
+                @if (!_toOriginal)
+                {
+                    <MudTextField T="string" @bind-Value="_guestFolder" Label="Folder in the VM" Placeholder="D:\Restore" Variant="Variant.Outlined"
+                                  HelperText="The selected items go directly into this folder. Missing folders are created." />
+                }
+                <MudCheckBox T="bool" @bind-Value="_restorePermissions" Color="Color.Primary"
+                             Label="Restore owner and permissions from the backup (otherwise they are inherited from the target folder)" />
+            }
+            <MudRadioGroup T="FileRestoreModeDto" @bind-Value="_restoreMode">
+                <MudRadio T="FileRestoreModeDto" Value="FileRestoreModeDto.Overwrite" Color="Color.Primary">Replace existing files</MudRadio>
+                <MudRadio T="FileRestoreModeDto" Value="FileRestoreModeDto.Keep" Color="Color.Primary">Keep existing files and restore as RESTORED-&lt;name&gt;</MudRadio>
+            </MudRadioGroup>
+            <MudText Typo="Typo.caption">
+                @if (_restoreTarget == "share")
+                {
+                    <span>Shares get the content, times and attributes, not the permissions. Links and special files are not restored.</span>
+                    @if (_volume?.Family == "unix")
+                    {
+                        <span> Names that Windows does not allow (with \ : * ? " &lt; &gt; | or a trailing dot) are reported and left out.</span>
+                    }
+                }
+                else
+                {
+                    <span>Every file is written under a temporary name and replaces the old one only when complete. Files in use in the VM are reported. Links and junctions are not restored yet.</span>
+                }
+            </MudText>
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="@(() => _restoreOpen = false)">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="StartRestoreAsync" Disabled="@(_starting || !CanStart)">Restore</MudButton>
+    </DialogActions>
+</MudDialog>
+
 @code {
     private const char Separator = '\u0001';
     private const int PageSize = 500;
@@ -140,6 +239,18 @@ else
     private int _total;
     private bool _loading;
     private bool _closed;
+    private bool _preparing;
+    private bool _restoreOpen;
+    private bool _starting;
+    private string _restoreTarget = "share";
+    private string? _sharePath;
+    private Guid? _credentialId;
+    private FileRestoreModeDto _restoreMode = FileRestoreModeDto.Overwrite;
+    private List<WindowsCredentialDto>? _credentials;
+    private AgentDto? _agent;
+    private bool _toOriginal = true;
+    private string? _guestFolder;
+    private bool _restorePermissions = true;
 
     protected override Task OnInitializedAsync() => OpenAsync();
 
@@ -295,6 +406,147 @@ else
 
             var path = string.Join('/', _path.Append(entry.Name));
             return $"api/file-restore/mounts/{_mount.Id}/file?volume={Uri.EscapeDataString(_volume.Id)}&path={Uri.EscapeDataString(path)}";
+        }
+    }
+
+    /// <summary>Posts the selection, then lets the browser fetch the ZIP from the one-time link it gets back.</summary>
+    private async Task DownloadZipAsync()
+    {
+        if (_mount is null || _volume is null || _selected.Count == 0)
+        {
+            return;
+        }
+
+        _preparing = true;
+        try
+        {
+            var paths = _selected.Select(e => string.Join('/', _path.Append(e.Name))).ToList();
+            var ticket = await Api.PostAsync<FileDownloadTicketDto>(
+                $"api/file-restore/mounts/{_mount.Id}/downloads", new FileDownloadRequestDto(_volume.Id, paths, TimeZoneInfo.Local.Id));
+            await JS.InvokeVoidAsync("bdfuDownload", ticket.Url);
+            var maySkip = _selected.Any(e => e.Kind != "file" || e.Unsupported is not null);
+            Snackbar.Add(
+                maySkip
+                    ? $"Downloading {ticket.FileName}. What a ZIP cannot hold (links, special or unreadable files) is listed in _backdafuckup-skipped.txt inside it."
+                    : $"Downloading {ticket.FileName}.",
+                Severity.Info);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _preparing = false;
+        }
+    }
+
+    private string SelectionText
+    {
+        get
+        {
+            var names = string.Join(", ", _selected.Take(3).Select(e => e.Name)) + (_selected.Count > 3 ? $" and {_selected.Count - 3} more" : string.Empty);
+            var separator = _volume?.Family == "unix" ? "/" : "\\";
+            var folder = _path.Count == 0 ? string.Empty : separator + string.Join(separator, _path);
+            return $"{names} from {_volume?.Title}{folder}";
+        }
+    }
+
+    /// <summary>Drive letter or mount point plus folder, e.g. C:\Users\x, if the volume had one in the backup.</summary>
+    private string? OriginalLocation =>
+        _volume?.MountPoint is { Length: >= 2 } mount && mount[1] == ':'
+            ? mount.TrimEnd('\\') + "\\" + string.Join('\\', _path)
+            : null;
+
+    private string? AgentProblem => _agent switch
+    {
+        null => $"No backdafuckup agent is installed in {_mount?.VmName}. Install it under Guest Agents, or restore to a share.",
+        { Online: false } a => $"The agent in {a.HostName} is offline since {a.LastContactUtc.ToLocalTime():g}. Start the VM, or restore to a share.",
+        { CanRestoreFiles: false } a => $"The agent in {a.HostName} (version {a.Version}) cannot restore files yet; it updates itself within a few minutes.",
+        _ => null,
+    };
+
+    private bool CanStart => _restoreTarget == "share"
+        ? !string.IsNullOrWhiteSpace(_sharePath) && _credentialId is not null
+        : AgentProblem is null && (_toOriginal ? OriginalLocation is not null : !string.IsNullOrWhiteSpace(_guestFolder));
+
+    private void OnTargetChanged(string target)
+    {
+        _restoreTarget = target;
+        if (target == "vm")
+        {
+            _toOriginal = OriginalLocation is not null;
+            _restorePermissions = _toOriginal;
+        }
+    }
+
+    /// <summary>Permissions fit the original location; in another folder (or another VM) local accounts and inheritance may not.</summary>
+    private void OnLocationChanged(bool original)
+    {
+        _toOriginal = original;
+        _restorePermissions = original;
+    }
+
+    private async Task OpenRestoreAsync()
+    {
+        try
+        {
+            _credentials = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
+            _credentialId ??= _credentials.Count == 1 ? _credentials[0].Id : null;
+            var agents = await Api.GetAsync<List<AgentDto>>("api/agents");
+            _agent = agents.Where(a => a.VmNativeId == _mount?.VmNativeId).OrderByDescending(a => a.LastContactUtc).FirstOrDefault();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+            return;
+        }
+
+        _restoreOpen = true;
+    }
+
+    private async Task StartRestoreAsync()
+    {
+        if (_mount is null || _volume is null || _selected.Count == 0)
+        {
+            return;
+        }
+
+        _starting = true;
+        try
+        {
+            var request = new FileRestoreRequestDto
+            {
+                RestorePointId = _mount.RestorePointId,
+                Volume = _volume.Id,
+                Paths = [.. _selected.Select(e => string.Join('/', _path.Append(e.Name)))],
+                Mode = _restoreMode,
+                Target = _restoreTarget == "share"
+                    ? new FileRestoreTargetDto { Kind = FileRestoreTargetKindDto.Share, SharePath = _sharePath?.Trim(), CredentialId = _credentialId }
+                    : new FileRestoreTargetDto { Kind = FileRestoreTargetKindDto.Agent, Folder = _toOriginal ? null : _guestFolder?.Trim(), RestorePermissions = _restorePermissions },
+                MountId = _mount.Id,
+            };
+            var started = await Api.PostAsync<StartedDto>("api/file-restore/restores", request);
+            _restoreOpen = false;
+            var where = _restoreTarget == "share" ? request.Target.SharePath : _toOriginal ? $"the original location in {_mount.VmName}" : $"{request.Target.Folder} in {_mount.VmName}";
+            Snackbar.Add($"File restore started to {where}.", Severity.Success, options =>
+            {
+                options.Action = "Show session";
+                options.ActionColor = Color.Primary;
+                options.OnClick = _ =>
+                {
+                    Navigation.NavigateTo($"sessions/{started.SessionId}");
+                    return Task.CompletedTask;
+                };
+            });
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _starting = false;
         }
     }
 

@@ -18,7 +18,41 @@ public sealed class AgentService(
     TimeProvider time,
     ILogger<AgentService> logger)
 {
+    private static readonly TimeSpan KeyCacheTime = TimeSpan.FromMinutes(1);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Guid AgentId, DateTimeOffset Until)> _keyCache = new(StringComparer.Ordinal);
+
     public AgentOptions Options => options.Value;
+
+    /// <summary>
+    /// <see cref="AuthenticateAsync"/> with a short cache, for the many requests of a file restore (one per file). A
+    /// removed agent keeps access for at most a minute.
+    /// </summary>
+    public async Task<Guid?> AuthenticateCachedAsync(string? key, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(key) || key.Length > 256)
+        {
+            return null;
+        }
+
+        var hash = Hash(key.Trim());
+        var now = time.GetUtcNow();
+        if (_keyCache.TryGetValue(hash, out var cached) && cached.Until > now)
+        {
+            return cached.AgentId;
+        }
+
+        var agentId = await AuthenticateAsync(key, cancellationToken).ConfigureAwait(false);
+        if (agentId is { } id)
+        {
+            _keyCache[hash] = (id, now + KeyCacheTime);
+        }
+        else
+        {
+            _keyCache.TryRemove(hash, out _);
+        }
+
+        return agentId;
+    }
 
     public bool IsOnline(Guid agentId) => registry.IsOnline(agentId, options.Value.OnlineWindow);
 

@@ -46,31 +46,7 @@ public sealed class SmbRemoteWindowsConnector : IRemoteWindowsConnector
 {
     public IRemoteWindows Connect(string address, string userName, string password, TimeSpan timeout)
     {
-        ArgumentNullException.ThrowIfNull(userName);
-        var (domain, user) = SplitUser(userName, address);
-        var client = new SMB2Client((int)timeout.TotalMilliseconds, enableSMB311Support: true);
-        var connected = IPAddress.TryParse(address, out var ip)
-            ? client.Connect(ip, SMBTransportType.DirectTCPTransport)
-            : client.Connect(address, SMBTransportType.DirectTCPTransport);
-        if (!connected)
-        {
-            throw new IOException($"No SMB connection to {address}:445 (firewall, or the guest is not a Windows computer with file sharing).");
-        }
-
-        var status = client.Login(domain, user, password ?? string.Empty, AuthenticationMethod.NTLMv2);
-        if (status != NTStatus.STATUS_SUCCESS)
-        {
-            client.Disconnect();
-            var reason = status switch
-            {
-                NTStatus.STATUS_LOGON_FAILURE => "wrong user name or password",
-                NTStatus.STATUS_ACCOUNT_RESTRICTION or NTStatus.STATUS_ACCOUNT_DISABLED => "the account is restricted or disabled",
-                NTStatus.STATUS_ACCESS_DENIED => "access denied (NTLM may be blocked by policy)",
-                _ => status.ToString(),
-            };
-            throw new UnauthorizedAccessException($"Logon as {userName} at {address}:445 failed: {reason}.");
-        }
-
+        var client = SmbLogon.Open(address, address, null, userName, password, timeout);
         return new SmbRemoteWindows(client, address);
     }
 

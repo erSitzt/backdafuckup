@@ -32,6 +32,7 @@
     <PackageVersion Include="LTRData.DiscUtils.Fat" Version="1.0.90" />
     <PackageVersion Include="LTRData.DiscUtils.Lvm" Version="1.0.90" />
     <PackageVersion Include="LTRData.DiscUtils.Registry" Version="1.0.90" />
+    <PackageVersion Include="System.IO.Hashing" Version="10.0.14" />
   </ItemGroup>
   <ItemGroup Label="Test">
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />

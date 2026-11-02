@@ -24,6 +24,9 @@ public sealed class AgentOptions
 
     public TimeSpan ThawTimeout { get; set; } = TimeSpan.FromMinutes(2);
 
+    /// <summary>A file restore into a VM fails when the agent neither downloads nor reports for this long.</summary>
+    public TimeSpan TransferSilenceLimit { get; set; } = TimeSpan.FromMinutes(5);
+
     /// <summary>Push installation: how long a started agent service must keep running to count as working.</summary>
     public TimeSpan ServiceStableTime { get; set; } = TimeSpan.FromSeconds(10);
 
@@ -56,6 +59,13 @@ public sealed class AgentRegistry(TimeProvider time)
     public DateTimeOffset? LastContact(Guid agentId) => _agents.TryGetValue(agentId, out var channel) ? channel.LastContact : null;
 
     public void Touch(Guid agentId) => Channel(agentId).LastContact = time.GetUtcNow();
+
+    /// <summary>What the agent reported it can do with its last poll (kept in memory; agents poll every ≤ 50 s).</summary>
+    public void SetCapabilities(Guid agentId, IReadOnlyCollection<string>? capabilities) =>
+        Channel(agentId).Capabilities = capabilities is null ? [] : [.. capabilities];
+
+    public bool HasCapability(Guid agentId, string capability) =>
+        _agents.TryGetValue(agentId, out var channel) && channel.Capabilities.Contains(capability, StringComparer.Ordinal);
 
     /// <summary>
     /// Marks the agent busy for an operation (prepare … thaw): no self-update is offered meanwhile, because a restart
@@ -154,6 +164,8 @@ public sealed class AgentRegistry(TimeProvider time)
         public Channel<AgentCommand> Commands { get; } = System.Threading.Channels.Channel.CreateUnbounded<AgentCommand>();
 
         public DateTimeOffset LastContact { get; set; }
+
+        public string[] Capabilities { get; set; } = [];
 
         public int OpenPolls => Volatile.Read(ref OpenPollCount);
     }

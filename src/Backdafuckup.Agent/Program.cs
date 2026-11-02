@@ -123,7 +123,12 @@ internal static class AgentHost
             }
         }
 
-        var runner = new AgentRunner(paths, new WindowsHostInfo(paths, () => vss.ProviderState), vss, log);
+#if NET48
+        // .NET Framework allows 2 connections per host: the long poll, a file restore download and its progress report
+        // need more at the same time.
+        System.Net.ServicePointManager.DefaultConnectionLimit = Math.Max(System.Net.ServicePointManager.DefaultConnectionLimit, 16);
+#endif
+        var runner = new AgentRunner(paths, new WindowsHostInfo(paths, () => vss.ProviderState), vss, log, restoreFiles: new WindowsRestoreFileSystem());
         var code = runner.RunAsync(stop).GetAwaiter().GetResult();
         log.Write(code == AgentProtocol.RestartExitCode ? "Restarting for the update." : "Stopped.");
         return code;

@@ -23,12 +23,18 @@ public sealed class AgentRunner
     private readonly CommandExecutor _executor;
     private readonly Func<AgentConfig, HttpMessageHandler> _handlerFactory;
     private readonly TimeSpan _retryDelay;
+    private readonly IRestoreFileSystem? _restoreFiles;
+    private readonly object _transferLock = new object();
+    private Task? _transfer;
+    private AgentConfig? _config;
     private AgentHostInfo? _hostInfo;
     private DateTime _hostInfoAt;
     private string? _failedUpdateHash;
 
-    public AgentRunner(AgentPaths paths, IHostInfoSource host, IVssBridge vss, AgentLog log, Func<AgentConfig, HttpMessageHandler>? handlerFactory = null, TimeSpan? retryDelay = null)
+    /// <param name="restoreFiles">File operations for file-level restores into this guest; null: the agent cannot restore files.</param>
+    public AgentRunner(AgentPaths paths, IHostInfoSource host, IVssBridge vss, AgentLog log, Func<AgentConfig, HttpMessageHandler>? handlerFactory = null, TimeSpan? retryDelay = null, IRestoreFileSystem? restoreFiles = null)
     {
+        _restoreFiles = restoreFiles;
         _paths = paths;
         _host = host;
         _log = log;
@@ -46,6 +52,7 @@ public sealed class AgentRunner
             try
             {
                 var config = ReadConfig();
+                _config = config;
                 using (var http = new HttpClient(_handlerFactory(config)) { BaseAddress = new Uri(config.ServerUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromMinutes(2) })
                 {
                     http.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, await GetOrEnrollAsync(http, config, stop).ConfigureAwait(false));
@@ -167,7 +174,7 @@ public sealed class AgentRunner
 
     private async Task ExecuteAsync(HttpClient http, AgentCommand command, CancellationToken stop)
     {
-        var result = _executor.Execute(command);
+        var result = command.Kind == AgentCommandKinds.RestoreFiles ? await StartTransferAsync(http, command, stop).ConfigureAwait(false) : _executor.Execute(command);
         for (var attempt = 1; attempt <= 3 && !stop.IsCancellationRequested; attempt++)
         {
             try
@@ -190,6 +197,56 @@ public sealed class AgentRunner
 
             await DelayAsync(TimeSpan.FromSeconds(1), stop).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Accepts a file restore and runs it in the background on its own connection (no total timeout: one file can take
+    /// long; same certificate pin). One transfer at a time.
+    /// </summary>
+    private async Task<AgentCommandResult> StartTransferAsync(HttpClient http, AgentCommand command, CancellationToken stop)
+    {
+        var result = new AgentCommandResult { CommandId = command.Id };
+        if (_restoreFiles is null || _config is null)
+        {
+            result.Error = "This agent cannot restore files.";
+            return result;
+        }
+
+        // The server considers a restore done with its final report; the task here ends a moment later. A restore
+        // started right after the previous one waits for that instead of being refused.
+        Task? previous;
+        lock (_transferLock)
+        {
+            previous = _transfer;
+        }
+
+        if (previous is { IsCompleted: false })
+        {
+            await Task.WhenAny(previous, Task.Delay(TimeSpan.FromSeconds(5), stop)).ConfigureAwait(false);
+        }
+
+        lock (_transferLock)
+        {
+            if (_transfer is { IsCompleted: false })
+            {
+                result.Error = "Another file restore is running in this guest; try again when it has finished.";
+                return result;
+            }
+
+            var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
+            client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
+            var transfer = new FileRestoreTransfer(client, command.TransferId, _restoreFiles, _log);
+            _transfer = Task.Run(async () =>
+            {
+                using (client)
+                {
+                    await transfer.RunAsync(stop).ConfigureAwait(false);
+                }
+            });
+        }
+
+        result.Success = true;
+        return result;
     }
 
     /// <summary>
@@ -270,6 +327,11 @@ public sealed class AgentRunner
         if (force || _hostInfo is null || DateTime.UtcNow - _hostInfoAt > TimeSpan.FromMinutes(10))
         {
             _hostInfo = _host.Collect();
+            if (_restoreFiles is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilityRestoreFiles))
+            {
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilityRestoreFiles);
+            }
+
             _hostInfoAt = DateTime.UtcNow;
         }
 

@@ -11,7 +11,8 @@ internal sealed class FatGuestFileSystem(DiscFileSystem fs) : IGuestFileSystem, 
 
     public string Type => "FAT";
 
-    public string Label => fs.VolumeLabel?.Trim() ?? string.Empty;
+    /// <summary>The volume label; "NO NAME" is what FAT stores for "no label" (e.g. on EFI system partitions).</summary>
+    public string Label => fs.VolumeLabel?.Trim() is { Length: > 0 } label && label != "NO NAME" ? label : string.Empty;
 
     public GuestEntry Stat(GuestPath path)
     {

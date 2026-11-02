@@ -12,5 +12,6 @@
     <PackageReference Include="LTRData.DiscUtils.Fat" />
     <PackageReference Include="LTRData.DiscUtils.Lvm" />
     <PackageReference Include="LTRData.DiscUtils.Registry" />
+    <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>
 </Project>

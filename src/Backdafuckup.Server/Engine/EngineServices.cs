@@ -19,6 +19,7 @@ public sealed class SessionRunnerService(
     RestoreSessionRunner restores,
     MaintenanceSessionRunner maintenance,
     Agents.AgentDeploymentRunner deployments,
+    FileRestore.FileRestoreSessionRunner fileRestores,
     StartupRecovery recovery,
     IOptions<EngineOptions> options,
     TimeProvider time,
@@ -91,6 +92,7 @@ public sealed class SessionRunnerService(
         SessionKind.Restore => running.Count(SessionKind.Restore) < options.Value.MaxConcurrentRestoreSessions,
         SessionKind.RepositoryMaintenance => running.Count(SessionKind.RepositoryMaintenance) == 0 && running.Count(SessionKind.Backup) == 0,
         SessionKind.AgentDeployment => running.Count(SessionKind.AgentDeployment) < 2,
+        SessionKind.FileRestore => running.Count(SessionKind.FileRestore) < options.Value.MaxConcurrentFileRestoreSessions,
         _ => false,
     };
 
@@ -108,6 +110,7 @@ public sealed class SessionRunnerService(
                 SessionKind.Restore => await restores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.RepositoryMaintenance => await maintenance.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.AgentDeployment => await deployments.RunAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.FileRestore => await fileRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 _ => (SessionState.Failed, "Unknown session kind."),
             };
 
@@ -447,6 +450,10 @@ public static class EngineServiceCollectionExtensions
         });
         services.AddSingleton(sp => new FileLevel.FileLevelWorkers(Math.Max(1, sp.GetRequiredService<IOptions<FileRestore.FileRestoreOptions>>().Value.WorkerThreads)));
         services.AddSingleton<FileRestore.FileRestoreMounts>();
+        services.AddSingleton<FileRestore.FileRestoreDownloads>();
+        services.AddSingleton<FileRestore.FileRestoreSessionRunner>();
+        services.AddSingleton<FileRestore.AgentTransfers>();
+        services.TryAddSingleton<Backdafuckup.Smb.ISmbShareConnector, Backdafuckup.Smb.SmbShareConnector>();
         services.AddHostedService<FileRestore.FileRestoreSweeper>();
         return services;
     }

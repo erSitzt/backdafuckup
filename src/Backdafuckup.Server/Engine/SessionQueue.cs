@@ -57,6 +57,22 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Queues a file-level restore (files and folders of one restore point to a target).</summary>
+    public async Task<Guid> EnqueueFileRestoreAsync(FileRestoreRequestDto request, string vmName, string triggeredBy, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var session = new SessionEntity
+        {
+            Kind = SessionKind.FileRestore,
+            Name = $"Restore files {vmName}",
+            TriggeredBy = triggeredBy,
+            State = SessionState.Queued,
+            CreatedUtc = time.GetUtcNow(),
+            Parameters = JsonSerializer.Serialize(request),
+        };
+        return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Queues a push installation of the guest agent into the given VMs.</summary>
     public async Task<Guid> EnqueueAgentDeploymentAsync(InstallAgentsDto request, string triggeredBy, CancellationToken cancellationToken)
     {

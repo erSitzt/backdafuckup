@@ -14,7 +14,8 @@ public sealed record FileMountDto(
     string? ConsistencyReason,
     IReadOnlyList<GuestVolumeDto> Volumes,
     IReadOnlyList<string> Warnings,
-    int IdleTimeoutMinutes);
+    int IdleTimeoutMinutes,
+    string VmNativeId);
 
 /// <param name="Title">Display name: drive letter or mount point, label, otherwise the id.</param>
 /// <param name="Family">"windows" or "unix" for readable volumes.</param>
@@ -47,3 +48,67 @@ public sealed record GuestEntryDto(
     string? Unsupported);
 
 public sealed record GuestEntryPageDto(string Volume, string Path, int Total, int Offset, IReadOnlyList<GuestEntryDto> Entries);
+
+/// <summary>Files and folders of one folder to download as a ZIP.</summary>
+/// <param name="Paths">Paths inside the volume with "/" as separator; all in the same folder.</param>
+/// <param name="TimeZone">IANA or Windows id of the browser's time zone, for the MS-DOS times in the ZIP.</param>
+public sealed record FileDownloadRequestDto(string Volume, IReadOnlyList<string> Paths, string? TimeZone);
+
+/// <param name="Url">Relative URL of the ZIP. It works once, for the same user, within <paramref name="ExpiresInSeconds"/>.</param>
+public sealed record FileDownloadTicketDto(string Url, string FileName, int ExpiresInSeconds);
+
+public enum FileRestoreModeDto
+{
+    /// <summary>Existing files are replaced.</summary>
+    Overwrite,
+
+    /// <summary>Existing files stay; restored files are written as RESTORED-&lt;name&gt;.</summary>
+    Keep,
+}
+
+public enum FileRestoreTargetKindDto
+{
+    /// <summary>A folder on an SMB share (\\server\share\folder) with a Windows credential.</summary>
+    Share,
+
+    /// <summary>Into a Windows VM through its guest agent: the original location or another folder.</summary>
+    Agent,
+}
+
+public sealed record FileRestoreTargetDto
+{
+    public FileRestoreTargetKindDto Kind { get; init; }
+
+    /// <summary>Share target: \\server\share\folder. Missing folders are created.</summary>
+    public string? SharePath { get; init; }
+
+    /// <summary>Share target: a Windows credential (DOMAIN\user) with write access.</summary>
+    public Guid? CredentialId { get; init; }
+
+    /// <summary>Agent target: the VM to restore into; null is the VM of the restore point.</summary>
+    public string? VmNativeId { get; init; }
+
+    /// <summary>Agent target: a folder in the VM (D:\Restore); null restores to the original location.</summary>
+    public string? Folder { get; init; }
+
+    /// <summary>Agent target: apply owner and permissions from the backup (NTFS sources).</summary>
+    public bool RestorePermissions { get; init; }
+}
+
+/// <summary>Restores files and folders of one folder of a restore point volume (a session of kind FileRestore).</summary>
+public sealed record FileRestoreRequestDto
+{
+    public required Guid RestorePointId { get; init; }
+
+    public required string Volume { get; init; }
+
+    /// <summary>Paths inside the volume with "/" as separator; all in the same folder.</summary>
+    public required IReadOnlyList<string> Paths { get; init; }
+
+    public FileRestoreModeDto Mode { get; init; }
+
+    public required FileRestoreTargetDto Target { get; init; }
+
+    /// <summary>The file browser the restore was started from; its session log records the restore.</summary>
+    public Guid? MountId { get; init; }
+}

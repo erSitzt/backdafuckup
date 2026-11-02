@@ -88,7 +88,8 @@ public sealed class FileRestoreMounts(
         mount.Point.ConsistencyReason,
         [.. mount.Image.Volumes.Select(ToDto)],
         mount.Image.Warnings,
-        (int)options.Value.IdleTimeout.TotalMinutes);
+        (int)options.Value.IdleTimeout.TotalMinutes,
+        mount.Point.VmNativeId);
 
     public async Task<GuestEntryPageDto> ListAsync(BrowseMount mount, string volume, GuestPath path, int offset, int limit, CancellationToken cancellationToken)
     {
@@ -110,6 +111,9 @@ public sealed class FileRestoreMounts(
     public async Task StreamFileAsync(BrowseMount mount, string volume, GuestPath path, HttpResponse response, CancellationToken cancellationToken)
     {
         using var lease = mount.Lease();
+
+        // Also stops the reader thread when the response fails for another reason than the browser going away.
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var ready = new TaskCompletionSource<GuestEntry>(TaskCreationOptions.RunContinuationsAsynchronously);
         var pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 4 << 20, resumeWriterThreshold: 2 << 20));
         long copied = 0;
@@ -128,7 +132,7 @@ public sealed class FileRestoreMounts(
                     int n;
                     while ((n = input.Read(buffer)) > 0)
                     {
-                        cancellationToken.ThrowIfCancellationRequested();
+                        stop.Token.ThrowIfCancellationRequested();
                         output.Write(buffer, 0, n);
                         copied += n;
                     }
@@ -151,6 +155,7 @@ public sealed class FileRestoreMounts(
         }
         catch
         {
+            await stop.CancelAsync().ConfigureAwait(false);
             await pipe.Reader.CompleteAsync().ConfigureAwait(false);
             await ObserveAsync(producer).ConfigureAwait(false);
             throw;
@@ -169,10 +174,19 @@ public sealed class FileRestoreMounts(
         }
         catch (Exception ex)
         {
+            await stop.CancelAsync().ConfigureAwait(false);
             await pipe.Reader.CompleteAsync(ex).ConfigureAwait(false);
             await ObserveAsync(producer).ConfigureAwait(false);
             mount.Log.Warning($"Download of {Describe(mount, volume, path)} by {mount.User} broke off after {Fmt(copied)}: {ex.Message}");
-            throw;
+            if (!response.HasStarted)
+            {
+                response.ContentLength = null;
+                response.Headers.ContentDisposition = default;
+                throw;
+            }
+
+            // Too late for an error response: abort, so the browser reports a failed download, not a short file.
+            response.HttpContext.Abort();
         }
     }
 
@@ -268,15 +282,9 @@ public sealed class FileRestoreMounts(
             }
 
             reader = await repository.OpenRestorePointAsync(point.Id, cancellationToken).ConfigureAwait(false);
-            var disks = new List<GuestDiskSource>();
-            foreach (var disk in reader.Manifest.Disks)
-            {
-                var index = await reader.ReadDiskIndexAsync(disk.Key, cancellationToken).ConfigureAwait(false);
-                var chunks = reader.Chunks;
-                disks.Add(new GuestDiskSource(disk.Key, disk.Name, () => new RestorePointDiskStream(index, chunks, cache)));
-            }
+            var disks = await OpenDisksAsync(reader, cache, cancellationToken).ConfigureAwait(false);
 
-            var browsed = new BrowsedRestorePoint(point.Id, point.RepositoryId, point.VmName, point.CreatedUtc, point.Consistency, point.ConsistencyReason);
+            var browsed = new BrowsedRestorePoint(point.Id, point.RepositoryId, point.VmName, point.VmNativeId, point.CreatedUtc, point.Consistency, point.ConsistencyReason);
             sessionId = await CreateSessionAsync(browsed, user, cancellationToken).ConfigureAwait(false);
             var log = events.CreateLog(sessionId.Value, null);
             log.Info($"Opened by {user}: restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} ({point.Consistency}-consistent), {disks.Count} disk(s).");
@@ -285,7 +293,7 @@ public sealed class FileRestoreMounts(
             {
                 if (volume.Readable)
                 {
-                    log.Info($"Volume {Title(volume)}: {volume.FileSystem}, {Fmt(volume.Length)}.");
+                    log.Info($"Volume {Title(volume)} ({volume.FileSystem}, {Fmt(volume.Length)}).");
                 }
                 else
                 {
@@ -328,6 +336,67 @@ public sealed class FileRestoreMounts(
             logger.LogWarning(ex, "Opening restore point {RestorePoint} for file-level restore failed.", restorePointId);
             throw;
         }
+    }
+
+    /// <summary>A selection of one folder: 1 to 10,000 paths, all in the same folder, not the volume root (400 otherwise).</summary>
+    internal static List<GuestPath> ParseSelection(IReadOnlyList<string>? paths)
+    {
+        const int maxSelection = 10_000;
+        if (paths is not { Count: > 0 })
+        {
+            throw new ArgumentException("Select at least one file or folder.");
+        }
+
+        if (paths.Count > maxSelection)
+        {
+            throw new ArgumentException($"Select at most {maxSelection:N0} items; select their folder instead.");
+        }
+
+        var parsed = paths.Select(GuestPath.Parse).Distinct().ToList();
+        if (parsed.Any(p => p.IsRoot))
+        {
+            throw new ArgumentException("Select files or folders inside the volume, not the volume itself.");
+        }
+
+        var parent = parsed[0].Parent!;
+        if (parsed.Any(p => !p.Parent!.Equals(parent)))
+        {
+            throw new ArgumentException("All selected items must be in the same folder.");
+        }
+
+        return parsed;
+    }
+
+    /// <summary>Checks on a worker thread that the volume is readable and every selected item exists (404 otherwise).</summary>
+    internal Task CheckSelectionAsync(BrowseMount mount, string volume, IReadOnlyList<GuestPath> paths, CancellationToken cancellationToken) =>
+        workers.Run(
+            () =>
+            {
+                lock (mount.Gate)
+                {
+                    var fs = mount.Image.OpenFileSystem(volume);
+                    foreach (var path in paths)
+                    {
+                        fs.Stat(path);
+                    }
+                }
+
+                return true;
+            },
+            cancellationToken);
+
+    /// <summary>The disks of a restore point as sources for <see cref="GuestImage"/> (indexes read once, chunks through the cache).</summary>
+    internal static async Task<List<GuestDiskSource>> OpenDisksAsync(IRestorePointReader reader, ChunkCache cache, CancellationToken cancellationToken)
+    {
+        var disks = new List<GuestDiskSource>();
+        foreach (var disk in reader.Manifest.Disks)
+        {
+            var index = await reader.ReadDiskIndexAsync(disk.Key, cancellationToken).ConfigureAwait(false);
+            var chunks = reader.Chunks;
+            disks.Add(new GuestDiskSource(disk.Key, disk.Name, () => new RestorePointDiskStream(index, chunks, cache)));
+        }
+
+        return disks;
     }
 
     private async Task<Guid> CreateSessionAsync(BrowsedRestorePoint point, string user, CancellationToken cancellationToken)
@@ -385,28 +454,32 @@ public sealed class FileRestoreMounts(
         e.LinkTarget,
         e.Unsupported);
 
-    private static string Title(GuestVolume v)
+    internal static string Title(GuestVolume v)
     {
         var name = v.MountPoint ?? (string.IsNullOrEmpty(v.Label) ? null : v.Label) ?? v.LvmName ?? v.PartitionType ?? v.Id;
         return v.MountPoint is not null && !string.IsNullOrEmpty(v.Label) ? $"{name} ({v.Label})" : name;
     }
 
-    private static string Describe(BrowseMount mount, string volume, GuestPath path)
+    internal static string Describe(BrowseMount mount, string volume, GuestPath path) =>
+        Describe(mount.Image.Volumes.FirstOrDefault(x => x.Id == volume), volume, path);
+
+    /// <summary>A guest path as the user knows it: <c>C:\Users\x</c> or <c>/home/x</c>.</summary>
+    internal static string Describe(GuestVolume? v, string volume, GuestPath path)
     {
-        var v = mount.Image.Volumes.FirstOrDefault(x => x.Id == volume);
-        var prefix = v is null ? volume : Title(v);
+        // The drive letter or mount point alone ("C:", "/home"); a label would make the path unreadable.
+        var prefix = v?.MountPoint ?? (v is null ? volume : Title(v));
         return v?.FileSystem is "NTFS" or "FAT"
             ? $"{prefix.TrimEnd('\\')}\\{string.Join('\\', path.Components)}"
             : $"{prefix.TrimEnd('/')}{path}";
     }
 
-    private static string AsciiName(string name)
+    internal static string AsciiName(string name)
     {
         var ascii = new string([.. name.Select(ch => ch is >= ' ' and < (char)127 and not '"' and not '\\' ? ch : '_')]);
         return string.IsNullOrWhiteSpace(ascii) ? "download" : ascii;
     }
 
-    private static string Fmt(long bytes) => bytes switch
+    internal static string Fmt(long bytes) => bytes switch
     {
         >= 1L << 30 => $"{bytes / (double)(1L << 30):0.##} GiB",
         >= 1L << 20 => $"{bytes / (double)(1L << 20):0.##} MiB",
@@ -414,7 +487,7 @@ public sealed class FileRestoreMounts(
         _ => $"{bytes} bytes",
     };
 
-    private static async Task ObserveAsync(Task task)
+    internal static async Task ObserveAsync(Task task)
     {
         try
         {
@@ -428,7 +501,7 @@ public sealed class FileRestoreMounts(
 }
 
 /// <summary>Closes idle file browsers every minute and all of them when the service stops.</summary>
-public sealed class FileRestoreSweeper(FileRestoreMounts mounts, ILogger<FileRestoreSweeper> logger) : BackgroundService
+public sealed class FileRestoreSweeper(FileRestoreMounts mounts, FileRestoreDownloads downloads, TimeProvider time, ILogger<FileRestoreSweeper> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -440,6 +513,7 @@ public sealed class FileRestoreSweeper(FileRestoreMounts mounts, ILogger<FileRes
                 try
                 {
                     await mounts.SweepAsync().ConfigureAwait(false);
+                    downloads.Purge(time.GetUtcNow());
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
