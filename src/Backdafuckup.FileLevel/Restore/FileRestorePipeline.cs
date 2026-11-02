@@ -221,6 +221,13 @@ public static class FileRestorePipeline
                     case GuestEntryKind.File:
                         RestoreFile(step.Source, entry, step.Target, source);
                         break;
+                    case GuestEntryKind.Symlink when target is ILinkRestoreTarget links && entry.LinkTarget is { Length: > 0 } linkTarget:
+                        Guard(source, target.Describe(step.Target), () =>
+                        {
+                            links.CreateSymbolicLink(step.Target, linkTarget, Meta(entry));
+                            return null;
+                        });
+                        break;
                     case GuestEntryKind.Symlink:
                         Skip(source, $"symbolic link to {entry.LinkTarget}; links are not restored to this target");
                         break;
@@ -366,10 +373,10 @@ public static class FileRestorePipeline
             return null;
         }
 
-        private void ApplyMetadata(GuestPath sourcePath, GuestEntry entry, string[] path, bool isDirectory)
+        private RestoredItemMeta Meta(GuestEntry entry)
         {
             const FileAttributes kept = FileAttributes.ReadOnly | FileAttributes.Hidden | FileAttributes.System | FileAttributes.Archive;
-            var meta = new RestoredItemMeta(
+            return new RestoredItemMeta(
                 _unix ? null : entry.CreatedUtc,
                 entry.ModifiedUtc,
                 entry.AccessedUtc,
@@ -377,6 +384,11 @@ public static class FileRestorePipeline
                 entry.Mode,
                 entry.UserId,
                 entry.GroupId);
+        }
+
+        private void ApplyMetadata(GuestPath sourcePath, GuestEntry entry, string[] path, bool isDirectory)
+        {
+            var meta = Meta(entry);
             try
             {
                 target.SetMetadata(path, meta, isDirectory);

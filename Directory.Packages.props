@@ -24,6 +24,7 @@
     <PackageVersion Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" />
     <!-- Push installation of the guest agent (SMB 2/3 client, LGPL-3.0) -->
     <PackageVersion Include="SMBLibrary" Version="1.5.8.1" />
+    <PackageVersion Include="SSH.NET" Version="2026.0.0" />
     <!-- File-level restore: partitions and file systems (MIT). The ext and XFS providers are vendored and patched
          in src/ThirdParty (see their NOTICE.md); keep their upstream commit in step with these versions. -->
     <PackageVersion Include="LTRData.DiscUtils.Core" Version="1.0.90" />

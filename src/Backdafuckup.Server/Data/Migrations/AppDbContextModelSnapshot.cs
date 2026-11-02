@@ -1112,6 +1112,53 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.ToTable("session_tasks", (string)null);
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.SshHostKeyEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Fingerprint")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("fingerprint");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("host");
+
+                    b.Property<string>("KeyType")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("key_type");
+
+                    b.Property<int>("Port")
+                        .HasColumnType("integer")
+                        .HasColumnName("port");
+
+                    b.Property<string>("TrustedBy")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("trusted_by");
+
+                    b.Property<DateTimeOffset>("TrustedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("trusted_utc");
+
+                    b.HasKey("Id")
+                        .HasName("pk_ssh_host_keys");
+
+                    b.HasIndex("Host", "Port")
+                        .IsUnique()
+                        .HasDatabaseName("ix_ssh_host_keys_host_port");
+
+                    b.ToTable("ssh_host_keys", (string)null);
+                });
+
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole<System.Guid>", b =>
                 {
                     b.Property<Guid>("Id")

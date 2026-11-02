@@ -9,6 +9,7 @@ using Backdafuckup.Server.Agents;
 using Backdafuckup.Server.Data;
 using Backdafuckup.Server.Engine;
 using Backdafuckup.Smb;
+using Backdafuckup.Ssh;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -26,6 +27,8 @@ public sealed class FileRestoreSessionRunner(
     SessionTracker tracker,
     CredentialProtector protector,
     ISmbShareConnector shares,
+    ISshConnector ssh,
+    ConnectionManager connections,
     AgentService agents,
     AgentRegistry registry,
     AgentTransfers transfers,
@@ -69,9 +72,12 @@ public sealed class FileRestoreSessionRunner(
                 log.Info("The restore point is crash-consistent: the newest changes before the snapshot may be missing in some files.");
             }
 
-            var (result, targetText, targetWarnings) = request.Target.Kind == FileRestoreTargetKindDto.Agent
-                ? await RunAgentAsync(request, point, disks, paths, log, progress, cancellationToken).ConfigureAwait(false)
-                : await RunShareAsync(request, point, disks, paths, log, progress, cancellationToken).ConfigureAwait(false);
+            var (result, targetText, targetWarnings) = request.Target.Kind switch
+            {
+                FileRestoreTargetKindDto.Agent => await RunAgentAsync(request, point, disks, paths, log, progress, cancellationToken).ConfigureAwait(false),
+                FileRestoreTargetKindDto.Ssh => await RunSshAsync(request, point, disks, paths, log, progress, session.TriggeredBy, cancellationToken).ConfigureAwait(false),
+                _ => await RunShareAsync(request, point, disks, paths, log, progress, cancellationToken).ConfigureAwait(false),
+            };
             var done = result;
             var final = progress.Final(done.Files, done.Bytes);
             var summary = $"{done.Files:N0} file(s) in {done.Directories:N0} folder(s) restored, {VmBackupTask.Format(done.Bytes)}, to {targetText}";
@@ -291,6 +297,175 @@ public sealed class FileRestoreSessionRunner(
         {
             transfers.Remove(transfer);
         }
+    }
+
+    /// <summary>
+    /// Into a Linux VM over SSH: uploads the selection into a staging folder (the pipeline), then the restore script
+    /// puts it in place as root. Per-item results of the script adjust the counts of the upload.
+    /// </summary>
+    private async Task<(FileRestoreResult Result, string Target, int Warnings)> RunSshAsync(
+        FileRestoreRequestDto request, RestorePointEntity point, List<GuestDiskSource> disks, List<GuestPath> paths, IOperationLog log, RestoreProgress progress, string user, CancellationToken cancellationToken)
+    {
+        var (userName, secret) = await LinuxLoginAsync(request.Target.CredentialId, cancellationToken).ConfigureAwait(false);
+        var login = new SshLogin(userName, secret.Password, secret.PrivateKey, secret.Passphrase, secret.SudoPassword);
+        var port = request.Target.Port ?? 22;
+        IReadOnlyList<string> addresses = !string.IsNullOrWhiteSpace(request.Target.Address) ? [request.Target.Address.Trim()] : await GuestAddressesAsync(point, cancellationToken).ConfigureAwait(false);
+        if (addresses.Count == 0)
+        {
+            throw new InvalidOperationException($"The guest tools of {point.VmName} report no IP address (VM off, or no guest tools). Enter the address of the VM.");
+        }
+
+        FileRestoreResult? result = null;
+        string targetText = string.Empty;
+        await FileLevelWorkers.RunDedicated(
+            () =>
+            {
+                using var image = GuestImage.Open(disks);
+                var volume = ReadableVolume(image, request.Volume);
+                if (volume.FileSystem is not ("ext" or "XFS"))
+                {
+                    throw new InvalidOperationException($"Volume {FileRestoreMounts.Title(volume)} is {volume.FileSystem}; SSH restores files of Linux volumes. Restore Windows files through the agent.");
+                }
+
+                var fs = image.OpenFileSystem(volume.Id);
+                string Describe(GuestPath path) => FileRestoreMounts.Describe(volume, volume.Id, path);
+                var parent = paths[0].Parent!;
+                string scriptRoot;
+                string baseFolder;
+                if (string.IsNullOrWhiteSpace(request.Target.Folder))
+                {
+                    var mount = volume.MountPoint;
+                    if (mount is null || !mount.StartsWith('/'))
+                    {
+                        throw new InvalidOperationException($"Volume {FileRestoreMounts.Title(volume)} had no mount point in the backup's /etc/fstab, so there is no original location. Choose a folder in the VM.");
+                    }
+
+                    scriptRoot = mount;
+                    baseFolder = mount.TrimEnd('/') + parent;
+                    targetText = $"{point.VmName}, original location {Describe(parent)}";
+                }
+                else
+                {
+                    scriptRoot = SshTargetPaths.Normalize(request.Target.Folder) ?? throw new ArgumentException($"'{request.Target.Folder}' is not an absolute folder in the VM.");
+                    baseFolder = scriptRoot;
+                    targetText = $"{point.VmName}, folder {scriptRoot}";
+                }
+
+                var errors = new List<string>();
+                ISshSession? connected = null;
+                foreach (var address in addresses)
+                {
+                    try
+                    {
+                        connected = ssh.Connect(address, port, login, new DbHostKeyStore(dbFactory, time, user, note => log.Info(note)), TimeSpan.FromSeconds(30));
+                        break;
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        // The same account fails on every address.
+                        throw;
+                    }
+                    catch (IOException ex)
+                    {
+                        errors.Add(ex.Message);
+                    }
+                }
+
+                using var sshSession = connected ?? throw new IOException(string.Join(" ", errors));
+                log.Info($"Restoring {Names(paths)} from {Describe(parent)} (restore point of {point.CreatedUtc.ToLocalTime():g}) into {targetText} over SSH. " +
+                    ModeText(request.Mode) + (request.Target.RestorePermissions ? " Owner and group come from the backup." : " Owner and group are those of the restore folder."));
+                log.Info($"Connected to {sshSession.Endpoint} as {userName}" + (sshSession.IsRoot ? "." : "; the files are put in place as root through sudo."));
+                var stage = sshSession.CreateStaging();
+                try
+                {
+                    var target = new SshStagingTarget(sshSession, stage, baseFolder, point.VmName);
+                    var checking = new SpaceCheck(progress, bytes =>
+                    {
+                        if (sshSession.FreeBytes(stage) is { } free && bytes > free)
+                        {
+                            throw new IOException($"The selection needs {VmBackupTask.Format(bytes)} in /var/tmp on {sshSession.Endpoint}, but only {VmBackupTask.Format(free)} are free.");
+                        }
+                    });
+                    var uploaded = FileRestorePipeline.Run(
+                        fs,
+                        paths,
+                        target,
+                        new FileRestorePipelineOptions { Mode = request.Mode == FileRestoreModeDto.Keep ? FileRestoreMode.Keep : FileRestoreMode.Overwrite, Describe = Describe },
+                        checking,
+                        cancellationToken);
+                    log.Info($"{uploaded.Files:N0} file(s) uploaded to {stage}; putting them in place as root.");
+                    var applied = target.Apply(request.Mode == FileRestoreModeDto.Keep, request.Target.RestorePermissions, scriptRoot, cancellationToken);
+                    foreach (var (entry, reason) in applied.Failed)
+                    {
+                        progress.Problem(new FileRestoreProblem(FileRestoreProblemKind.Failed, target.Display(entry), null, reason));
+                    }
+
+                    foreach (var (entry, reason) in applied.Partial)
+                    {
+                        progress.Problem(new FileRestoreProblem(FileRestoreProblemKind.Incomplete, target.Display(entry), null, $"restored, but {reason}"));
+                    }
+
+                    foreach (var (entry, newPath) in applied.Renamed)
+                    {
+                        progress.Renamed(target.Display(entry), newPath);
+                    }
+
+                    result = uploaded with
+                    {
+                        Files = applied.Restored.Count,
+                        Bytes = applied.Restored.Sum(e => e.Size),
+                        Directories = Math.Max(0, uploaded.Directories - applied.Failed.Count(f => f.Entry.Kind == 'D')),
+                        Renamed = applied.Renamed.Count,
+                        Failed = uploaded.Failed + applied.Failed.Count,
+                        Incomplete = uploaded.Incomplete + applied.Partial.Count,
+                    };
+                }
+                finally
+                {
+                    sshSession.RemoveStaging(stage);
+                }
+            },
+            "file-restore-ssh").ConfigureAwait(false);
+        return (result!, targetText, 0);
+    }
+
+    private async Task<(string User, LinuxSecret Secret)> LinuxLoginAsync(Guid? credentialId, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var credential = await db.Credentials.AsNoTracking().FirstOrDefaultAsync(c => c.Id == credentialId && c.Kind == CredentialKind.Linux, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("The Linux credential no longer exists. Choose another one under Credentials.");
+        return (credential.Username, Api.LinuxCredentialEndpoints.Unprotect(protector, credential));
+    }
+
+    private async Task<IReadOnlyList<string>> GuestAddressesAsync(RestorePointEntity point, CancellationToken cancellationToken)
+    {
+        if (point.ConnectionId is not { } connectionId)
+        {
+            return [];
+        }
+
+        await using var hypervisor = await connections.OpenAsync(connectionId, cancellationToken).ConfigureAwait(false);
+        return await hypervisor.GetGuestAddressesAsync(point.VmNativeId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Forwards everything; checks the free space once the selection is counted.</summary>
+    private sealed class SpaceCheck(IFileRestoreObserver inner, Action<long> check) : IFileRestoreObserver
+    {
+        public void Counting(long files, long bytes) => inner.Counting(files, bytes);
+
+        public void Planned(long files, long directories, long bytes)
+        {
+            inner.Planned(files, directories, bytes);
+            check(bytes);
+        }
+
+        public void Copied(long bytes) => inner.Copied(bytes);
+
+        public void FileRestored(long files) => inner.FileRestored(files);
+
+        public void Renamed(string source, string target) => inner.Renamed(source, target);
+
+        public void Problem(FileRestoreProblem problem) => inner.Problem(problem);
     }
 
     /// <summary>

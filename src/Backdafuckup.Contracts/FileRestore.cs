@@ -73,6 +73,9 @@ public enum FileRestoreTargetKindDto
 
     /// <summary>Into a Windows VM through its guest agent: the original location or another folder.</summary>
     Agent,
+
+    /// <summary>Into a Linux VM over SSH/SFTP (root login or sudo): the original location or another folder.</summary>
+    Ssh,
 }
 
 public sealed record FileRestoreTargetDto
@@ -82,16 +85,22 @@ public sealed record FileRestoreTargetDto
     /// <summary>Share target: \\server\share\folder. Missing folders are created.</summary>
     public string? SharePath { get; init; }
 
-    /// <summary>Share target: a Windows credential (DOMAIN\user) with write access.</summary>
+    /// <summary>Share target: a Windows credential (DOMAIN\user) with write access. SSH target: a Linux credential.</summary>
     public Guid? CredentialId { get; init; }
+
+    /// <summary>SSH target: address of the VM; null tries the addresses its guest tools report.</summary>
+    public string? Address { get; init; }
+
+    /// <summary>SSH target: port (22 if null).</summary>
+    public int? Port { get; init; }
 
     /// <summary>Agent target: the VM to restore into; null is the VM of the restore point.</summary>
     public string? VmNativeId { get; init; }
 
-    /// <summary>Agent target: a folder in the VM (D:\Restore); null restores to the original location.</summary>
+    /// <summary>Agent or SSH target: a folder in the VM (D:\Restore, /srv/restore); null restores to the original location.</summary>
     public string? Folder { get; init; }
 
-    /// <summary>Agent target: apply owner and permissions from the backup (NTFS sources).</summary>
+    /// <summary>Agent target: owner and permissions from the backup. SSH target: owner and group from the backup.</summary>
     public bool RestorePermissions { get; init; }
 }
 

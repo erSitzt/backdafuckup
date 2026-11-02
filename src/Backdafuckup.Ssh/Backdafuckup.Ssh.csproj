@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- File-level restore into Linux guests: SSH/SFTP (SSH.NET, MIT) and the restore script that runs as root. -->
+  <ItemGroup>
+    <PackageReference Include="SSH.NET" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="restore.sh" LogicalName="Backdafuckup.Ssh.restore.sh" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Backdafuckup.Ssh.Tests" />
+  </ItemGroup>
+</Project>

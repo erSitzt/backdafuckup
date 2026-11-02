@@ -41,6 +41,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<AgentEntity> Agents => Set<AgentEntity>();
 
+    public DbSet<SshHostKeyEntity> SshHostKeys => Set<SshHostKeyEntity>();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
@@ -155,6 +157,16 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasIndex(x => x.VmNativeId);
             e.Property(x => x.KeyHash).HasMaxLength(64);
             e.Property(x => x.Build).HasMaxLength(16);
+        });
+
+        builder.Entity<SshHostKeyEntity>(e =>
+        {
+            e.ToTable("ssh_host_keys");
+            e.HasIndex(x => new { x.Host, x.Port }).IsUnique();
+            e.Property(x => x.Host).HasMaxLength(255);
+            e.Property(x => x.KeyType).HasMaxLength(64);
+            e.Property(x => x.Fingerprint).HasMaxLength(128);
+            e.Property(x => x.TrustedBy).HasMaxLength(200);
         });
 
         // Our entities create their Guid v7 keys client-side. Marking them as never generated lets EF Core treat

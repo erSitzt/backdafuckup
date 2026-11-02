@@ -142,16 +142,7 @@ else
         <MudStack Spacing="3">
             <MudRadioGroup T="string" Value="_restoreTarget" ValueChanged="OnTargetChanged">
                 <MudRadio T="string" Value="@("share")" Color="Color.Primary">Copy to a network share (SMB)</MudRadio>
-                @if (_volume?.Family == "windows")
-                {
-                    <MudRadio T="string" Value="@("vm")" Color="Color.Primary">Back into the VM @_mount?.VmName (guest agent)</MudRadio>
-                }
-                else
-                {
-                    <MudTooltip Text="Linux files go back into the VM over SSH: coming next">
-                        <MudRadio T="string" Value="@("vm")" Disabled="true">Back into the VM (SSH)</MudRadio>
-                    </MudTooltip>
-                }
+                <MudRadio T="string" Value="@("vm")" Color="Color.Primary">Back into the VM @_mount?.VmName @(_volume?.Family == "unix" ? "(SSH)" : "(guest agent)")</MudRadio>
             </MudRadioGroup>
             @if (_restoreTarget == "share")
             {
@@ -159,7 +150,7 @@ else
                               HelperText="The selected items go directly into this folder. Missing folders are created." />
                 @if (_credentials is { Count: 0 })
                 {
-                    <MudAlert Severity="Severity.Info" Dense="true">No Windows credential yet. Add one with write access to the share under <MudLink Href="/credentials">Windows Credentials</MudLink>.</MudAlert>
+                    <MudAlert Severity="Severity.Info" Dense="true">No Windows credential yet. Add one with write access to the share under <MudLink Href="/infrastructure/credentials">Credentials</MudLink>.</MudAlert>
                 }
                 else
                 {
@@ -173,7 +164,28 @@ else
             }
             else
             {
-                @if (AgentProblem is { } problem)
+                @if (_volume?.Family == "unix")
+                {
+                    <MudStack Row="true" Spacing="2">
+                        <MudTextField T="string" @bind-Value="_sshAddress" Label="Address of the VM" Variant="Variant.Outlined" Placeholder="from the guest tools"
+                                      HelperText="Empty: the addresses the guest tools report" />
+                        <MudNumericField T="int" @bind-Value="_sshPort" Label="SSH port" Variant="Variant.Outlined" Min="1" Max="65535" Style="max-width:120px" />
+                    </MudStack>
+                    @if (_linuxCredentials is { Count: 0 })
+                    {
+                        <MudAlert Severity="Severity.Info" Dense="true">No Linux credential yet. Add root or an account with sudo under <MudLink Href="/infrastructure/credentials">Credentials</MudLink>.</MudAlert>
+                    }
+                    else
+                    {
+                        <MudSelect T="Guid?" @bind-Value="_linuxCredentialId" Label="Linux account" Variant="Variant.Outlined" HelperText="root, or an account with sudo">
+                            @foreach (var credential in _linuxCredentials ?? [])
+                            {
+                                <MudSelectItem T="Guid?" Value="@credential.Id">@credential.UserName@(string.IsNullOrEmpty(credential.Description) ? "" : $" – {credential.Description}")</MudSelectItem>
+                            }
+                        </MudSelect>
+                    }
+                }
+                else if (AgentProblem is { } problem)
                 {
                     <MudAlert Severity="Severity.Warning" Dense="true">@problem</MudAlert>
                 }
@@ -189,11 +201,11 @@ else
                 </MudRadioGroup>
                 @if (!_toOriginal)
                 {
-                    <MudTextField T="string" @bind-Value="_guestFolder" Label="Folder in the VM" Placeholder="D:\Restore" Variant="Variant.Outlined"
+                    <MudTextField T="string" @bind-Value="_guestFolder" Label="Folder in the VM" Placeholder="@(_volume?.Family == "unix" ? "/srv/restore" : "D:\\Restore")" Variant="Variant.Outlined"
                                   HelperText="The selected items go directly into this folder. Missing folders are created." />
                 }
                 <MudCheckBox T="bool" @bind-Value="_restorePermissions" Color="Color.Primary"
-                             Label="Restore owner and permissions from the backup (otherwise they are inherited from the target folder)" />
+                             Label="@(_volume?.Family == "unix" ? "Restore owner and group from the backup (otherwise those of the restore folder)" : "Restore owner and permissions from the backup (otherwise they are inherited from the target folder)")" />
             }
             <MudRadioGroup T="FileRestoreModeDto" @bind-Value="_restoreMode">
                 <MudRadio T="FileRestoreModeDto" Value="FileRestoreModeDto.Overwrite" Color="Color.Primary">Replace existing files</MudRadio>
@@ -207,6 +219,10 @@ else
                     {
                         <span> Names that Windows does not allow (with \ : * ? " &lt; &gt; | or a trailing dot) are reported and left out.</span>
                     }
+                }
+                else if (_volume?.Family == "unix")
+                {
+                    <span>The files go to /var/tmp in the VM first and are then put in place as root (sudo): each replaces the old one only when complete, with mode, times and symbolic links; nothing is written through links.</span>
                 }
                 else
                 {
@@ -251,6 +267,10 @@ else
     private bool _toOriginal = true;
     private string? _guestFolder;
     private bool _restorePermissions = true;
+    private List<LinuxCredentialDto>? _linuxCredentials;
+    private Guid? _linuxCredentialId;
+    private string? _sshAddress;
+    private int _sshPort = 22;
 
     protected override Task OnInitializedAsync() => OpenAsync();
 
@@ -453,10 +473,12 @@ else
     }
 
     /// <summary>Drive letter or mount point plus folder, e.g. C:\Users\x, if the volume had one in the backup.</summary>
-    private string? OriginalLocation =>
-        _volume?.MountPoint is { Length: >= 2 } mount && mount[1] == ':'
-            ? mount.TrimEnd('\\') + "\\" + string.Join('\\', _path)
-            : null;
+    private string? OriginalLocation => _volume?.MountPoint switch
+    {
+        { Length: >= 2 } mount when mount[1] == ':' => mount.TrimEnd('\\') + "\\" + string.Join('\\', _path),
+        { } mount when mount.StartsWith('/') => mount.TrimEnd('/') + "/" + string.Join('/', _path),
+        _ => null,
+    };
 
     private string? AgentProblem => _agent switch
     {
@@ -468,7 +490,8 @@ else
 
     private bool CanStart => _restoreTarget == "share"
         ? !string.IsNullOrWhiteSpace(_sharePath) && _credentialId is not null
-        : AgentProblem is null && (_toOriginal ? OriginalLocation is not null : !string.IsNullOrWhiteSpace(_guestFolder));
+        : (_volume?.Family == "unix" ? _linuxCredentialId is not null : AgentProblem is null)
+            && (_toOriginal ? OriginalLocation is not null : !string.IsNullOrWhiteSpace(_guestFolder));
 
     private void OnTargetChanged(string target)
     {
@@ -493,6 +516,8 @@ else
         {
             _credentials = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
             _credentialId ??= _credentials.Count == 1 ? _credentials[0].Id : null;
+            _linuxCredentials = await Api.GetAsync<List<LinuxCredentialDto>>("api/credentials/linux");
+            _linuxCredentialId ??= _linuxCredentials.Count == 1 ? _linuxCredentials[0].Id : null;
             var agents = await Api.GetAsync<List<AgentDto>>("api/agents");
             _agent = agents.Where(a => a.VmNativeId == _mount?.VmNativeId).OrderByDescending(a => a.LastContactUtc).FirstOrDefault();
         }
@@ -523,7 +548,17 @@ else
                 Mode = _restoreMode,
                 Target = _restoreTarget == "share"
                     ? new FileRestoreTargetDto { Kind = FileRestoreTargetKindDto.Share, SharePath = _sharePath?.Trim(), CredentialId = _credentialId }
-                    : new FileRestoreTargetDto { Kind = FileRestoreTargetKindDto.Agent, Folder = _toOriginal ? null : _guestFolder?.Trim(), RestorePermissions = _restorePermissions },
+                    : _volume.Family == "unix"
+                        ? new FileRestoreTargetDto
+                        {
+                            Kind = FileRestoreTargetKindDto.Ssh,
+                            Address = string.IsNullOrWhiteSpace(_sshAddress) ? null : _sshAddress.Trim(),
+                            Port = _sshPort,
+                            CredentialId = _linuxCredentialId,
+                            Folder = _toOriginal ? null : _guestFolder?.Trim(),
+                            RestorePermissions = _restorePermissions,
+                        }
+                        : new FileRestoreTargetDto { Kind = FileRestoreTargetKindDto.Agent, Folder = _toOriginal ? null : _guestFolder?.Trim(), RestorePermissions = _restorePermissions },
                 MountId = _mount.Id,
             };
             var started = await Api.PostAsync<StartedDto>("api/file-restore/restores", request);

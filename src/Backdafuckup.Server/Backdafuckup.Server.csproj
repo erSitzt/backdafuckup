@@ -13,6 +13,7 @@
     <ProjectReference Include="..\Backdafuckup.Contracts\Backdafuckup.Contracts.csproj" />
     <ProjectReference Include="..\Backdafuckup.Agent.Protocol\Backdafuckup.Agent.Protocol.csproj" />
     <ProjectReference Include="..\Backdafuckup.Smb\Backdafuckup.Smb.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Ssh\Backdafuckup.Ssh.csproj" />
     <ProjectReference Include="..\Backdafuckup.FileLevel\Backdafuckup.FileLevel.csproj" />
     <ProjectReference Include="..\Backdafuckup.Web\Backdafuckup.Web.csproj" />
   </ItemGroup>

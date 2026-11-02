@@ -45,3 +45,9 @@ public interface IFileRestoreTarget : IDisposable
 
     void SetMetadata(IReadOnlyList<string> path, RestoredItemMeta meta, bool isDirectory);
 }
+
+/// <summary>A target that restores symbolic links as links (Linux over SSH); others skip them.</summary>
+public interface ILinkRestoreTarget
+{
+    void CreateSymbolicLink(IReadOnlyList<string> path, string linkTarget, RestoredItemMeta meta);
+}

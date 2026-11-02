@@ -190,3 +190,20 @@ internal static class AgentTargetPaths
         }
     }
 }
+
+/// <summary>Folders in a Linux guest.</summary>
+internal static class SshTargetPaths
+{
+    /// <summary>An absolute path without "." or ".." components and without trailing "/"; null if it is none.</summary>
+    public static string? Normalize(string? folder)
+    {
+        var trimmed = folder?.Trim();
+        if (string.IsNullOrEmpty(trimmed) || trimmed[0] != '/' || trimmed.Contains('\0', StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var parts = trimmed.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Any(p => p is "." or "..") ? null : "/" + string.Join('/', parts);
+    }
+}

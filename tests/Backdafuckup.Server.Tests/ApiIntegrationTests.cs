@@ -470,6 +470,63 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         await running;
     }
 
+    [Fact]
+    public async Task File_level_restore_writes_into_a_linux_vm_over_ssh()
+    {
+        // A real OpenSSH with sudo (Debian container); the account alice needs her password for sudo.
+        await using var guest = await SshTestServer.StartAsync(Ct);
+        var client = await SignedInClientAsync();
+        var point = await BackUpFixtureAsync(client, "linux01", "ext4-gpt");
+        var credential = await Read<LinuxCredentialDto>(client.PostAsJsonAsync("/api/credentials/linux", new SaveLinuxCredentialDto("alice", "alicepw", null, null, "alicepw", "test guest"), Ct));
+        Assert.True(credential.HasSudoPassword);
+        var mount = await Read<FileMountDto>(client.PostAsJsonAsync("/api/file-restore/mounts", new OpenFileMountRequestDto(point.Id), Ct));
+        var volume = mount.Volumes.Single(v => v.Readable).Id;
+        FileRestoreRequestDto Request(FileRestoreModeDto mode, string? folder = "/srv/restore") => new()
+        {
+            RestorePointId = point.Id,
+            Volume = volume,
+            Paths = ["folder", "hello.txt", "link-to-hello", "owned.txt", "secret.txt", "pattern-3m.bin"],
+            Mode = mode,
+            Target = new FileRestoreTargetDto { Kind = FileRestoreTargetKindDto.Ssh, Address = guest.Host, Port = guest.Port, CredentialId = credential.Id, Folder = folder, RestorePermissions = true },
+            MountId = mount.Id,
+        };
+
+        // No fstab in the test image, so no original location; relative folders are refused.
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/file-restore/restores", Request(FileRestoreModeDto.Overwrite, folder: null), Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/file-restore/restores", Request(FileRestoreModeDto.Overwrite, folder: "srv/../etc"), Ct)).StatusCode);
+
+        var first = await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync("/api/file-restore/restores", Request(FileRestoreModeDto.Overwrite), Ct))).SessionId);
+        var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{first.Session.Id}/log", Ct))!.Select(l => l.Message));
+        Assert.True(first.Session.State == "Succeeded", first.Session.Summary + "\n" + log);
+        Assert.Contains("trusted on first use", log, StringComparison.Ordinal);
+        Assert.Contains("put in place as root through sudo", log, StringComparison.Ordinal);
+        var manifest = FsFixtures.Manifest("ext4-gpt.p1").ToDictionary(l => l[7], l => l[1]);
+        var sums = await guest.ExecAsync(Ct, "sh", "-c", "cd /srv/restore && sha256sum hello.txt pattern-3m.bin folder/sub/deep/nested.txt");
+        Assert.Contains($"{manifest["hello.txt"]}  hello.txt", sums, StringComparison.Ordinal);
+        Assert.Contains($"{manifest["pattern-3m.bin"]}  pattern-3m.bin", sums, StringComparison.Ordinal);
+        Assert.Contains($"{manifest["folder/sub/deep/nested.txt"]}  folder/sub/deep/nested.txt", sums, StringComparison.Ordinal);
+        var stat = await guest.ExecAsync(Ct, "stat", "-c", "%n %u:%g %a %Y", "/srv/restore/secret.txt", "/srv/restore/owned.txt", "/srv/restore/hello.txt");
+        Assert.Contains("/srv/restore/secret.txt 0:0 640", stat, StringComparison.Ordinal);
+        Assert.Contains("/srv/restore/owned.txt 1000:1000 644", stat, StringComparison.Ordinal);
+        Assert.Contains("/srv/restore/hello.txt 0:0 644 981173106", stat, StringComparison.Ordinal);
+        Assert.Equal("hello.txt\n", await guest.ExecAsync(Ct, "readlink", "/srv/restore/link-to-hello"));
+
+        // Keep: existing files stay, restored ones become RESTORED- copies; a planted link is not written through.
+        await guest.ExecAsync(Ct, "sh", "-c", "echo changed > /srv/restore/hello.txt && rm -rf /srv/restore/folder && ln -s /etc /srv/restore/folder");
+        var kept = await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync("/api/file-restore/restores", Request(FileRestoreModeDto.Keep), Ct))).SessionId);
+        var keptLog = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{kept.Session.Id}/log", Ct))!.Select(l => l.Message));
+        Assert.True(kept.Session.State == "Warning", kept.Session.Summary + "\n" + keptLog);
+        Assert.Equal("changed\n", await guest.ExecAsync(Ct, "cat", "/srv/restore/hello.txt"));
+        Assert.Equal($"{manifest["hello.txt"]}  /srv/restore/RESTORED-hello.txt\n", await guest.ExecAsync(Ct, "sha256sum", "/srv/restore/RESTORED-hello.txt"));
+        Assert.Contains("/srv/restore/folder is a symbolic link; nothing is written through it", keptLog, StringComparison.Ordinal);
+        Assert.Equal(string.Empty, await guest.ExecAsync(Ct, "sh", "-c", "ls /etc | grep -x sub || true"));
+        Assert.Equal(string.Empty, await guest.ExecAsync(Ct, "sh", "-c", "ls -A /var/tmp | grep bdfu- || true"));
+
+        // The host key was trusted on first use and is listed.
+        var keys = await client.GetFromJsonAsync<List<SshHostKeyDto>>("/api/ssh-host-keys", Ct);
+        Assert.Contains(keys!, k => k.Host == guest.Host && k.Port == guest.Port);
+    }
+
     /// <summary>Windows paths of the agent in a local folder: <c>D:\a\b</c> is <c>{root}/D/a/b</c>.</summary>
     private sealed class SandboxRestoreFileSystem(string root) : PortableRestoreFileSystem
     {

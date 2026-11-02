@@ -106,6 +106,34 @@ public enum CredentialKind
 
     /// <summary>Windows administrator for the push installation of the guest agent (DOMAIN\user or .\user).</summary>
     Windows,
+
+    /// <summary>Linux account for file restores over SSH; the secret is a protected <see cref="LinuxSecret"/> (JSON).</summary>
+    Linux,
+}
+
+/// <summary>What a Linux credential holds (stored as protected JSON): password or private key, and the sudo password.</summary>
+public sealed record LinuxSecret(string? Password, string? PrivateKey, string? Passphrase, string? SudoPassword);
+
+/// <summary>An SSH host key trusted on first use (one per host and port); a different key later is refused.</summary>
+public sealed class SshHostKeyEntity
+{
+    public Guid Id { get; set; } = Guid.CreateVersion7();
+
+    /// <summary>The address as it was connected to (IP or name).</summary>
+    public required string Host { get; set; }
+
+    public int Port { get; set; }
+
+    /// <summary>e.g. ssh-ed25519.</summary>
+    public required string KeyType { get; set; }
+
+    /// <summary>SHA-256 of the key, base64 without padding (as OpenSSH shows it after "SHA256:").</summary>
+    public required string Fingerprint { get; set; }
+
+    public DateTimeOffset TrustedUtc { get; set; }
+
+    /// <summary>The session that met the host first.</summary>
+    public string? TrustedBy { get; set; }
 }
 
 /// <summary>A backdafuckup agent in a Windows guest (enrolled with the enrollment secret, then known by its key).</summary>

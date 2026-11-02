@@ -17,6 +17,7 @@ backdafuckup uses the following third-party components. Keep this list in sync w
 | LTRData.DiscUtils (Core, Streams, Ntfs, Fat, Lvm, Registry) | MIT | FileLevel (reading partitions and file systems of restore points) |
 | DiscUtils.Ext and DiscUtils.Xfs, vendored with changes in `src/ThirdParty` (see their `NOTICE.md`) | MIT | FileLevel (ext2/3/4 and XFS) |
 | System.IO.Hashing (Microsoft) | MIT | FileLevel (CRC-32 for ZIP downloads) |
+| SSH.NET | MIT | Ssh (file restore into Linux VMs over SSH/SFTP) |
 | mingw-w64 runtime (headers, libraries) and GCC runtime libraries | mingw-w64: ZPL / public domain; libgcc, libstdc++: GPL-3.0 with GCC Runtime Library Exception | bdfu-vss.dll (statically linked runtime) |
 
 Build tools (not shipped): mingw-w64 GCC (GPL-3.0) and osslsigncode (GPL-3.0) in the Docker image of `native/bdfu-vss`.

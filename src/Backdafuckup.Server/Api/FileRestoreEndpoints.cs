@@ -95,6 +95,39 @@ public static class FileRestoreEndpoints
                         target = await CheckAgentTargetAsync(request, point, mount, agents, registry, ct);
                         break;
 
+                    case FileRestoreTargetKindDto.Ssh:
+                        if (!await db.Credentials.AnyAsync(c => c.Id == request.Target.CredentialId && c.Kind == CredentialKind.Linux, ct))
+                        {
+                            throw new ArgumentException("Choose a Linux credential (Credentials → Linux).");
+                        }
+
+                        if (request.Target.Port is < 1 or > 65535)
+                        {
+                            throw new ArgumentException("The SSH port must be between 1 and 65535.");
+                        }
+
+                        var folder = request.Target.Folder;
+                        if (!string.IsNullOrWhiteSpace(folder) && SshTargetPaths.Normalize(folder) is null)
+                        {
+                            throw new ArgumentException($"'{folder}' is not an absolute folder in the VM; enter it as /srv/restore.");
+                        }
+
+                        if (mount?.Image.Volumes.FirstOrDefault(v => v.Id == request.Volume) is { } linuxVolume)
+                        {
+                            if (linuxVolume.FileSystem is not ("ext" or "XFS"))
+                            {
+                                throw new ArgumentException($"{linuxVolume.FileSystem} files are restored into a VM through the agent, not over SSH.");
+                            }
+
+                            if (string.IsNullOrWhiteSpace(folder) && linuxVolume.MountPoint?.StartsWith('/') != true)
+                            {
+                                throw new ArgumentException("This volume had no mount point in the backup's /etc/fstab, so there is no original location; choose a folder in the VM.");
+                            }
+                        }
+
+                        target = string.IsNullOrWhiteSpace(folder) ? $"the original location in {point.VmName} over SSH" : $"{SshTargetPaths.Normalize(folder)} in {point.VmName} over SSH";
+                        break;
+
                     default:
                         throw new ArgumentException("This restore target is not supported.");
                 }

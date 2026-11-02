@@ -292,6 +292,16 @@ public sealed record WindowsCredentialDto(Guid Id, string UserName, string? Desc
 
 public sealed record SaveWindowsCredentialDto(string UserName, string Password, string? Description);
 
+/// <summary>A Linux account for file restores over SSH (secrets are never returned).</summary>
+public sealed record LinuxCredentialDto(Guid Id, string UserName, string? Description, bool UsesPrivateKey, bool HasSudoPassword, DateTimeOffset CreatedUtc);
+
+/// <param name="PrivateKey">OpenSSH or PEM private key; password or key is required.</param>
+/// <param name="SudoPassword">For accounts other than root whose sudo asks for a password.</param>
+public sealed record SaveLinuxCredentialDto(string UserName, string? Password, string? PrivateKey, string? Passphrase, string? SudoPassword, string? Description);
+
+/// <summary>An SSH host key trusted on first use.</summary>
+public sealed record SshHostKeyDto(Guid Id, string Host, int Port, string KeyType, string Fingerprint, DateTimeOffset TrustedUtc, string? TrustedBy);
+
 public static class GuestFailurePolicies
 {
     public const string CrashConsistentWithWarning = "CrashConsistentWithWarning";

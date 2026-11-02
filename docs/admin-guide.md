@@ -198,6 +198,18 @@ Restore points show their consistency ("application", or "crash" plus the reason
 - **Not restored yet:** symbolic links and junctions of the backup, alternate data streams, the sparse flag. Hard links become separate copies.
 - **Stop** lets the agent finish the current file. If the agent neither downloads nor reports for 5 minutes (`Agent:TransferSilenceLimit`), the restore fails; what was written stays. During the restore the agent does not update itself.
 
+**Restore into a Linux VM (SSH)**
+- *Restore… → Back into the VM (SSH)* connects to the VM over SSH (port 22) with a *Linux credential* (Credentials → Linux): `root`, or an account that may use `sudo`. Enter the sudo password in the credential if sudo asks for one; sudo with `requiretty` works too.
+- **Address:** empty uses the IP addresses the guest tools report; otherwise enter the address and port.
+- **Original location:** the mount point from the backup's `/etc/fstab` plus the original folder, e.g. `/home/alice/docs`. Not available for volumes without an fstab entry. **Another folder:** e.g. `/srv/restore`; the selected items go directly into it.
+- **How it works:**
+  1. The files are uploaded over SFTP into `/var/tmp/bdfu-<id>` (mode 0700, owned by the login account). The selection must fit there; the free space is checked first.
+  2. One restore script runs as root (directly or through `sudo`). It puts every file into place as a temporary file next to its target and renames it when complete. It sets mode, times and, with *Restore owner and group*, owner and group (otherwise those of the restore folder), applies the SELinux label where SELinux is on, and creates symbolic links last.
+  3. The staging folder is removed at the end.
+- **Never written:** through a symbolic link on the target (the item fails), or outside the chosen location. File names never become shell code: they travel base64-encoded and reach commands only as quoted arguments.
+- **Host keys:** the first connection trusts the VM's SSH host key; later connections must present the same key or fail with both fingerprints. After a reinstall, remove the old key under *Credentials → Known SSH hosts*.
+- **Not restored:** ACLs, extended attributes and file capabilities; hard links become separate copies.
+
 **Audit trail:** every opened browser is a session of type *FileBrowse* under *Sessions*. Its log shows who opened which restore point, every download (files, folders and size, plus skipped items) and every restore started from it. *Stop* in the session closes the browser.
 
 **Limits and resources**
