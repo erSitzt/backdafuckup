@@ -1,0 +1,42 @@
+@inject AuthState Auth
+
+<div style="display:flex;min-height:100vh;align-items:center;justify-content:center;background:#eef1f2">
+    <MudPaper Elevation="3" Class="pa-8" Style="width:380px">
+        <MudText Typo="Typo.h5" Class="mb-1">backdafuckup</MudText>
+        <MudText Typo="Typo.body2" Class="mb-6" Color="Color.Secondary">Sign in to the backup console</MudText>
+        <EditForm Model="this" OnValidSubmit="LoginAsync">
+            <MudTextField @bind-Value="_userName" Label="User name" Variant="Variant.Outlined" AutoFocus="true" Class="mb-3" />
+            <MudTextField @bind-Value="_password" Label="Password" InputType="InputType.Password" Variant="Variant.Outlined" Class="mb-3" />
+            @if (_error is not null)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mb-3">@_error</MudAlert>
+            }
+            <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Primary" FullWidth="true" Disabled="_busy">Sign in</MudButton>
+        </EditForm>
+    </MudPaper>
+</div>
+
+@code {
+    private string _userName = string.Empty;
+    private string _password = string.Empty;
+    private string? _error;
+    private bool _busy;
+
+    private async Task LoginAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            await Auth.LoginAsync(_userName, _password);
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

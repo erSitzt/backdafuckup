@@ -1,0 +1,307 @@
+@page "/jobs/new"
+@page "/jobs/{Id:guid}"
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject NavigationManager Navigation
+
+<PageTitle>@(Id is null ? "New job" : "Edit job") – backdafuckup</PageTitle>
+<MudText Typo="Typo.h4" Class="mb-4">@(Id is null ? "New Backup Job" : $"Edit {_name}")</MudText>
+
+@if (_pools is null || _repositories is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <div class="step-header">
+        @for (var i = 0; i < Steps.Length; i++)
+        {
+            var index = i;
+            <MudChip T="string" Color="@(index == _step ? Color.Primary : index < _step ? Color.Success : Color.Default)" OnClick="@(() => GoTo(index))">@($"{index + 1}. {Steps[index]}")</MudChip>
+        }
+    </div>
+
+    <MudPaper Class="pa-4" Elevation="1">
+        @switch (_step)
+        {
+            case 0:
+                <MudTextField @bind-Value="_name" Label="Name" Variant="Variant.Outlined" Class="mb-3" />
+                <MudTextField @bind-Value="_description" Label="Description" Variant="Variant.Outlined" Lines="2" />
+                break;
+
+            case 1:
+                <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="Pool" Variant="Variant.Outlined" Class="mb-3">
+                    @foreach (var pool in _pools)
+                    {
+                        <MudSelectItem T="Guid" Value="pool.Id">@pool.DisplayName</MudSelectItem>
+                    }
+                </MudSelect>
+                <MudTextField @bind-Value="_vmFilter" Placeholder="Filter VMs" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Class="mb-2" />
+                <MudSimpleTable Dense="true" Hover="true" Elevation="0" Style="max-height:420px;overflow-y:auto">
+                    <thead><tr><th></th><th>VM</th><th>Power</th><th>Disks</th></tr></thead>
+                    <tbody>
+                        @foreach (var vm in _vms.Where(v => string.IsNullOrWhiteSpace(_vmFilter) || v.Name.Contains(_vmFilter, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            <tr>
+                                <td><MudCheckBox T="bool" Value="@_selected.ContainsKey(vm.NativeId)" ValueChanged="@(on => Toggle(vm, on))" Dense="true" /></td>
+                                <td>@vm.Name</td>
+                                <td>@vm.Properties.GetValueOrDefault("powerState")</td>
+                                <td>@vm.Properties.GetValueOrDefault("diskCount") (@Fmt.Bytes(long.TryParse(vm.Properties.GetValueOrDefault("diskBytes"), out var b) ? b : null))</td>
+                            </tr>
+                        }
+                    </tbody>
+                </MudSimpleTable>
+                <MudText Typo="Typo.body2" Class="mt-2">@_selected.Count VM(s) selected</MudText>
+                break;
+
+            case 2:
+                <MudSelect T="Guid" @bind-Value="_repositoryId" Label="Backup repository" Variant="Variant.Outlined" Class="mb-3">
+                    @foreach (var repository in _repositories)
+                    {
+                        <MudSelectItem T="Guid" Value="repository.Id">@repository.Name (@Fmt.Bytes(repository.FreeBytes) free)</MudSelectItem>
+                    }
+                </MudSelect>
+                <MudNumericField @bind-Value="_retention" Label="Restore points to keep" Min="1" Max="10000" Variant="Variant.Outlined" Class="mb-3" />
+                <MudExpansionPanels>
+                    <MudExpansionPanel Text="Advanced">
+                        <MudNumericField @bind-Value="_parallelVms" Label="VMs processed in parallel" Min="1" Max="16" Variant="Variant.Outlined" Class="mb-3" />
+                        <MudNumericField @bind-Value="_nbdConnections" Label="NBD connections per disk" Min="1" Max="12" Variant="Variant.Outlined" Class="mb-3" />
+                        <MudNumericField @bind-Value="_retries" Label="Retries for failed VMs" Min="0" Max="10" Variant="Variant.Outlined" />
+                    </MudExpansionPanel>
+                </MudExpansionPanels>
+                break;
+
+            case 3:
+                <MudRadioGroup T="string" @bind-Value="_scheduleKind" Class="mb-3">
+                    <MudRadio T="string" Value="@("None")">Run manually</MudRadio>
+                    <MudRadio T="string" Value="@("Daily")">Daily</MudRadio>
+                    <MudRadio T="string" Value="@("Weekly")">On selected weekdays</MudRadio>
+                </MudRadioGroup>
+                @if (_scheduleKind != "None")
+                {
+                    <MudTextField @bind-Value="_time" Label="Time (HH:mm)" Variant="Variant.Outlined" Class="mb-3" Style="max-width:200px" />
+                    @if (_scheduleKind == "Weekly")
+                    {
+                        <div class="mb-3">
+                            @foreach (var day in WeekDays)
+                            {
+                                <MudCheckBox T="bool" Value="@_days.Contains(day)" ValueChanged="@(on => ToggleDay(day, on))" Label="@day.ToString()" />
+                            }
+                        </div>
+                    }
+                    <MudTextField @bind-Value="_timeZone" Label="Time zone (IANA, e.g. Europe/Berlin)" Variant="Variant.Outlined" Style="max-width:400px" />
+                }
+                break;
+
+            default:
+                <MudSimpleTable Dense="true" Elevation="0">
+                    <tbody>
+                        <tr><td style="width:220px">Name</td><td>@_name</td></tr>
+                        <tr><td>Pool</td><td>@_pools.FirstOrDefault(p => p.Id == _connectionId)?.DisplayName</td></tr>
+                        <tr><td>VMs</td><td>@string.Join(", ", _selected.Values)</td></tr>
+                        <tr><td>Repository</td><td>@_repositories.FirstOrDefault(r => r.Id == _repositoryId)?.Name</td></tr>
+                        <tr><td>Retention</td><td>@_retention restore points</td></tr>
+                        <tr><td>Schedule</td><td>@Jobs.Describe(Schedule())</td></tr>
+                    </tbody>
+                </MudSimpleTable>
+                <MudCheckBox @bind-Value="_enabled" Label="Job enabled" Class="mt-2" />
+                <MudAlert Severity="Severity.Info" Dense="true" Class="mt-2">
+                    Changed block tracking is enabled on the VMs' disks with the first backup. While it is enabled, storage live migration of those disks is not possible.
+                </MudAlert>
+                break;
+        }
+
+        @if (_error is not null)
+        {
+            <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">@_error</MudAlert>
+        }
+
+        <div class="d-flex gap-2 mt-4">
+            <MudButton Href="/jobs">Cancel</MudButton>
+            <MudSpacer />
+            <MudButton Variant="Variant.Outlined" Disabled="@(_step == 0)" OnClick="@(() => GoTo(_step - 1))">Back</MudButton>
+            @if (_step < Steps.Length - 1)
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="@(() => GoTo(_step + 1))">Next</MudButton>
+            }
+            else
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="SaveAsync">Finish</MudButton>
+            }
+        </div>
+    </MudPaper>
+}
+
+@code {
+    private static readonly string[] Steps = ["Name", "Virtual machines", "Storage", "Schedule", "Summary"];
+    private static readonly DayOfWeek[] WeekDays = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday];
+
+    [Parameter] public Guid? Id { get; set; }
+
+    private List<ConnectionDto>? _pools;
+    private List<RepositoryDto>? _repositories;
+    private List<InventoryItemDto> _vms = [];
+    private readonly Dictionary<string, string> _selected = [];
+    private readonly HashSet<DayOfWeek> _days = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday];
+    private int _step;
+    private string _name = string.Empty;
+    private string? _description;
+    private Guid _connectionId;
+    private Guid _repositoryId;
+    private int _retention = 14;
+    private int _parallelVms = 2;
+    private int _nbdConnections = 4;
+    private int _retries = 2;
+    private string _scheduleKind = "Daily";
+    private string _time = "22:00";
+    private string _timeZone = TimeZoneInfo.Local.Id == "UTC" ? "Europe/Berlin" : TimeZoneInfo.Local.Id;
+    private string _vmFilter = string.Empty;
+    private bool _enabled = true;
+    private bool _busy;
+    private string? _error;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections");
+        _repositories = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
+        if (Id is { } id)
+        {
+            var job = await Api.GetAsync<JobDto>($"api/jobs/{id}");
+            _name = job.Name;
+            _description = job.Description;
+            _connectionId = job.ConnectionId;
+            _repositoryId = job.RepositoryId;
+            _retention = job.RetentionPoints;
+            _parallelVms = job.MaxParallelVms;
+            _nbdConnections = job.NbdConnectionsPerDisk;
+            _retries = job.RetryCount;
+            _enabled = job.Enabled;
+            _scheduleKind = job.Schedule.Kind;
+            _time = job.Schedule.TimeOfDay;
+            _timeZone = job.Schedule.TimeZoneId;
+            _days.Clear();
+            _days.UnionWith(job.Schedule.Days);
+            foreach (var o in job.Objects)
+            {
+                _selected[o.NativeId] = o.Name;
+            }
+        }
+        else
+        {
+            _connectionId = _pools.FirstOrDefault()?.Id ?? Guid.Empty;
+            _repositoryId = _repositories.FirstOrDefault()?.Id ?? Guid.Empty;
+        }
+
+        await LoadVmsAsync();
+    }
+
+    private async Task OnPoolChangedAsync(Guid id)
+    {
+        _connectionId = id;
+        _selected.Clear();
+        await LoadVmsAsync();
+    }
+
+    private async Task LoadVmsAsync() =>
+        _vms = _connectionId == Guid.Empty ? [] : (await Api.GetAsync<List<InventoryItemDto>>($"api/connections/{_connectionId}/inventory")).Where(i => i.Kind == "Vm").ToList();
+
+    private void Toggle(InventoryItemDto vm, bool on)
+    {
+        if (on)
+        {
+            _selected[vm.NativeId] = vm.Name;
+        }
+        else
+        {
+            _selected.Remove(vm.NativeId);
+        }
+    }
+
+    private void ToggleDay(DayOfWeek day, bool on)
+    {
+        if (on)
+        {
+            _days.Add(day);
+        }
+        else
+        {
+            _days.Remove(day);
+        }
+    }
+
+    private void GoTo(int step)
+    {
+        if (step < 0 || step >= Steps.Length)
+        {
+            return;
+        }
+
+        // Moving forward validates every step in between; moving back is always allowed.
+        for (var current = _step; current < step; current++)
+        {
+            _error = Validate(current);
+            if (_error is not null)
+            {
+                _step = current;
+                return;
+            }
+        }
+
+        _error = null;
+        _step = step;
+    }
+
+    private string? Validate(int step) => step switch
+    {
+        0 when string.IsNullOrWhiteSpace(_name) => "Enter a name.",
+        1 when _selected.Count == 0 => "Select at least one VM.",
+        2 when _repositoryId == Guid.Empty => "Select a repository.",
+        3 when _scheduleKind == "Weekly" && _days.Count == 0 => "Select at least one weekday.",
+        3 when _scheduleKind != "None" && !TimeOnly.TryParse(_time, out _) => "Enter the time as HH:mm.",
+        _ => null,
+    };
+
+    private ScheduleDto Schedule() => new(_scheduleKind, _time, _scheduleKind == "Weekly" ? _days.ToList() : [], _timeZone);
+
+    private async Task SaveAsync()
+    {
+        _busy = true;
+        _error = null;
+        var request = new SaveJobDto
+        {
+            Name = _name.Trim(),
+            Description = _description,
+            Enabled = _enabled,
+            ConnectionId = _connectionId,
+            RepositoryId = _repositoryId,
+            RetentionPoints = _retention,
+            Schedule = Schedule(),
+            Objects = _selected.Select(kv => new JobObjectDto(kv.Key, kv.Value)).ToList(),
+            MaxParallelVms = _parallelVms,
+            NbdConnectionsPerDisk = _nbdConnections,
+            RetryCount = _retries,
+        };
+        try
+        {
+            if (Id is { } id)
+            {
+                await Api.PutAsync($"api/jobs/{id}", request);
+            }
+            else
+            {
+                await Api.PostAsync("api/jobs", request);
+            }
+
+            Snackbar.Add($"Job {request.Name} saved.", Severity.Success);
+            Navigation.NavigateTo("/jobs");
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

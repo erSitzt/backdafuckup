@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <AssemblyName>backdafuckup</AssemblyName>
+    <RootNamespace>Backdafuckup.Server</RootNamespace>
+    <UserSecretsId>backdafuckup-server</UserSecretsId>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
+    <ProjectReference Include="..\Backdafuckup.DataMover\Backdafuckup.DataMover.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Storage\Backdafuckup.Storage.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Nbd\Backdafuckup.Nbd.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Xen\Backdafuckup.Xen.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Contracts\Backdafuckup.Contracts.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Web\Backdafuckup.Web.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Serilog.AspNetCore" />
+    <PackageReference Include="Serilog.Sinks.File" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
+    <PackageReference Include="EFCore.NamingConventions" />
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Backdafuckup.Server.Tests" />
+  </ItemGroup>
+</Project>

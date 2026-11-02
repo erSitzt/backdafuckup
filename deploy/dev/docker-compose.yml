@@ -1,0 +1,14 @@
+# Development database for backdafuckup. Not for production use.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: backdafuckup
+      POSTGRES_USER: backdafuckup
+      POSTGRES_PASSWORD: backdafuckup-dev
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - bdfu-pgdata:/var/lib/postgresql/data
+volumes:
+  bdfu-pgdata:

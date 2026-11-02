@@ -1,0 +1,217 @@
+@page "/restore/{Id:guid}"
+@inject ApiClient Api
+@inject NavigationManager Navigation
+
+<PageTitle>Restore VM – backdafuckup</PageTitle>
+<MudText Typo="Typo.h4" Class="mb-4">Restore Entire VM</MudText>
+
+@if (_point is null || _pools is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <div class="step-header">
+        @for (var i = 0; i < Steps.Length; i++)
+        {
+            var index = i;
+            <MudChip T="string" Color="@(index == _step ? Color.Primary : index < _step ? Color.Success : Color.Default)" OnClick="@(() => _step = Math.Min(index, _step))">@($"{index + 1}. {Steps[index]}")</MudChip>
+        }
+    </div>
+
+    <MudPaper Class="pa-4" Elevation="1">
+        @switch (_step)
+        {
+            case 0:
+                <MudText Typo="Typo.h6">@_point.VmName</MudText>
+                <MudText Typo="Typo.body2" Class="mb-3">Restore point from @Fmt.Time(_point.CreatedUtc) (@_point.Kind, job @_point.JobName) · @_point.VCpus vCPU · @Fmt.Bytes(_point.MemoryBytes) RAM · @_point.Firmware</MudText>
+                <MudRadioGroup T="RestoreModeDto" @bind-Value="_mode">
+                    <MudRadio T="RestoreModeDto" Value="RestoreModeDto.OriginalLocation">Restore to the original location</MudRadio>
+                    <MudRadio T="RestoreModeDto" Value="RestoreModeDto.AlternateLocation">Restore to a new location or with different settings</MudRadio>
+                </MudRadioGroup>
+                @if (_mode == RestoreModeDto.OriginalLocation)
+                {
+                    <MudCheckBox @bind-Value="_replace" Label="Replace the existing VM if it still exists (it is shut down and renamed)" Class="mt-2" />
+                    @if (_replace)
+                    {
+                        <MudCheckBox @bind-Value="_deleteReplaced" Label="Delete the replaced VM and its disks after a successful restore" Color="Color.Error" />
+                    }
+                }
+                break;
+
+            case 1:
+                @if (_mode == RestoreModeDto.AlternateLocation)
+                {
+                    <MudSelect T="Guid" Value="_targetPool" ValueChanged="OnPoolChangedAsync" Label="Target pool" Variant="Variant.Outlined" Class="mb-3">
+                        @foreach (var pool in _pools)
+                        {
+                            <MudSelectItem T="Guid" Value="pool.Id">@pool.DisplayName</MudSelectItem>
+                        }
+                    </MudSelect>
+                    <MudTextField @bind-Value="_vmName" Label="VM name" Variant="Variant.Outlined" Class="mb-3" />
+                    <MudSelect T="string" @bind-Value="_host" Label="Host (optional)" Variant="Variant.Outlined" Clearable="true" Class="mb-3">
+                        @foreach (var host in _inventory.Where(i => i.Kind == "Host"))
+                        {
+                            <MudSelectItem T="string" Value="host.NativeId">@host.Name</MudSelectItem>
+                        }
+                    </MudSelect>
+                }
+                <MudText Typo="Typo.subtitle1" Class="mb-2">Storage per disk</MudText>
+                @foreach (var disk in _point.Disks)
+                {
+                    <MudSelect T="string" Value="@_storage.GetValueOrDefault(disk.Key)" ValueChanged="@(v => _storage[disk.Key] = v)" Label="@($"{disk.Name} ({Fmt.Bytes(disk.CapacityBytes)})")" Variant="Variant.Outlined" Class="mb-3" Disabled="@(_mode == RestoreModeDto.OriginalLocation)">
+                        @foreach (var sr in _inventory.Where(i => i.Kind == "Storage"))
+                        {
+                            <MudSelectItem T="string" Value="sr.NativeId">@sr.Name (@sr.Properties.GetValueOrDefault("type"))</MudSelectItem>
+                        }
+                    </MudSelect>
+                }
+                break;
+
+            case 2:
+                @if (_mode == RestoreModeDto.AlternateLocation)
+                {
+                    @foreach (var nic in _point.Nics)
+                    {
+                        <MudSelect T="string" Value="@_networks.GetValueOrDefault(nic.Device)" ValueChanged="@(v => _networks[nic.Device] = v)" Label="@($"NIC {nic.Device} (was {nic.NetworkName}, {nic.Mac})")" Variant="Variant.Outlined" Class="mb-3">
+                            @foreach (var net in _inventory.Where(i => i.Kind == "Network"))
+                            {
+                                <MudSelectItem T="string" Value="net.NativeId">@net.Name</MudSelectItem>
+                            }
+                        </MudSelect>
+                    }
+                    <MudCheckBox @bind-Value="_regenerateMacs" Label="Generate new MAC addresses (recommended when the original VM still exists)" />
+                }
+                else
+                {
+                    <MudText>The VM keeps its original networks and MAC addresses.</MudText>
+                }
+                <MudCheckBox @bind-Value="_powerOn" Label="Power on the VM after the restore" Class="mt-2" />
+                break;
+
+            default:
+                <MudSimpleTable Dense="true" Elevation="0">
+                    <tbody>
+                        <tr><td style="width:220px">VM</td><td>@_point.VmName → @(_mode == RestoreModeDto.OriginalLocation ? _point.VmName : _vmName)</td></tr>
+                        <tr><td>Restore point</td><td>@Fmt.Time(_point.CreatedUtc)</td></tr>
+                        <tr><td>Location</td><td>@(_mode == RestoreModeDto.OriginalLocation ? "Original location" : _pools.FirstOrDefault(p => p.Id == _targetPool)?.DisplayName)</td></tr>
+                        <tr><td>Disks</td><td>@string.Join(", ", _point.Disks.Select(d => $"{d.Name} → {StorageName(_storage.GetValueOrDefault(d.Key))}"))</td></tr>
+                        <tr><td>Power on</td><td>@(_powerOn ? "yes" : "no")</td></tr>
+                    </tbody>
+                </MudSimpleTable>
+                @if (_mode == RestoreModeDto.OriginalLocation && _replace)
+                {
+                    <MudAlert Severity="Severity.Warning" Class="mt-3">The existing VM will be shut down@(_deleteReplaced ? " and deleted after the restore" : " and renamed").</MudAlert>
+                }
+                break;
+        }
+
+        @if (_error is not null)
+        {
+            <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">@_error</MudAlert>
+        }
+
+        <div class="d-flex gap-2 mt-4">
+            <MudButton Href="/backups">Cancel</MudButton>
+            <MudSpacer />
+            <MudButton Variant="Variant.Outlined" Disabled="@(_step == 0)" OnClick="@(() => _step--)">Back</MudButton>
+            @if (_step < Steps.Length - 1)
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="@(() => _step++)">Next</MudButton>
+            }
+            else
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="StartAsync">Restore</MudButton>
+            }
+        </div>
+    </MudPaper>
+}
+
+@code {
+    private static readonly string[] Steps = ["Mode", "Target", "Network", "Summary"];
+
+    [Parameter] public Guid Id { get; set; }
+
+    private RestorePointDto? _point;
+    private List<ConnectionDto>? _pools;
+    private List<InventoryItemDto> _inventory = [];
+    private readonly Dictionary<string, string> _storage = [];
+    private readonly Dictionary<string, string> _networks = [];
+    private RestoreModeDto _mode = RestoreModeDto.AlternateLocation;
+    private Guid _targetPool;
+    private string _vmName = string.Empty;
+    private string? _host;
+    private bool _replace;
+    private bool _deleteReplaced;
+    private bool _regenerateMacs = true;
+    private bool _powerOn;
+    private int _step;
+    private bool _busy;
+    private string? _error;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _point = await Api.GetAsync<RestorePointDto>($"api/restore-points/{Id}");
+        _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections");
+        _vmName = $"{_point.VmName}_restored";
+        _targetPool = _point.ConnectionId ?? _pools.FirstOrDefault()?.Id ?? Guid.Empty;
+        foreach (var disk in _point.Disks)
+        {
+            if (disk.StorageId is not null)
+            {
+                _storage[disk.Key] = disk.StorageId;
+            }
+        }
+
+        foreach (var nic in _point.Nics)
+        {
+            _networks[nic.Device] = nic.NetworkId;
+        }
+
+        await LoadInventoryAsync();
+    }
+
+    private async Task OnPoolChangedAsync(Guid pool)
+    {
+        _targetPool = pool;
+        await LoadInventoryAsync();
+    }
+
+    private async Task LoadInventoryAsync() =>
+        _inventory = _targetPool == Guid.Empty ? [] : await Api.GetAsync<List<InventoryItemDto>>($"api/connections/{_targetPool}/inventory");
+
+    private string StorageName(string? id) => _inventory.FirstOrDefault(i => i.NativeId == id)?.Name ?? id ?? "original";
+
+    private async Task StartAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var alternate = _mode == RestoreModeDto.AlternateLocation;
+            var started = await Api.PostAsync<StartedDto>("api/restores", new RestoreRequestDto
+            {
+                RestorePointId = Id,
+                Mode = _mode,
+                TargetConnectionId = alternate ? _targetPool : _point!.ConnectionId,
+                VmName = alternate ? _vmName : null,
+                TargetHostId = alternate ? _host : null,
+                DiskStorage = alternate ? new Dictionary<string, string>(_storage) : [],
+                NetworkMap = alternate ? new Dictionary<string, string>(_networks) : [],
+                RegenerateMacs = alternate && _regenerateMacs,
+                PowerOn = _powerOn,
+                ReplaceExisting = !alternate && _replace,
+                DeleteReplaced = !alternate && _replace && _deleteReplaced,
+            });
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

@@ -1,0 +1,101 @@
+@page "/backups"
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+
+<PageTitle>Backups – backdafuckup</PageTitle>
+<MudText Typo="Typo.h4" Class="mb-4">Backups &amp; Restore</MudText>
+
+@if (_points is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else if (_points.Count == 0)
+{
+    <MudAlert Severity="Severity.Info">No restore points yet.</MudAlert>
+}
+else
+{
+    <MudTextField @bind-Value="_filter" Placeholder="Filter by VM or job" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Class="mb-3" Style="max-width:400px" />
+    <MudExpansionPanels MultiExpansion="true">
+        @foreach (var vm in _points.Where(Matches).GroupBy(p => (p.VmNativeId, p.VmName)).OrderBy(g => g.Key.VmName))
+        {
+            var latest = vm.OrderByDescending(p => p.CreatedUtc).First();
+            <MudExpansionPanel>
+                <TitleContent>
+                    <div class="d-flex align-center gap-3">
+                        <MudIcon Icon="@Icons.Material.Filled.Computer" />
+                        <MudText Typo="Typo.h6">@vm.Key.VmName</MudText>
+                        <MudText Typo="Typo.body2" Color="Color.Secondary">@vm.Count() restore point(s) · latest @Fmt.Time(latest.CreatedUtc) · job @latest.JobName</MudText>
+                    </div>
+                </TitleContent>
+                <ChildContent>
+                    <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+                        <thead><tr><th>Created</th><th>Type</th><th>Disks</th><th>New data</th><th>Job</th><th></th></tr></thead>
+                        <tbody>
+                            @foreach (var p in vm.OrderByDescending(p => p.CreatedUtc))
+                            {
+                                <tr>
+                                    <td>@Fmt.Time(p.CreatedUtc)</td>
+                                    <td>@p.Kind</td>
+                                    <td>@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))</td>
+                                    <td>@Fmt.Bytes(p.NewStoredBytes)</td>
+                                    <td>@p.JobName</td>
+                                    <td style="text-align:right;white-space:nowrap">
+                                        <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Restore" Href="@($"/restore/{p.Id}")">Restore VM</MudButton>
+                                        <MudTooltip Text="Verify all data"><MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.FactCheck" OnClick="@(() => VerifyAsync(p))" /></MudTooltip>
+                                        <MudTooltip Text="Delete restore point"><MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete" Color="Color.Error" OnClick="@(() => DeleteAsync(p))" /></MudTooltip>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                </ChildContent>
+            </MudExpansionPanel>
+        }
+    </MudExpansionPanels>
+}
+
+@code {
+    private List<RestorePointDto>? _points;
+    private string _filter = string.Empty;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync() => _points = await Api.GetAsync<List<RestorePointDto>>("api/restore-points");
+
+    private bool Matches(RestorePointDto p) => string.IsNullOrWhiteSpace(_filter)
+        || p.VmName.Contains(_filter, StringComparison.OrdinalIgnoreCase) || p.JobName.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+
+    private async Task VerifyAsync(RestorePointDto point)
+    {
+        Snackbar.Add($"Verifying restore point of {point.VmName}…", Severity.Info);
+        try
+        {
+            var result = await Api.PostAsync<VerifyResultDto>($"api/restore-points/{point.Id}/verify?full=true");
+            Snackbar.Add(result.Ok ? $"All {result.CheckedChunks} blocks are intact." : $"{result.Problems.Count} problem(s): {string.Join("; ", result.Problems.Take(3))}", result.Ok ? Severity.Success : Severity.Error);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task DeleteAsync(RestorePointDto point)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Delete restore point", $"Delete the restore point of {point.VmName} from {Fmt.Time(point.CreatedUtc)}? This cannot be undone.", yesText: "Delete", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await Api.DeleteAsync($"api/restore-points/{point.Id}");
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+}

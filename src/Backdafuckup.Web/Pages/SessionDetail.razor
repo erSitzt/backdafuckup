@@ -1,0 +1,153 @@
+@page "/sessions/{Id:guid}"
+@implements IAsyncDisposable
+@inject ApiClient Api
+@inject LiveConnection Live
+@inject ISnackbar Snackbar
+
+<PageTitle>Session – backdafuckup</PageTitle>
+
+@if (_session is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <div class="d-flex align-center mb-2">
+        <MudText Typo="Typo.h4">@_session.Name</MudText>
+        <MudChip T="string" Class="ml-3" Color="@Fmt.StateColor(_session.State)">@_session.State</MudChip>
+        <MudSpacer />
+        @if (_session.State is "Running" or "Queued")
+        {
+            <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.Stop" OnClick="StopAsync">Stop</MudButton>
+        }
+    </div>
+    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-3">
+        @_session.Kind · started by @_session.TriggeredBy · @Fmt.Time(_session.StartedUtc ?? _session.CreatedUtc) · duration @Fmt.Duration(_session.StartedUtc, _session.EndedUtc)
+        @if (_session.Summary is not null) { <span> · @_session.Summary</span> }
+    </MudText>
+    <MudProgressLinear Color="Color.Primary" Value="@_session.Progress" Size="Size.Large" Class="mb-4">@($"{_session.Progress:0}%")</MudProgressLinear>
+
+    <MudGrid>
+        <MudItem xs="12" sm="4"><StatTile Title="Read" Value="@Fmt.Bytes(_session.ReadBytes)" Icon="@Icons.Material.Filled.Download" Color="Color.Primary" /></MudItem>
+        <MudItem xs="12" sm="4"><StatTile Title="Stored (new data)" Value="@Fmt.Bytes(_session.TransferredBytes)" Icon="@Icons.Material.Filled.Save" Color="Color.Primary" /></MudItem>
+        <MudItem xs="12" sm="4"><StatTile Title="Objects" Value="@_tasks.Count.ToString()" Icon="@Icons.Material.Filled.Computer" Color="Color.Primary" /></MudItem>
+
+        <MudItem xs="12" md="5">
+            <MudPaper Class="pa-3" Elevation="1">
+                <MudText Typo="Typo.h6" Class="mb-2">Objects</MudText>
+                @foreach (var t in _tasks.Values.OrderBy(t => t.ObjectName))
+                {
+                    <div class="d-flex align-center">
+                        <MudText Typo="Typo.body1">@t.ObjectName</MudText>
+                        <MudSpacer />
+                        <MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(t.State)">@t.State</MudChip>
+                    </div>
+                    <MudProgressLinear Value="@t.Progress" Color="@Fmt.StateColor(t.State)" />
+                    <MudText Typo="Typo.caption" Class="d-block mb-3">
+                        @Fmt.Bytes(t.ReadBytes) read · @Fmt.Bytes(t.TransferredBytes) stored · @Fmt.Duration(t.StartedUtc, t.EndedUtc)
+                        @if (t.Error is not null) { <span style="color:#c62828"> · @t.Error</span> }
+                    </MudText>
+                }
+            </MudPaper>
+        </MudItem>
+        <MudItem xs="12" md="7">
+            <MudPaper Class="pa-3" Elevation="1">
+                <MudText Typo="Typo.h6" Class="mb-2">Log</MudText>
+                <div class="session-log">
+                    @foreach (var entry in _log.Values.OrderBy(e => e.Id))
+                    {
+                        <div class="@entry.Severity">@entry.TimestampUtc.ToLocalTime().ToString("HH:mm:ss") @entry.Message</div>
+                    }
+                </div>
+            </MudPaper>
+        </MudItem>
+    </MudGrid>
+}
+
+@code {
+    [Parameter] public Guid Id { get; set; }
+
+    private SessionSummaryDto? _session;
+    private readonly Dictionary<Guid, SessionTaskDto> _tasks = [];
+    private readonly SortedDictionary<long, LogEntryDto> _log = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        Live.SessionUpdated += OnSession;
+        Live.TaskUpdated += OnTask;
+        Live.LogEntryUpserted += OnLog;
+        try
+        {
+            await Live.JoinSessionAsync(Id);
+        }
+        catch (Exception)
+        {
+            // Without live updates the page shows the state at load time.
+        }
+
+        var detail = await Api.GetAsync<SessionDetailDto>($"api/sessions/{Id}");
+        _session = detail.Session;
+        foreach (var t in detail.Tasks)
+        {
+            _tasks[t.Id] = t;
+        }
+
+        foreach (var e in await Api.GetAsync<List<LogEntryDto>>($"api/sessions/{Id}/log"))
+        {
+            _log[e.Id] = e;
+        }
+    }
+
+    private void OnSession(SessionSummaryDto s)
+    {
+        if (s.Id == Id)
+        {
+            _session = s;
+            _ = InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void OnTask(SessionTaskDto t)
+    {
+        if (t.SessionId == Id)
+        {
+            _tasks[t.Id] = t;
+            _ = InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void OnLog(LogEntryDto e)
+    {
+        if (e.SessionId == Id)
+        {
+            _log[e.Id] = e;
+            _ = InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task StopAsync()
+    {
+        try
+        {
+            await Api.PostAsync($"api/sessions/{Id}/stop");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Warning);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        Live.SessionUpdated -= OnSession;
+        Live.TaskUpdated -= OnTask;
+        Live.LogEntryUpserted -= OnLog;
+        try
+        {
+            await Live.LeaveSessionAsync(Id);
+        }
+        catch (Exception)
+        {
+        }
+    }
+}

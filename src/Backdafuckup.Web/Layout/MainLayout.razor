@@ -1,0 +1,75 @@
+﻿@inherits LayoutComponentBase
+@implements IDisposable
+@inject AuthState Auth
+@inject NavigationManager Navigation
+
+<MudThemeProvider Theme="_theme" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+@if (!Auth.Initialized)
+{
+    <div class="boot">Connecting to the backup server…</div>
+}
+else if (Auth.SetupRequired)
+{
+    <SetupForm />
+}
+else if (Auth.User is null)
+{
+    <LoginForm />
+}
+else
+{
+    <MudLayout>
+        <MudAppBar Elevation="1" Dense="true">
+            <MudIconButton Icon="@Icons.Material.Filled.Menu" Color="Color.Inherit" Edge="Edge.Start" OnClick="@(() => _drawerOpen = !_drawerOpen)" />
+            <MudText Typo="Typo.h6" Class="ml-2">backdafuckup</MudText>
+            <MudSpacer />
+            <MudText Typo="Typo.body2" Class="mr-2">@Auth.User.UserName</MudText>
+            <MudTooltip Text="Sign out">
+                <MudIconButton Icon="@Icons.Material.Filled.Logout" Color="Color.Inherit" OnClick="LogoutAsync" />
+            </MudTooltip>
+        </MudAppBar>
+        <MudDrawer @bind-Open="_drawerOpen" ClipMode="DrawerClipMode.Always" Elevation="1" Variant="DrawerVariant.Responsive">
+            <NavMenu />
+        </MudDrawer>
+        <MudMainContent>
+            <MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="py-4">
+                @Body
+            </MudContainer>
+        </MudMainContent>
+    </MudLayout>
+}
+
+@code {
+    private bool _drawerOpen = true;
+
+    private readonly MudTheme _theme = new()
+    {
+        PaletteLight = new PaletteLight
+        {
+            Primary = "#00704a",
+            Secondary = "#37474f",
+            AppbarBackground = "#1f2a30",
+            DrawerBackground = "#f7f8f8",
+        },
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        Auth.Changed += OnAuthChanged;
+        await Auth.InitializeAsync();
+    }
+
+    private void OnAuthChanged() => InvokeAsync(StateHasChanged);
+
+    private async Task LogoutAsync()
+    {
+        await Auth.LogoutAsync();
+        Navigation.NavigateTo("/");
+    }
+
+    public void Dispose() => Auth.Changed -= OnAuthChanged;
+}

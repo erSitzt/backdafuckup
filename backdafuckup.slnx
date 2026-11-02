@@ -1,0 +1,21 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Backdafuckup.Contracts/Backdafuckup.Contracts.csproj" />
+    <Project Path="src/Backdafuckup.Core/Backdafuckup.Core.csproj" />
+    <Project Path="src/Backdafuckup.DataMover/Backdafuckup.DataMover.csproj" />
+    <Project Path="src/Backdafuckup.Nbd/Backdafuckup.Nbd.csproj" />
+    <Project Path="src/Backdafuckup.Server/Backdafuckup.Server.csproj" />
+    <Project Path="src/Backdafuckup.Storage/Backdafuckup.Storage.csproj" />
+    <Project Path="src/Backdafuckup.Web/Backdafuckup.Web.csproj" />
+    <Project Path="src/Backdafuckup.Xen/Backdafuckup.Xen.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Backdafuckup.DataMover.Tests/Backdafuckup.DataMover.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.Lab.Tests/Backdafuckup.Lab.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.Nbd.Tests/Backdafuckup.Nbd.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.Server.Tests/Backdafuckup.Server.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.Storage.Tests/Backdafuckup.Storage.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.Testing/Backdafuckup.Testing.csproj" />
+    <Project Path="tests/Backdafuckup.Xen.Tests/Backdafuckup.Xen.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,73 @@
+@page "/sessions"
+@implements IDisposable
+@inject ApiClient Api
+@inject LiveConnection Live
+
+<PageTitle>History – backdafuckup</PageTitle>
+<div class="d-flex align-center mb-4">
+    <MudText Typo="Typo.h4">History</MudText>
+    <MudSpacer />
+    <MudSelect T="string" Value="_kind" ValueChanged="OnKindChangedAsync" Label="Type" Dense="true" Variant="Variant.Outlined" Style="max-width:220px">
+        <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
+        <MudSelectItem T="string" Value="@("Backup")">Backup</MudSelectItem>
+        <MudSelectItem T="string" Value="@("Restore")">Restore</MudSelectItem>
+        <MudSelectItem T="string" Value="@("RepositoryMaintenance")">Maintenance</MudSelectItem>
+    </MudSelect>
+</div>
+
+@if (_sessions is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <MudPaper Elevation="1" Class="pa-2"><SessionTable Sessions="_sessions" /></MudPaper>
+}
+
+@code {
+    private List<SessionSummaryDto>? _sessions;
+    private string _kind = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        Live.SessionUpdated += OnSessionUpdated;
+        try
+        {
+            await Live.EnsureStartedAsync();
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private async Task OnKindChangedAsync(string kind)
+    {
+        _kind = kind;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync() => _sessions = await Api.GetAsync<List<SessionSummaryDto>>($"api/sessions?limit=200&kind={_kind}");
+
+    private void OnSessionUpdated(SessionSummaryDto session) => _ = InvokeAsync(() =>
+    {
+        if (_sessions is null)
+        {
+            return;
+        }
+
+        var index = _sessions.FindIndex(s => s.Id == session.Id);
+        if (index >= 0)
+        {
+            _sessions[index] = session;
+        }
+        else if (string.IsNullOrEmpty(_kind) || _kind == session.Kind)
+        {
+            _sessions.Insert(0, session);
+        }
+
+        StateHasChanged();
+    });
+
+    public void Dispose() => Live.SessionUpdated -= OnSessionUpdated;
+}

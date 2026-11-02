@@ -1,0 +1,89 @@
+@page "/"
+@implements IDisposable
+@inject ApiClient Api
+@inject LiveConnection Live
+
+<PageTitle>Home – backdafuckup</PageTitle>
+<MudText Typo="Typo.h4" Class="mb-4">Home</MudText>
+
+@if (_data is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <MudGrid>
+        <MudItem xs="12" sm="6" md="3"><StatTile Title="Succeeded (24 h)" Value="@_data.JobsSucceeded24h.ToString()" Color="Color.Success" Icon="@Icons.Material.Filled.CheckCircle" /></MudItem>
+        <MudItem xs="12" sm="6" md="3"><StatTile Title="Warnings (24 h)" Value="@_data.JobsWarning24h.ToString()" Color="Color.Warning" Icon="@Icons.Material.Filled.Warning" /></MudItem>
+        <MudItem xs="12" sm="6" md="3"><StatTile Title="Failed (24 h)" Value="@_data.JobsFailed24h.ToString()" Color="Color.Error" Icon="@Icons.Material.Filled.Error" /></MudItem>
+        <MudItem xs="12" sm="6" md="3"><StatTile Title="Protected VMs" Value="@($"{_data.ProtectedVms} / {_data.ProtectedVms + _data.UnprotectedVms}")" Color="Color.Primary" Icon="@Icons.Material.Filled.Shield" /></MudItem>
+
+        <MudItem xs="12" md="7">
+            <MudPaper Class="pa-4" Elevation="1">
+                <MudText Typo="Typo.h6" Class="mb-2">Running</MudText>
+                @if (_data.RunningSessions.Count == 0)
+                {
+                    <MudText Typo="Typo.body2" Color="Color.Secondary">Nothing is running.</MudText>
+                }
+                @foreach (var s in _data.RunningSessions)
+                {
+                    <MudLink Href="@($"/sessions/{s.Id}")"><MudText Typo="Typo.body1">@s.Name</MudText></MudLink>
+                    <MudProgressLinear Color="Color.Primary" Value="@s.Progress" Class="mb-3">@($"{s.Progress:0}%")</MudProgressLinear>
+                }
+                <MudText Typo="Typo.h6" Class="mt-4 mb-2">Recent sessions</MudText>
+                <SessionTable Sessions="_data.RecentSessions" />
+            </MudPaper>
+        </MudItem>
+        <MudItem xs="12" md="5">
+            <MudPaper Class="pa-4" Elevation="1">
+                <MudText Typo="Typo.h6" Class="mb-2">Repositories</MudText>
+                @foreach (var r in _data.Repositories)
+                {
+                    var used = r.TotalBytes is > 0 && r.FreeBytes is { } free ? 100.0 * (r.TotalBytes.Value - free) / r.TotalBytes.Value : 0;
+                    <MudText Typo="Typo.body1">@r.Name <MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(r.State)">@r.State</MudChip></MudText>
+                    <MudProgressLinear Color="@(used > 90 ? Color.Error : used > 75 ? Color.Warning : Color.Primary)" Value="@used" Size="Size.Large" />
+                    <MudText Typo="Typo.caption" Class="mb-3 d-block">@Fmt.Bytes(r.FreeBytes) free of @Fmt.Bytes(r.TotalBytes) · @r.RestorePoints restore points</MudText>
+                }
+                @if (_data.Repositories.Count == 0)
+                {
+                    <MudText Typo="Typo.body2" Color="Color.Secondary">No repository yet. <MudLink Href="/infrastructure/repositories">Add one</MudLink>.</MudText>
+                }
+            </MudPaper>
+        </MudItem>
+    </MudGrid>
+}
+
+@code {
+    private DashboardDto? _data;
+    private DateTime _lastLoad;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        Live.SessionUpdated += OnSessionUpdated;
+        try
+        {
+            await Live.EnsureStartedAsync();
+        }
+        catch (Exception)
+        {
+            // Live updates are optional; the page still works.
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        _lastLoad = DateTime.UtcNow;
+        _data = await Api.GetAsync<DashboardDto>("api/dashboard");
+    }
+
+    private void OnSessionUpdated(SessionSummaryDto session)
+    {
+        if (DateTime.UtcNow - _lastLoad > TimeSpan.FromSeconds(2))
+        {
+            _ = InvokeAsync(async () => { await LoadAsync(); StateHasChanged(); });
+        }
+    }
+
+    public void Dispose() => Live.SessionUpdated -= OnSessionUpdated;
+}

@@ -1,0 +1,112 @@
+@page "/infrastructure/pools"
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+
+<PageTitle>Virtualization pools – backdafuckup</PageTitle>
+<div class="d-flex align-center mb-4">
+    <MudText Typo="Typo.h4">Virtualization Pools</MudText>
+    <MudSpacer />
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add pool</MudButton>
+</div>
+
+@if (_adding)
+{
+    <AddPoolWizard OnDone="OnPoolAddedAsync" OnCancel="@(() => _adding = false)" />
+}
+
+@if (_pools is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else if (_pools.Count == 0 && !_adding)
+{
+    <MudAlert Severity="Severity.Info">No XCP-ng / XenServer pool has been added yet.</MudAlert>
+}
+else
+{
+    <MudExpansionPanels MultiExpansion="true">
+        @foreach (var pool in _pools)
+        {
+            <MudExpansionPanel>
+                <TitleContent>
+                    <div class="d-flex align-center gap-3">
+                        <MudIcon Icon="@Icons.Material.Filled.Dns" />
+                        <MudText Typo="Typo.h6">@pool.DisplayName</MudText>
+                        <MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(pool.Status)">@pool.Status</MudChip>
+                        <MudText Typo="Typo.body2" Color="Color.Secondary">@pool.ProductName @pool.ProductVersion · master @pool.MasterAddress</MudText>
+                    </div>
+                </TitleContent>
+                <ChildContent>
+                    @if (pool.LastError is not null && pool.Status == "Error")
+                    {
+                        <MudAlert Severity="Severity.Error" Dense="true" Class="mb-2">@pool.LastError</MudAlert>
+                    }
+                    <MudText Typo="Typo.subtitle2">Trusted host certificates (public key SHA-256)</MudText>
+                    <MudSimpleTable Dense="true" Elevation="0" Class="mb-3">
+                        <tbody>
+                            @foreach (var host in pool.Hosts)
+                            {
+                                <tr><td>@host.Address</td><td class="mono">@host.SpkiSha256</td><td>@Fmt.Time(host.TrustedUtc)</td></tr>
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                    <MudText Typo="Typo.body2" Class="mb-3">
+                        Backups read disks over NBD. A pool network needs the NBD purpose, e.g.
+                        <span class="mono">xe network-param-add param-name=purpose param-key=nbd uuid=&lt;network-uuid&gt;</span>
+                        (see Inventory for the NBD state of each network).
+                    </MudText>
+                    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Refresh" OnClick="@(() => RescanAsync(pool))" Class="mr-2">Rescan</MudButton>
+                    <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.Delete" OnClick="@(() => RemoveAsync(pool))">Remove</MudButton>
+                </ChildContent>
+            </MudExpansionPanel>
+        }
+    </MudExpansionPanels>
+}
+
+@code {
+    private List<ConnectionDto>? _pools;
+    private bool _adding;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync() => _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections");
+
+    private async Task OnPoolAddedAsync()
+    {
+        _adding = false;
+        await LoadAsync();
+    }
+
+    private async Task RescanAsync(ConnectionDto pool)
+    {
+        try
+        {
+            await Api.PostAsync($"api/connections/{pool.Id}/rescan");
+            Snackbar.Add($"{pool.DisplayName} rescanned.", Severity.Success);
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task RemoveAsync(ConnectionDto pool)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Remove pool", $"Remove {pool.DisplayName}? Restore points are kept.", yesText: "Remove", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await Api.DeleteAsync($"api/connections/{pool.Id}");
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+}

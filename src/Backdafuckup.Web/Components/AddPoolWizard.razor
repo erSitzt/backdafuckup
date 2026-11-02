@@ -1,0 +1,179 @@
+@using System.Net
+@using System.Net.Http.Json
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+
+<MudPaper Class="pa-4 mb-4" Elevation="2">
+    <MudText Typo="Typo.h6" Class="mb-3">Add XCP-ng / XenServer pool</MudText>
+
+    @if (_step == Step.Address)
+    {
+        <MudText Typo="Typo.body2" Class="mb-3">Enter the address of any host of the pool. The certificate is shown for confirmation next.</MudText>
+        <MudStack Row="true" AlignItems="AlignItems.Start">
+            <MudTextField @bind-Value="_address" Label="Host name or IP address" Variant="Variant.Outlined" AutoFocus="true" />
+            <MudNumericField @bind-Value="_port" Label="Port" Variant="Variant.Outlined" Style="max-width:120px" />
+        </MudStack>
+    }
+    else if (_step == Step.Trust)
+    {
+        <MudAlert Severity="Severity.Warning" Class="mb-3">
+            Verify the certificate before you trust it (compare the fingerprint on the host console:
+            <span class="mono">openssl x509 -in /etc/xensource/xapi-ssl.pem -noout -pubkey | openssl pkey -pubin -outform der | sha256sum</span>).
+        </MudAlert>
+        @foreach (var cert in _pending)
+        {
+            <MudSimpleTable Dense="true" Elevation="0" Class="mb-3">
+                <tbody>
+                    <tr><td style="width:180px">Host</td><td>@cert.HostAddress</td></tr>
+                    <tr><td>Subject</td><td>@cert.Subject</td></tr>
+                    <tr><td>Issuer</td><td>@cert.Issuer @(cert.ValidAgainstSystemCa ? "(trusted CA)" : "(self-signed or unknown CA)")</td></tr>
+                    <tr><td>Valid</td><td>@Fmt.Time(cert.NotBefore) – @Fmt.Time(cert.NotAfter)</td></tr>
+                    <tr><td>Public key SHA-256</td><td class="mono">@cert.SpkiSha256</td></tr>
+                    <tr><td>Certificate SHA-256</td><td class="mono">@cert.Sha256Thumbprint</td></tr>
+                </tbody>
+            </MudSimpleTable>
+        }
+    }
+    else if (_step == Step.Credentials)
+    {
+        <MudStack>
+            <MudTextField @bind-Value="_displayName" Label="Display name" Variant="Variant.Outlined" />
+            <MudTextField @bind-Value="_userName" Label="User name (pool admin)" Variant="Variant.Outlined" />
+            <MudTextField @bind-Value="_password" Label="Password" InputType="InputType.Password" Variant="Variant.Outlined" />
+            <MudCheckBox @bind-Value="_allowInsecureNbd" Label="Allow unencrypted NBD (networks with purpose insecure_nbd)" />
+        </MudStack>
+    }
+
+    @if (_error is not null)
+    {
+        <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">@_error</MudAlert>
+    }
+
+    <div class="d-flex gap-2 mt-4">
+        <MudButton Variant="Variant.Text" OnClick="OnCancel">Cancel</MudButton>
+        <MudSpacer />
+        @if (_step == Step.Address)
+        {
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || string.IsNullOrWhiteSpace(_address))" OnClick="ProbeAsync">Next</MudButton>
+        }
+        else if (_step == Step.Trust)
+        {
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="TrustAsync">Trust certificate</MudButton>
+        }
+        else
+        {
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="CreateAsync">Connect and add</MudButton>
+        }
+    </div>
+    @if (_busy)
+    {
+        <MudProgressLinear Indeterminate="true" Class="mt-2" />
+    }
+</MudPaper>
+
+@code {
+    private enum Step { Address, Trust, Credentials }
+
+    [Parameter] public EventCallback OnDone { get; set; }
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private Step _step = Step.Address;
+    private string _address = string.Empty;
+    private int _port = 443;
+    private string _displayName = string.Empty;
+    private string _userName = "root";
+    private string _password = string.Empty;
+    private bool _allowInsecureNbd;
+    private bool _busy;
+    private string? _error;
+    private readonly List<CertificateDto> _trusted = [];
+    private List<CertificateDto> _pending = [];
+    private bool _createAfterTrust;
+
+    private async Task ProbeAsync()
+    {
+        await RunAsync(async () =>
+        {
+            var cert = await Api.PostAsync<CertificateDto>("api/connections/probe", new ProbeRequestDto(_address.Trim(), _port));
+            _pending = [cert];
+            _displayName = string.IsNullOrEmpty(_displayName) ? _address.Trim() : _displayName;
+            _step = Step.Trust;
+        });
+    }
+
+    private async Task TrustAsync()
+    {
+        _trusted.AddRange(_pending);
+        _pending = [];
+        _step = Step.Credentials;
+        if (_createAfterTrust)
+        {
+            await CreateAsync();
+        }
+    }
+
+    private async Task CreateAsync()
+    {
+        await RunAsync(async () =>
+        {
+            var request = new CreateConnectionDto
+            {
+                DisplayName = _displayName.Trim(),
+                Address = _address.Trim(),
+                Port = _port,
+                UserName = _userName.Trim(),
+                Password = _password,
+                TrustedCertificates = _trusted,
+                AllowInsecureNbd = _allowInsecureNbd,
+            };
+            using var response = await Api.PostRawAsync("api/connections", request);
+            if (response.StatusCode == HttpStatusCode.Conflict && response.Content.Headers.ContentType?.MediaType == "application/json"
+                && await TryReadUntrustedAsync(response) is { Certificates.Count: > 0 } untrusted)
+            {
+                // The address was a pool member; the master presents another certificate.
+                _pending = untrusted.Certificates.ToList();
+                _createAfterTrust = true;
+                _step = Step.Trust;
+                return;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new ApiException(await ApiClient.ReadProblemAsync(response), response.StatusCode, null);
+            }
+
+            Snackbar.Add($"Pool {_displayName} added.", Severity.Success);
+            await OnDone.InvokeAsync();
+        });
+    }
+
+    private static async Task<UntrustedCertificatesDto?> TryReadUntrustedAsync(HttpResponseMessage response)
+    {
+        try
+        {
+            return await response.Content.ReadFromJsonAsync<UntrustedCertificatesDto>();
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    private async Task RunAsync(Func<Task> action)
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            await action();
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

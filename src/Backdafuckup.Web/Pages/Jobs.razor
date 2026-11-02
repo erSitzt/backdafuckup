@@ -1,0 +1,144 @@
+@page "/jobs"
+@implements IDisposable
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+@inject NavigationManager Navigation
+@inject LiveConnection Live
+
+<PageTitle>Backup jobs – backdafuckup</PageTitle>
+<div class="d-flex align-center mb-4">
+    <MudText Typo="Typo.h4">Backup Jobs</MudText>
+    <MudSpacer />
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" Href="/jobs/new">New job</MudButton>
+</div>
+
+@if (_jobs is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <MudTable Items="_jobs" Hover="true" Dense="true" Elevation="1">
+        <HeaderContent>
+            <MudTh>Name</MudTh><MudTh>VMs</MudTh><MudTh>Repository</MudTh><MudTh>Schedule</MudTh><MudTh>Last result</MudTh><MudTh>Last run</MudTh><MudTh>Next run</MudTh><MudTh></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd>
+                <MudLink Href="@($"/jobs/{context.Id}")">@context.Name</MudLink>
+                @if (!context.Enabled) { <MudChip T="string" Size="Size.Small">disabled</MudChip> }
+            </MudTd>
+            <MudTd>@context.Objects.Count</MudTd>
+            <MudTd>@context.RepositoryName</MudTd>
+            <MudTd>@Describe(context.Schedule)</MudTd>
+            <MudTd>
+                @if (context.IsRunning)
+                {
+                    <MudChip T="string" Size="Size.Small" Color="Color.Info">Running</MudChip>
+                }
+                else if (context.LastResult is not null)
+                {
+                    <MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(context.LastResult)">@context.LastResult</MudChip>
+                }
+            </MudTd>
+            <MudTd>@Fmt.Time(context.LastRunUtc)</MudTd>
+            <MudTd>@Fmt.Time(context.NextRunUtc)</MudTd>
+            <MudTd Style="text-align:right; white-space:nowrap">
+                @if (context.IsRunning)
+                {
+                    <MudTooltip Text="Open running session"><MudIconButton Icon="@Icons.Material.Filled.Visibility" OnClick="@(() => OpenRunningAsync(context))" /></MudTooltip>
+                }
+                else
+                {
+                    <MudTooltip Text="Run now (incremental)"><MudIconButton Icon="@Icons.Material.Filled.PlayArrow" Color="Color.Primary" OnClick="@(() => RunAsync(context, false))" /></MudTooltip>
+                    <MudTooltip Text="Active full"><MudIconButton Icon="@Icons.Material.Filled.FastForward" OnClick="@(() => RunAsync(context, true))" /></MudTooltip>
+                }
+                <MudTooltip Text="@(context.Enabled ? "Disable" : "Enable")"><MudIconButton Icon="@(context.Enabled ? Icons.Material.Filled.PauseCircle : Icons.Material.Filled.PlayCircle)" OnClick="@(() => ToggleAsync(context))" /></MudTooltip>
+                <MudTooltip Text="Delete"><MudIconButton Icon="@Icons.Material.Filled.Delete" Color="Color.Error" Disabled="context.IsRunning" OnClick="@(() => DeleteAsync(context))" /></MudTooltip>
+            </MudTd>
+        </RowTemplate>
+        <NoRecordsContent><MudText>No backup job yet.</MudText></NoRecordsContent>
+    </MudTable>
+}
+
+@code {
+    private List<JobDto>? _jobs;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        Live.SessionUpdated += OnSessionUpdated;
+        try
+        {
+            await Live.EnsureStartedAsync();
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private async Task LoadAsync() => _jobs = await Api.GetAsync<List<JobDto>>("api/jobs");
+
+    private void OnSessionUpdated(SessionSummaryDto session)
+    {
+        if (session.JobId is not null && (session.State is not "Running" || _jobs?.Any(j => j.Id == session.JobId && !j.IsRunning) == true))
+        {
+            _ = InvokeAsync(async () => { await LoadAsync(); StateHasChanged(); });
+        }
+    }
+
+    public static string Describe(ScheduleDto schedule) => schedule.Kind switch
+    {
+        "Daily" => $"Daily at {schedule.TimeOfDay}",
+        "Weekly" => $"{string.Join(", ", schedule.Days.Select(d => d.ToString()[..3]))} at {schedule.TimeOfDay}",
+        _ => "Not scheduled",
+    };
+
+    private async Task RunAsync(JobDto job, bool activeFull)
+    {
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/jobs/{job.Id}/run", new RunJobDto(activeFull));
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task OpenRunningAsync(JobDto job)
+    {
+        var sessions = await Api.GetAsync<List<SessionSummaryDto>>($"api/sessions?jobId={job.Id}&limit=1");
+        if (sessions.Count > 0)
+        {
+            Navigation.NavigateTo($"/sessions/{sessions[0].Id}");
+        }
+    }
+
+    private async Task ToggleAsync(JobDto job)
+    {
+        await Api.PostAsync($"api/jobs/{job.Id}/enabled/{(!job.Enabled).ToString().ToLowerInvariant()}");
+        await LoadAsync();
+    }
+
+    private async Task DeleteAsync(JobDto job)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Delete job", $"Delete {job.Name}? Its restore points stay available for restores.", yesText: "Delete", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await Api.DeleteAsync($"api/jobs/{job.Id}");
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    public void Dispose() => Live.SessionUpdated -= OnSessionUpdated;
+}

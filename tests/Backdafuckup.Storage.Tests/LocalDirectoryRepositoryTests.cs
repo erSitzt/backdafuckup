@@ -1,0 +1,336 @@
+using System.Security.Cryptography;
+using Backdafuckup.Core.Hypervisor;
+using Backdafuckup.Core.Repository;
+using Backdafuckup.Storage;
+using Microsoft.Extensions.Time.Testing;
+
+namespace Backdafuckup.Storage.Tests;
+
+[Trait("Category", "Unit")]
+public sealed class LocalDirectoryRepositoryTests : IDisposable
+{
+    private const int ChunkSize = 64 * 1024;
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "bdfu-repo-tests", Guid.NewGuid().ToString("N"));
+
+    // GC only deletes chunks older than its safety window; tests run "in the future" so that window is passed.
+    private readonly FakeTimeProvider _time = new(DateTimeOffset.UtcNow.AddHours(1));
+
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_root))
+        {
+            Directory.Delete(_root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Writes_commits_and_reads_back_a_restore_point()
+    {
+        await using var repo = await CreateAsync();
+        var disk = RandomDisk(5);
+        var (rpId, _) = await BackupAsync(repo, "vm-1", disk);
+
+        await using var reader = await repo.OpenRestorePointAsync(rpId, Ct);
+        var index = await reader.ReadDiskIndexAsync("0", Ct);
+        var restored = await RestoreAsync(reader.Chunks, index);
+        Assert.Equal(disk, restored);
+
+        var metadata = await reader.OpenBlobAsync(reader.Manifest.Metadata!, Ct);
+        Assert.Equal("metadata", new StreamReader(metadata).ReadToEnd());
+
+        var verify = await repo.VerifyAsync(rpId, VerifyDepth.Full, null, Ct);
+        Assert.True(verify.Ok, string.Join("; ", verify.Problems));
+    }
+
+    [Fact]
+    public async Task Identical_chunks_are_stored_once_and_zero_chunks_not_at_all()
+    {
+        await using var repo = await CreateAsync();
+        var block = RandomNumberGenerator.GetBytes(ChunkSize);
+        var disk = new byte[ChunkSize * 4];
+        block.CopyTo(disk, 0);
+        block.CopyTo(disk, ChunkSize * 2);
+
+        var (_, stats) = await BackupAsync(repo, "vm-1", disk);
+
+        Assert.Equal(1, stats.Stored);
+        Assert.Equal(1, stats.Deduplicated);
+        Assert.Equal(2, stats.Zero);
+        Assert.Single(Directory.EnumerateFiles(Path.Combine(_root, "chunks"), "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task Uncommitted_writes_leave_no_restore_point_behind()
+    {
+        await using (var repo = await CreateAsync())
+        {
+            var writer = repo.BeginWrite(Guid.NewGuid(), "vm-1", null);
+            var data = RandomNumberGenerator.GetBytes(ChunkSize);
+            await writer.PutChunkAsync(ChunkId.Compute(data), data, Ct);
+            await writer.DisposeAsync();
+
+            Assert.Empty(await ToListAsync(repo.ListRestorePointsAsync(Ct)));
+            Assert.False(Directory.Exists(Path.Combine(_root, "restore-points", "vm-1")));
+        }
+
+        // A crash before commit leaves a directory without manifest; opening the repository removes it.
+        var orphan = Path.Combine(_root, "restore-points", "vm-2", $"20260101T000000Z_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(orphan);
+        await File.WriteAllTextAsync(Path.Combine(orphan, "disk-0.idx"), "partial", Ct);
+        await using var reopened = await LocalDirectoryRepository.OpenAsync(_root, Ct, _time);
+        Assert.False(Directory.Exists(orphan));
+    }
+
+    [Fact]
+    public async Task Second_owner_cannot_open_the_repository()
+    {
+        await using var repo = await CreateAsync();
+
+        await Assert.ThrowsAsync<RepositoryLockedException>(() => LocalDirectoryRepository.OpenAsync(_root, Ct));
+    }
+
+    [Fact]
+    public async Task Detects_corrupt_and_missing_chunks()
+    {
+        await using var repo = await CreateAsync();
+        var (rpId, _) = await BackupAsync(repo, "vm-1", RandomDisk(3));
+        var chunks = Directory.EnumerateFiles(Path.Combine(_root, "chunks"), "*", SearchOption.AllDirectories).Order().ToList();
+
+        var bytes = await File.ReadAllBytesAsync(chunks[0], Ct);
+        bytes[^1] ^= 0xFF;
+        await File.WriteAllBytesAsync(chunks[0], bytes, Ct);
+        File.Delete(chunks[1]);
+
+        var full = await repo.VerifyAsync(rpId, VerifyDepth.Full, null, Ct);
+        Assert.False(full.Ok);
+        Assert.Equal(2, full.Problems.Count);
+
+        var quick = await repo.VerifyAsync(rpId, VerifyDepth.Quick, null, Ct);
+        Assert.Contains(quick.Problems, p => p.Contains("missing", StringComparison.Ordinal));
+
+        var id = ChunkId.Parse(Path.GetFileName(chunks[0]));
+        await Assert.ThrowsAsync<ChunkCorruptException>(async () => await repo.Chunks.ReadAsync(id, new byte[ChunkSize], Ct));
+    }
+
+    [Fact]
+    public async Task Pinned_restore_points_cannot_be_deleted()
+    {
+        await using var repo = await CreateAsync();
+        var (rpId, _) = await BackupAsync(repo, "vm-1", RandomDisk(2));
+
+        using (repo.Pin(rpId))
+        {
+            await Assert.ThrowsAsync<RestorePointPinnedException>(() => repo.DeleteRestorePointAsync(rpId, Ct));
+        }
+
+        await repo.DeleteRestorePointAsync(rpId, Ct);
+        Assert.Empty(await ToListAsync(repo.ListRestorePointsAsync(Ct)));
+    }
+
+    [Fact]
+    public async Task Gc_removes_only_chunks_that_are_no_longer_referenced()
+    {
+        await using var repo = await CreateAsync();
+        var first = RandomDisk(4);
+        var second = (byte[])first.Clone();
+        RandomNumberGenerator.Fill(second.AsSpan(0, ChunkSize)); // one chunk differs
+        var (rp1, _) = await BackupAsync(repo, "vm-1", first);
+        var (rp2, _) = await BackupAsync(repo, "vm-1", second);
+        Assert.Equal(5, CountChunkFiles());
+
+        await repo.DeleteRestorePointAsync(rp1, Ct);
+        var gc = await repo.CollectGarbageAsync(null, Ct);
+
+        Assert.Equal(1, gc.DeletedChunks);
+        Assert.Equal(4, CountChunkFiles());
+        Assert.True((await repo.VerifyAsync(rp2, VerifyDepth.Full, null, Ct)).Ok);
+    }
+
+    [Fact]
+    public async Task Restore_points_survive_reopening_the_repository()
+    {
+        Guid rpId;
+        var disk = RandomDisk(3);
+        await using (var repo = await CreateAsync())
+        {
+            (rpId, _) = await BackupAsync(repo, "vm-1", disk);
+        }
+
+        await using var reopened = await LocalDirectoryRepository.OpenAsync(_root, Ct, _time);
+        var all = await ToListAsync(reopened.ListRestorePointsAsync(Ct));
+        Assert.Single(all);
+        Assert.Equal(rpId, all[0].RestorePointId);
+        await using var reader = await reopened.OpenRestorePointAsync(rpId, Ct);
+        Assert.Equal(disk, await RestoreAsync(reader.Chunks, await reader.ReadDiskIndexAsync("0", Ct)));
+    }
+
+    [Fact]
+    public async Task Gc_running_concurrently_with_backups_never_deletes_referenced_chunks()
+    {
+        await using var repo = await CreateAsync();
+
+        // A small pool of chunk contents so that writers constantly deduplicate against each other.
+        var pool = Enumerable.Range(0, 24).Select(_ => RandomNumberGenerator.GetBytes(ChunkSize)).ToArray();
+        var committed = new System.Collections.Concurrent.ConcurrentBag<Guid>();
+        using var stop = new CancellationTokenSource();
+
+        var writers = Enumerable.Range(0, 4).Select(w => Task.Run(async () =>
+        {
+            for (var i = 0; i < 25; i++)
+            {
+                var disk = new byte[ChunkSize * 6];
+                for (var c = 0; c < 6; c++)
+                {
+                    pool[Random.Shared.Next(pool.Length)].CopyTo(disk, c * ChunkSize);
+                }
+
+                var commit = Random.Shared.Next(3) != 0;
+                var (rpId, _) = await BackupAsync(repo, $"vm-{w}", disk, commit);
+                if (commit)
+                {
+                    committed.Add(rpId);
+
+                    // Retention-like deletes of older restore points interleave with GC.
+                    if (Random.Shared.Next(4) == 0 && committed.TryTake(out var old))
+                    {
+                        try
+                        {
+                            await repo.DeleteRestorePointAsync(old, Ct);
+                        }
+                        catch (RestorePointPinnedException)
+                        {
+                            committed.Add(old);
+                        }
+                    }
+                }
+            }
+        }, Ct)).ToArray();
+
+        var gcLoop = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                await repo.CollectGarbageAsync(null, Ct);
+            }
+        }, Ct);
+
+        await Task.WhenAll(writers);
+        await stop.CancelAsync();
+        await gcLoop;
+        await repo.CollectGarbageAsync(null, Ct);
+
+        foreach (var rpId in committed)
+        {
+            var result = await repo.VerifyAsync(rpId, VerifyDepth.Full, null, Ct);
+            Assert.True(result.Ok, $"{rpId}: {string.Join("; ", result.Problems)}");
+        }
+
+        // After the final GC, every chunk on disk is referenced by some restore point.
+        var referenced = new HashSet<ChunkId>();
+        foreach (var rpId in committed)
+        {
+            await using var reader = await repo.OpenRestorePointAsync(rpId, Ct);
+            referenced.UnionWith((await reader.ReadDiskIndexAsync("0", Ct)).Entries.Where(e => !e.IsZero));
+        }
+
+        Assert.Equal(referenced.Count, CountChunkFiles());
+    }
+
+    private async Task<LocalDirectoryRepository> CreateAsync() =>
+        await LocalDirectoryRepository.CreateAsync(_root, Ct, ChunkSize, 3, _time);
+
+    private int CountChunkFiles() => Directory.EnumerateFiles(Path.Combine(_root, "chunks"), "*", SearchOption.AllDirectories).Count();
+
+    private static byte[] RandomDisk(int chunks) => RandomNumberGenerator.GetBytes(ChunkSize * chunks);
+
+    private sealed record PutStats(int Stored, int Deduplicated, int Zero);
+
+    private static async Task<(Guid RestorePointId, PutStats Stats)> BackupAsync(LocalDirectoryRepository repo, string vm, byte[] disk, bool commit = true)
+    {
+        var rpId = Guid.CreateVersion7();
+        await using var writer = repo.BeginWrite(rpId, vm, null);
+        var index = ChunkIndex.CreateEmpty(ChunkSize, disk.Length);
+        int stored = 0, deduplicated = 0, zero = 0;
+        for (var i = 0; i < index.Entries.Length; i++)
+        {
+            var data = disk.AsMemory(i * ChunkSize, Math.Min(ChunkSize, disk.Length - (i * ChunkSize)));
+            if (!data.Span.ContainsAnyExcept((byte)0))
+            {
+                zero++;
+                continue;
+            }
+
+            var id = ChunkId.Compute(data.Span);
+            index.Entries[i] = id;
+            var result = await writer.PutChunkAsync(id, data, Ct);
+            if (result.Outcome == ChunkPutOutcome.Stored)
+            {
+                stored++;
+            }
+            else
+            {
+                deduplicated++;
+            }
+        }
+
+        var indexRef = await writer.WriteDiskIndexAsync("0", index, Ct);
+        var blob = await writer.WriteBlobAsync("vm-metadata", "test", new MemoryStream("metadata"u8.ToArray()), Ct);
+        if (commit)
+        {
+            await writer.CommitAsync(
+                new RestorePointManifest
+                {
+                    RestorePointId = rpId,
+                    RepositoryId = repo.Info.RepositoryId,
+                    CreatedUtc = DateTimeOffset.UtcNow,
+                    Kind = RestorePointKind.Full,
+                    Source = new ManifestSource(HypervisorKind.XenServer, "pool", vm, vm, null),
+                    Vm = new VmDescriptor { VmId = vm, Name = vm },
+                    Metadata = blob,
+                    Chunking = new ManifestChunking(ChunkSize, "sha256", "zstd"),
+                    Disks =
+                    [
+                        new ManifestDisk
+                        {
+                            Key = "0",
+                            SourceDiskId = "disk",
+                            Name = "disk",
+                            CapacityBytes = disk.Length,
+                            Index = indexRef,
+                            Stats = new DiskBackupStats(),
+                        },
+                    ],
+                },
+                Ct);
+        }
+
+        return (rpId, new PutStats(stored, deduplicated, zero));
+    }
+
+    private static async Task<byte[]> RestoreAsync(IChunkReader chunks, ChunkIndex index)
+    {
+        var disk = new byte[index.DiskSize];
+        for (var i = 0; i < index.Entries.Length; i++)
+        {
+            if (!index.Entries[i].IsZero)
+            {
+                await chunks.ReadAsync(index.Entries[i], disk.AsMemory(i * index.ChunkSize, Math.Min(index.ChunkSize, (int)(index.DiskSize - (i * (long)index.ChunkSize)))), Ct);
+            }
+        }
+
+        return disk;
+    }
+
+    private static async Task<List<T>> ToListAsync<T>(IAsyncEnumerable<T> source)
+    {
+        var list = new List<T>();
+        await foreach (var item in source)
+        {
+            list.Add(item);
+        }
+
+        return list;
+    }
+}

@@ -1,0 +1,23 @@
+<MudSimpleTable Dense="true" Hover="true" Elevation="0">
+    <thead>
+        <tr><th>Session</th><th>Type</th><th>State</th><th>Started</th><th>Duration</th><th>Read</th><th>Transferred</th></tr>
+    </thead>
+    <tbody>
+        @foreach (var s in Sessions)
+        {
+            <tr>
+                <td><MudLink Href="@($"/sessions/{s.Id}")">@s.Name</MudLink></td>
+                <td>@s.Kind</td>
+                <td><MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(s.State)">@s.State</MudChip></td>
+                <td>@Fmt.Time(s.StartedUtc ?? s.CreatedUtc)</td>
+                <td>@Fmt.Duration(s.StartedUtc, s.EndedUtc)</td>
+                <td>@Fmt.Bytes(s.ReadBytes)</td>
+                <td>@Fmt.Bytes(s.TransferredBytes)</td>
+            </tr>
+        }
+    </tbody>
+</MudSimpleTable>
+
+@code {
+    [Parameter] public IReadOnlyList<SessionSummaryDto> Sessions { get; set; } = [];
+}

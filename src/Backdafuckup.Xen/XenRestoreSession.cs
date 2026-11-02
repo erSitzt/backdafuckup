@@ -1,0 +1,546 @@
+using System.Buffers;
+using System.Globalization;
+using System.Net;
+using System.Text.Json.Nodes;
+using Backdafuckup.Core.DataMover;
+using Backdafuckup.Core.Hypervisor;
+using Backdafuckup.Core.Operations;
+using Backdafuckup.Xen.Xapi;
+
+namespace Backdafuckup.Xen;
+
+internal sealed partial class XenHypervisorSession
+{
+    public async Task<IVmRestoreSession> BeginRestoreAsync(VmRestorePlan plan, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        var xapi = await OpenDedicatedSessionAsync(cancellationToken).ConfigureAwait(false);
+        return new XenRestoreSession(this, xapi, plan, log, ledger);
+    }
+}
+
+/// <summary>
+/// Restore of a whole VM: creates disks (VDI.create), streams them with import_raw_vdi, re-creates the VM with
+/// import_metadata (mapping old to new disk UUIDs) and applies name, networks, MACs, affinity and power state.
+/// Everything created is removed again if the restore does not complete.
+/// </summary>
+internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession xapi, VmRestorePlan plan, IOperationLog log, IArtifactLedger ledger) : IVmRestoreSession
+{
+    private readonly List<(string VdiRef, string Uuid, Guid Artifact)> _createdVdis = [];
+    private string? _vmRef;
+    private Guid? _vmArtifact;
+    private (string Ref, string OriginalName)? _replaced;
+    private bool _completed;
+
+    public async Task<RestoreValidation> ValidateAsync(CancellationToken cancellationToken)
+    {
+        var errors = new List<string>();
+        var warnings = new List<string>();
+        var srs = await xapi.GetAllRecordsAsync("SR", cancellationToken).ConfigureAwait(false);
+        var networks = await xapi.GetAllRecordsAsync("network", cancellationToken).ConfigureAwait(false);
+
+        var needed = new Dictionary<string, long>(StringComparer.Ordinal);
+        foreach (var disk in plan.Manifest.Disks)
+        {
+            if (!plan.DiskStorage.TryGetValue(disk.Key, out var srUuid))
+            {
+                errors.Add($"No target storage selected for disk {disk.Name}.");
+                continue;
+            }
+
+            needed[srUuid] = needed.GetValueOrDefault(srUuid) + disk.CapacityBytes;
+        }
+
+        foreach (var (srUuid, bytes) in needed)
+        {
+            var sr = srs.Values.FirstOrDefault(s => s.Str("uuid") == srUuid);
+            if (sr is null)
+            {
+                errors.Add($"Target storage {srUuid} does not exist.");
+                continue;
+            }
+
+            var free = sr.Long("physical_size") - sr.Long("physical_utilisation");
+            if (free < bytes)
+            {
+                var message = $"Storage {sr.Str("name_label")} has {free / (1L << 30)} GiB free, the restored disks need up to {bytes / (1L << 30)} GiB.";
+                if (sr.Str("type") is "lvm" or "lvmoiscsi" or "lvmohba")
+                {
+                    errors.Add(message);
+                }
+                else
+                {
+                    warnings.Add(message + " Thin provisioned storage may still fit.");
+                }
+            }
+        }
+
+        foreach (var network in plan.NetworkMap.Values.Distinct())
+        {
+            if (!networks.Values.Any(n => n.Str("uuid") == network))
+            {
+                errors.Add($"Target network {network} does not exist.");
+            }
+        }
+
+        if (plan.Mode == RestoreMode.OriginalLocation)
+        {
+            var existing = await xapi.TryGetByUuidAsync("VM", plan.Manifest.Source.VmId, cancellationToken).ConfigureAwait(false);
+            if (existing is not null && !plan.ReplaceExisting)
+            {
+                errors.Add($"The original VM {plan.Manifest.Source.VmName} still exists. Choose 'Replace existing VM' or restore to another location.");
+            }
+        }
+
+        var vms = await xapi.GetAllRecordsAsync("VM", cancellationToken).ConfigureAwait(false);
+        if (vms.Values.Any(v => !v.Bool("is_a_snapshot") && !v.Bool("is_a_template") && v.Str("name_label") == plan.VmName
+                                && !(plan.ReplaceExisting && v.Str("uuid") == plan.Manifest.Source.VmId)))
+        {
+            warnings.Add($"A VM named '{plan.VmName}' already exists.");
+        }
+
+        if (plan.Manifest.Vm.HasVtpm)
+        {
+            warnings.Add("The VM had a virtual TPM. TPM contents are not part of the backup; BitLocker or measured boot may need recovery keys.");
+        }
+
+        if (plan.Mode == RestoreMode.AlternateLocation && !plan.RegenerateMacs
+            && vms.Values.Any(v => v.Str("uuid") == plan.Manifest.Source.VmId))
+        {
+            warnings.Add("The original VM exists in the target pool; keeping its MAC addresses creates duplicate MACs on the network.");
+        }
+
+        if (!string.IsNullOrEmpty(plan.TargetHostId)
+            && await xapi.TryGetByUuidAsync("host", plan.TargetHostId, cancellationToken).ConfigureAwait(false) is null)
+        {
+            errors.Add($"Target host {plan.TargetHostId} does not exist.");
+        }
+
+        return new RestoreValidation(errors, warnings);
+    }
+
+    public async Task<IDiskWriter> CreateDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken)
+    {
+        var srRef = await xapi.TryGetByUuidAsync("SR", target.StorageId, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException($"Storage {target.StorageId} does not exist.");
+        var record = new JsonObject
+        {
+            ["name_label"] = target.Name,
+            ["name_description"] = $"Restored by backdafuckup from {plan.Manifest.CreatedUtc:yyyy-MM-dd HH:mm} UTC",
+            ["SR"] = srRef,
+            ["virtual_size"] = target.CapacityBytes.ToString(CultureInfo.InvariantCulture),
+            ["type"] = "user",
+            ["sharable"] = false,
+            ["read_only"] = false,
+            ["other_config"] = XenHypervisorSession.Map((XenTags.Session, plan.SessionId.ToString())),
+            ["xenstore_data"] = new JsonObject(),
+            ["sm_config"] = new JsonObject(),
+            ["tags"] = new JsonArray(),
+        };
+        var vdiRef = await xapi.CallStringAsync("VDI.create", cancellationToken, record).ConfigureAwait(false);
+        var vdi = await xapi.GetRecordAsync("VDI", vdiRef, cancellationToken).ConfigureAwait(false);
+        var artifact = await ledger.RecordAsync(XenArtifactKinds.RestoredVdi, vdi.Str("uuid"), vdiRef, null, cancellationToken).ConfigureAwait(false);
+        _createdVdis.Add((vdiRef, vdi.Str("uuid"), artifact));
+
+        var importHost = await ResolveImportHostAsync(srRef, cancellationToken).ConfigureAwait(false);
+        log.Info($"Created disk {target.Name} ({target.CapacityBytes / (1L << 30)} GiB) on {target.StorageId}.");
+        return new XenRawImportWriter(owner, xapi, importHost, vdiRef, vdi.Str("uuid"), target.CapacityBytes, owner.Provider.Options.ImportTimeout);
+    }
+
+    public async Task<RestoredVm> CreateVmAsync(IReadOnlyDictionary<string, string> sourceToNewDiskId, CancellationToken cancellationToken)
+    {
+        var keepIdentity = plan.Mode == RestoreMode.OriginalLocation;
+        if (plan.Mode == RestoreMode.OriginalLocation && plan.ReplaceExisting)
+        {
+            var originalRef = await xapi.TryGetByUuidAsync("VM", plan.Manifest.Source.VmId, cancellationToken).ConfigureAwait(false);
+            if (originalRef is not null)
+            {
+                await ReplaceOriginalAsync(originalRef, cancellationToken).ConfigureAwait(false);
+                keepIdentity = false; // the old VM still owns the UUID
+            }
+        }
+
+        var taskRef = await xapi.CreateTaskAsync("backdafuckup restore: import VM metadata", cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var query = new List<string>
+            {
+                $"session_id={Uri.EscapeDataString(xapi.SessionRef)}",
+                $"task_id={Uri.EscapeDataString(taskRef)}",
+                $"restore={(keepIdentity ? "true" : "false")}",
+                $"force={(owner.Provider.Options.ForceMetadataImport ? "true" : "false")}",
+            };
+            query.AddRange(sourceToNewDiskId.Select(kv => $"vdi:{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+
+            using var content = new ByteArrayContent(plan.Metadata.Content);
+            using var response = await xapi.Transport.SendHandlerAsync(HttpMethod.Put, "import_metadata?" + string.Join('&', query), content, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new HttpRequestException($"import_metadata failed: HTTP {(int)response.StatusCode}", null, response.StatusCode);
+            }
+
+            var result = await xapi.WaitForTaskAsync(taskRef, owner.Provider.Options.TaskTimeout, null, cancellationToken).ConfigureAwait(false);
+            var task = await xapi.GetRecordAsync("task", taskRef, cancellationToken).ConfigureAwait(false);
+            var vmRefs = XapiSession.DecodeTaskResultRefs(task.Str("result"));
+            _vmRef = vmRefs.Count > 0 ? vmRefs[0] : result;
+            if (!_vmRef.StartsWith("OpaqueRef:", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("import_metadata did not return the new VM.");
+            }
+        }
+        finally
+        {
+            await xapi.TryDestroyTaskAsync(taskRef).ConfigureAwait(false);
+        }
+
+        var vm = await xapi.GetRecordAsync("VM", _vmRef, cancellationToken).ConfigureAwait(false);
+        _vmArtifact = await ledger.RecordAsync(XenArtifactKinds.RestoredVm, vm.Str("uuid"), _vmRef, null, cancellationToken).ConfigureAwait(false);
+        log.Info($"Created VM {vm.Str("name_label")} from the backed-up configuration.");
+        return new RestoredVm(vm.Str("uuid"), vm.Str("name_label"));
+    }
+
+    public async Task<RestoredVm> CompleteAsync(CancellationToken cancellationToken)
+    {
+        if (_vmRef is null)
+        {
+            throw new InvalidOperationException("CreateVmAsync must be called first.");
+        }
+
+        await xapi.CallAsync("VM.set_name_label", cancellationToken, _vmRef, plan.VmName).ConfigureAwait(false);
+        await ReconfigureNicsAsync(cancellationToken).ConfigureAwait(false);
+
+        string? hostRef = null;
+        if (!string.IsNullOrEmpty(plan.TargetHostId))
+        {
+            hostRef = await xapi.TryGetByUuidAsync("host", plan.TargetHostId, cancellationToken).ConfigureAwait(false);
+            if (hostRef is not null)
+            {
+                await xapi.CallAsync("VM.set_affinity", cancellationToken, _vmRef, hostRef).ConfigureAwait(false);
+            }
+        }
+
+        if (_replaced is { } replaced && plan.DeleteReplaced)
+        {
+            await DeleteVmWithDisksAsync(replaced.Ref, cancellationToken).ConfigureAwait(false);
+            log.Info($"Deleted the replaced VM {replaced.OriginalName}.");
+            _replaced = null;
+        }
+
+        // From here on the restore is final.
+        _completed = true;
+        foreach (var vdi in _createdVdis)
+        {
+            await ledger.UpdateAsync(vdi.Artifact, ArtifactState.Done, null, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (_vmArtifact is { } vmArtifact)
+        {
+            await ledger.UpdateAsync(vmArtifact, ArtifactState.Done, null, cancellationToken).ConfigureAwait(false);
+        }
+
+        foreach (var vdi in _createdVdis)
+        {
+            try
+            {
+                await xapi.CallAsync("VDI.remove_from_other_config", cancellationToken, vdi.VdiRef, XenTags.Session).ConfigureAwait(false);
+            }
+            catch (XapiException)
+            {
+            }
+        }
+
+        if (plan.PowerOn)
+        {
+            log.Info("Starting the restored VM.");
+            if (hostRef is not null)
+            {
+                await xapi.RunTaskAsync("VM.start_on", null, owner.Provider.Options.TaskTimeout, cancellationToken, _vmRef, hostRef, false, false).ConfigureAwait(false);
+            }
+            else
+            {
+                await xapi.RunTaskAsync("VM.start", null, owner.Provider.Options.TaskTimeout, cancellationToken, _vmRef, false, false).ConfigureAwait(false);
+            }
+        }
+
+        var vm = await xapi.GetRecordAsync("VM", _vmRef, cancellationToken).ConfigureAwait(false);
+        return new RestoredVm(vm.Str("uuid"), vm.Str("name_label"));
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (!_completed)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            try
+            {
+                if (_vmRef is not null)
+                {
+                    await xapi.CallAsync("VM.destroy", timeout.Token, _vmRef).ConfigureAwait(false);
+                }
+
+                if (_vmArtifact is { } vmArtifact)
+                {
+                    await ledger.UpdateAsync(vmArtifact, ArtifactState.Done, null, timeout.Token).ConfigureAwait(false);
+                }
+
+                foreach (var vdi in _createdVdis)
+                {
+                    await XenHypervisorSession.DestroyVdiByUuidAsync(xapi, vdi.Uuid, log, timeout.Token).ConfigureAwait(false);
+                    await ledger.UpdateAsync(vdi.Artifact, ArtifactState.Done, null, timeout.Token).ConfigureAwait(false);
+                }
+
+                if (_replaced is { } replaced)
+                {
+                    await xapi.CallAsync("VM.set_name_label", timeout.Token, replaced.Ref, replaced.OriginalName).ConfigureAwait(false);
+                    log.Info($"Restore failed; the original VM {replaced.OriginalName} keeps its name again (it was shut down).");
+                }
+
+                if (_createdVdis.Count > 0 || _vmRef is not null)
+                {
+                    log.Info("Removed the partially restored VM and disks.");
+                }
+            }
+            catch (Exception ex) when (ex is XapiException or HttpRequestException or IOException or OperationCanceledException)
+            {
+                log.Warning($"Cleanup after the failed restore was incomplete ({ex.Message}); leftovers are removed automatically later.");
+                foreach (var vdi in _createdVdis)
+                {
+                    await ledger.UpdateAsync(vdi.Artifact, ArtifactState.CleanupPending, null, CancellationToken.None).ConfigureAwait(false);
+                }
+
+                if (_vmArtifact is { } vmArtifact)
+                {
+                    await ledger.UpdateAsync(vmArtifact, ArtifactState.CleanupPending, null, CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+        }
+
+        await xapi.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private async Task ReplaceOriginalAsync(string originalRef, CancellationToken cancellationToken)
+    {
+        var original = await xapi.GetRecordAsync("VM", originalRef, cancellationToken).ConfigureAwait(false);
+        var name = original.Str("name_label");
+        if (original.Str("power_state") != "Halted")
+        {
+            log.Info($"Shutting down the original VM {name}.");
+            try
+            {
+                await xapi.RunTaskAsync("VM.clean_shutdown", null, TimeSpan.FromMinutes(5), cancellationToken, originalRef).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is XapiException or TimeoutException)
+            {
+                log.Warning($"Clean shutdown failed ({ex.Message}); forcing power off.");
+                await xapi.RunTaskAsync("VM.hard_shutdown", null, TimeSpan.FromMinutes(5), cancellationToken, originalRef).ConfigureAwait(false);
+            }
+        }
+
+        var replacedName = $"{name} (replaced {DateTime.Now:yyyy-MM-dd HH:mm})";
+        await xapi.CallAsync("VM.set_name_label", cancellationToken, originalRef, replacedName).ConfigureAwait(false);
+        _replaced = (originalRef, name);
+        log.Info($"The original VM was renamed to '{replacedName}'.");
+    }
+
+    private async Task ReconfigureNicsAsync(CancellationToken cancellationToken)
+    {
+        var vm = await xapi.GetRecordAsync("VM", _vmRef!, cancellationToken).ConfigureAwait(false);
+        var regenerate = plan.RegenerateMacs;
+        foreach (var vifRef in vm.Set("VIFs"))
+        {
+            var vif = await xapi.GetRecordAsync("VIF", vifRef, cancellationToken).ConfigureAwait(false);
+            var device = vif.Str("device");
+            var networkRef = vif.Str("network");
+            if (plan.NetworkMap.TryGetValue(device, out var networkUuid))
+            {
+                networkRef = await xapi.TryGetByUuidAsync("network", networkUuid, cancellationToken).ConfigureAwait(false) ?? networkRef;
+            }
+
+            if (networkRef == vif.Str("network") && !regenerate)
+            {
+                continue;
+            }
+
+            await xapi.CallAsync("VIF.destroy", cancellationToken, vifRef).ConfigureAwait(false);
+            var record = new JsonObject
+            {
+                ["device"] = device,
+                ["network"] = networkRef,
+                ["VM"] = _vmRef,
+                ["MAC"] = regenerate ? string.Empty : vif.Str("MAC"),
+                ["MTU"] = vif.Long("MTU").ToString(CultureInfo.InvariantCulture),
+                ["other_config"] = new JsonObject(),
+                ["qos_algorithm_type"] = string.Empty,
+                ["qos_algorithm_params"] = new JsonObject(),
+                ["locking_mode"] = "network_default",
+                ["ipv4_allowed"] = new JsonArray(),
+                ["ipv6_allowed"] = new JsonArray(),
+            };
+            await xapi.CallAsync("VIF.create", cancellationToken, record).ConfigureAwait(false);
+        }
+    }
+
+    private async Task DeleteVmWithDisksAsync(string vmRef, CancellationToken cancellationToken)
+    {
+        var vm = await xapi.GetRecordAsync("VM", vmRef, cancellationToken).ConfigureAwait(false);
+        var vdis = new List<string>();
+        foreach (var vbdRef in vm.Set("VBDs"))
+        {
+            var vbd = await xapi.GetRecordAsync("VBD", vbdRef, cancellationToken).ConfigureAwait(false);
+            if (vbd.Str("type") == "Disk" && !XapiRecord.IsNullRef(vbd.Str("VDI")))
+            {
+                vdis.Add(vbd.Str("VDI"));
+            }
+        }
+
+        await xapi.CallAsync("VM.destroy", cancellationToken, vmRef).ConfigureAwait(false);
+        foreach (var vdi in vdis)
+        {
+            await xapi.CallAsync("VDI.destroy", cancellationToken, vdi).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Shared SRs are imported through the master; local SRs through the host that has them attached.</summary>
+    private async Task<string> ResolveImportHostAsync(string srRef, CancellationToken cancellationToken)
+    {
+        var sr = await xapi.GetRecordAsync("SR", srRef, cancellationToken).ConfigureAwait(false);
+        if (sr.Bool("shared"))
+        {
+            return xapi.MasterAddress;
+        }
+
+        foreach (var pbdRef in sr.Set("PBDs"))
+        {
+            var pbd = await xapi.GetRecordAsync("PBD", pbdRef, cancellationToken).ConfigureAwait(false);
+            if (pbd.Bool("currently_attached"))
+            {
+                var host = await xapi.GetRecordAsync("host", pbd.Str("host"), cancellationToken).ConfigureAwait(false);
+                return host.Str("address");
+            }
+        }
+
+        return xapi.MasterAddress;
+    }
+}
+
+/// <summary>Streams a restore-point disk into a new VDI with PUT /import_raw_vdi (format=raw).</summary>
+internal sealed class XenRawImportWriter(
+    XenHypervisorSession owner,
+    XapiSession xapi,
+    string importHost,
+    string vdiRef,
+    string vdiUuid,
+    long capacity,
+    TimeSpan timeout) : IDiskWriter
+{
+    public string DiskId => vdiUuid;
+
+    public long Capacity => capacity;
+
+    public DiskWriterCapabilities Capabilities => DiskWriterCapabilities.Sequential;
+
+    public async Task WriteAsync(IDiskImageSource image, IProgress<long>? bytesWritten, CancellationToken cancellationToken)
+    {
+        if (image.Capacity != capacity)
+        {
+            throw new ArgumentException($"Image size {image.Capacity} does not match the disk size {capacity}.", nameof(image));
+        }
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(timeout);
+        var taskRef = await xapi.CreateTaskAsync("backdafuckup restore: import disk", timeoutCts.Token).ConfigureAwait(false);
+        try
+        {
+            var host = importHost;
+            for (var redirects = 0; ; redirects++)
+            {
+                var transport = host == xapi.MasterAddress ? xapi.Transport : owner.CreateTransport(host);
+                try
+                {
+                    var query = $"import_raw_vdi?session_id={Uri.EscapeDataString(xapi.SessionRef)}&task_id={Uri.EscapeDataString(taskRef)}&vdi={Uri.EscapeDataString(vdiRef)}&format=raw";
+                    using var content = new DiskImageContent(image, bytesWritten);
+                    using var response = await transport.SendHandlerAsync(HttpMethod.Put, query, content, timeoutCts.Token).ConfigureAwait(false);
+                    if (response.StatusCode is HttpStatusCode.Redirect or HttpStatusCode.TemporaryRedirect && response.Headers.Location is { } location && redirects < 3)
+                    {
+                        host = location.Host;
+                        continue;
+                    }
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        throw new HttpRequestException($"import_raw_vdi failed: HTTP {(int)response.StatusCode}", null, response.StatusCode);
+                    }
+
+                    break;
+                }
+                finally
+                {
+                    if (!ReferenceEquals(transport, xapi.Transport))
+                    {
+                        transport.Dispose();
+                    }
+                }
+            }
+
+            await xapi.WaitForTaskAsync(taskRef, owner.Provider.Options.TaskTimeout, null, timeoutCts.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            await xapi.TryDestroyTaskAsync(taskRef).ConfigureAwait(false);
+        }
+    }
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
+/// <summary>HTTP body that streams a disk image in 4 MiB writes.</summary>
+internal sealed class DiskImageContent(IDiskImageSource image, IProgress<long>? progress) : HttpContent
+{
+    private const int WriteSize = 4 * 1024 * 1024;
+
+    protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+        SerializeToStreamAsync(stream, context, CancellationToken.None);
+
+    protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken)
+    {
+        await using var source = image.OpenSequential(prefetchChunks: 32, workers: 8);
+        var buffer = ArrayPool<byte>.Shared.Rent(WriteSize);
+        try
+        {
+            long total = 0;
+            while (true)
+            {
+                var filled = 0;
+                while (filled < WriteSize)
+                {
+                    var n = await source.ReadAsync(buffer.AsMemory(filled, WriteSize - filled), cancellationToken).ConfigureAwait(false);
+                    if (n == 0)
+                    {
+                        break;
+                    }
+
+                    filled += n;
+                }
+
+                if (filled == 0)
+                {
+                    break;
+                }
+
+                await stream.WriteAsync(buffer.AsMemory(0, filled), cancellationToken).ConfigureAwait(false);
+                total += filled;
+                progress?.Report(total);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    protected override bool TryComputeLength(out long length)
+    {
+        length = image.Capacity;
+        return true;
+    }
+}

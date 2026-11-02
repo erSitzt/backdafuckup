@@ -1,0 +1,9 @@
+html, body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+.boot { display: flex; height: 100vh; align-items: center; justify-content: center; color: #555; font-size: 1.1rem; }
+#blazor-error-ui { background: #ffe0e0; bottom: 0; box-shadow: 0 -1px 2px rgba(0,0,0,.2); display: none; left: 0; padding: .6rem 1.25rem .7rem; position: fixed; width: 100%; z-index: 2000; }
+#blazor-error-ui .dismiss { cursor: pointer; position: absolute; right: .75rem; top: .5rem; }
+.session-log { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .82rem; max-height: 60vh; overflow-y: auto; }
+.session-log .Warning { color: #b26a00; }
+.session-log .Error { color: #c62828; }
+.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .8rem; word-break: break-all; }
+.step-header { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }

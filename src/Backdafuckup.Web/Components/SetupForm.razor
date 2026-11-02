@@ -1,0 +1,57 @@
+@inject ApiClient Api
+@inject AuthState Auth
+
+<div style="display:flex;min-height:100vh;align-items:center;justify-content:center;background:#eef1f2">
+    <MudPaper Elevation="3" Class="pa-8" Style="width:480px">
+        <MudText Typo="Typo.h5" Class="mb-1">Welcome to backdafuckup</MudText>
+        <MudText Typo="Typo.body2" Class="mb-4">
+            Create the first administrator. The setup token is printed in the server log and stored in the file
+            <span class="mono">setup-token</span> in the server's data directory.
+        </MudText>
+        <EditForm Model="this" OnValidSubmit="SubmitAsync">
+            <MudTextField @bind-Value="_token" Label="Setup token" Variant="Variant.Outlined" Class="mb-3" AutoFocus="true" />
+            <MudTextField @bind-Value="_userName" Label="Administrator user name" Variant="Variant.Outlined" Class="mb-3" />
+            <MudTextField @bind-Value="_password" Label="Password (at least 12 characters)" InputType="InputType.Password" Variant="Variant.Outlined" Class="mb-3" />
+            <MudTextField @bind-Value="_repeat" Label="Repeat password" InputType="InputType.Password" Variant="Variant.Outlined" Class="mb-3" />
+            @if (_error is not null)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mb-3">@_error</MudAlert>
+            }
+            <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Filled" Color="Color.Primary" FullWidth="true" Disabled="_busy">Create administrator</MudButton>
+        </EditForm>
+    </MudPaper>
+</div>
+
+@code {
+    private string _token = string.Empty;
+    private string _userName = "admin";
+    private string _password = string.Empty;
+    private string _repeat = string.Empty;
+    private string? _error;
+    private bool _busy;
+
+    private async Task SubmitAsync()
+    {
+        _error = null;
+        if (_password != _repeat)
+        {
+            _error = "The passwords do not match.";
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            await Api.PostAsync("api/setup", new SetupRequestDto(_token.Trim(), _userName.Trim(), _password));
+            await Auth.LoginAsync(_userName.Trim(), _password);
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

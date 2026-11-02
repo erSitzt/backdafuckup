@@ -1,0 +1,150 @@
+@page "/infrastructure/repositories"
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+@inject NavigationManager Navigation
+
+<PageTitle>Repositories – backdafuckup</PageTitle>
+<div class="d-flex align-center mb-4">
+    <MudText Typo="Typo.h4">Backup Repositories</MudText>
+    <MudSpacer />
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add repository</MudButton>
+</div>
+
+@if (_adding)
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="2">
+        <MudText Typo="Typo.h6" Class="mb-2">Add repository</MudText>
+        <MudText Typo="Typo.body2" Class="mb-3">
+            A directory on a volume mounted on the backup server (e.g. an iSCSI LUN). If the directory already contains a
+            backdafuckup repository, it is imported together with its restore points.
+        </MudText>
+        <MudGrid>
+            <MudItem xs="12" md="4"><MudTextField @bind-Value="_name" Label="Name" Variant="Variant.Outlined" /></MudItem>
+            <MudItem xs="12" md="8"><MudTextField @bind-Value="_path" Label="Path (e.g. /mnt/backup/repo1)" Variant="Variant.Outlined" /></MudItem>
+            <MudItem xs="12" md="4">
+                <MudSelect T="int" @bind-Value="_chunkKiB" Label="Block size" Variant="Variant.Outlined">
+                    <MudSelectItem T="int" Value="1024">1 MiB (recommended)</MudSelectItem>
+                    <MudSelectItem T="int" Value="4096">4 MiB (large, rarely changing disks)</MudSelectItem>
+                    <MudSelectItem T="int" Value="512">512 KiB (more deduplication)</MudSelectItem>
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" md="4"><MudNumericField @bind-Value="_compression" Label="Compression level (0 = off)" Min="0" Max="19" Variant="Variant.Outlined" /></MudItem>
+            <MudItem xs="12" md="4"><MudNumericField @bind-Value="_maxTasks" Label="Max concurrent tasks" Min="1" Max="32" Variant="Variant.Outlined" /></MudItem>
+        </MudGrid>
+        <div class="d-flex gap-2 mt-4">
+            <MudButton OnClick="@(() => _adding = false)">Cancel</MudButton>
+            <MudSpacer />
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="AddAsync">Add</MudButton>
+        </div>
+    </MudPaper>
+}
+
+@if (_items is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <MudTable Items="_items" Hover="true" Dense="true" Elevation="1">
+        <HeaderContent>
+            <MudTh>Name</MudTh><MudTh>Path</MudTh><MudTh>State</MudTh><MudTh>Capacity</MudTh><MudTh>Restore points</MudTh><MudTh>Block size</MudTh><MudTh></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd>@context.Name</MudTd>
+            <MudTd><span class="mono">@context.Path</span></MudTd>
+            <MudTd><MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(context.State)">@context.State</MudChip></MudTd>
+            <MudTd>@Fmt.Bytes(context.FreeBytes) free of @Fmt.Bytes(context.TotalBytes)</MudTd>
+            <MudTd>@context.RestorePoints (@Fmt.Bytes(context.LogicalBytes) of VM disks)</MudTd>
+            <MudTd>@Fmt.Bytes(context.ChunkSize)</MudTd>
+            <MudTd Style="text-align:right; white-space:nowrap">
+                <MudTooltip Text="Remove unreferenced data now"><MudIconButton Icon="@Icons.Material.Filled.CleaningServices" OnClick="@(() => CollectGarbageAsync(context))" /></MudTooltip>
+                <MudTooltip Text="Import restore points missing in the catalog"><MudIconButton Icon="@Icons.Material.Filled.Sync" OnClick="@(() => RescanAsync(context))" /></MudTooltip>
+                <MudTooltip Text="Remove from the console (data is kept)"><MudIconButton Icon="@Icons.Material.Filled.Delete" Color="Color.Error" OnClick="@(() => RemoveAsync(context))" /></MudTooltip>
+            </MudTd>
+        </RowTemplate>
+        <NoRecordsContent><MudText>No repository yet.</MudText></NoRecordsContent>
+    </MudTable>
+}
+
+@code {
+    private List<RepositoryDto>? _items;
+    private bool _adding;
+    private bool _busy;
+    private string _name = string.Empty;
+    private string _path = string.Empty;
+    private int _chunkKiB = 1024;
+    private int _compression = 3;
+    private int _maxTasks = 4;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync() => _items = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
+
+    private async Task AddAsync()
+    {
+        _busy = true;
+        try
+        {
+            await Api.PostAsync("api/repositories", new CreateRepositoryDto { Name = _name.Trim(), Path = _path.Trim(), ChunkSizeKiB = _chunkKiB, CompressionLevel = _compression, MaxConcurrentTasks = _maxTasks });
+            Snackbar.Add($"Repository {_name} added.", Severity.Success);
+            _adding = false;
+            _name = string.Empty;
+            _path = string.Empty;
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task CollectGarbageAsync(RepositoryDto repository)
+    {
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/repositories/{repository.Id}/gc");
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task RescanAsync(RepositoryDto repository)
+    {
+        try
+        {
+            await Api.PostAsync($"api/repositories/{repository.Id}/rescan");
+            Snackbar.Add("Rescan finished.", Severity.Success);
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task RemoveAsync(RepositoryDto repository)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Remove repository", $"Remove {repository.Name} from the console? The backup data on disk is kept and can be imported again.", yesText: "Remove", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await Api.DeleteAsync($"api/repositories/{repository.Id}");
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+}
