@@ -460,7 +460,10 @@ public sealed class FileRestoreSessionRunner(
             _files = files ?? _files;
             _copied = bytes ?? _copied;
             var metrics = Metrics(runner.Clock.GetUtcNow()) with { CurrentBytesPerSecond = 0 };
-            log.Info(ProgressText(), "progress");
+            if (_plannedFiles > 0 || _files > 0)
+            {
+                log.Info(ProgressText(), "progress");
+            }
             return metrics;
         }
 

@@ -264,7 +264,8 @@ public sealed class SmbShareConnector : ISmbShareConnector
         }
         catch (SocketException ex)
         {
-            throw new IOException($"{server} cannot be resolved by DNS: {ex.Message}", ex);
+            var hint = server.Contains('.', StringComparison.Ordinal) ? string.Empty : $" Short (NetBIOS) names are not resolved here; write the full DNS name, e.g. {server}.<your domain>.";
+            throw new IOException($"{server} cannot be resolved by DNS: {ex.Message}.{hint}", ex);
         }
     }
 
