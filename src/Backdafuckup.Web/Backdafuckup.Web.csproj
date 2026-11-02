@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
-  <PropertyGroup>
-    <OverrideHtmlAssetPlaceholders>true</OverrideHtmlAssetPlaceholders>
-  </PropertyGroup>
+  <!--
+    index.html references _framework/blazor.webassembly.js without fingerprint placeholders: the server's
+    MapStaticAssets maps it to the fingerprinted file. (The placeholders were not replaced in a published server.)
+  -->
   <ItemGroup>
     <ProjectReference Include="..\Backdafuckup.Contracts\Backdafuckup.Contracts.csproj" />
   </ItemGroup>

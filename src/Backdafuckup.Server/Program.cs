@@ -104,13 +104,14 @@ try
     app.UseSerilogRequestLogging();
     app.UseExceptionHandler();
     app.UseStatusCodePages();
-    app.UseBlazorFrameworkFiles();
-    app.UseStaticFiles();
     app.UseRouting();
     app.UseAuthentication();
     app.UseAuthorization();
     app.UseMiddleware<CsrfHeaderMiddleware>();
 
+    // The web console from the static web asset manifest: names without fingerprint (blazor.webassembly.js,
+    // dotnet.js) map to the fingerprinted files, with compression and caching. Needed before the login.
+    app.MapStaticAssets().AllowAnonymous();
     app.MapHealthChecks("/health").AllowAnonymous();
     app.MapOpenApi().AllowAnonymous();
     app.MapAuthEndpoints();
