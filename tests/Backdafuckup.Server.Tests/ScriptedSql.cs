@@ -32,6 +32,12 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
     /// <summary>Makes the next attach fail with this SQL Server error number.</summary>
     public int? FailAttachWith { get; set; }
 
+    /// <summary>SERVERPROPERTY('ProductVersion') of the instance (SQL Server 2022 Express by default).</summary>
+    public string ProductVersion { get; set; } = "16.0.4305.5";
+
+    /// <summary>Database users of attached databases that have no login on the instance (name, type_desc).</summary>
+    public List<(string Name, string Type)> OrphanedUsers { get; } = [];
+
     public void AddDatabase(string name, params string[] files)
     {
         lock (_lock)
@@ -50,10 +56,19 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
 
     public List<SqlInstanceInfo> Instances() =>
     [
-        new() { Name = "SQLEXPRESS", InstanceId = "MSSQL16.SQLEXPRESS", SetupVersion = "16.0.1000.6", ServiceName = "MSSQL$SQLEXPRESS", ServiceState = "Running", ServiceAccount = @"NT Service\MSSQL$SQLEXPRESS" },
+        new()
+        {
+            Name = "SQLEXPRESS", InstanceId = "MSSQL16.SQLEXPRESS", SetupVersion = "16.0.1000.6", ServiceName = "MSSQL$SQLEXPRESS", ServiceState = "Running",
+            ServiceAccount = @"NT Service\MSSQL$SQLEXPRESS", DefaultDataFolder = @"D:\Data", DefaultLogFolder = @"L:\Logs",
+        },
     ];
 
-    public List<SqlVolumeInfo> Volumes() => [new() { Root = @"C:\", FreeBytes = 50L << 30, TotalBytes = 100L << 30 }];
+    public List<SqlVolumeInfo> Volumes() =>
+    [
+        new() { Root = @"C:\", FreeBytes = 50L << 30, TotalBytes = 100L << 30 },
+        new() { Root = @"D:\", FreeBytes = 20L << 30, TotalBytes = 40L << 30 },
+        new() { Root = @"L:\", FreeBytes = 10L << 30, TotalBytes = 20L << 30 },
+    ];
 
     public DbConnection Open(string instance, SqlAccount account)
     {
@@ -79,6 +94,45 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                     return (_databases.TryGetValue(Name(), out var found) ? found.Id : DBNull.Value, null);
                 case "SELECT state_desc FROM sys.databases WHERE name = @name":
                     return (_databases.ContainsKey(Name()) ? "ONLINE" : null, null);
+                case "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)), CAST(SERVERPROPERTY('Edition') AS nvarchar(128)), CAST(SERVERPROPERTY('EngineEdition') AS int), SUSER_SNAME(), IS_SRVROLEMEMBER('sysadmin'), IS_SRVROLEMEMBER('dbcreator')":
+                {
+                    var table = Table(("version", typeof(string)), ("edition", typeof(string)), ("engine", typeof(int)), ("login", typeof(string)), ("sysadmin", typeof(int)), ("dbcreator", typeof(int)));
+                    table.Rows.Add(ProductVersion, "Express Edition (64-bit)", 4, Accounts[^1].UserName, 0, 1);
+                    return (null, table);
+                }
+
+                case "SELECT database_id, name, state_desc, recovery_model_desc, is_read_only FROM sys.databases ORDER BY name":
+                {
+                    var table = Table(("id", typeof(int)), ("name", typeof(string)), ("state", typeof(string)), ("recovery", typeof(string)), ("ro", typeof(bool)));
+                    foreach (var (name, database) in _databases.OrderBy(d => d.Key, StringComparer.OrdinalIgnoreCase))
+                    {
+                        table.Rows.Add(database.Id, name, "ONLINE", "SIMPLE", false);
+                    }
+
+                    return (null, table);
+                }
+
+                case "SELECT database_id, name, physical_name, type_desc, CAST(size AS bigint) * 8192 FROM sys.master_files ORDER BY database_id, file_id":
+                {
+                    var table = Table(("id", typeof(int)), ("name", typeof(string)), ("path", typeof(string)), ("type", typeof(string)), ("size", typeof(long)));
+                    foreach (var database in _databases.Values.OrderBy(d => d.Id))
+                    {
+                        foreach (var file in database.Files)
+                        {
+                            table.Rows.Add(database.Id, Path.GetFileNameWithoutExtension(file), file, file.EndsWith(".ldf", StringComparison.OrdinalIgnoreCase) ? "LOG" : "ROWS", 8L << 20);
+                        }
+                    }
+
+                    return (null, table);
+                }
+
+                case "SELECT SUSER_SNAME(owner_sid), is_trustworthy_on, is_broker_enabled, recovery_model_desc, compatibility_level FROM sys.databases WHERE name = @name":
+                {
+                    var table = Table(("owner", typeof(string)), ("trustworthy", typeof(bool)), ("broker", typeof(bool)), ("recovery", typeof(string)), ("level", typeof(byte)));
+                    table.Rows.Add(Accounts[^1].UserName, false, false, "FULL", (byte)160);
+                    return (null, table);
+                }
+
                 case "SELECT physical_name FROM sys.master_files WHERE database_id = @id":
                 {
                     var table = new DataTable();
@@ -90,6 +144,17 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
 
                     return (null, table);
                 }
+            }
+
+            if (OrphanQuery().Match(text) is { Success: true })
+            {
+                var table = Table(("name", typeof(string)), ("type", typeof(string)));
+                foreach (var (name, type) in OrphanedUsers)
+                {
+                    table.Rows.Add(name, type);
+                }
+
+                return (null, table);
             }
 
             if (AttachStatement().Match(text) is { Success: true } attach)
@@ -131,6 +196,20 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
             throw new NotSupportedException($"The scripted SQL Server does not know: {text}");
         }
     }
+
+    private static DataTable Table(params (string Name, Type Type)[] columns)
+    {
+        var table = new DataTable();
+        foreach (var (name, type) in columns)
+        {
+            table.Columns.Add(name, type);
+        }
+
+        return table;
+    }
+
+    [GeneratedRegex(@"^SELECT dp\.name, dp\.type_desc FROM \[(?:[^\]]|\]\])+\]\.sys\.database_principals AS dp LEFT JOIN sys\.server_principals AS sp ON sp\.sid = dp\.sid WHERE sp\.sid IS NULL")]
+    private static partial Regex OrphanQuery();
 
     [GeneratedRegex(@"^CREATE DATABASE \[(?<name>(?:[^\]]|\]\])+)\] ON (?<files>.+) FOR ATTACH$")]
     private static partial Regex AttachStatement();

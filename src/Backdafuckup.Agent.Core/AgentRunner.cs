@@ -360,7 +360,7 @@ public sealed class AgentRunner
 
         var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
         client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
-        var job = new SqlJobRunner(client, command.JobId, _sql, _log);
+        var job = new SqlJobRunner(client, command.JobId, _sql, _log, _restoreFiles);
         _ = Task.Run(async () =>
         {
             using (client)
@@ -500,6 +500,11 @@ public sealed class AgentRunner
             if (_publish is not null && _sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlPublish))
             {
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlPublish);
+            }
+
+            if (_restoreFiles is not null && _sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlAttachFiles))
+            {
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlAttachFiles);
             }
 
             if (_restoreFiles is not null)

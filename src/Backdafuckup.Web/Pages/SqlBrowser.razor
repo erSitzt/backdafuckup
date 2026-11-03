@@ -69,7 +69,11 @@ else
                             <MudSpacer />
                             <MudTooltip Text="Attach the database from the backup to an instance, without copying it, e.g. to take tables or rows out of it. Unpublish removes it again.">
                                 <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Link"
-                                           Disabled="@(!db.Restorable || !CanExport(db))" OnClick="@(() => OpenPublishAsync(db))">Publish</MudButton>
+                                           Disabled="@(!db.Restorable || !CanExport(db))" OnClick="@(() => OpenPublishAsync(db, restore: false))">Publish</MudButton>
+                            </MudTooltip>
+                            <MudTooltip Text="Copy the database files into a VM under new names and attach them as a new database, on the original or another instance.">
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore"
+                                           Disabled="@(!db.Restorable || !CanExport(db))" OnClick="@(() => OpenPublishAsync(db, restore: true))">Restore</MudButton>
                             </MudTooltip>
                             <MudTooltip Text="The database files as they are in the backup, plus a script that attaches them to an instance.">
                                 <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.FolderZip"
@@ -156,7 +160,7 @@ else
 
 <MudDialog @bind-Visible="_publishOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true, CloseOnEscapeKey = true })">
     <TitleContent>
-        <MudText Typo="Typo.h6">Publish @_publishDb?.Name</MudText>
+        <MudText Typo="Typo.h6">@(_restoreMode ? $"Restore {_publishDb?.Name} as a new database" : $"Publish {_publishDb?.Name}")</MudText>
         <MudText Typo="Typo.body2">
             @_publishDb?.Instance on @_mount?.VmName, restore point of @_mount?.RestorePointCreatedUtc.ToLocalTime().ToString("g") ·
             @(_publishDb is null ? "" : Fmt.Bytes(_publishDb.TotalBytes))
@@ -164,14 +168,24 @@ else
     </TitleContent>
     <DialogContent>
         <MudStack Spacing="3">
-            <MudText Typo="Typo.body2">
-                The agent in the target VM mounts the backup's volumes (read from the backup, nothing is copied) and attaches the
-                database to an instance there. Changes go to a temporary overlay in the VM and are discarded when it is unpublished.
-            </MudText>
+            @if (_restoreMode)
+            {
+                <MudText Typo="Typo.body2">
+                    The agent in the target VM writes the database files under new names (never over existing files), checks them
+                    against the backup and attaches them to an instance there. The database in the backup and existing databases stay as they are.
+                </MudText>
+            }
+            else
+            {
+                <MudText Typo="Typo.body2">
+                    The agent in the target VM mounts the backup's volumes (read from the backup, nothing is copied) and attaches the
+                    database to an instance there. Changes go to a temporary overlay in the VM and are discarded when it is unpublished.
+                </MudText>
+            }
             <MudGrid Spacing="2">
                 <MudItem xs="12" md="6">
                     <MudSelect T="string" Value="_targetVm" ValueChanged="OnTargetVmChanged" Label="Target VM" Variant="Variant.Outlined" Dense="true"
-                               HelperText="VMs whose agent can publish SQL Server databases.">
+                               HelperText="@(_restoreMode ? "VMs whose agent can restore SQL Server databases." : "VMs whose agent can publish SQL Server databases.")">
                         @foreach (var a in _publishAgents)
                         {
                             <MudSelectItem T="string" Value="@a.VmNativeId">@($"{a.VmName ?? a.HostName} ({a.HostName}{(a.Online ? "" : ", offline")})")</MudSelectItem>
@@ -190,7 +204,7 @@ else
             </MudGrid>
             @if (_publishAgents.Count == 0)
             {
-                <MudAlert Severity="Severity.Info" Dense="true">No VM has an agent that can publish SQL Server databases. Install the agent under Guest Agents; agents update themselves after a server update.</MudAlert>
+                <MudAlert Severity="Severity.Info" Dense="true">No VM has an agent that can @(_restoreMode ? "restore" : "publish") SQL Server databases. Install the agent under Guest Agents; agents update themselves after a server update.</MudAlert>
             }
             @if (_accounts.Count == 0)
             {
@@ -224,16 +238,52 @@ else
                         <MudTextField T="string" @bind-Value="_publishName" Label="Database name" Variant="Variant.Outlined" Immediate="true" Margin="Margin.Dense"
                                       HelperText="Must not exist on the instance." />
                     </MudItem>
-                    <MudItem xs="12" md="6">
-                        <MudSelect T="int" @bind-Value="_publishHours" Label="Unpublish automatically after" Variant="Variant.Outlined" Dense="true"
-                                   HelperText="Or earlier with Unpublish in the session.">
-                            @foreach (var hours in new[] { 1, 2, 4, 8, 24, 72 })
-                            {
-                                <MudSelectItem T="int" Value="@hours">@(hours == 1 ? "1 hour" : $"{hours} hours")</MudSelectItem>
-                            }
-                        </MudSelect>
-                    </MudItem>
+                    @if (!_restoreMode)
+                    {
+                        <MudItem xs="12" md="6">
+                            <MudSelect T="int" @bind-Value="_publishHours" Label="Unpublish automatically after" Variant="Variant.Outlined" Dense="true"
+                                       HelperText="Or earlier with Unpublish in the session.">
+                                @foreach (var hours in new[] { 1, 2, 4, 8, 24, 72 })
+                                {
+                                    <MudSelectItem T="int" Value="@hours">@(hours == 1 ? "1 hour" : $"{hours} hours")</MudSelectItem>
+                                }
+                            </MudSelect>
+                        </MudItem>
+                    }
                 </MudGrid>
+                @if (_restoreMode)
+                {
+                    <MudRadioGroup T="string" @bind-Value="_fileLocation">
+                        <MudRadio T="string" Value="@SqlRestoreFiles.Original" Color="Color.Primary">The folders of the files in the backup</MudRadio>
+                        <MudRadio T="string" Value="@SqlRestoreFiles.Default" Color="Color.Primary">
+                            The instance's default folders@(TargetInstance is { } ti ? $" ({ti.DefaultDataFolder ?? "none"}, {ti.DefaultLogFolder ?? ti.DefaultDataFolder ?? "none"})" : "")
+                        </MudRadio>
+                        <MudRadio T="string" Value="@SqlRestoreFiles.Folder" Color="Color.Primary">Other folders</MudRadio>
+                    </MudRadioGroup>
+                    @if (_fileLocation == SqlRestoreFiles.Folder)
+                    {
+                        <MudGrid Spacing="2">
+                            <MudItem xs="12" md="6">
+                                <MudTextField T="string" @bind-Value="_dataFolder" Label="Folder for the data files" Placeholder="D:\SQL\Data" Variant="Variant.Outlined" Immediate="true" Margin="Margin.Dense" />
+                            </MudItem>
+                            <MudItem xs="12" md="6">
+                                <MudTextField T="string" @bind-Value="_logFolder" Label="Folder for the log files" Placeholder="(the data folder)" Variant="Variant.Outlined" Immediate="true" Margin="Margin.Dense" />
+                            </MudItem>
+                        </MudGrid>
+                    }
+                    @if (RestoreTargets() is { Paths: { } paths })
+                    {
+                        <MudSimpleTable Dense="true" Elevation="0">
+                            <thead><tr><th>In the backup</th><th>Restored as</th><th style="text-align:right">Size</th></tr></thead>
+                            <tbody>
+                                @foreach (var (file, path) in RestoreFilesOrdered().Zip(paths))
+                                {
+                                    <tr><td class="mono">@file.Path</td><td class="mono">@path</td><td style="text-align:right">@(file.SizeBytes is { } size ? Fmt.Bytes(size) : "")</td></tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                    }
+                }
                 @foreach (var (severity, text) in PublishChecks())
                 {
                     <MudAlert Severity="@severity" Dense="true">@text</MudAlert>
@@ -243,7 +293,8 @@ else
     </DialogContent>
     <DialogActions>
         <MudButton OnClick="@(() => _publishOpen = false)">Cancel</MudButton>
-        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Link" Disabled="@(!CanPublish || _starting)" OnClick="PublishAsync">Publish</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@(_restoreMode ? Icons.Material.Filled.SettingsBackupRestore : Icons.Material.Filled.Link)"
+                   Disabled="@(!CanPublish || _starting)" OnClick="PublishAsync">@(_restoreMode ? "Restore" : "Publish")</MudButton>
     </DialogActions>
 </MudDialog>
 
@@ -262,6 +313,10 @@ else
     private bool _preparing;
 
     private bool _publishOpen;
+    private bool _restoreMode;
+    private string _fileLocation = SqlRestoreFiles.Original;
+    private string? _dataFolder;
+    private string? _logFolder;
     private SqlDatabaseDto? _publishDb;
     private List<AgentDto> _publishAgents = [];
     private List<(Guid Id, string Text)> _accounts = [];
@@ -278,8 +333,9 @@ else
     private SqlTargetInstanceDto? TargetInstance =>
         _targetSql?.Instances.FirstOrDefault(i => string.Equals(i.Name, _targetInstance, StringComparison.OrdinalIgnoreCase));
 
-    private async Task OpenPublishAsync(SqlDatabaseDto db)
+    private async Task OpenPublishAsync(SqlDatabaseDto db, bool restore)
     {
+        _restoreMode = restore;
         _publishDb = db;
         _targetSql = null;
         _checkError = null;
@@ -287,7 +343,8 @@ else
         _publishName = db.Name;
         try
         {
-            _publishAgents = [.. (await Api.GetAsync<List<AgentDto>>("api/agents")).Where(a => a.CanPublishSql && a.VmNativeId is not null).OrderBy(a => a.VmName ?? a.HostName)];
+            _publishAgents = [.. (await Api.GetAsync<List<AgentDto>>("api/agents"))
+                .Where(a => (restore ? a.CanRestoreSql : a.CanPublishSql) && a.VmNativeId is not null).OrderBy(a => a.VmName ?? a.HostName)];
             var windows = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
             var logins = await Api.GetAsync<List<SqlCredentialDto>>("api/credentials/sql");
             _accounts = [.. windows.Select(c => (c.Id, $"{c.UserName} (Windows)")), .. logins.Select(c => (c.Id, $"{c.UserName} (SQL login)"))];
@@ -361,9 +418,10 @@ else
 
         var taken = TargetInstance?.Databases.Select(d => d.Name).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
         var name = _publishDb.Name;
+        var suffix = _restoreMode ? "_restored" : "_published";
         for (var n = 1; taken.Contains(name); n++)
         {
-            name = n == 1 ? $"{_publishDb.Name}_published" : $"{_publishDb.Name}_published{n}";
+            name = n == 1 ? _publishDb.Name + suffix : $"{_publishDb.Name}{suffix}{n}";
         }
 
         _publishName = name;
@@ -433,8 +491,61 @@ else
         }
 
         var host = _publishAgents.FirstOrDefault(a => a.VmNativeId == _targetVm)?.HostName ?? "the VM";
-        checks.Add((Severity.Normal, $"While the database is published, the agent in {host} does no other restore work; restores into {host} wait until it is unpublished."));
+        if (_restoreMode)
+        {
+            var (paths, error) = RestoreTargets();
+            if (error is not null)
+            {
+                checks.Add((Severity.Error, error));
+            }
+            else if (paths is not null)
+            {
+                foreach (var drive in RestoreFilesOrdered().Zip(paths).GroupBy(f => f.Second[..3], StringComparer.OrdinalIgnoreCase))
+                {
+                    var needed = drive.Sum(f => f.First.SizeBytes ?? 0);
+                    var volume = _targetSql.Volumes.FirstOrDefault(v => string.Equals(v.Root, drive.Key, StringComparison.OrdinalIgnoreCase));
+                    if (volume is null)
+                    {
+                        checks.Add((Severity.Error, $"{drive.Key} is not a local fixed volume of {host}."));
+                    }
+                    else if (volume.FreeBytes < needed + (512L << 20))
+                    {
+                        checks.Add((Severity.Error, $"{drive.Key} on {host} has {Fmt.Bytes(volume.FreeBytes)} free; the files need {Fmt.Bytes(needed)} (512 MB stay free)."));
+                    }
+                }
+            }
+
+            checks.Add((Severity.Normal, "Existing files are never replaced: if a file of that name exists, the restore stops and deletes what it has written."));
+        }
+        else
+        {
+            checks.Add((Severity.Normal, $"While the database is published, the agent in {host} does no other restore work; restores into {host} wait until it is unpublished."));
+        }
+
         return checks;
+    }
+
+    /// <summary>The database's files in the order the server names them: primary data file, other data files, logs.</summary>
+    private List<SqlFileDto> RestoreFilesOrdered() =>
+        _publishDb is null ? [] : [.. _publishDb.Files.OrderByDescending(f => f.Primary).ThenBy(f => f.Kind == "log" ? 1 : 0)];
+
+    /// <summary>Where the files would go (the same naming as the server's), or why not.</summary>
+    private (IReadOnlyList<string>? Paths, string? Error) RestoreTargets()
+    {
+        if (_publishDb is null || TargetInstance is not { } target || string.IsNullOrWhiteSpace(_publishName))
+        {
+            return (null, null);
+        }
+
+        try
+        {
+            return (SqlRestoreFiles.TargetPaths(_publishName.Trim(), [.. RestoreFilesOrdered().Select(f => (f.Path, f.Kind))], _fileLocation, _dataFolder, _logFolder,
+                target.DefaultDataFolder, target.DefaultLogFolder), null);
+        }
+        catch (ArgumentException ex)
+        {
+            return (null, ex.Message);
+        }
     }
 
     private bool CanPublish =>
@@ -451,8 +562,12 @@ else
         _starting = true;
         try
         {
-            var started = await Api.PostAsync<StartedDto>("api/sql/publishes", new SqlPublishRequestDto(
-                _mount.RestorePointId, _publishDb.Instance, _publishDb.Name, _targetVm!, _targetInstance!, _accountId!.Value, _publishName.Trim(), _publishHours * 60));
+            var started = _restoreMode
+                ? await Api.PostAsync<StartedDto>("api/sql/restores", new SqlRestoreRequestDto(
+                    _mount.RestorePointId, _publishDb.Instance, _publishDb.Name, _targetVm!, _targetInstance!, _accountId!.Value, _publishName.Trim(),
+                    _fileLocation, _dataFolder, _logFolder))
+                : await Api.PostAsync<StartedDto>("api/sql/publishes", new SqlPublishRequestDto(
+                    _mount.RestorePointId, _publishDb.Instance, _publishDb.Name, _targetVm!, _targetInstance!, _accountId!.Value, _publishName.Trim(), _publishHours * 60));
             _publishOpen = false;
             Navigation.NavigateTo($"/sessions/{started.SessionId}");
         }

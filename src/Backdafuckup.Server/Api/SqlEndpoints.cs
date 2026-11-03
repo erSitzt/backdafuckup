@@ -45,6 +45,7 @@ public static class SqlEndpoints
             await db.Credentials.Where(c => c.Id == id && c.Kind == CredentialKind.SqlServer).ExecuteDeleteAsync(ct) > 0 ? Results.NoContent() : Results.NotFound());
 
         app.MapPost("/api/sql/publishes", StartPublishAsync);
+        app.MapPost("/api/sql/restores", StartRestoreAsync);
 
         app.MapPost("/api/sql/inventory", async (
             SqlInventoryRequestDto request, AgentService agents, AgentRegistry registry, SqlJobs jobs, IDbContextFactory<AppDbContext> dbFactory, CredentialProtector protector, CancellationToken ct) =>
@@ -125,6 +126,64 @@ public static class SqlEndpoints
         }
 
         var id = await queue.EnqueueSqlPublishAsync(request with { DatabaseName = name }, point.RepositoryId, point.VmName, http.User.Identity?.Name ?? "user", ct);
+        return Results.Ok(new StartedDto(id));
+    }
+
+    /// <summary>
+    /// Starts a database restore. Checked here: the restore point, the name, the file location and its folders, the
+    /// account and an agent that can restore databases; the session checks the instance with the account.
+    /// </summary>
+    private static async Task<IResult> StartRestoreAsync(
+        SqlRestoreRequestDto request, AppDbContext db, AgentService agents, AgentRegistry registry, SessionQueue queue, HttpContext http, CancellationToken ct)
+    {
+        var point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == request.RestorePointId, ct);
+        if (point is null || point.State != RestorePointState.Available)
+        {
+            return Results.Problem("The restore point is not available (deleted, or still being written).", statusCode: StatusCodes.Status404NotFound);
+        }
+
+        var name = request.DatabaseName?.Trim() ?? string.Empty;
+        if (name.Length is 0 or > 128 || name.Any(char.IsControl))
+        {
+            return Results.Problem("The database name must have 1 to 128 characters and no control characters.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (string.IsNullOrWhiteSpace(request.TargetInstance))
+        {
+            return Results.Problem("Choose the instance to restore to.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        try
+        {
+            // The folders are checked with placeholders for the instance defaults (only the agent knows them).
+            SqlRestoreFiles.TargetPaths(name, [(@"C:\x\a.mdf", "data"), (@"C:\x\a.ldf", "log")], request.FileLocation, request.DataFolder, request.LogFolder, @"C:\default", @"C:\default");
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (!await db.Credentials.AnyAsync(c => c.Id == request.CredentialId && (c.Kind == CredentialKind.Windows || c.Kind == CredentialKind.SqlServer), ct))
+        {
+            return Results.Problem("The account no longer exists. Choose another one under Credentials.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        try
+        {
+            var agent = await SqlAgentAsync(request.TargetVmNativeId, agents, registry, ct);
+            if (!registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlAttachFiles))
+            {
+                return Results.Problem(
+                    $"The agent in {agent.HostName} (version {agent.AgentVersion}) cannot restore SQL Server databases yet. It updates itself within a few minutes after a server update.",
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+        }
+
+        var id = await queue.EnqueueSqlRestoreAsync(request with { DatabaseName = name }, point.RepositoryId, point.VmName, http.User.Identity?.Name ?? "user", ct);
         return Results.Ok(new StartedDto(id));
     }
 

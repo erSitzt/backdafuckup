@@ -87,6 +87,31 @@ public sealed class SqlCatalog(FileLevelWorkers workers)
         return text.ToString();
     }
 
+    /// <summary>
+    /// A database of the backup with all its files found, or the reasons it cannot be <paramref name="verb"/> (system
+    /// database, FILESTREAM, files missing in the backup, …).
+    /// </summary>
+    internal static SqlDatabaseDto Restorable(SqlMountDto described, string instance, string name, string vmName, DateTimeOffset created, string verb)
+    {
+        var database = described.Databases.FirstOrDefault(d =>
+                string.Equals(d.Instance, instance, StringComparison.OrdinalIgnoreCase) && string.Equals(d.Name, name, StringComparison.Ordinal))
+            ?? throw new KeyNotFoundException($"The restore point of {vmName} from {created.ToLocalTime():g} has no SQL Server database {instance}\\{name}.");
+        if (!database.Restorable)
+        {
+            throw new InvalidOperationException($"SQL Server database {instance}\\{name} cannot be {verb}: {string.Join("; ", database.Problems)}");
+        }
+
+        var broken = database.Files.Where(f => f.Problem is not null || f.Volume is null || f.GuestPath is null).ToList();
+        if (broken.Count > 0 || database.Files.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"SQL Server database {instance}\\{name} cannot be {verb}: " +
+                (broken.Count == 0 ? "the backup lists no files." : string.Join("; ", broken.Select(f => $"{f.Path}: {f.Problem ?? "not found in the backup"}"))));
+        }
+
+        return database;
+    }
+
     /// <summary>T-SQL QUOTENAME for identifiers: [name] with "]" doubled.</summary>
     internal static string QuoteName(string name) => "[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
 

@@ -27,8 +27,9 @@ public sealed class SqlInventoryTests(SqlServerFixture sql) : IClassFixture<SqlS
         Assert.Equal("Developer Edition (64-bit)", admin.Edition);
         var inv = admin.Databases.Single(d => d.Name == "inv");
         Assert.Equal(("ONLINE", "FULL", false), (inv.State, inv.RecoveryModel, inv.ReadOnly));
-        Assert.Equal(["inv", "inv_2", "inv_log"], inv.Files.Select(f => f.LogicalName).ToList());
-        Assert.Equal(["ROWS", "ROWS", "LOG"], inv.Files.Select(f => f.Type).ToList());
+        // In file_id order: SQL Server gives the log file id 2 when it creates the database, the second data file 3.
+        Assert.Equal(["inv", "inv_log", "inv_2"], inv.Files.Select(f => f.LogicalName).ToList());
+        Assert.Equal(["ROWS", "LOG", "ROWS"], inv.Files.Select(f => f.Type).ToList());
         Assert.Equal(8L << 20, inv.Files[0].SizeBytes);
         Assert.Contains(admin.Databases, d => d.Name == "master");
 

@@ -438,6 +438,9 @@ public enum SessionKind
 
     /// <summary>A SQL Server database attached from a restore point (published) until it is unpublished.</summary>
     SqlPublish,
+
+    /// <summary>A SQL Server database restored from a restore point (its files written into a VM and attached).</summary>
+    SqlRestore,
 }
 
 public enum GuestFailurePolicy

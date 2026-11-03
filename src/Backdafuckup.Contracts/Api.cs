@@ -269,6 +269,9 @@ public sealed record AgentDto
     /// <summary>The agent can publish a SQL Server database from a restore point into its guest.</summary>
     public bool CanPublishSql { get; init; }
 
+    /// <summary>The agent can restore a SQL Server database from a restore point into its guest (write the files and attach them).</summary>
+    public bool CanRestoreSql { get; init; }
+
     public DateTimeOffset EnrolledUtc { get; init; }
 
     public DateTimeOffset LastContactUtc { get; init; }

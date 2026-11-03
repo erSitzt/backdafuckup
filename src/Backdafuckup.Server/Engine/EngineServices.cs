@@ -21,6 +21,7 @@ public sealed class SessionRunnerService(
     Agents.AgentDeploymentRunner deployments,
     FileRestore.FileRestoreSessionRunner fileRestores,
     Sql.SqlPublishSessionRunner sqlPublishes,
+    Sql.SqlRestoreSessionRunner sqlRestores,
     StartupRecovery recovery,
     IOptions<EngineOptions> options,
     IOptions<Sql.SqlRestoreOptions> sqlOptions,
@@ -96,6 +97,7 @@ public sealed class SessionRunnerService(
         SessionKind.AgentDeployment => running.Count(SessionKind.AgentDeployment) < 2,
         SessionKind.FileRestore => running.Count(SessionKind.FileRestore) < options.Value.MaxConcurrentFileRestoreSessions,
         SessionKind.SqlPublish => running.Count(SessionKind.SqlPublish) < sqlOptions.Value.MaxConcurrentPublishes,
+        SessionKind.SqlRestore => running.Count(SessionKind.SqlRestore) < sqlOptions.Value.MaxConcurrentRestores,
         _ => false,
     };
 
@@ -115,6 +117,7 @@ public sealed class SessionRunnerService(
                 SessionKind.AgentDeployment => await deployments.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.FileRestore => await fileRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.SqlPublish => await sqlPublishes.RunAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.SqlRestore => await sqlRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 _ => (SessionState.Failed, "Unknown session kind."),
             };
 
@@ -478,6 +481,7 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Sql.SqlJobs>();
         services.Configure<Sql.SqlRestoreOptions>(configuration.GetSection("SqlRestore"));
         services.AddSingleton<Sql.SqlPublishSessionRunner>();
+        services.AddSingleton<Sql.SqlRestoreSessionRunner>();
         services.AddSingleton<Publishing.DiskPublishes>();
         services.TryAddSingleton<Backdafuckup.Smb.ISmbShareConnector, Backdafuckup.Smb.SmbShareConnector>();
         services.TryAddSingleton<Backdafuckup.Ssh.ISshConnector, Backdafuckup.Ssh.SshConnector>();

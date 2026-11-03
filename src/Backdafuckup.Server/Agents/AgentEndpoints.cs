@@ -92,7 +92,8 @@ public static class AgentEndpoints
             return list.Select(a => a.ToDto(
                 agents.IsOnline(a.Id), vms.FirstOrDefault(v => v.NativeId == a.VmNativeId)?.Name, packages.Get(a.Build)?.FilesHash, registry.HasCapability(a.Id, AgentProtocol.CapabilityRestoreFiles),
                 registry.HasCapability(a.Id, AgentProtocol.CapabilitySqlRestore),
-                registry.HasCapability(a.Id, AgentProtocol.CapabilitySqlPublish))).ToList();
+                registry.HasCapability(a.Id, AgentProtocol.CapabilitySqlPublish),
+                registry.HasCapability(a.Id, AgentProtocol.CapabilitySqlAttachFiles))).ToList();
         });
 
         console.MapGet("/settings", async (AgentSettingsStore settings, AgentPackages packages, CancellationToken ct) => new AgentSettingsDto
@@ -413,7 +414,7 @@ public static class AgentEndpoints
         });
     }
 
-    private static AgentDto ToDto(this AgentEntity a, bool online, string? vmName, string? currentFilesHash, bool canRestoreFiles, bool canRunSql, bool canPublishSql) => new()
+    private static AgentDto ToDto(this AgentEntity a, bool online, string? vmName, string? currentFilesHash, bool canRestoreFiles, bool canRunSql, bool canPublishSql, bool canRestoreSql) => new()
     {
         Id = a.Id,
         HostName = a.HostName,
@@ -434,5 +435,6 @@ public static class AgentEndpoints
         CanRestoreFiles = canRestoreFiles,
         CanRunSql = canRunSql,
         CanPublishSql = canPublishSql,
+        CanRestoreSql = canRestoreSql,
     };
 }

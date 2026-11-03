@@ -15,6 +15,12 @@ public sealed class SqlRestoreOptions
     /// <summary>Publishes at the same time (each holds a restore point and an agent).</summary>
     public int MaxConcurrentPublishes { get; set; } = 8;
 
+    /// <summary>Database restores at the same time (one per agent; more wait for their agent).</summary>
+    public int MaxConcurrentRestores { get; set; } = 4;
+
+    /// <summary>How long the attach of a restored database may take (SQL Server's recovery runs in it).</summary>
+    public TimeSpan AttachTimeout { get; set; } = TimeSpan.FromHours(2);
+
     /// <summary>How long a publish session waits for the agent to come back to remove a database the publish left.</summary>
     public TimeSpan LeftoverWaitLimit { get; set; } = TimeSpan.FromMinutes(20);
 

@@ -52,7 +52,7 @@ else
         <MudProgressLinear Color="Color.Primary" Value="@_session.Progress" Size="Size.Large" Class="mb-4">@($"{_session.Progress:0}%")</MudProgressLinear>
     }
 
-    @if (_session.Kind == "SqlPublish")
+    @if (_session.Kind is "SqlPublish" or "SqlRestore")
     {
     }
     else if (_session.Kind == "Restore")

@@ -1,5 +1,6 @@
 using Backdafuckup.Agent.Core;
 using Backdafuckup.Agent.Protocol;
+using Backdafuckup.Contracts;
 
 namespace Backdafuckup.Server.Tests;
 
@@ -84,4 +85,36 @@ public sealed class SqlPublishDatabaseTests
 
         public void GrantAccess(string path, IReadOnlyList<string> accounts, Action<string> log) => Grants[path] = accounts;
     }
+}
+
+/// <summary>Names and folders of restored database files (the console shows the same as the server writes).</summary>
+public sealed class SqlRestoreFilesTests
+{
+    private static readonly (string, string)[] Files =
+        [(@"D:\SQL\shop.mdf", "data"), (@"D:\SQL\shop_2.ndf", "data"), (@"E:\Arch\shop_3.ndf", "data"), (@"L:\Log\shop_log.ldf", "log"), (@"L:\Log2\shop_log2.ldf", "log")];
+
+    [Fact]
+    public void Files_are_named_after_the_new_database_in_the_chosen_folders()
+    {
+        Assert.Equal(
+            [@"D:\SQL\a_b_c_.mdf", @"D:\SQL\a_b_c__2.ndf", @"E:\Arch\a_b_c__3.ndf", @"L:\Log\a_b_c__log.ldf", @"L:\Log2\a_b_c__log_2.ldf"],
+            SqlRestoreFiles.TargetPaths("a/b:c*", Files, SqlRestoreFiles.Original, null, null, null, null));
+        Assert.Equal(
+            [@"F:\Data\shop.mdf", @"F:\Data\shop_2.ndf", @"F:\Data\shop_3.ndf", @"G:\Logs\shop_log.ldf", @"G:\Logs\shop_log_2.ldf"],
+            SqlRestoreFiles.TargetPaths("shop", Files, SqlRestoreFiles.Default, null, null, @"F:\Data\", @"G:\Logs"));
+        Assert.Equal(
+            [@"X:\shop.mdf", @"X:\shop_2.ndf", @"X:\shop_3.ndf", @"X:\shop_log.ldf", @"X:\shop_log_2.ldf"],
+            SqlRestoreFiles.TargetPaths("shop", Files, SqlRestoreFiles.Folder, @"X:\", " ", null, null));
+        Assert.Equal("database", SqlRestoreFiles.Stem(" ... "));
+    }
+
+    [Theory]
+    [InlineData(SqlRestoreFiles.Folder, @"SQL\Data")]
+    [InlineData(SqlRestoreFiles.Folder, @"\\server\share")]
+    [InlineData(SqlRestoreFiles.Folder, @"D:\SQL\..\Windows")]
+    [InlineData(SqlRestoreFiles.Folder, null)]
+    [InlineData(SqlRestoreFiles.Default, null)]
+    [InlineData("elsewhere", @"D:\SQL")]
+    public void Relative_or_missing_folders_are_refused(string location, string? folder) =>
+        Assert.Throws<ArgumentException>(() => SqlRestoreFiles.TargetPaths("shop", Files, location, folder, null, null, null));
 }

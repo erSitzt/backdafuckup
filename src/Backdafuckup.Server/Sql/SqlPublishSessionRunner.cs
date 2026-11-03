@@ -336,22 +336,7 @@ public sealed class SqlPublishSessionRunner(
     private static Plan PlanPublish(List<GuestDiskSource> sources, StoredGuestMetadata? stored, SqlPublishRequestDto request, RestorePointEntity point)
     {
         using var image = GuestImage.Open(sources);
-        var described = SqlCatalog.Describe(image, stored);
-        var database = described.Databases.FirstOrDefault(d =>
-                string.Equals(d.Instance, request.Instance, StringComparison.OrdinalIgnoreCase) && string.Equals(d.Name, request.Database, StringComparison.Ordinal))
-            ?? throw new KeyNotFoundException($"The restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} has no SQL Server database {request.Instance}\\{request.Database}.");
-        if (!database.Restorable)
-        {
-            throw new InvalidOperationException($"SQL Server database {request.Instance}\\{request.Database} cannot be published: {string.Join("; ", database.Problems)}");
-        }
-
-        var broken = database.Files.Where(f => f.Problem is not null || f.Volume is null || f.GuestPath is null).ToList();
-        if (broken.Count > 0 || database.Files.Count == 0)
-        {
-            throw new InvalidOperationException(
-                $"SQL Server database {request.Instance}\\{request.Database} cannot be published: " +
-                (broken.Count == 0 ? "the backup lists no files." : string.Join("; ", broken.Select(f => $"{f.Path}: {f.Problem ?? "not found in the backup"}"))));
-        }
+        var database = SqlCatalog.Restorable(SqlCatalog.Describe(image, stored), request.Instance, request.Database, point.VmName, point.CreatedUtc, "published");
 
         var info = new PublishInfo { Title = $"{point.VmName}, restore point of {point.CreatedUtc.ToLocalTime():g}" };
         var disks = new List<GuestDiskSource>();

@@ -60,6 +60,12 @@ public static class AgentProtocol
     public const string CapabilitySqlPublish = "sql-publish-v1";
 
     /// <summary>
+    /// The agent attaches restored database files (<see cref="SqlJobKinds.AttachFiles"/>) and deletes the files of a
+    /// failed restore (<see cref="SqlJobKinds.DeleteFiles"/>).
+    /// </summary>
+    public const string CapabilitySqlAttachFiles = "sql-attach-files-v1";
+
+    /// <summary>
     /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
     /// <see cref="PublishInfo.BlockSize"/> bytes), <c>POST {id}/status</c> (heartbeat; the answer says whether to stop).
     /// </summary>
@@ -532,6 +538,16 @@ public static class SqlJobKinds
     /// <see cref="SqlJobRequest.Database"/> is dropped only if all its files lie in <see cref="SqlJobRequest.PublishFolder"/>.
     /// </summary>
     public const string DropPublished = "drop-published";
+
+    /// <summary>
+    /// Attaches <see cref="SqlJobRequest.Files"/> (restored before, primary data file first) as
+    /// <see cref="SqlJobRequest.Database"/>, after giving SQL Server access to them; if the attach fails, the files are
+    /// deleted again (they were restored for it).
+    /// </summary>
+    public const string AttachFiles = "attach-files";
+
+    /// <summary>Deletes <see cref="SqlJobRequest.Files"/>: the files a failed or stopped restore had written.</summary>
+    public const string DeleteFiles = "delete-files";
 }
 
 public static class SqlAccountKinds
@@ -573,6 +589,9 @@ public sealed class SqlJobRequest
 
     /// <summary>DropPublished: the publish's folder in the guest (<see cref="PublishStatus.Folder"/>).</summary>
     public string? PublishFolder { get; set; }
+
+    /// <summary>AttachFiles, DeleteFiles: the database's files in the guest, the primary data file first.</summary>
+    public List<string>? Files { get; set; }
 }
 
 public sealed class SqlJobResult

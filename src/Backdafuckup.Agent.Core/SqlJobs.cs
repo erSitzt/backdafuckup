@@ -107,12 +107,15 @@ public sealed class SqlJobRunner
     private readonly ISqlEnvironment _sql;
     private readonly AgentLog _log;
 
-    public SqlJobRunner(HttpClient http, Guid id, ISqlEnvironment sql, AgentLog log)
+    private readonly IRestoreFileSystem? _files;
+
+    public SqlJobRunner(HttpClient http, Guid id, ISqlEnvironment sql, AgentLog log, IRestoreFileSystem? files = null)
     {
         _http = http;
         _id = id;
         _sql = sql;
         _log = log;
+        _files = files;
     }
 
     private string Base => AgentProtocol.SqlJobsPath + "/" + _id.ToString("D");
@@ -141,6 +144,11 @@ public sealed class SqlJobRunner
             }
 
             Kind = request.Kind;
+            void Log(string line)
+            {
+                _log.Write($"SQL job {_id}: {line}");
+                result.Log.Add(line);
+            }
 
             // The account name may be logged, never its password.
             _log.Write($"SQL job {_id}: {request.Kind}{(request.Account is { } account ? $" as {account.UserName} ({account.Kind})" : string.Empty)}.");
@@ -155,11 +163,23 @@ public sealed class SqlJobRunner
                         throw new InvalidOperationException("The job names no instance, account, database or publish folder.");
                     }
 
-                    SqlPublishDatabase.Drop(_sql, request.Instance!, request.Account, request.Database!, request.PublishFolder!, line =>
+                    SqlPublishDatabase.Drop(_sql, request.Instance!, request.Account, request.Database!, request.PublishFolder!, Log);
+                    break;
+                case SqlJobKinds.AttachFiles:
+                    AttachFiles(request, Log);
+                    break;
+                case SqlJobKinds.DeleteFiles:
+                    var files = request.Files ?? new List<string>();
+                    if (_files is null || files.Count == 0)
                     {
-                        _log.Write($"SQL job {_id}: {line}");
-                        result.Log.Add(line);
-                    });
+                        throw new InvalidOperationException(_files is null ? "This agent cannot delete restored files." : "The job names no files.");
+                    }
+
+                    if (SqlAttach.DeleteFiles(_files, files, Log) is { Count: > 0 } failed)
+                    {
+                        throw new InvalidOperationException($"{failed.Count} restored file(s) could not be deleted: {string.Join("; ", failed)}");
+                    }
+
                     break;
                 default:
                     throw new InvalidOperationException($"Unknown SQL job '{request.Kind}' (agent older than the server?).");
@@ -192,6 +212,47 @@ public sealed class SqlJobRunner
             }
 
             await Task.Delay(TimeSpan.FromSeconds(2), stop).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Attaches restored files; if the attach fails, the files are deleted again (the restore wrote them for it, and the
+    /// server only sends files it created: existing files fail the transfer).
+    /// </summary>
+    private void AttachFiles(SqlJobRequest request, Action<string> log)
+    {
+        var files = request.Files ?? new List<string>();
+        if (request.Account is null || string.IsNullOrEmpty(request.Instance) || string.IsNullOrEmpty(request.Database) || files.Count == 0)
+        {
+            throw new InvalidOperationException("The job names no instance, account, database or files.");
+        }
+
+        if (_files is null)
+        {
+            throw new InvalidOperationException("This agent cannot attach restored files.");
+        }
+
+        var attached = false;
+        try
+        {
+            SqlAttach.AttachFiles(
+                _sql, request.Instance!, request.Account, request.Database!, files,
+                (path, accounts) =>
+                {
+                    foreach (var account in accounts)
+                    {
+                        _files.GrantFullControl(path, account);
+                    }
+                },
+                "on the restored files",
+                log,
+                () => attached = true,
+                describe: true);
+        }
+        catch (Exception) when (!attached)
+        {
+            SqlAttach.DeleteFiles(_files, files, log);
+            throw;
         }
     }
 

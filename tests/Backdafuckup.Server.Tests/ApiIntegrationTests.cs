@@ -717,7 +717,9 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         var agent = await _factory.Services.GetRequiredService<AgentService>().WaitForVmAsync(vmNativeId, TimeSpan.FromSeconds(30), Ct)
             ?? throw new TimeoutException("The agent did not come online.");
         var registry = _factory.Services.GetRequiredService<AgentRegistry>();
-        var capability = publish is not null ? (sql is not null ? AgentProtocol.CapabilitySqlPublish : AgentProtocol.CapabilityPublish) : fs is null ? AgentProtocol.CapabilitySqlRestore : AgentProtocol.CapabilityRestoreFilesV2;
+        var capability = publish is not null ? (sql is not null ? AgentProtocol.CapabilitySqlPublish : AgentProtocol.CapabilityPublish)
+            : fs is null ? AgentProtocol.CapabilitySqlRestore
+            : sql is not null ? AgentProtocol.CapabilitySqlAttachFiles : AgentProtocol.CapabilityRestoreFilesV2;
         for (var i = 0; i < 100 && !registry.HasCapability(agent.Id, capability); i++)
         {
             await Task.Delay(100, Ct);
@@ -979,6 +981,111 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         await running;
     }
 
+    [Fact]
+    public async Task A_sql_database_is_restored_as_a_new_database_through_the_agent_and_attached()
+    {
+        var client = await SignedInClientAsync();
+        var mdf = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11);
+        var ndf = WindowsTestDisk.SqlFile(3, 256 << 10, 0x33);
+        var ldf = WindowsTestDisk.SqlFile(2, 512 << 10, 0x22);
+        var image = WindowsTestDisk.Create(
+            [
+                new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+                new WindowsTestDisk.Volume('D', 8, new Dictionary<string, byte[]> { ["SQL/shop.mdf"] = mdf, ["SQL/shop_2.ndf"] = ndf }),
+                new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]> { ["Log/shop_log.ldf"] = ldf }),
+            ],
+            software: root =>
+            {
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\Instance Names\SQL").SetValue("SQLEXPRESS", "MSSQL16.SQLEXPRESS");
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\MSSQL16.SQLEXPRESS\Setup").SetValue("Version", "16.0.1000.6");
+            });
+        var sandbox = Path.Combine(_root, "sql-restore-guest");
+        var fs = new SandboxRestoreFileSystem(sandbox);
+        var sql = new ScriptedSqlEnvironment(path => File.ReadAllBytes(fs.Local(path)));
+        sql.AddDatabase("shop", @"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf");
+        sql.OrphanedUsers.Add(("shop_app", "SQL_USER"));
+        static GuestSqlFile F(string path, string spec) => new() { Path = path, Spec = spec };
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+        var point = await BackUpImageAsync(client, "sql05", image, async vm => started = await StartAgentAsync(
+            vm, fs, sql, null,
+            [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", DataFiles = [F(@"D:\SQL\", "shop_2.ndf"), F(@"D:\SQL\", "shop.mdf")], LogFiles = [F(@"L:\Log\", "shop_log.ldf")], InBackup = true }]));
+        var (agent, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_restore", "Restore-1", null), Ct));
+        SqlRestoreRequestDto Request(string name, string location = SqlRestoreFiles.Original, string? data = null, string? logFolder = null) =>
+            new(point.Id, "SQLEXPRESS", "shop", point.VmNativeId, "SQLEXPRESS", login.Id, name, location, data, logFolder);
+        async Task<SessionDetailDto> RestoreAsync(SqlRestoreRequestDto request) =>
+            await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/restores", request, Ct))).SessionId);
+        async Task<string> LogAsync(Guid session) => string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{session}/log", Ct))!.Select(l => l.Message));
+        string Local(string windowsPath) => fs.Local(windowsPath);
+
+        // Checked before a session starts: the folders must be absolute local paths.
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/sql/restores", Request("x", SqlRestoreFiles.Folder, @"SQL\data"), Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/sql/restores", Request("x", "elsewhere"), Ct)).StatusCode);
+
+        // The name is taken: refused before anything is written.
+        var taken = await RestoreAsync(Request("shop"));
+        Assert.True(taken.Session.State == "Failed", taken.Session.Summary);
+        Assert.Contains("has a database [shop] already", taken.Session.Summary, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(sandbox));
+
+        // Into the original folders under new names: written, checked, attached; users without a login are named.
+        var restored = await RestoreAsync(Request("shop_restored"));
+        var log = await LogAsync(restored.Session.Id);
+        Assert.True(restored.Session.State == "Succeeded", restored.Session.Summary + "\n" + log);
+        string[] targets = [@"D:\SQL\shop_restored.mdf", @"D:\SQL\shop_restored_2.ndf", @"L:\Log\shop_restored_log.ldf"];
+        Assert.Equal(targets, sql.DatabaseFiles("shop_restored"));
+        Assert.Equal(mdf, File.ReadAllBytes(Local(targets[0])));
+        Assert.Equal(ndf, File.ReadAllBytes(Local(targets[1])));
+        Assert.Equal(ldf, File.ReadAllBytes(Local(targets[2])));
+        Assert.Equal(mdf, sql.AttachedFiles[targets[0]]);
+        Assert.Equal(targets.Select(t => $@"{t} NT SERVICE\MSSQL$SQLEXPRESS"), fs.Grants);
+        Assert.Contains(@"Restored SQLEXPRESS\shop from the restore point of ", restored.Session.Summary, StringComparison.Ordinal);
+        Assert.Contains(@"as [shop_restored] on SQL01", restored.Session.Summary, StringComparison.Ordinal);
+        Assert.Contains("TRUSTWORTHY off (SQL Server turns it off when attaching)", log, StringComparison.Ordinal);
+        Assert.Contains("without a login on instance SQLEXPRESS: shop_app (sql user)", log, StringComparison.Ordinal);
+        Assert.Contains(@"D:\SQL\shop.mdf → D:\SQL\shop_restored.mdf", log, StringComparison.Ordinal);
+
+        // A file of that name exists already: it stays as it is, the files this restore wrote are deleted again.
+        Directory.CreateDirectory(Path.GetDirectoryName(Local(@"L:\Restore\copy_log.ldf"))!);
+        await File.WriteAllTextAsync(Local(@"L:\Restore\copy_log.ldf"), "someone else's log", Ct);
+        var exists = await RestoreAsync(Request("copy", SqlRestoreFiles.Folder, @"D:\Restore", @"L:\Restore"));
+        var existsLog = await LogAsync(exists.Session.Id);
+        Assert.True(exists.Session.State == "Failed", exists.Session.Summary + "\n" + existsLog);
+        Assert.Equal("someone else's log", await File.ReadAllTextAsync(Local(@"L:\Restore\copy_log.ldf"), Ct));
+        Assert.False(File.Exists(Local(@"D:\Restore\copy.mdf")));
+        Assert.False(File.Exists(Local(@"D:\Restore\copy_2.ndf")));
+        Assert.Contains("deleted the 2 restored file(s) again.", existsLog, StringComparison.Ordinal);
+        Assert.DoesNotContain(sql.Statements, s => s.StartsWith("CREATE DATABASE [copy]", StringComparison.Ordinal));
+
+        // The attach fails: explained, and the restored files are deleted.
+        sql.FailAttachWith = 5120;
+        var refused = await RestoreAsync(Request("shop_default", SqlRestoreFiles.Default));
+        Assert.True(refused.Session.State == "Failed", refused.Session.Summary);
+        Assert.Contains("SQL Server cannot open a database file", refused.Session.Summary, StringComparison.Ordinal);
+        Assert.Contains("The restored files were deleted again.", refused.Session.Summary, StringComparison.Ordinal);
+        Assert.False(File.Exists(Local(@"D:\Data\shop_default.mdf")));
+        Assert.False(File.Exists(Local(@"L:\Logs\shop_default_log.ldf")));
+
+        // The instance's default folders.
+        var defaults = await RestoreAsync(Request("shop_default", SqlRestoreFiles.Default));
+        Assert.True(defaults.Session.State == "Succeeded", defaults.Session.Summary);
+        Assert.Equal([@"D:\Data\shop_default.mdf", @"D:\Data\shop_default_2.ndf", @"L:\Logs\shop_default_log.ldf"], sql.DatabaseFiles("shop_default"));
+
+        // An older instance than the backup's: refused before anything is written.
+        sql.ProductVersion = "15.0.2000.5";
+        var older = await RestoreAsync(Request("shop_old"));
+        Assert.True(older.Session.State == "Failed", older.Session.Summary);
+        Assert.Contains("only on the same or a newer version", older.Session.Summary, StringComparison.Ordinal);
+        Assert.False(File.Exists(Local(@"D:\SQL\shop_old.mdf")));
+
+        // The password never reaches a log.
+        var agentLog = string.Join("\n", Directory.GetFiles(_root, "agent.log", SearchOption.AllDirectories).Select(File.ReadAllText));
+        Assert.DoesNotContain("Restore-1", agentLog + log + existsLog, StringComparison.Ordinal);
+
+        await stop.CancelAsync();
+        await running;
+    }
+
     /// <summary>Waits until the session log has a line with <paramref name="text"/>; fails if the session ends first.</summary>
     private static async Task<string> WaitForLogAsync(HttpClient client, Guid sessionId, string text)
     {
@@ -1183,7 +1290,23 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     /// <summary>Windows paths of the agent in a local folder: <c>D:\a\b</c> is <c>{root}/D/a/b</c>.</summary>
     private sealed class SandboxRestoreFileSystem(string root) : PortableRestoreFileSystem
     {
+        /// <summary>The ACEs the agent added: "path account".</summary>
+        public List<string> Grants { get; } = [];
+
         public override string? CheckRoot(string path) => null;
+
+        public override void GrantFullControl(string path, string account)
+        {
+            Guard(path);
+            Assert.True(File.Exists(Map(path)), path);
+            lock (Grants)
+            {
+                Grants.Add($"{path} {account}");
+            }
+        }
+
+        /// <summary>The local file for a Windows path.</summary>
+        public string Local(string windowsPath) => Map(windowsPath);
 
         protected override string Map(string windowsPath) =>
             Path.Combine([root, windowsPath[..1], .. windowsPath[3..].Split('\\', StringSplitOptions.RemoveEmptyEntries)]);

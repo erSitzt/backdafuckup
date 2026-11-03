@@ -109,3 +109,87 @@ public sealed record SqlPublishRequestDto(
     Guid CredentialId,
     string DatabaseName,
     int AutoUnpublishMinutes);
+
+/// <summary>
+/// Restore a database of a restore point as a new database: the agent in the target VM writes its files
+/// (<see cref="SqlRestoreFiles"/> names them after <see cref="DatabaseName"/>) and attaches them.
+/// </summary>
+/// <param name="FileLocation"><see cref="SqlRestoreFiles.Original"/>, <see cref="SqlRestoreFiles.Default"/> or <see cref="SqlRestoreFiles.Folder"/>.</param>
+/// <param name="DataFolder">For <see cref="SqlRestoreFiles.Folder"/>: the folder of the data files.</param>
+/// <param name="LogFolder">For <see cref="SqlRestoreFiles.Folder"/>: the folder of the log files (default: the data folder).</param>
+public sealed record SqlRestoreRequestDto(
+    Guid RestorePointId,
+    string Instance,
+    string Database,
+    string TargetVmNativeId,
+    string TargetInstance,
+    Guid CredentialId,
+    string DatabaseName,
+    string FileLocation,
+    string? DataFolder,
+    string? LogFolder);
+
+/// <summary>Where the files of a restored database go and how they are named (shared by the console and the server).</summary>
+public static class SqlRestoreFiles
+{
+    /// <summary>The folders the files had in the backup.</summary>
+    public const string Original = "original";
+
+    /// <summary>The target instance's default data and log folders.</summary>
+    public const string Default = "default";
+
+    /// <summary>Folders chosen in the wizard.</summary>
+    public const string Folder = "folder";
+
+    /// <summary>A file name stem from a database name: characters Windows does not allow in file names become "_".</summary>
+    public static string Stem(string database)
+    {
+        var invalid = "<>:\"/\\|?*";
+        var stem = new string([.. database.Select(c => c < 32 || invalid.Contains(c) ? '_' : c)]).Trim().TrimEnd('.');
+        return stem.Length == 0 ? "database" : stem;
+    }
+
+    /// <summary>
+    /// The target path of each file, in the given order (primary data file first): <c>name.mdf</c>,
+    /// <c>name_2.ndf</c>, … for data files and <c>name_log.ldf</c>, <c>name_log_2.ldf</c>, … for log files.
+    /// </summary>
+    /// <param name="files">Path in the backup (e.g. <c>D:\SQL\shop.mdf</c>) and kind ("data" or "log") of each file.</param>
+    /// <exception cref="ArgumentException">A folder is missing or not an absolute local path.</exception>
+    public static IReadOnlyList<string> TargetPaths(
+        string database, IReadOnlyList<(string Path, string Kind)> files, string location, string? dataFolder, string? logFolder, string? defaultData, string? defaultLog)
+    {
+        var stem = Stem(database);
+        var paths = new List<string>();
+        int data = 0, logs = 0;
+        foreach (var (path, kind) in files)
+        {
+            var isLog = kind == "log";
+            var name = isLog
+                ? (++logs == 1 ? $"{stem}_log.ldf" : $"{stem}_log_{logs}.ldf")
+                : (++data == 1 ? $"{stem}.mdf" : $"{stem}_{data}.ndf");
+            var folder = location switch
+            {
+                Original => path[..Math.Max(0, path.LastIndexOf('\\'))],
+                Default => isLog ? defaultLog ?? defaultData : defaultData,
+                Folder => isLog ? (string.IsNullOrWhiteSpace(logFolder) ? dataFolder : logFolder) : dataFolder,
+                _ => throw new ArgumentException($"Unknown file location '{location}'."),
+            };
+            if (string.IsNullOrWhiteSpace(folder))
+            {
+                throw new ArgumentException(location == Default
+                    ? "The instance names no default folder for its databases; choose a folder."
+                    : $"No folder for the {(isLog ? "log" : "data")} files.");
+            }
+
+            folder = folder.Trim().TrimEnd('\\');
+            if (folder.Length < 2 || !char.IsAsciiLetter(folder[0]) || folder[1] != ':' || (folder.Length > 2 && folder[2] != '\\') || folder.Contains("\\..", StringComparison.Ordinal))
+            {
+                throw new ArgumentException($"{folder} is not an absolute local folder (like D:\\SQL\\Data).");
+            }
+
+            paths.Add(folder + "\\" + name);
+        }
+
+        return paths;
+    }
+}

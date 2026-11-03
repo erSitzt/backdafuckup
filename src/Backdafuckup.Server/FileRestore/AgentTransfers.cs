@@ -30,6 +30,8 @@ public sealed class AgentTransfer : IDisposable
         Observer = observer;
         Time = time;
         Hashes = new string?[plan.Items.Count];
+        Written = new bool[plan.Items.Count];
+        Verified = new bool[plan.Items.Count];
         LastHeartbeat = time.GetUtcNow();
     }
 
@@ -47,6 +49,12 @@ public sealed class AgentTransfer : IDisposable
 
     /// <summary>SHA-256 of each file as it was sent; compared with what the agent wrote.</summary>
     internal string?[] Hashes { get; }
+
+    /// <summary>Per item: the agent reports the file as written (it exists at its final path, whatever its content).</summary>
+    internal bool[] Written { get; }
+
+    /// <summary>Per item: written, and its SHA-256 matches what was sent.</summary>
+    internal bool[] Verified { get; }
 
     public DateTimeOffset LastHeartbeat { get; internal set; }
 
@@ -297,6 +305,7 @@ public sealed class AgentTransfers(TimeProvider time)
         switch (result.Status)
         {
             case FileTransferStatus.Ok or FileTransferStatus.Renamed or FileTransferStatus.Incomplete when isFile:
+                transfer.Written[result.Index] = true;
                 if (transfer.Hashes[result.Index] is { } sent && !string.Equals(sent, result.Sha256, StringComparison.OrdinalIgnoreCase))
                 {
                     transfer.Failed++;
@@ -305,6 +314,7 @@ public sealed class AgentTransfers(TimeProvider time)
                     return;
                 }
 
+                transfer.Verified[result.Index] = transfer.Hashes[result.Index] is not null;
                 transfer.RestoredFiles++;
                 transfer.RestoredBytes += item.Size;
                 transfer.Observer.FileRestored(transfer.RestoredFiles);

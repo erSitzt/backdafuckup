@@ -74,6 +74,23 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Queues a SQL database restore; its repository is recorded like for a publish.</summary>
+    public async Task<Guid> EnqueueSqlRestoreAsync(SqlRestoreRequestDto request, Guid repositoryId, string vmName, string triggeredBy, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var session = new SessionEntity
+        {
+            Kind = SessionKind.SqlRestore,
+            Name = $"Restore SQL database {request.Database} ({vmName})",
+            TriggeredBy = triggeredBy,
+            RepositoryId = repositoryId,
+            State = SessionState.Queued,
+            CreatedUtc = time.GetUtcNow(),
+            Parameters = JsonSerializer.Serialize(request),
+        };
+        return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Queues a file-level restore (files and folders of one restore point to a target).</summary>
     public async Task<Guid> EnqueueFileRestoreAsync(FileRestoreRequestDto request, string vmName, string triggeredBy, CancellationToken cancellationToken)
     {
