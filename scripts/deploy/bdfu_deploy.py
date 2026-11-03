@@ -377,14 +377,30 @@ Remove-Item -Force {ps_quote(STAGING + "\\backdafuckup.zip")}
 
 $service = Get-Service -Name {SERVICE} -ErrorAction SilentlyContinue
 if ($service -and $service.Status -ne 'Stopped') {{
+    $processId = (Get-CimInstance Win32_Service -Filter "Name='{SERVICE}'").ProcessId
     Stop-Service -Name {SERVICE} -Force
     (Get-Service -Name {SERVICE}).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
+    # "Stopped" comes before the process has released its files: wait for it to exit.
+    if ($processId -gt 0) {{ Wait-Process -Id $processId -Timeout 60 -ErrorAction SilentlyContinue }}
 }}
-if (Test-Path $install) {{
-    if (Test-Path "$install.old") {{ Remove-Item -Recurse -Force "$install.old" }}
-    Rename-Item $install "$install.old"
+# Swap the program folders. A file still in use (e.g. an Explorer window in the folder) gets 60 s; if the swap fails,
+# the old version is put back and started again, so a failed update never leaves the server stopped.
+$swapped = $false
+try {{
+    if (Test-Path $install) {{
+        if (Test-Path "$install.old") {{ Remove-Item -Recurse -Force "$install.old" }}
+        for ($attempt = 1; $attempt -le 30 -and -not $swapped; $attempt++) {{
+            try {{ Rename-Item $install "$install.old" -ErrorAction Stop; $swapped = $true }} catch {{ Start-Sleep -Seconds 2 }}
+        }}
+        if (-not $swapped) {{ throw "$install is still in use after 60 s (an Explorer window, console or editor open in it?); the update was not installed." }}
+    }}
+    Rename-Item $new $install -ErrorAction Stop
 }}
-Rename-Item $new $install
+catch {{
+    if ($swapped -and -not (Test-Path $install)) {{ Rename-Item "$install.old" $install }}
+    if ($service) {{ Start-Service -Name {SERVICE} }}
+    throw
+}}
 if (-not $service) {{
     sc.exe create {SERVICE} binPath= "`"$install\backdafuckup.exe`"" start= delayed-auto DisplayName= "backdafuckup backup server" | Out-Null
     sc.exe description {SERVICE} "Open-source VM backup for XCP-ng / XenServer" | Out-Null
