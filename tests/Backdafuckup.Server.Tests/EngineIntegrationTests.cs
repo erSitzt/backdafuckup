@@ -8,6 +8,7 @@ using Backdafuckup.Core.Repository;
 using Backdafuckup.Server.Data;
 using Backdafuckup.Server.Engine;
 using Backdafuckup.Server.Hosting;
+using Backdafuckup.Server.Sql;
 using Backdafuckup.Storage;
 using Backdafuckup.Testing.Xapi;
 using Backdafuckup.Xen;
@@ -145,14 +146,15 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         var (vmUuid, _) = _pool.AddVm("sql01", DiskSize);
         var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
         await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
-        await using var agent = new FakeGuestAgent(Services, vmUuid);
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { IncludeUnselectedDatabase = true };
         await agent.StartAsync(Ct);
         var frozenAtSnapshot = false;
         _pool.OnSnapshot = _ => frozenAtSnapshot = agent.Frozen;
 
         var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
 
-        Assert.Equal(SessionState.Succeeded, session.State);
+        // The database the SQL writer did not include is only crash-consistent: a warning.
+        Assert.Equal(SessionState.Warning, session.State);
         Assert.True(frozenAtSnapshot);
         Assert.False(agent.Frozen);
         Assert.Equal([AgentCommandKinds.PrepareBackup, AgentCommandKinds.Freeze, AgentCommandKinds.Thaw], agent.Commands);
@@ -160,10 +162,44 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         Assert.Equal("application", point.Consistency);
         Assert.Null(point.ConsistencyReason);
         Assert.True(File.Exists(Path.Combine(point.ManifestPath!, "guest-metadata.zst")));
+        Assert.Equal(2, point.SqlDatabaseCount);
+
+        // Guest metadata v2: file kinds, writer components kept after the thaw, consistency per database.
+        var repository = await Services.GetRequiredService<RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+        await using (var reader = await repository.OpenRestorePointAsync(point.Id, Ct))
+        {
+            Assert.Equal(StoredGuestMetadata.FormatV2, reader.Manifest.Guest!.Format);
+            Assert.Equal(2, reader.Manifest.SqlDatabaseCount);
+            var stored = await StoredGuestMetadata.ReadAsync(reader, Ct);
+            var shop = stored!.SqlDatabases.Single(d => d.Database == "shop");
+            Assert.Equal("application", shop.Consistency);
+            Assert.Equal("SQL01", shop.Server);
+            Assert.Equal(@"D:\SQL\shop.mdf", shop.DataFiles.Single().FullPath());
+            Assert.Equal(@"D:\SQL\shop_log.ldf", shop.LogFiles.Single().FullPath());
+            var notSelected = stored.SqlDatabases.Single(d => d.Database == "notselected");
+            Assert.Equal("crash", notSelected.Consistency);
+            Assert.Contains("did not include this database", notSelected.ConsistencyReason, StringComparison.Ordinal);
+            var writer = stored.Writers.Single(w => w.Name == "SqlServerWriter");
+            Assert.Equal("Stable", writer.State);
+            Assert.Equal([@"SQL01\shop", @"SQL01\model"], writer.Components);
+
+            Assert.NotNull(reader.Manifest.VssDocuments);
+            await using var blob = await reader.OpenBlobAsync(reader.Manifest.VssDocuments!, Ct);
+            var documents = await System.Text.Json.JsonSerializer.DeserializeAsync<StoredVssDocuments>(blob, Backdafuckup.Server.Agents.AgentJson.Options, Ct);
+            Assert.Equal("<BACKUP_COMPONENTS/>", documents!.BackupComponentsXml);
+            Assert.Contains("WRITER_METADATA", documents.SqlWriterMetadataXml, StringComparison.Ordinal);
+        }
+
         await using var db = await DbAsync();
         var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
-        Assert.Contains(log, m => m.Contains("VSS prepared by the agent on SQL01 (10.0.0.5)", StringComparison.Ordinal) && m.Contains("1 SQL database(s) in MSSQLSERVER", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains("VSS prepared by the agent on SQL01 (10.0.0.5)", StringComparison.Ordinal) && m.Contains("2 SQL database(s) in MSSQLSERVER", StringComparison.Ordinal));
         Assert.Contains(log, m => m.Contains("application-consistent snapshot", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains(@"SQL database MSSQLSERVER\notselected is only crash-consistent", StringComparison.Ordinal));
+
+        // Older restore points (count unknown) get the count from their guest metadata.
+        await db.RestorePoints.Where(r => r.Id == point.Id).ExecuteUpdateAsync(s => s.SetProperty(r => r.SqlDatabaseCount, (int?)null), Ct);
+        Assert.Equal(1, await Services.GetRequiredService<SqlCatalogBackfill>().RunAsync(Ct));
+        Assert.Equal(2, (await LatestRestorePointAsync()).SqlDatabaseCount);
     }
 
     [Fact]

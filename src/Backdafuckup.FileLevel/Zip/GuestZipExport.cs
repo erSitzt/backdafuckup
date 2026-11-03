@@ -199,6 +199,55 @@ public static class GuestZipExport
         return new GuestZipResult(files, directories, content, zip.Position, skippedCount, skipped, listName);
     }
 
+    /// <summary>
+    /// Writes single files, possibly from different volumes, under the given names at the archive root (plus optional
+    /// extra text files, e.g. a script). Every file must be readable: a file that cannot be read fails the archive,
+    /// because a database without one of its files is useless.
+    /// </summary>
+    public static GuestZipResult WriteFiles(
+        IReadOnlyList<(IGuestFileSystem Fs, GuestPath Path, string Name)> files,
+        IReadOnlyList<(string Name, string Text)> extras,
+        Stream output,
+        GuestZipOptions options,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(options);
+        var names = ZipNames.Unique([.. files.Select(f => f.Name), .. extras.Select(e => e.Name)]);
+        using var zip = new ZipStreamWriter(output, options.Writer);
+        long content = 0;
+        for (var i = 0; i < files.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var (fs, path, _) = files[i];
+            var entry = fs.Stat(path);
+            if (entry.Kind != GuestEntryKind.File || entry.Unsupported is not null)
+            {
+                throw new InvalidDataException($"{options.Describe(path)} cannot be exported: {entry.Unsupported ?? "it is not a regular file"}.");
+            }
+
+            using var input = fs.OpenRead(path);
+            var read = zip.AddFile(new ZipEntryMeta(names[i], entry.ModifiedUtc, ZipHost.Dos, Attributes(entry, unix: false)), entry.Size, input, cancellationToken);
+            if (read != entry.Size)
+            {
+                throw new InvalidDataException($"{options.Describe(path)} has {entry.Size:N0} bytes, but {read:N0} bytes were read (damaged file system metadata?).");
+            }
+
+            content += read;
+        }
+
+        for (var i = 0; i < extras.Count; i++)
+        {
+            var bytes = Encoding.UTF8.GetBytes(extras[i].Text);
+            using var text = new MemoryStream(bytes, writable: false);
+            zip.AddFile(new ZipEntryMeta(names[files.Count + i], DateTime.UtcNow, ZipHost.Dos, (uint)FileAttributes.Archive), bytes.Length, text, cancellationToken);
+        }
+
+        zip.Finish();
+        return new GuestZipResult(files.Count, 0, content, zip.Position, 0, [], null);
+    }
+
     /// <summary>The image is untrusted input: a damaged folder or inode can make the parser throw nearly anything.</summary>
     private static bool IsDataError(Exception ex) => ex is not (OperationCanceledException or OutOfMemoryException);
 

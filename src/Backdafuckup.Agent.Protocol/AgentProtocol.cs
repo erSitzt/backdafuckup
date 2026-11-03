@@ -200,6 +200,12 @@ public sealed class GuestBackupInfo
     public List<GuestWriter> Writers { get; set; } = new List<GuestWriter>();
 
     public List<GuestSqlDatabase> SqlDatabases { get; set; } = new List<GuestSqlDatabase>();
+
+    /// <summary>
+    /// The SQL Server writer's metadata document (<c>IVssExamineWriterMetadata::SaveAsXML</c>), kept with the restore point
+    /// for a later restore through the writer. Null if the guest has no SQL Server writer or the agent is older.
+    /// </summary>
+    public string? SqlWriterMetadataXml { get; set; }
 }
 
 public sealed class GuestVolume
@@ -237,10 +243,46 @@ public sealed class GuestSqlDatabase
     /// <summary>SQL Server instance, e.g. <c>MSSQLSERVER</c> or <c>SQLEXPRESS</c>.</summary>
     public string Instance { get; set; } = string.Empty;
 
+    /// <summary>The server part of the writer's logical path (the computer name), if the agent reports it.</summary>
+    public string? Server { get; set; }
+
     public string Database { get; set; } = string.Empty;
 
-    /// <summary>Data and log files with their paths in the guest.</summary>
+    /// <summary>Data and log files with their paths in the guest (all kinds, as before).</summary>
     public List<string> Files { get; set; } = new List<string>();
+
+    /// <summary>Data files (.mdf/.ndf, FILESTREAM containers) as the SQL writer reports them. Empty for older agents.</summary>
+    public List<GuestSqlFile> DataFiles { get; set; } = new List<GuestSqlFile>();
+
+    /// <summary>Log files (.ldf). Empty for older agents.</summary>
+    public List<GuestSqlFile> LogFiles { get; set; } = new List<GuestSqlFile>();
+
+    /// <summary>Other files of the component (e.g. full-text catalogs).</summary>
+    public List<GuestSqlFile> OtherFiles { get; set; } = new List<GuestSqlFile>();
+
+    /// <summary>True if the component was part of the VSS backup (selectable and added); null for older agents.</summary>
+    public bool? InBackup { get; set; }
+
+    /// <summary>VSS_COMPONENT_FLAGS of the component.</summary>
+    public int ComponentFlags { get; set; }
+}
+
+/// <summary>One file description of a VSS component: folder, file spec (may contain wildcards) and the recursive flag.</summary>
+public sealed class GuestSqlFile
+{
+    /// <summary>Folder, e.g. <c>D:\SQL\</c>.</summary>
+    public string Path { get; set; } = string.Empty;
+
+    /// <summary>File name or wildcard spec, e.g. <c>shop.mdf</c> or <c>*</c>.</summary>
+    public string Spec { get; set; } = string.Empty;
+
+    /// <summary>True for folders that are included with their subfolders, e.g. FILESTREAM containers.</summary>
+    public bool Recursive { get; set; }
+
+    /// <summary>The full path of a single file, or null for a wildcard or recursive spec (a method, so it is not serialized).</summary>
+    public string? FullPath() => Recursive || Spec.IndexOfAny(new[] { '*', '?' }) >= 0
+        ? null
+        : (Path.EndsWith("\\", StringComparison.Ordinal) ? Path : Path + "\\") + Spec;
 }
 
 public sealed class FreezeReport
@@ -261,6 +303,12 @@ public sealed class ThawReport
     public int VssResult { get; set; }
 
     public List<GuestWriter> Writers { get; set; } = new List<GuestWriter>();
+
+    /// <summary>
+    /// The Backup Components Document after BackupComplete (<c>IVssBackupComponents::SaveAsXML</c>), with the writers'
+    /// per-component backup metadata. Kept for a later restore through the SQL writer; null for older agents.
+    /// </summary>
+    public string? BackupComponentsXml { get; set; }
 }
 
 /// <summary>The server ships different agent files than installed: download them and restart.</summary>

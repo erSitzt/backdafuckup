@@ -51,5 +51,6 @@ internal static class ApiMapping
         r.Vm?.MemoryBytes ?? 0,
         r.Vm?.Firmware,
         r.Consistency,
-        r.ConsistencyReason);
+        r.ConsistencyReason,
+        r.SqlDatabaseCount);
 }

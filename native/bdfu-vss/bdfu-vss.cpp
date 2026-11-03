@@ -380,7 +380,40 @@ std::wstring FileList(IVssWMComponent* component, UINT count, HRESULT (STDMETHOD
     return out;
 }
 
-// Writer metadata as JSON; adds the selectable components to the backup.
+// Files of one kind as JSON objects: folder, file spec (may contain wildcards) and whether subfolders are included.
+std::wstring FileDescs(IVssWMComponent* component, UINT count, HRESULT (STDMETHODCALLTYPE IVssWMComponent::*get)(UINT, IVssWMFiledesc**))
+{
+    std::wstring out;
+    for (UINT i = 0; i < count; i++)
+    {
+        IVssWMFiledesc* file = nullptr;
+        if (FAILED((component->*get)(i, &file)) || file == nullptr)
+        {
+            continue;
+        }
+
+        BSTR path = nullptr;
+        BSTR spec = nullptr;
+        boolean recursive = false;
+        file->GetPath(&path);
+        file->GetFilespec(&spec);
+        file->GetRecursive(&recursive);
+        if (!out.empty())
+        {
+            out += L',';
+        }
+
+        out += L"{\"path\":" + JsonString(Bstr(path)) + L",\"spec\":" + JsonString(Bstr(spec)) + L",\"recursive\":" + (recursive ? L"true" : L"false") + L"}";
+        SysFreeString(path);
+        SysFreeString(spec);
+        file->Release();
+    }
+
+    return out;
+}
+
+// Writer metadata as JSON; adds the selectable components to the backup. For the SQL Server writer the whole writer
+// metadata document is included (SaveAsXML): a later VSS restore through the writer needs it.
 HRESULT DescribeWriters(std::wstring& json)
 {
     UINT writers = 0;
@@ -415,9 +448,21 @@ HRESULT DescribeWriters(std::wstring& json)
             json += L',';
         }
 
-        json += L"{\"name\":" + JsonString(Bstr(name)) + L",\"writerId\":" + JsonString(GuidText(writerId)) +
-                L",\"instanceName\":" + JsonString(GuidText(instanceId)) + L",\"state\":\"Stable\",\"components\":[";
+        std::wstring writerName = Bstr(name);
         SysFreeString(name);
+        json += L"{\"name\":" + JsonString(writerName) + L",\"writerId\":" + JsonString(GuidText(writerId)) +
+                L",\"instanceName\":" + JsonString(GuidText(instanceId)) + L",\"state\":\"Stable\"";
+        if (writerName == L"SqlServerWriter")
+        {
+            BSTR xml = nullptr;
+            if (SUCCEEDED(metadata->SaveAsXML(&xml)) && xml != nullptr)
+            {
+                json += L",\"metadataXml\":" + JsonString(Bstr(xml));
+                SysFreeString(xml);
+            }
+        }
+
+        json += L",\"components\":[";
         bool first = true;
         for (UINT c = 0; c < components; c++)
         {
@@ -444,17 +489,25 @@ HRESULT DescribeWriters(std::wstring& json)
                     }
                 }
 
-                json += std::wstring(first ? L"" : L",") + L"{\"logicalPath\":" + JsonString(logical) + L",\"name\":" + JsonString(componentName) +
-                        L",\"files\":[" + all + L"]}";
-                first = false;
+                bool added = false;
                 if (info->bSelectable)
                 {
-                    HRESULT added = g_state.backup->AddComponent(instanceId, writerId, info->type, info->bstrLogicalPath, info->bstrComponentName);
-                    if (SUCCEEDED(added))
+                    added = SUCCEEDED(g_state.backup->AddComponent(instanceId, writerId, info->type, info->bstrLogicalPath, info->bstrComponentName));
+                    if (added)
                     {
                         g_state.components.push_back({instanceId, writerId, info->type, logical, componentName});
                     }
                 }
+
+                wchar_t numbers[64];
+                swprintf(numbers, 64, L",\"type\":%d,\"flags\":%lu", static_cast<int>(info->type), static_cast<unsigned long>(info->dwComponentFlags));
+                json += std::wstring(first ? L"" : L",") + L"{\"logicalPath\":" + JsonString(logical) + L",\"name\":" + JsonString(componentName) +
+                        L",\"files\":[" + all + L"]" + numbers + L",\"selectable\":" + (info->bSelectable ? L"true" : L"false") +
+                        L",\"added\":" + (added ? L"true" : L"false") +
+                        L",\"dataFiles\":[" + FileDescs(component, info->cDatabases, &IVssWMComponent::GetDatabaseFile) +
+                        L"],\"logFiles\":[" + FileDescs(component, info->cLogFiles, &IVssWMComponent::GetDatabaseLogFile) +
+                        L"],\"otherFiles\":[" + FileDescs(component, info->cFileCount, &IVssWMComponent::GetFile) + L"]}";
+                first = false;
 
                 component->FreeComponentInfo(info);
             }
@@ -695,6 +748,7 @@ extern "C" __declspec(dllexport) int bdfu_vss_thaw(wchar_t** json)
     }
 
     SetEvent(g_thaw);
+    std::wstring components;  // the Backup Components Document, saved after BackupComplete
     ULONGLONG held = GetTickCount64() - g_state.frozenAt;
     bool providerGaveUp = g_state.timeout != nullptr && WaitForSingleObject(g_state.timeout, 0) == WAIT_OBJECT_0;
     HRESULT status = S_OK;
@@ -717,6 +771,13 @@ extern "C" __declspec(dllexport) int bdfu_vss_thaw(wchar_t** json)
         if (SUCCEEDED(g_state.backup->BackupComplete(&async)))
         {
             WaitAsync(async, kAsyncTimeoutMs, nullptr);
+        }
+
+        BSTR xml = nullptr;
+        if (SUCCEEDED(g_state.backup->SaveAsXML(&xml)) && xml != nullptr)
+        {
+            components = Bstr(xml);
+            SysFreeString(xml);
         }
     }
     else
@@ -767,7 +828,13 @@ extern "C" __declspec(dllexport) int bdfu_vss_thaw(wchar_t** json)
     swprintf(number, 32, L"%d", static_cast<int>(SUCCEEDED(status) ? 0 : status));
     std::wstring result = std::wstring(L"{\"vssResult\":") + number;
     swprintf(number, 32, L"%llu", static_cast<unsigned long long>(held));
-    result += std::wstring(L",\"heldMs\":") + number + L",\"writers\":[" + writers + L"]}";
+    result += std::wstring(L",\"heldMs\":") + number + L",\"writers\":[" + writers + L"]";
+    if (!components.empty())
+    {
+        result += L",\"backupComponentsXml\":" + JsonString(components);
+    }
+
+    result += L"}";
     Cleanup(false);
     ReleaseSRWLockExclusive(&g_lock);
     return Out(json, result);

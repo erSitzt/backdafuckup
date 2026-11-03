@@ -9,6 +9,7 @@ using Backdafuckup.DataMover;
 using Backdafuckup.Agent.Protocol;
 using Backdafuckup.Server.Agents;
 using Backdafuckup.Server.Data;
+using Backdafuckup.Server.Sql;
 using Microsoft.EntityFrameworkCore;
 
 namespace Backdafuckup.Server.Engine;
@@ -245,9 +246,25 @@ internal sealed class VmBackupTask(
             await tracker.UpdateTaskAsync(taskId, t => t.Metrics = CurrentMetrics(), CancellationToken.None).ConfigureAwait(false);
             var (manifestDisks, warnings) = await BackupDisksAsync(backup, writer, baseline, baseReader, cancellationToken).ConfigureAwait(false);
             warnings |= consistencyReason is not null;
-            var guestBlob = guest?.Quiescer is { Prepared: { } prepared } quiescer
-                ? await writer.WriteBlobAsync("guest-metadata", GuestMetadataFormat, new MemoryStream(GuestMetadata(prepared, quiescer.Thawed)), cancellationToken).ConfigureAwait(false)
-                : null;
+            ManifestBlob? guestBlob = null;
+            ManifestBlob? vssBlob = null;
+            int? sqlDatabases = null;
+            if (guest?.Quiescer is { Prepared: { } prepared } quiescer)
+            {
+                var stored = StoredGuestMetadata.Build(prepared, quiescer.Thawed, consistency, consistencyReason);
+                sqlDatabases = stored.SqlDatabases.Count;
+                guestBlob = await writer.WriteBlobAsync("guest-metadata", StoredGuestMetadata.FormatV2, new MemoryStream(stored.Serialize()), cancellationToken).ConfigureAwait(false);
+                if (StoredVssDocuments.From(prepared, quiescer.Thawed) is { } documents)
+                {
+                    vssBlob = await writer.WriteBlobAsync("vss-documents", StoredVssDocuments.Format, new MemoryStream(documents.Serialize()), cancellationToken).ConfigureAwait(false);
+                }
+
+                foreach (var database in stored.SqlDatabases.Where(d => d.Consistency != "application" && consistency == "application"))
+                {
+                    _log.Warning($"SQL database {database.Instance}\\{database.Database} is only crash-consistent: {database.ConsistencyReason}.");
+                    warnings = true;
+                }
+            }
 
             var metadata = await writer.WriteBlobAsync("vm-metadata", backup.Metadata.Format, new MemoryStream(backup.Metadata.Content), cancellationToken).ConfigureAwait(false);
             var kind = manifestDisks.All(d => d.Stats.Mode == DiskBackupMode.Cbt) && manifestDisks.Count > 0 ? RestorePointKind.Incremental : RestorePointKind.Full;
@@ -265,6 +282,8 @@ internal sealed class VmBackupTask(
                 Consistency = consistency,
                 ConsistencyReason = consistencyReason,
                 Guest = guestBlob,
+                SqlDatabaseCount = guest?.Quiescer is { Prepared: not null } ? sqlDatabases : 0,
+                VssDocuments = vssBlob,
                 Chunking = new ManifestChunking(repository.Info.ChunkSize, repository.Info.Hash, repository.Info.Compression),
                 Disks = manifestDisks,
             };
@@ -328,7 +347,6 @@ internal sealed class VmBackupTask(
         }
     }
 
-    internal const string GuestMetadataFormat = "backdafuckup-guest-v1";
 
     /// <summary>
     /// Guest processing before the snapshot: the agent of the VM (installed first if needed), or the reason why the backup
@@ -378,9 +396,6 @@ internal sealed class VmBackupTask(
         // A missing agent was reported before the snapshot, a failed freeze by the hypervisor provider.
         return ("crash", reason);
     }
-
-    private static byte[] GuestMetadata(GuestBackupInfo prepared, ThawReport? thawed) =>
-        JsonSerializer.SerializeToUtf8Bytes(new { prepared.Volumes, prepared.SqlDatabases, Writers = thawed?.Writers ?? prepared.Writers }, AgentJson.Options);
 
     /// <summary>
     /// Backs up the disks of the VM, up to <see cref="BackupJob.MaxParallelDisks"/> at a time. If one disk fails, the
@@ -573,6 +588,7 @@ internal sealed class VmBackupTask(
         entity.ManifestPath = manifestPath;
         entity.Consistency = manifest.Consistency;
         entity.ConsistencyReason = manifest.ConsistencyReason;
+        entity.SqlDatabaseCount = manifest.SqlDatabaseCount ?? (manifest.Guest is null ? 0 : null);
         entity.LogicalBytes = manifest.Disks.Sum(d => d.CapacityBytes);
         entity.NewStoredBytes = manifest.Disks.Sum(d => d.Stats.NewStoredBytes);
         entity.Disks = manifest.Disks.Select(d => new RestorePointDisk

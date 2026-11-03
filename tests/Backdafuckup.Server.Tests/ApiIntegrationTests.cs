@@ -320,11 +320,18 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     }
 
     /// <summary>A VM whose disk holds a file system test image, backed up once.</summary>
-    private async Task<RestorePointDto> BackUpFixtureAsync(HttpClient client, string vmName, string fixture)
+    private async Task<RestorePointDto> BackUpFixtureAsync(HttpClient client, string vmName, string fixture) =>
+        await BackUpImageAsync(client, vmName, await File.ReadAllBytesAsync(FsFixtures.Image(fixture), Ct));
+
+    /// <summary>A VM whose disk holds <paramref name="image"/>, backed up once (with guest processing if an agent is set up).</summary>
+    private async Task<RestorePointDto> BackUpImageAsync(HttpClient client, string vmName, byte[] image, Func<string, Task>? beforeBackup = null)
     {
-        var image = await File.ReadAllBytesAsync(FsFixtures.Image(fixture), Ct);
         var (vmUuid, disks) = _pool.AddVm(vmName, image.LongLength);
         _pool.WriteDisk(disks[0], 0, image);
+        if (beforeBackup is not null)
+        {
+            await beforeBackup(vmUuid);
+        }
         var connection = await Read<ConnectionDto>(client.PostAsJsonAsync("/api/connections", new CreateConnectionDto { DisplayName = "Lab pool", Address = "xcp1", UserName = "root", Password = "secret" }, Ct));
         var repository = await Read<RepositoryDto>(client.PostAsJsonAsync("/api/repositories", new CreateRepositoryDto { Name = "Local", Path = Path.Combine(_root, "repo") }, Ct));
         var job = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", new SaveJobDto
@@ -336,10 +343,143 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Schedule = new ScheduleDto("Daily", "22:00", [], "Europe/Berlin"),
             Objects = [new JobObjectDto(vmUuid, vmName)],
             RetryCount = 0,
+            GuestProcessing = beforeBackup is not null,
         }, Ct));
         var backup = await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{job.Id}/run", new RunJobDto(), Ct));
         Assert.Equal("Succeeded", (await WaitForSessionAsync(client, backup.SessionId)).Session.State);
         return Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!);
+    }
+
+    [Fact]
+    public async Task Sql_databases_of_a_restore_point_are_described_from_the_guest_metadata_and_the_backup()
+    {
+        var client = await SignedInClientAsync();
+        var image = WindowsTestDisk.Create(
+            [
+                new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+                new WindowsTestDisk.Volume('D', 12, new Dictionary<string, byte[]>
+                {
+                    ["SQL/shop.mdf"] = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11),
+                    ["SQL/shop_2.ndf"] = WindowsTestDisk.SqlFile(3, 256 << 10, 0x33),
+                    ["SQL/docs.mdf"] = WindowsTestDisk.SqlFile(1, 64 << 10, 0x44),
+                }),
+                new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]>
+                {
+                    ["Log/shop_log.ldf"] = WindowsTestDisk.SqlFile(2, 512 << 10, 0x22),
+                    ["Log/docs_log.ldf"] = WindowsTestDisk.SqlFile(2, 64 << 10, 0x55),
+                }),
+            ],
+            software: root =>
+            {
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\Instance Names\SQL").SetValue("SQLEXPRESS", "MSSQL16.SQLEXPRESS");
+                var setup = root.CreateSubKey(@"Microsoft\Microsoft SQL Server\MSSQL16.SQLEXPRESS\Setup");
+                setup.SetValue("Version", "16.0.1000.6");
+                setup.SetValue("Edition", "Express Edition (64-bit)");
+                var server = root.CreateSubKey(@"Microsoft\Microsoft SQL Server\MSSQL16.SQLEXPRESS\MSSQLServer");
+                server.SetValue("DefaultData", @"D:\SQL");
+                server.SetValue("DefaultLog", @"L:\Log");
+                server.SetValue("BackupDirectory", @"C:\Backup");
+            },
+            system: root => root.CreateSubKey(@"ControlSet001\Services\MSSQL$SQLEXPRESS").SetValue("ObjectName", @"NT Service\MSSQL$SQLEXPRESS"));
+        static GuestSqlFile F(string path, string spec, bool recursive = false) => new() { Path = path, Spec = spec, Recursive = recursive };
+        FakeGuestAgent? agent = null;
+        try
+        {
+            var point = await BackUpImageAsync(client, "sql01", image, async vmUuid =>
+            {
+                agent = new FakeGuestAgent(_factory!.Services, vmUuid)
+                {
+                    SqlDatabases =
+                    [
+                        // The secondary file is listed first: the primary file is found by its page header.
+                        new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", DataFiles = [F(@"D:\SQL\", "shop_2.ndf"), F(@"D:\SQL\", "shop.mdf")], LogFiles = [F(@"L:\Log\", "shop_log.ldf")], InBackup = true },
+                        new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "docs", DataFiles = [F(@"D:\SQL\", "docs.mdf"), F(@"D:\SQL\fs\", "*", recursive: true)], LogFiles = [F(@"L:\Log\", "docs_log.ldf")], InBackup = true },
+                        new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "gone", DataFiles = [F(@"D:\SQL\", "gone.mdf")], LogFiles = [F(@"E:\Log\", "gone_log.ldf")], InBackup = true },
+                        new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "master", DataFiles = [F(@"C:\Program Files\SQL\", "master.mdf")], LogFiles = [F(@"C:\Program Files\SQL\", "mastlog.ldf")], InBackup = true },
+                        // Guest metadata from an older agent: a flat file list.
+                        new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "legacy", Files = [@"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf"] },
+                    ],
+                };
+                await agent.StartAsync(Ct);
+            });
+            Assert.Equal(5, point.SqlDatabaseCount);
+
+            var mount = await Read<FileMountDto>(client.PostAsJsonAsync("/api/file-restore/mounts", new OpenFileMountRequestDto(point.Id), Ct));
+            Assert.Equal(["C:", "D:", "L:"], mount.Volumes.Where(v => v.Readable).Select(v => v.MountPoint).Order().ToList());
+            var sql = (await client.GetFromJsonAsync<SqlMountDto>($"/api/file-restore/mounts/{mount.Id}/sql", Ct))!;
+            Assert.Empty(sql.Warnings);
+
+            var instance = Assert.Single(sql.Instances);
+            Assert.Equal(new SqlInstanceDto("SQLEXPRESS", "MSSQL16.SQLEXPRESS", "16.0.1000.6", "SQL Server 2022", "Express Edition (64-bit)", "MSSQL$SQLEXPRESS",
+                @"NT Service\MSSQL$SQLEXPRESS", @"D:\SQL", @"L:\Log", @"C:\Backup"), instance);
+
+            var shop = sql.Databases.Single(d => d.Name == "shop");
+            Assert.True(shop.Restorable, string.Join("; ", shop.Problems));
+            Assert.Equal("application", shop.Consistency);
+            Assert.Equal([@"D:\SQL\shop.mdf", @"D:\SQL\shop_2.ndf", @"L:\Log\shop_log.ldf"], shop.Files.Select(f => f.Path).ToList());
+            Assert.True(shop.Files[0].Primary);
+            Assert.Equal(["data", "data", "log"], shop.Files.Select(f => f.Kind).ToList());
+            Assert.Equal([1L << 20, 256L << 10, 512L << 10], shop.Files.Select(f => f.SizeBytes!.Value).ToList());
+            Assert.Equal((1L << 20) + (256L << 10) + (512L << 10), shop.TotalBytes);
+            Assert.Equal("/SQL/shop.mdf", shop.Files[0].GuestPath);
+
+            var docs = sql.Databases.Single(d => d.Name == "docs");
+            Assert.False(docs.Restorable);
+            Assert.Contains(docs.Problems, p => p.Contains("FILESTREAM", StringComparison.Ordinal));
+
+            var gone = sql.Databases.Single(d => d.Name == "gone");
+            Assert.Contains(gone.Problems, p => p.Contains("gone.mdf: it does not exist in the restore point", StringComparison.Ordinal));
+            Assert.Contains(gone.Problems, p => p.Contains("no volume with drive letter E:", StringComparison.Ordinal));
+
+            Assert.Contains(sql.Databases.Single(d => d.Name == "master").Problems, p => p.Contains("system database", StringComparison.Ordinal));
+
+            var legacy = sql.Databases.Single(d => d.Name == "legacy");
+            Assert.True(legacy.Restorable, string.Join("; ", legacy.Problems));
+            Assert.Equal(["data", "log"], legacy.Files.Select(f => f.Kind).ToList());
+
+            // Export the files of "shop" as a ZIP: primary file first, content as in the backup, plus an attach script.
+            var ticket = await Read<FileDownloadTicketDto>(client.PostAsJsonAsync($"/api/file-restore/mounts/{mount.Id}/sql/downloads", new SqlDownloadRequestDto("SQLEXPRESS", "shop", "UTC"), Ct));
+            Assert.EndsWith("_SQLEXPRESS_shop.zip", ticket.FileName, StringComparison.Ordinal);
+            var zipResponse = await client.GetAsync("/" + ticket.Url, Ct);
+            Assert.True(zipResponse.IsSuccessStatusCode, await zipResponse.Content.ReadAsStringAsync(Ct));
+            using (var zip = new System.IO.Compression.ZipArchive(new MemoryStream(await zipResponse.Content.ReadAsByteArrayAsync(Ct))))
+            {
+                Assert.Equal(["shop.mdf", "shop_2.ndf", "shop_log.ldf", "shop-attach.sql"], zip.Entries.Select(e => e.FullName).ToList());
+                byte[] Content(string name)
+                {
+                    using var stream = zip.GetEntry(name)!.Open();
+                    using var copy = new MemoryStream();
+                    stream.CopyTo(copy);
+                    return copy.ToArray();
+                }
+
+                Assert.Equal(WindowsTestDisk.SqlFile(1, 1 << 20, 0x11), Content("shop.mdf"));
+                Assert.Equal(WindowsTestDisk.SqlFile(2, 512 << 10, 0x22), Content("shop_log.ldf"));
+                var script = System.Text.Encoding.UTF8.GetString(Content("shop-attach.sql"));
+                Assert.Contains("CREATE DATABASE [shop] ON\r\n    (FILENAME = N'D:\\Restore\\shop.mdf'),\r\n    (FILENAME = N'D:\\Restore\\shop_2.ndf'),\r\n    (FILENAME = N'D:\\Restore\\shop_log.ldf')\r\nFOR ATTACH;", script, StringComparison.Ordinal);
+            }
+
+            // A database with a missing file cannot be exported; the audit log names the download.
+            var refused = await client.PostAsJsonAsync($"/api/file-restore/mounts/{mount.Id}/sql/downloads", new SqlDownloadRequestDto("SQLEXPRESS", "gone", null), Ct);
+            Assert.False(refused.IsSuccessStatusCode);
+            Assert.Contains("gone.mdf: it does not exist in the restore point", await refused.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+            Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/file-restore/mounts/{mount.Id}", Ct)).StatusCode);
+            var browseLog = await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{mount.SessionId}/log", Ct);
+            Assert.Contains(browseLog!, l => l.Message.Contains(@"downloaded the files of SQL database SQLEXPRESS\shop (3 file(s)) as ZIP", StringComparison.Ordinal));
+
+            // For checking the console by hand: BDFU_UI_FIXTURE=<folder> keeps a copy of this repository (add it as a repository).
+            if (Environment.GetEnvironmentVariable("BDFU_UI_FIXTURE") is { Length: > 0 } keep)
+            {
+                CopyDirectory(Path.Combine(_root, "repo"), keep);
+            }
+        }
+        finally
+        {
+            if (agent is not null)
+            {
+                await agent.DisposeAsync();
+            }
+        }
     }
 
     [Fact]
@@ -618,6 +758,20 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     {
         var response = await request;
         Assert.True(response.IsSuccessStatusCode, $"{(int)response.StatusCode}: {await response.Content.ReadAsStringAsync(Ct)}");
+    }
+
+    private static void CopyDirectory(string source, string target)
+    {
+        foreach (var directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(target, Path.GetRelativePath(source, directory)));
+        }
+
+        Directory.CreateDirectory(target);
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories).Where(f => Path.GetFileName(f) != ".owner.lock"))
+        {
+            File.Copy(file, Path.Combine(target, Path.GetRelativePath(source, file)), overwrite: true);
+        }
     }
 
     private static async Task<T> Read<T>(Task<HttpResponseMessage> request)

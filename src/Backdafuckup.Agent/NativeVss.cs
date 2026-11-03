@@ -45,10 +45,22 @@ internal sealed class NativeVss : IVssBridge
         {
             Volumes = WindowsHostInfo.Volumes(),
             Writers = native.Writers.Select(w => w.ToWriter()).ToList(),
-            SqlDatabases = native.Writers.Where(w => string.Equals(w.Name, "SqlServerWriter", StringComparison.OrdinalIgnoreCase))
+            SqlDatabases = native.Writers.Where(w => IsSqlWriter(w.Name))
                 .SelectMany(w => w.Components)
-                .Select(c => new GuestSqlDatabase { Instance = Instance(c.LogicalPath), Database = c.Name, Files = c.Files })
+                .Select(c => new GuestSqlDatabase
+                {
+                    Instance = Instance(c.LogicalPath),
+                    Server = Server(c.LogicalPath),
+                    Database = c.Name,
+                    Files = c.Files,
+                    DataFiles = c.DataFiles,
+                    LogFiles = c.LogFiles,
+                    OtherFiles = c.OtherFiles,
+                    InBackup = c.Added,
+                    ComponentFlags = c.Flags,
+                })
                 .ToList(),
+            SqlWriterMetadataXml = native.Writers.FirstOrDefault(w => IsSqlWriter(w.Name))?.MetadataXml,
         };
     }
 
@@ -72,10 +84,13 @@ internal sealed class NativeVss : IVssBridge
             VssResult = native.VssResult,
             Consistent = native.VssResult == 0 && native.Writers.All(w => w.Failure is null),
             Writers = native.Writers.Select(w => w.ToWriter()).ToList(),
+            BackupComponentsXml = native.BackupComponentsXml,
         };
     }
 
     public void Abort() => bdfu_vss_abort();
+
+    private static bool IsSqlWriter(string name) => string.Equals(name, "SqlServerWriter", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Registers our provider with COM+ and VSS (needs administrator rights).</summary>
     public static void Register(string dllPath)
@@ -112,6 +127,15 @@ internal sealed class NativeVss : IVssBridge
 
             throw new VssException(message + WindowsEvents.Recent(), hr);
         }
+    }
+
+    /// <summary>"SQL01\SQLEXPRESS" → "SQL01"; "SQL01" → "SQL01".</summary>
+    private static string? Server(string? logicalPath)
+    {
+        var path = logicalPath ?? string.Empty;
+        var slash = path.IndexOf('\\');
+        var server = slash >= 0 ? path.Substring(0, slash) : path;
+        return server.Length == 0 ? null : server;
     }
 
     /// <summary>"SQL01\SQLEXPRESS" → "SQLEXPRESS"; "SQL01" → "MSSQLSERVER" (default instance).</summary>
@@ -172,6 +196,8 @@ internal sealed class NativeVss : IVssBridge
         public long HeldMs { get; set; }
 
         public List<NativeWriter> Writers { get; set; } = new List<NativeWriter>();
+
+        public string? BackupComponentsXml { get; set; }
     }
 
     private sealed class NativeError
@@ -190,6 +216,8 @@ internal sealed class NativeVss : IVssBridge
         public string State { get; set; } = string.Empty;
 
         public string? Failure { get; set; }
+
+        public string? MetadataXml { get; set; }
 
         public List<NativeComponent> Components { get; set; } = new List<NativeComponent>();
 
@@ -211,6 +239,16 @@ internal sealed class NativeVss : IVssBridge
         public string Name { get; set; } = string.Empty;
 
         public List<string> Files { get; set; } = new List<string>();
+
+        public bool? Added { get; set; }
+
+        public int Flags { get; set; }
+
+        public List<GuestSqlFile> DataFiles { get; set; } = new List<GuestSqlFile>();
+
+        public List<GuestSqlFile> LogFiles { get; set; } = new List<GuestSqlFile>();
+
+        public List<GuestSqlFile> OtherFiles { get; set; } = new List<GuestSqlFile>();
     }
 }
 

@@ -1,0 +1,270 @@
+@page "/sql/{RestorePointId:guid}"
+@implements IAsyncDisposable
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+
+<PageTitle>Restore SQL databases – backdafuckup</PageTitle>
+
+@if (_error is not null)
+{
+    <MudAlert Severity="Severity.Error" Class="mb-3">@_error</MudAlert>
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="OpenAsync" StartIcon="@Icons.Material.Filled.Storage">Open again</MudButton>
+    <MudButton Variant="Variant.Text" Href="/backups" Class="ml-2">Back to backups</MudButton>
+}
+else if (_mount is null || _sql is null)
+{
+    <MudText Typo="Typo.h5" Class="mb-2">Restore SQL databases</MudText>
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+    <MudText Typo="Typo.body2">Opening the restore point: reading partitions, file systems and the SQL Server configuration…</MudText>
+}
+else
+{
+    <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3" Wrap="Wrap.Wrap">
+        <MudText Typo="Typo.h5">SQL Server: @_mount.VmName</MudText>
+        <MudChip T="string" Size="Size.Small" Color="Color.Default">@_mount.RestorePointCreatedUtc.ToLocalTime().ToString("g")</MudChip>
+        <ConsistencyChip Consistency="@_mount.Consistency" Reason="@_mount.ConsistencyReason" />
+        <MudSpacer />
+        <MudText Typo="Typo.caption">Closes after @_mount.IdleTimeoutMinutes minutes without use.</MudText>
+        <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="CloseAsync" StartIcon="@Icons.Material.Filled.Close">Close</MudButton>
+    </MudStack>
+
+    @foreach (var warning in _mount.Warnings.Concat(_sql.Warnings))
+    {
+        <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-2">@warning</MudAlert>
+    }
+
+    @if (_sql.Databases.Count == 0)
+    {
+        <MudAlert Severity="Severity.Info" Class="mb-2">
+            This restore point lists no SQL Server databases. They are recorded when the VM is backed up with guest processing
+            (backdafuckup agent in the VM) and SQL Server's VSS writer (service "SQL Server VSS Writer") is running.
+        </MudAlert>
+    }
+    else
+    {
+        <MudGrid Spacing="2">
+            <MudItem xs="12" md="3">
+                <MudPaper Class="pa-2" Elevation="1" Style="min-height:60vh;overflow:auto">
+                    @* MudBlazor 9 renders Items only through an ItemTemplate. *@
+                    <MudTreeView T="string" Items="_tree" SelectedValue="_selected" SelectedValueChanged="OnSelected" Dense="true" Hover="true">
+                        <ItemTemplate>
+                            <MudTreeViewItem T="string" Value="@context.Value" Text="@context.Text" Icon="@context.Icon" @bind-Items="context.Children"
+                                             CanExpand="@context.Expandable" @bind-Expanded="@context.Expanded" />
+                        </ItemTemplate>
+                    </MudTreeView>
+                </MudPaper>
+            </MudItem>
+            <MudItem xs="12" md="9">
+                <MudPaper Class="pa-3" Elevation="1" Style="min-height:60vh">
+                    @if (SelectedDatabase is { } db)
+                    {
+                        var instance = InstanceOf(db.Instance);
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Wrap="Wrap.Wrap" Class="mb-2">
+                            <MudIcon Icon="@Icons.Material.Filled.Storage" />
+                            <MudText Typo="Typo.h6">@db.Name</MudText>
+                            <MudText Typo="Typo.body2" Class="mud-text-secondary">@db.Instance@(instance?.Product is { } product ? $" · {product}" : "")</MudText>
+                            <ConsistencyChip Consistency="@db.Consistency" Reason="@db.ConsistencyReason" />
+                            <MudSpacer />
+                            <MudTooltip Text="The database files as they are in the backup, plus a script that attaches them to an instance.">
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.FolderZip"
+                                           Disabled="@(!CanExport(db) || _preparing)" OnClick="@(() => ExportFilesAsync(db))">Export files</MudButton>
+                            </MudTooltip>
+                        </MudStack>
+
+                        @if (!db.Restorable)
+                        {
+                            <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-2">
+                                <b>Cannot be restored:</b>
+                                <ul class="ml-4">
+                                    @foreach (var problem in db.Problems)
+                                    {
+                                        <li>@problem</li>
+                                    }
+                                </ul>
+                            </MudAlert>
+                        }
+
+                        @if (db.Consistency != "application")
+                        {
+                            <MudAlert Severity="Severity.Info" Dense="true" Class="mb-2">
+                                The database files are crash-consistent@(db.ConsistencyReason is { } reason ? $" ({reason})" : "").
+                                SQL Server recovers them when they are attached, like after a power failure.
+                            </MudAlert>
+                        }
+
+                        <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+                            <thead><tr><th>File</th><th>Type</th><th style="text-align:right">Size</th><th></th></tr></thead>
+                            <tbody>
+                                @foreach (var file in db.Files)
+                                {
+                                    <tr>
+                                        <td><span class="mono">@file.Path</span></td>
+                                        <td>
+                                            @(file.Kind switch { "data" => file.Primary ? "data (primary)" : "data", "log" => "log", _ => "other" })
+                                        </td>
+                                        <td style="text-align:right">@(file.SizeBytes is { } size ? Fmt.Bytes(size) : "")</td>
+                                        <td>
+                                            @if (file.Problem is not null)
+                                            {
+                                                <MudTooltip Text="@file.Problem">
+                                                    <MudIcon Icon="@Icons.Material.Filled.Block" Size="Size.Small" Color="Color.Error" />
+                                                </MudTooltip>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                        <MudText Typo="Typo.caption" Class="mt-2">@db.Files.Count file(s), @Fmt.Bytes(db.TotalBytes) in the backup.</MudText>
+                    }
+                    else if (SelectedInstance is { } inst)
+                    {
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-2">
+                            <MudIcon Icon="@Icons.Material.Filled.Dns" />
+                            <MudText Typo="Typo.h6">@inst.Name</MudText>
+                            <MudText Typo="Typo.body2" Class="mud-text-secondary">@(inst.Product ?? "SQL Server")</MudText>
+                        </MudStack>
+                        <MudSimpleTable Dense="true" Elevation="0">
+                            <tbody>
+                                <tr><td>Version</td><td>@(inst.Version ?? "unknown")</td></tr>
+                                <tr><td>Edition</td><td>@(inst.Edition ?? "unknown")</td></tr>
+                                <tr><td>Instance id</td><td class="mono">@inst.InstanceId</td></tr>
+                                <tr><td>Service</td><td class="mono">@inst.ServiceName@(inst.ServiceAccount is { } account ? $" ({account})" : "")</td></tr>
+                                <tr><td>Default data folder</td><td class="mono">@inst.DefaultDataFolder</td></tr>
+                                <tr><td>Default log folder</td><td class="mono">@inst.DefaultLogFolder</td></tr>
+                                <tr><td>Backup folder</td><td class="mono">@inst.BackupFolder</td></tr>
+                                <tr><td>Databases</td><td>@_sql.Databases.Count(d => string.Equals(d.Instance, inst.Name, StringComparison.OrdinalIgnoreCase))</td></tr>
+                            </tbody>
+                        </MudSimpleTable>
+                        <MudText Typo="Typo.caption" Class="mt-2">As recorded in the registry of the backed-up VM.</MudText>
+                    }
+                    else
+                    {
+                        <MudText Typo="Typo.body2" Class="pa-4">Choose an instance or a database on the left.</MudText>
+                    }
+                </MudPaper>
+            </MudItem>
+        </MudGrid>
+    }
+}
+
+@code {
+    private const char Separator = '\u0001';
+
+    [Parameter]
+    public Guid RestorePointId { get; set; }
+
+    private FileMountDto? _mount;
+    private SqlMountDto? _sql;
+    private string? _error;
+    private List<TreeItemData<string>> _tree = [];
+    private string? _selected;
+    private bool _closed;
+    private bool _preparing;
+
+    private SqlDatabaseDto? SelectedDatabase =>
+        _selected is { } s && s.StartsWith("d:", StringComparison.Ordinal) && _sql is not null
+            ? _sql.Databases.FirstOrDefault(d => Key(d) == s)
+            : null;
+
+    private SqlInstanceDto? SelectedInstance =>
+        _selected is { } s && s.StartsWith("i:", StringComparison.Ordinal) ? InstanceOf(s[2..]) : null;
+
+    protected override Task OnInitializedAsync() => OpenAsync();
+
+    private async Task OpenAsync()
+    {
+        _error = null;
+        _mount = null;
+        _sql = null;
+        try
+        {
+            _mount = await Api.PostAsync<FileMountDto>("api/file-restore/mounts", new OpenFileMountRequestDto(RestorePointId));
+            _closed = false;
+            _sql = await Api.GetAsync<SqlMountDto>($"api/file-restore/mounts/{_mount.Id}/sql");
+            _tree = [.. _sql.Instances.OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).Select(i => new TreeItemData<string>
+            {
+                Value = "i:" + i.Name,
+                Text = i.Product is null ? i.Name : $"{i.Name}  ·  {i.Product}",
+                Icon = Icons.Material.Filled.Dns,
+                Expanded = true,
+                Children = [.. _sql.Databases
+                    .Where(d => string.Equals(d.Instance, i.Name, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase)
+                    .Select(d => new TreeItemData<string>
+                    {
+                        Value = Key(d),
+                        Text = d.Name,
+                        Icon = d.Restorable ? Icons.Material.Filled.Storage : Icons.Material.Filled.Block,
+                        Expandable = false,
+                    })],
+            })];
+            _selected = _sql.Databases.Where(d => d.Restorable).Select(Key).FirstOrDefault() ?? _tree.FirstOrDefault()?.Value;
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private void OnSelected(string? value) => _selected = value;
+
+    private SqlInstanceDto? InstanceOf(string name) =>
+        _sql?.Instances.FirstOrDefault(i => string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase));
+
+    private static string Key(SqlDatabaseDto d) => "d:" + d.Instance + Separator + d.Name;
+
+    private static bool CanExport(SqlDatabaseDto d) => d.Files.Count > 0 && d.Files.All(f => f.Problem is null);
+
+    private async Task ExportFilesAsync(SqlDatabaseDto db)
+    {
+        if (_mount is null)
+        {
+            return;
+        }
+
+        _preparing = true;
+        try
+        {
+            var ticket = await Api.PostAsync<FileDownloadTicketDto>(
+                $"api/file-restore/mounts/{_mount.Id}/sql/downloads", new SqlDownloadRequestDto(db.Instance, db.Name, TimeZoneInfo.Local.Id));
+            await JS.InvokeVoidAsync("bdfuDownload", ticket.Url);
+            Snackbar.Add($"Downloading {ticket.FileName}: the database files and {db.Name}-attach.sql.", Severity.Info);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _preparing = false;
+        }
+    }
+
+    private async Task CloseAsync()
+    {
+        await UnmountAsync();
+        _mount = null;
+        _error = "The SQL browser is closed.";
+    }
+
+    private async Task UnmountAsync()
+    {
+        if (_mount is null || _closed)
+        {
+            return;
+        }
+
+        _closed = true;
+        try
+        {
+            await Api.DeleteAsync($"api/file-restore/mounts/{_mount.Id}");
+        }
+        catch (ApiException)
+        {
+        }
+    }
+
+    public async ValueTask DisposeAsync() => await UnmountAsync();
+}

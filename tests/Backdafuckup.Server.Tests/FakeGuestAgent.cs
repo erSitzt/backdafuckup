@@ -25,6 +25,12 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
 
     public List<string> Commands { get; } = [];
 
+    /// <summary>Also reports a database that the SQL writer did not include in the VSS backup.</summary>
+    public bool IncludeUnselectedDatabase { get; set; }
+
+    /// <summary>The SQL databases to report instead of the default "shop".</summary>
+    public List<GuestSqlDatabase>? SqlDatabases { get; set; }
+
     public bool Frozen { get; private set; }
 
     /// <summary>Thaw answer: by default consistent; VSS_E_HOLD_WRITES_TIMEOUT simulates a snapshot over 10 s.</summary>
@@ -87,9 +93,34 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
                 result.Prepare = new GuestBackupInfo
                 {
                     Volumes = [new GuestVolume { Name = @"\\?\Volume{1}\", MountPoints = [@"C:\"], FileSystem = "NTFS", SizeBytes = 64L << 30 }],
-                    Writers = [new GuestWriter { Name = "SqlServerWriter", WriterId = "a65faa63-5ea8-4ebc-9dbd-a0c4db26912a", State = "Stable" }],
-                    SqlDatabases = [new GuestSqlDatabase { Instance = "MSSQLSERVER", Database = "shop", Files = [@"D:\SQL\shop.mdf", @"D:\SQL\shop_log.ldf"] }],
+                    Writers = [new GuestWriter { Name = "SqlServerWriter", WriterId = "a65faa63-5ea8-4ebc-9dbd-a0c4db26912a", State = "Stable", Components = [@"SQL01\shop", @"SQL01\model"] }],
+                    SqlDatabases =
+                    [
+                        new GuestSqlDatabase
+                        {
+                            Instance = "MSSQLSERVER", Server = "SQL01", Database = "shop", Files = [@"D:\SQL\shop.mdf", @"D:\SQL\shop_log.ldf"],
+                            DataFiles = [new GuestSqlFile { Path = @"D:\SQL\", Spec = "shop.mdf" }],
+                            LogFiles = [new GuestSqlFile { Path = @"D:\SQL\", Spec = "shop_log.ldf" }],
+                            InBackup = true,
+                        },
+                    ],
+                    SqlWriterMetadataXml = "<WRITER_METADATA writerId=\"a65faa63\"/>",
                 };
+                if (SqlDatabases is not null)
+                {
+                    result.Prepare.SqlDatabases = SqlDatabases;
+                }
+
+                if (IncludeUnselectedDatabase)
+                {
+                    result.Prepare.SqlDatabases.Add(new GuestSqlDatabase
+                    {
+                        Instance = "MSSQLSERVER", Server = "SQL01", Database = "notselected", Files = [@"D:\SQL\ns.mdf"],
+                        DataFiles = [new GuestSqlFile { Path = @"D:\SQL\", Spec = "ns.mdf" }],
+                        InBackup = false,
+                    });
+                }
+
                 break;
             case AgentCommandKinds.Freeze:
                 Frozen = true;
@@ -102,7 +133,8 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
                     HeldMs = 1500,
                     Consistent = ThawVssResult == 0,
                     VssResult = ThawVssResult,
-                    Writers = [new GuestWriter { Name = "SqlServerWriter", State = ThawVssResult == 0 ? "Stable" : "FailedAtFreeze" }],
+                    Writers = [new GuestWriter { Name = "SqlServerWriter", WriterId = "a65faa63-5ea8-4ebc-9dbd-a0c4db26912a", State = ThawVssResult == 0 ? "Stable" : "FailedAtFreeze" }],
+                    BackupComponentsXml = ThawVssResult == 0 ? "<BACKUP_COMPONENTS/>" : null,
                 };
                 break;
             case AgentCommandKinds.Abort:

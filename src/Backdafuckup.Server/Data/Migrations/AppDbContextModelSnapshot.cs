@@ -866,6 +866,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("session_id");
 
+                    b.Property<int?>("SqlDatabaseCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("sql_database_count");
+
                     b.Property<string>("State")
                         .IsRequired()
                         .HasMaxLength(16)

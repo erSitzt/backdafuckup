@@ -43,6 +43,22 @@ public sealed class FileRestoreDownloads(
     }
 
     /// <summary>
+    /// A link for a ZIP of single files from any volumes of the browser, under the given names (e.g. the files of a SQL
+    /// database), plus optional text files. <paramref name="what"/> names the content in the audit log.
+    /// </summary>
+    public FileDownloadTicketDto PrepareFiles(
+        BrowseMount mount, IReadOnlyList<(string Volume, GuestPath Path, string Name)> files, IReadOnlyList<(string Name, string Text)> extras,
+        string fileName, string what, string? timeZone)
+    {
+        var now = time.GetUtcNow();
+        Purge(now);
+        var token = Base64Url(RandomNumberGenerator.GetBytes(32));
+        var lifetime = options.Value.DownloadLinkLifetime;
+        _tickets[token] = new Ticket(mount.Id, mount.User, string.Empty, GuestPath.Root, [], ResolveZone(timeZone), SafeFileName(fileName), now + lifetime, files, extras, what);
+        return new FileDownloadTicketDto($"api/file-restore/downloads/{token}", SafeFileName(fileName), (int)lifetime.TotalSeconds);
+    }
+
+    /// <summary>
     /// Streams the ZIP of a ticket. Errors before the first byte become problem responses; later ones abort the
     /// connection, so the browser reports a failed download instead of saving a short archive.
     /// </summary>
@@ -64,7 +80,7 @@ public sealed class FileRestoreDownloads(
         {
             MaxEntries = options.Value.MaxZipEntries,
             Writer = new ZipWriterOptions { DosTimeZone = ticket.Zone },
-            Describe = path => FileRestoreMounts.Describe(mount, ticket.Volume, path),
+            Describe = path => FileRestoreMounts.Describe(mount, ticket.Files?.FirstOrDefault(f => f.Path.Equals(path)).Volume ?? ticket.Volume, path),
         };
         GuestZipResult? result = null;
         var producer = FileLevelWorkers.RunDedicated(
@@ -73,9 +89,10 @@ public sealed class FileRestoreDownloads(
                 try
                 {
                     using var image = GuestImage.Open(mount.Disks, describe: false);
-                    var fs = image.OpenFileSystem(ticket.Volume);
                     using var output = pipe.Writer.AsStream(leaveOpen: true);
-                    result = GuestZipExport.Write(fs, ticket.Paths, output, zipOptions, stop.Token);
+                    result = ticket.Files is { } files
+                        ? GuestZipExport.WriteFiles([.. files.Select(f => (image.OpenFileSystem(f.Volume), f.Path, f.Name))], ticket.Extras ?? [], output, zipOptions, stop.Token)
+                        : GuestZipExport.Write(image.OpenFileSystem(ticket.Volume), ticket.Paths, output, zipOptions, stop.Token);
                     output.Flush();
                     pipe.Writer.Complete();
                 }
@@ -169,6 +186,11 @@ public sealed class FileRestoreDownloads(
 
     private static string DescribeSelection(BrowseMount mount, Ticket ticket)
     {
+        if (ticket.What is not null)
+        {
+            return ticket.What;
+        }
+
         var names = string.Join(", ", ticket.Paths.Take(5).Select(p => p.Name));
         var more = ticket.Paths.Length > 5 ? $" and {ticket.Paths.Length - 5:N0} more" : string.Empty;
         return $"{names}{more} in {FileRestoreMounts.Describe(mount, ticket.Volume, ticket.Parent)}";
@@ -208,5 +230,16 @@ public sealed class FileRestoreDownloads(
 
     private static string Base64Url(byte[] bytes) => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
-    private sealed record Ticket(Guid MountId, string User, string Volume, GuestPath Parent, GuestPath[] Paths, TimeZoneInfo Zone, string FileName, DateTimeOffset ExpiresUtc);
+    private sealed record Ticket(
+        Guid MountId,
+        string User,
+        string Volume,
+        GuestPath Parent,
+        GuestPath[] Paths,
+        TimeZoneInfo Zone,
+        string FileName,
+        DateTimeOffset ExpiresUtc,
+        IReadOnlyList<(string Volume, GuestPath Path, string Name)>? Files = null,
+        IReadOnlyList<(string Name, string Text)>? Extras = null,
+        string? What = null);
 }

@@ -208,7 +208,8 @@ public sealed record RestorePointDto(
     long MemoryBytes,
     string? Firmware,
     string Consistency = "crash",
-    string? ConsistencyReason = null);
+    string? ConsistencyReason = null,
+    int? SqlDatabaseCount = null);
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 

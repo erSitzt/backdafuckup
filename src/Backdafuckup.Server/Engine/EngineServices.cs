@@ -456,6 +456,9 @@ public static class EngineServiceCollectionExtensions
         services.TryAddSingleton<Backdafuckup.Smb.ISmbShareConnector, Backdafuckup.Smb.SmbShareConnector>();
         services.TryAddSingleton<Backdafuckup.Ssh.ISshConnector, Backdafuckup.Ssh.SshConnector>();
         services.AddHostedService<FileRestore.FileRestoreSweeper>();
+        services.AddSingleton<Sql.SqlCatalog>();
+        services.AddSingleton<Sql.SqlCatalogBackfill>();
+        services.AddHostedService(sp => sp.GetRequiredService<Sql.SqlCatalogBackfill>());
         return services;
     }
 

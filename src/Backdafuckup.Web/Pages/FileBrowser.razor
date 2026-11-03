@@ -47,7 +47,13 @@ else
     <MudGrid Spacing="2">
         <MudItem xs="12" md="3">
             <MudPaper Class="pa-2" Elevation="1" Style="min-height:60vh;overflow:auto">
-                <MudTreeView T="string" Items="_tree" ServerData="LoadFoldersAsync" SelectedValue="_selectedNode" SelectedValueChanged="OnNodeSelectedAsync" Dense="true" Hover="true" />
+                @* MudBlazor 9 renders Items only through an ItemTemplate. *@
+                <MudTreeView T="string" Items="_tree" ServerData="LoadFoldersAsync" SelectedValue="_selectedNode" SelectedValueChanged="OnNodeSelectedAsync" Dense="true" Hover="true">
+                    <ItemTemplate>
+                        <MudTreeViewItem T="string" Value="@context.Value" Text="@context.Text" Icon="@context.Icon" @bind-Items="context.Children"
+                                         CanExpand="@context.Expandable" @bind-Expanded="@context.Expanded" />
+                    </ItemTemplate>
+                </MudTreeView>
                 @foreach (var volume in _mount.Volumes.Where(v => !v.Readable))
                 {
                     <MudTooltip Text="@volume.Reason">

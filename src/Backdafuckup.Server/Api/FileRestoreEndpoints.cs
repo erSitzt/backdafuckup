@@ -41,6 +41,18 @@ public static class FileRestoreEndpoints
                 return Results.Ok(await mounts.ListAsync(mount, volume, GuestPath.Parse(path), offset ?? 0, limit ?? 500, ct));
             }));
 
+        // The SQL Server instances and databases of the opened restore point (from the guest metadata and the backup's registry).
+        group.MapGet("/mounts/{id:guid}/sql", (Guid id, FileRestoreMounts mounts, Sql.SqlCatalog catalog, HttpContext http, CancellationToken ct) =>
+            Handle(async () =>
+            {
+                var mount = mounts.Get(id, User(http));
+                return Results.Ok(await catalog.DescribeAsync(mount, ct));
+            }));
+
+        // The files of one SQL database as a ZIP (one-time link, like file downloads).
+        group.MapPost("/mounts/{id:guid}/sql/downloads", (Guid id, SqlDownloadRequestDto request, FileRestoreMounts mounts, FileRestoreDownloads downloads, Sql.SqlCatalog catalog, HttpContext http, CancellationToken ct) =>
+            Handle(async () => Results.Ok(await catalog.PrepareDownloadAsync(mounts.Get(id, User(http)), downloads, request, ct))));
+
         group.MapGet("/mounts/{id:guid}/file", (Guid id, string volume, string path, FileRestoreMounts mounts, HttpContext http, CancellationToken ct) =>
             Handle(async () =>
             {

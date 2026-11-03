@@ -43,6 +43,12 @@ public sealed record RestorePointManifest
     /// <summary>What the guest contained (volumes, VSS writers, SQL databases), as reported by the agent.</summary>
     public ManifestBlob? Guest { get; init; }
 
+    /// <summary>Number of SQL Server databases in <see cref="Guest"/>; null in manifests written before it was recorded.</summary>
+    public int? SqlDatabaseCount { get; init; }
+
+    /// <summary>The VSS documents of the guest (SQL Server writer metadata, Backup Components Document), if any.</summary>
+    public ManifestBlob? VssDocuments { get; init; }
+
     /// <summary>Informational only: the restore point whose indexes were reused for unchanged chunks.</summary>
     public Guid? BaseRestorePointId { get; init; }
 

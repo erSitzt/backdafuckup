@@ -381,6 +381,9 @@ public sealed class RestorePointEntity
 
     public string? ConsistencyReason { get; set; }
 
+    /// <summary>SQL Server databases in the guest metadata; null until known (restore points from before it was recorded).</summary>
+    public int? SqlDatabaseCount { get; set; }
+
     public VmDescriptor? Vm { get; set; }
 
     public List<RestorePointDisk> Disks { get; set; } = [];

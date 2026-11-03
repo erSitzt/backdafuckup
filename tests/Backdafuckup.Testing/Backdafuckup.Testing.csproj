@@ -5,6 +5,10 @@
   <ItemGroup>
     <PackageReference Include="ZstdSharp.Port" />
     <PackageReference Include="Testcontainers" />
+    <PackageReference Include="LTRData.DiscUtils.Core" />
+    <PackageReference Include="LTRData.DiscUtils.Streams" />
+    <PackageReference Include="LTRData.DiscUtils.Ntfs" />
+    <PackageReference Include="LTRData.DiscUtils.Registry" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Backdafuckup.Core\Backdafuckup.Core.csproj" />
