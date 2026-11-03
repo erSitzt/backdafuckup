@@ -6,8 +6,11 @@ namespace Backdafuckup.Xen;
 public sealed record XenOptions
 {
     /// <summary>
-    /// Bit order of the bitmap returned by VDI.list_changed_blocks. <c>null</c> = not yet verified against a real
-    /// host: incremental backups are then disabled and every backup reads the full disk (safe default, spec risk 1).
+    /// Bit order of the bitmap returned by VDI.list_changed_blocks, for a bit-exact decoding. <c>null</c> (default): the
+    /// bitmap is read in whole bytes (512 KiB each, see <see cref="CbtBitmap.DecodeByteRanges"/>), which is right for
+    /// any bit order and reads exactly the same chunks when the repository's chunk size is a multiple of 512 KiB (the
+    /// default is 1 MiB). Setting it only saves reads with smaller chunks; XenServer documents
+    /// <see cref="Core.Extents.CbtBitOrder.MostSignificantBitFirst"/>.
     /// </summary>
     public CbtBitOrder? CbtBitOrder { get; init; }
 

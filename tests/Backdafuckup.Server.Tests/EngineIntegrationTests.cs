@@ -81,7 +81,9 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         Assert.All(rp1.Disks, d => Assert.NotNull(d.ChangeTokenValue));
         var contentAtRp1 = _pool.DiskContent(disks[0]);
 
-        // 2nd run: incremental, reads only changed blocks.
+        // 2nd run: incremental, reads only changed blocks. The pool reports them in the other bit order than XenServer
+        // documents: the default decoding (whole bitmap bytes) still finds them, and the restore below proves it.
+        _pool.ChangedBlocksBitOrder = CbtBitOrder.LeastSignificantBitFirst;
         _pool.WriteDisk(disks[0], 2 * CbtBitmap.BlockSize, new byte[CbtBitmap.BlockSize].Select((_, i) => (byte)i).ToArray());
         var second = await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
         Assert.Equal(SessionState.Succeeded, second.State);
@@ -478,7 +480,6 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         builder.Services.AddSingleton<IHypervisorProvider>(new XenProvider(
             new XenOptions
             {
-                CbtBitOrder = CbtBitOrder.MostSignificantBitFirst,
                 XapiRetryAttempts = 1,
                 XapiRetryDelay = TimeSpan.FromMilliseconds(10),
                 SnapshotReleaseTimeout = TimeSpan.FromMilliseconds(300),

@@ -31,8 +31,9 @@ public sealed class LabTests
         Enum.TryParse<DiskTransportMode>(Env("BDFU_LAB_TRANSPORT"), true, out var mode) ? mode : DiskTransportMode.Automatic;
 
     /// <summary>
-    /// Determines the bit order of VDI.list_changed_blocks: compares the blocks that really differ between two snapshots
-    /// with the bitmap decoded both ways. The correct order covers every changed block (CBT may over-report).
+    /// Checks changed block tracking on a real pool: the blocks that really differ between two snapshots must lie in the
+    /// ranges that backups read (whole bitmap bytes, independent of the bit order), and tells which bit order the pool
+    /// uses (XenServer documents most significant bit first). CBT may over-report, never under-report.
     /// </summary>
     [Fact]
     public async Task Cbt_bit_order_spike()
@@ -72,6 +73,7 @@ public sealed class LabTests
         var actual = Enumerable.Range(0, before.Length).Where(i => !before[i].AsSpan().SequenceEqual(after[i])).ToHashSet();
         var msb = Blocks(CbtBitmap.DecodeBase64(bitmap, disk2.CapacityBytes, CbtBitOrder.MostSignificantBitFirst));
         var lsb = Blocks(CbtBitmap.DecodeBase64(bitmap, disk2.CapacityBytes, CbtBitOrder.LeastSignificantBitFirst));
+        var read = Blocks(CbtBitmap.DecodeByteRanges(Convert.FromBase64String(bitmap), disk2.CapacityBytes));
         var token2 = second.GetNewChangeToken(disk2);
         await CommitAsync(session, second, ledger2, log);
         await session.ReleaseChangeTokensAsync(new[] { token1, token2 }.OfType<ChangeToken>(), log, Ct);
@@ -79,10 +81,13 @@ public sealed class LabTests
         Assert.SkipWhen(actual.Count == 0, "The VM did not change any data between the snapshots; write data during the wait and run again.");
         var msbCovers = actual.IsSubsetOf(msb);
         var lsbCovers = actual.IsSubsetOf(lsb);
-        var report = $"Changed 64 KiB blocks: {actual.Count}; bitmap marks {msb.Count}. MSB-first covers all: {msbCovers}; LSB-first covers all: {lsbCovers}.";
+        var report = $"Changed 64 KiB blocks: {actual.Count}; bitmap marks {msb.Count}, backups read {read.Count}. MSB-first covers all: {msbCovers}; LSB-first covers all: {lsbCovers}.";
         LabEnvironment.Say(report);
-        Assert.True(msbCovers ^ lsbCovers, "Inconclusive: " + report);
-        LabEnvironment.Say($"==> Configure \"Xen\": {{ \"CbtBitOrder\": \"{(msbCovers ? nameof(CbtBitOrder.MostSignificantBitFirst) : nameof(CbtBitOrder.LeastSignificantBitFirst))}\" }}");
+        Assert.True(actual.IsSubsetOf(read), "Backups would miss changed blocks: " + report);
+        Assert.True(msbCovers ^ lsbCovers, "Bit order inconclusive (backups are still complete): " + report);
+        LabEnvironment.Say(msbCovers
+            ? "==> The pool reports changed blocks most significant bit first, as XenServer documents."
+            : "==> The pool reports changed blocks least significant bit first, unlike XenServer's documentation; leave Xen:CbtBitOrder unset.");
     }
 
     /// <summary>Full backup (transport from BDFU_LAB_TRANSPORT) into a temporary repository, restore to another SR, compare disk hashes.</summary>
@@ -400,7 +405,6 @@ internal sealed record LabConnection(XenProvider Provider, ConnectionSettings Se
             $"Lab tests need BDFU_LAB_HOST, BDFU_LAB_USER, BDFU_LAB_PASSWORD and BDFU_LAB_VM (environment or {LabEnvironment.FilePath}).");
         var provider = new XenProvider(new XenOptions
         {
-            CbtBitOrder = CbtBitOrder.MostSignificantBitFirst,
             HttpImportFormat = Enum.TryParse<XenHttpImportFormat>(LabEnvironment.Get("BDFU_LAB_IMPORT_FORMAT"), true, out var import) ? import : XenHttpImportFormat.Vhd,
         });
         var credential = new NetworkCredential(LabEnvironment.Get("BDFU_LAB_USER") ?? "root", LabEnvironment.Get("BDFU_LAB_PASSWORD"));

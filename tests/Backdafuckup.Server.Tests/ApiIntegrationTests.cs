@@ -53,7 +53,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
                 services.AddSingleton<Backdafuckup.Smb.ISmbShareConnector>(_shares);
                 services.RemoveAll<IHypervisorProvider>();
                 services.AddSingleton<IHypervisorProvider>(new XenProvider(
-                    new XenOptions { CbtBitOrder = CbtBitOrder.MostSignificantBitFirst, XapiRetryAttempts = 1, XapiRetryDelay = TimeSpan.FromMilliseconds(10) },
+                    new XenOptions { XapiRetryAttempts = 1, XapiRetryDelay = TimeSpan.FromMilliseconds(10) },
                     (_, host) => new XapiTransport(new Uri($"https://{host}/"), _pool.CreateHandler())));
             });
         });

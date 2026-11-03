@@ -128,18 +128,29 @@ public sealed class XenProviderTests : IAsyncDisposable
             changes.Extents);
     }
 
-    [Fact]
-    public async Task Incrementals_stay_disabled_until_the_bit_order_is_configured()
+    [Theory]
+    [InlineData(CbtBitOrder.MostSignificantBitFirst)]
+    [InlineData(CbtBitOrder.LeastSignificantBitFirst)]
+    public async Task Without_a_configured_bit_order_incrementals_cover_the_changes_in_whole_bitmap_bytes(CbtBitOrder platformOrder)
     {
-        var (vmUuid, _) = _pool.AddVm("app02", DiskSize);
+        // Whatever order the platform uses, the default decoding reads the 512 KiB around every changed block.
+        _pool.ChangedBlocksBitOrder = platformOrder;
+        var (vmUuid, disks) = _pool.AddVm("app02", DiskSize);
         await using var session = await Provider(bitOrder: null).OpenAsync(Settings(), Ct);
         var token = await FullBackupAsync(session, vmUuid);
+
+        _pool.WriteDisk(disks[0], 3 * CbtBitmap.BlockSize, RandomNumberGenerator.GetBytes(CbtBitmap.BlockSize * 2));
+        _pool.WriteDisk(disks[0], 9 * CbtBitmap.BlockSize, RandomNumberGenerator.GetBytes(10));
+        _pool.WriteDisk(disks[0], DiskSize - 10, RandomNumberGenerator.GetBytes(10));
 
         await using var backup = await session.BeginBackupAsync(Request(vmUuid), Log, _ledger, Ct);
         var changes = await backup.GetChangedExtentsAsync(backup.Disks[0], token, Log, Ct);
 
-        Assert.True(changes.IsFull);
-        Assert.Contains("Xen:CbtBitOrder", changes.FullReason, StringComparison.Ordinal);
+        Assert.False(changes.IsFull, changes.FullReason);
+        Assert.Equal(
+            [new DiskExtent(0, 2L * CbtBitmap.ByteSpan), new DiskExtent(DiskSize - CbtBitmap.ByteSpan, CbtBitmap.ByteSpan)],
+            changes.Extents);
+        Assert.Contains(_log, l => l.Contains("256 KiB changed since the previous backup", StringComparison.Ordinal));
     }
 
     [Fact]

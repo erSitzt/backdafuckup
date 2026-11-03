@@ -260,6 +260,7 @@ tests/  Backdafuckup.Testing (InMemoryDisk, FakeHypervisorProvider with simulate
 ## Risks and open questions (resolve during lab spike / implementation)
 
 1. **CBT bitmap bit order.** A wrong order means silent data loss. Incrementals stay disabled until the lab spike confirms the order; the E2E block-hash check guards it permanently.
+   *Resolved 2026-11-03:* backups read whole bitmap bytes (512 KiB each), which is right for either order and selects exactly the same chunks at chunk sizes that are multiples of 512 KiB (default 1 MiB); incrementals are on by default. XenServer documents MSB first, and sm's `list_changed_blocks` produces it (`bytereverse()` of blktap's little-endian bitmap). `Xen:CbtBitOrder` is an optional bit-exact decoding for chunks below 512 KiB.
 2. **XAPI NBD capabilities and throughput are unknown.** Also open: whether customers accept enabling NBD on the management network or need a dedicated network.
 3. **`import_raw_vdi format=raw` writes zeros.** That inflates thin SRs and slows restores, so the sparse `format=vhd` stream may need to come into this spec.
 4. **`import_metadata` edge cases:** cross-pool network matching, ISO/CD devices (`force`), vTPM state on XCP-ng 8.3 (warning only for now), UEFI NVRAM.
@@ -283,7 +284,7 @@ Tasks 1–16 are implemented. 62 automated tests pass: unit tests, plus integrat
 - **"Enable NBD" action:** not in the UI yet. The pool page and the admin guide show the `xe network-param-add` command instead.
 - **Restore point verify:** runs inline in the API request instead of as its own session.
 - **No BenchmarkDotNet project yet.**
-- **Incremental backups are gated by `Xen:CbtBitOrder`.** Without that setting every backup is a full read (still deduplicated). The lab test `Cbt_bit_order_spike` determines the value on the real pool.
+- **Incremental backups are gated by `Xen:CbtBitOrder`.** Without that setting every backup is a full read (still deduplicated). The lab test `Cbt_bit_order_spike` determines the value on the real pool. *(Superseded 2026-11-03: no gate any more, see risk 1.)*
 
 **Still open (needs the lab pool):**
 

@@ -280,11 +280,6 @@ internal sealed class XenBackupSession : IVmBackupSession
             return ChangedExtents.Full("changed block tracking was (re-)enabled on this disk, e.g. for the first backup or after it was reset by a host or storage crash");
         }
 
-        if (_owner.Provider.Options.CbtBitOrder is not { } bitOrder)
-        {
-            return ChangedExtents.Full("incremental backups are disabled until changed block tracking is verified on this platform (Xen:CbtBitOrder)");
-        }
-
         if (!XapiRecord.IsNullRef(state.SourceVdiRef))
         {
             var source = await _xapi.GetRecordAsync("VDI", state.SourceVdiRef, cancellationToken).ConfigureAwait(false);
@@ -302,10 +297,11 @@ internal sealed class XenBackupSession : IVmBackupSession
 
         try
         {
-            var bitmap = await _xapi.CallStringAsync("VDI.list_changed_blocks", cancellationToken, baseRef, state.SnapshotVdiRef).ConfigureAwait(false);
-            var extents = CbtBitmap.DecodeBase64(bitmap, disk.CapacityBytes, bitOrder);
-            var changed = extents.Sum(e => e.Length);
-            log.Info($"Disk {disk.Name}: {FormatBytes(changed)} changed since the previous backup.");
+            var bitmap = Convert.FromBase64String(await _xapi.CallStringAsync("VDI.list_changed_blocks", cancellationToken, baseRef, state.SnapshotVdiRef).ConfigureAwait(false));
+            var extents = _owner.Provider.Options.CbtBitOrder is { } bitOrder
+                ? CbtBitmap.Decode(bitmap, disk.CapacityBytes, bitOrder)
+                : CbtBitmap.DecodeByteRanges(bitmap, disk.CapacityBytes);
+            log.Info($"Disk {disk.Name}: {FormatBytes(CbtBitmap.ChangedBytes(bitmap, disk.CapacityBytes))} changed since the previous backup.");
             return new ChangedExtents(false, null, extents);
         }
         catch (XapiException ex)
@@ -637,7 +633,8 @@ internal sealed class XenBackupSession : IVmBackupSession
 
     private static string FormatBytes(long bytes) =>
         bytes >= 1L << 30 ? (bytes / (double)(1L << 30)).ToString("0.0 GiB", CultureInfo.InvariantCulture)
-        : (bytes / (double)(1L << 20)).ToString("0.0 MiB", CultureInfo.InvariantCulture);
+        : bytes >= 1L << 20 ? (bytes / (double)(1L << 20)).ToString("0.0 MiB", CultureInfo.InvariantCulture)
+        : (bytes / 1024).ToString("0 KiB", CultureInfo.InvariantCulture);
 
     private sealed record DiskState(SnapshotDisk Disk, string SnapshotVdiRef, string SourceVdiRef, Guid Artifact, bool CbtJustEnabled)
     {

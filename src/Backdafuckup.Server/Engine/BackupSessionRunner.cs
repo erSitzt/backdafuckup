@@ -496,7 +496,7 @@ internal sealed class VmBackupTask(
         if (changes.IsFull && baseline is not null && session.RunMode != SessionRunMode.ActiveFull)
         {
             _log.Warning($"Disk {disk.Name}: full backup because {changes.FullReason}.");
-            warned = !string.IsNullOrEmpty(changes.FullReason) && !changes.FullReason.Contains("disabled until", StringComparison.Ordinal);
+            warned = !string.IsNullOrEmpty(changes.FullReason);
         }
         else if (changes.IsFull)
         {

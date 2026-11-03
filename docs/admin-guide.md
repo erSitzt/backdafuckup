@@ -85,7 +85,9 @@ ss -ltnp | grep 10809
 
 backdafuckup enables CBT on every disk it backs up. While CBT is enabled on a disk, **storage live migration** of that disk is not possible. When a disk is reset, for example after a host crash, the next backup reads it in full.
 
-**Important for the first deployment:** incremental backups stay disabled until the bit order of the CBT bitmap has been verified on your platform with the lab test (see "Lab verification" below). Set `"Xen": { "CbtBitOrder": "MostSignificantBitFirst" }` (or `LeastSignificantBitFirst`), as determined by the test. Until then every backup is a full read; the data is still deduplicated in the repository.
+Incremental backups need no setting. XAPI reports the changed blocks as a bitmap with one bit per 64 KiB block; one byte of it describes 512 KiB of the disk. backdafuckup reads every 512 KiB range whose byte has any bit set. That is right whatever the order of the bits within a byte is, and it reads exactly the chunks a bit-exact reading would when the repository's chunk size is a multiple of 512 KiB (the default is 1 MiB). XenServer documents the most significant bit as the first block; the storage manager (sm) turns blktap's bitmap into that order.
+
+Only with chunks smaller than 512 KiB does a bit-exact reading save reads: set `"Xen": { "CbtBitOrder": "MostSignificantBitFirst" }`, after checking it on your pool with the lab test `Cbt_bit_order_spike` (see "Lab verification" below). A wrong value would make incremental backups miss changes, so leave it unset unless the test confirms it.
 
 ## Installation (Linux)
 
@@ -292,7 +294,7 @@ Instead of exporting the variables, you can put the same `KEY=VALUE` lines into 
 
 To run a single test, add `--filter-method "*Cbt_bit_order_spike"`; add `--output detailed` to see the test output (progress, results) also for passed tests. With the HTTP export, each test reads the whole allocated disk once or twice, so a small VM keeps the run short. If XAPI still reports a snapshot disk in use after the backup, the tests wait for it like the service and print how long it took.
 
-- **`Cbt_bit_order_spike`:** takes two snapshots, compares the real block differences with the CBT bitmap, and prints the bit order to configure. Make sure the VM writes some data during the wait, e.g. `dd if=/dev/urandom of=/tmp/x bs=1M count=50; sync`.
+- **`Cbt_bit_order_spike`:** takes two snapshots and compares the real block differences with the CBT bitmap: it fails if incremental backups would miss a changed block, and prints the bit order the pool uses. Make sure the VM writes some data during the wait, e.g. `dd if=/dev/urandom of=/tmp/x bs=1M count=50; sync` (Linux) or `$b = New-Object byte[] 200MB; (New-Object Random).NextBytes($b); [IO.File]::WriteAllBytes("$env:TEMP\bdfu-cbt.bin", $b)` (Windows PowerShell).
 - **`Backup_and_restore_roundtrip`:** backs up the VM with the selected transport into a temporary repository, restores it as `<name>-bdfu-labtest` to the target SR, and compares SHA-256 hashes of the restore point and the restored disks (read back with a raw HTTP export).
 - **`Http_export_vhd_matches_raw`:** exports a snapshot of the VM as VHD (parsed by backdafuckup) and as raw, and checks that both give the same data. It works without NBD.
 

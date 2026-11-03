@@ -65,6 +65,12 @@ public sealed class FakeXenPool : IAsyncDisposable
     public string Password { get; set; } = "secret";
 
     /// <summary>When false, VDI.get_nbd_info returns an empty list (no NBD network).</summary>
+    /// <summary>
+    /// Bit order of the bitmaps from VDI.list_changed_blocks: XenServer's documented order by default; the other one
+    /// stands for a platform that differs.
+    /// </summary>
+    public CbtBitOrder ChangedBlocksBitOrder { get; set; } = CbtBitOrder.MostSignificantBitFirst;
+
     public bool NbdEnabled { get; set; } = true;
 
     /// <summary>Extra endpoints returned by VDI.get_nbd_info before the working one, e.g. ports nobody listens on.</summary>
@@ -442,7 +448,7 @@ public sealed class FakeXenPool : IAsyncDisposable
         var g1 = from["cbt_generation"]!.GetValue<long>();
         var g2 = to["cbt_generation"]!.GetValue<long>();
         var changed = _writes.GetValueOrDefault(source, []).Where(w => w.Generation > g1 && w.Generation <= g2).Select(w => w.Extent);
-        return Convert.ToBase64String(CbtBitmap.Encode(changed, to["virtual_size"]!.GetValue<long>(), CbtBitOrder.MostSignificantBitFirst));
+        return Convert.ToBase64String(CbtBitmap.Encode(changed, to["virtual_size"]!.GetValue<long>(), ChangedBlocksBitOrder));
     }
 
     /// <summary>VDI records list their VBDs like XAPI does (derived from the VBD table).</summary>

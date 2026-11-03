@@ -62,6 +62,48 @@ public sealed class CoreUtilityTests
         Assert.Throws<FormatException>(() => CbtBitmap.Decode([0xFF], 9L * CbtBitmap.BlockSize, CbtBitOrder.MostSignificantBitFirst));
     }
 
+    [Theory]
+    [InlineData(CbtBitOrder.MostSignificantBitFirst)]
+    [InlineData(CbtBitOrder.LeastSignificantBitFirst)]
+    public void CbtBitmap_byte_ranges_cover_every_changed_block_in_either_bit_order(CbtBitOrder order)
+    {
+        // 21 blocks, the last one partial: 3 bitmap bytes, the last one describes only 5 blocks of the disk.
+        var diskSize = (20L * CbtBitmap.BlockSize) + 4096;
+        // Blocks 1 and 7 (first byte; the order moves them to other bits of it) and block 20 (third byte).
+        DiskExtent[] changed = [new(CbtBitmap.BlockSize, 10), new(7L * CbtBitmap.BlockSize, CbtBitmap.BlockSize), new(20L * CbtBitmap.BlockSize, 100)];
+        var bitmap = CbtBitmap.Encode(changed, diskSize, order);
+
+        var ranges = CbtBitmap.DecodeByteRanges(bitmap, diskSize);
+
+        Assert.Equal([new DiskExtent(0, CbtBitmap.ByteSpan), new DiskExtent(2L * CbtBitmap.ByteSpan, diskSize - (2L * CbtBitmap.ByteSpan))], ranges);
+        Assert.All(changed, c => Assert.Contains(ranges, r => r.Offset <= c.Offset && c.End <= r.End));
+        Assert.Equal(3L * CbtBitmap.BlockSize, CbtBitmap.ChangedBytes(bitmap, diskSize));
+    }
+
+    [Fact]
+    public void CbtBitmap_byte_ranges_are_the_same_for_both_orders_and_select_the_same_chunks_as_an_exact_decoding()
+    {
+        var diskSize = 64L * CbtBitmap.ByteSpan;
+        var random = new Random(7);
+        var bitmap = new byte[64];
+        for (var i = 0; i < bitmap.Length; i += 3)
+        {
+            bitmap[i] = (byte)random.Next(1, 256);
+        }
+
+        var ranges = CbtBitmap.DecodeByteRanges(bitmap, diskSize);
+        Assert.Equal(22, ranges.Count);
+        foreach (var chunkSize in new[] { 512 * 1024, 1024 * 1024, 4 * 1024 * 1024 })
+        {
+            var byBytes = ExtentMath.DirtyChunks(ranges, diskSize, chunkSize);
+            Assert.Equal(byBytes, ExtentMath.DirtyChunks(CbtBitmap.Decode(bitmap, diskSize, CbtBitOrder.MostSignificantBitFirst), diskSize, chunkSize));
+            Assert.Equal(byBytes, ExtentMath.DirtyChunks(CbtBitmap.Decode(bitmap, diskSize, CbtBitOrder.LeastSignificantBitFirst), diskSize, chunkSize));
+        }
+
+        Assert.Throws<FormatException>(() => CbtBitmap.DecodeByteRanges([0xFF], 9L * CbtBitmap.BlockSize));
+        Assert.Empty(CbtBitmap.DecodeByteRanges(new byte[2], 16L * CbtBitmap.BlockSize));
+    }
+
     [Fact]
     public void ChunkId_matches_sha256_and_roundtrips_hex()
     {

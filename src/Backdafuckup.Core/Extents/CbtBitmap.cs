@@ -13,11 +13,80 @@ public enum CbtBitOrder
 /// <summary>
 /// Decodes the changed-block bitmap returned by XAPI's <c>VDI.list_changed_blocks</c>:
 /// base64, one bit per 64 KiB block, the first bit is the first block, 1 = changed.
-/// The bit order inside a byte is configurable until it is confirmed against a real host (see spec risk 1).
 /// </summary>
+/// <remarks>
+/// XenServer documents the first bit as the most significant bit of the first byte, and the storage manager (sm,
+/// <c>VDI.list_changed_blocks</c>) reverses the bits of each byte of blktap's little-endian bitmap to give exactly that.
+/// <see cref="DecodeByteRanges"/> does not depend on the order at all: a byte always describes the same 512 KiB, only
+/// the bits within it would move. That is what backups use unless an order is configured.
+/// </remarks>
 public static class CbtBitmap
 {
     public const int BlockSize = 64 * 1024;
+
+    /// <summary>The part of the disk one byte of the bitmap describes (8 blocks).</summary>
+    public const int ByteSpan = 8 * BlockSize;
+
+    /// <summary>
+    /// The changed parts of the disk in units of whole bitmap bytes: every byte with any bit set marks its 512 KiB
+    /// (clipped at the end of the disk). Covers every changed block whatever the bit order inside a byte is; at chunk
+    /// sizes that are multiples of 512 KiB it selects exactly the chunks a bit-exact decoding would.
+    /// </summary>
+    public static IReadOnlyList<DiskExtent> DecodeByteRanges(ReadOnlySpan<byte> bitmap, long diskSize)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(diskSize);
+        var requiredBytes = RequiredBytes(diskSize);
+        if (bitmap.Length < requiredBytes)
+        {
+            throw new FormatException(
+                $"Changed-block bitmap too short: {bitmap.Length} bytes for {(diskSize + BlockSize - 1) / BlockSize} blocks (need {requiredBytes}).");
+        }
+
+        var extents = new List<DiskExtent>();
+        long runStart = -1;
+        for (long i = 0; i < requiredBytes; i++)
+        {
+            var set = bitmap[(int)i] != 0;
+            if (set && runStart < 0)
+            {
+                runStart = i;
+            }
+            else if (!set && runStart >= 0)
+            {
+                extents.Add(ByteRange(runStart, i, diskSize));
+                runStart = -1;
+            }
+        }
+
+        if (runStart >= 0)
+        {
+            extents.Add(ByteRange(runStart, requiredBytes, diskSize));
+        }
+
+        return extents;
+    }
+
+    /// <summary>Bytes CBT reports as changed: set bits times 64 KiB, at most the disk size (independent of the bit order).</summary>
+    public static long ChangedBytes(ReadOnlySpan<byte> bitmap, long diskSize)
+    {
+        var requiredBytes = (int)Math.Min(bitmap.Length, RequiredBytes(diskSize));
+        long blocks = 0;
+        for (var i = 0; i < requiredBytes; i++)
+        {
+            blocks += System.Numerics.BitOperations.PopCount(bitmap[i]);
+        }
+
+        return Math.Min(blocks * BlockSize, diskSize);
+    }
+
+    private static long RequiredBytes(long diskSize) => (((diskSize + BlockSize - 1) / BlockSize) + 7) / 8;
+
+    private static DiskExtent ByteRange(long firstByte, long endByte, long diskSize)
+    {
+        var offset = firstByte * ByteSpan;
+        var end = Math.Min(endByte * ByteSpan, diskSize);
+        return new DiskExtent(offset, end - offset);
+    }
 
     public static IReadOnlyList<DiskExtent> DecodeBase64(string base64, long diskSize, CbtBitOrder order)
     {
