@@ -306,7 +306,12 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
         catch (XapiException ex)
         {
-            return ChangedExtents.Full($"changed blocks could not be determined ({ex.Code})");
+            // The storage manager's own words (e.g. "[opterr=Source and target VDI are unrelated]") and the state of the
+            // CBT chain: what support needs to tell a broken chain from CBT that is off or a disk format without CBT.
+            var detail = Detail(ex);
+            log.Warning($"Disk {disk.Name}: XAPI VDI.list_changed_blocks failed: {ex.Code}{(detail.Length > 0 ? ": " + detail : string.Empty)}. " +
+                await DescribeCbtAsync(baseRef, state, cancellationToken).ConfigureAwait(false));
+            return ChangedExtents.Full($"changed blocks could not be determined ({ex.Code}{(detail.Length > 0 ? ": " + detail : string.Empty)})");
         }
         catch (FormatException ex)
         {
@@ -629,6 +634,42 @@ internal sealed class XenBackupSession : IVmBackupSession
 
         var content = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
         return new VmMetadataBlob(XenTags.MetadataFormat, content);
+    }
+
+    /// <summary>The non-empty parameters of an XAPI error (for SR_BACKEND_FAILURE_*: the storage manager's message).</summary>
+    private static string Detail(XapiException ex) =>
+        string.Join("; ", ex.Parameters.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim()));
+
+    /// <summary>Type, CBT flag and time of the previous backup's tracking data, the new snapshot and the disk (best effort).</summary>
+    private async Task<string> DescribeCbtAsync(string baseRef, DiskState state, CancellationToken cancellationToken)
+    {
+        async Task<string> Describe(string label, string reference)
+        {
+            try
+            {
+                var vdi = await _xapi.GetRecordAsync("VDI", reference, cancellationToken).ConfigureAwait(false);
+                var smConfig = vdi.Map("sm_config");
+                var format = smConfig.TryGetValue("vdi_type", out var type) ? type : smConfig.TryGetValue("image-format", out var image) ? image : "unknown";
+                var time = vdi.Bool("is_a_snapshot") ? $", taken {vdi.Str("snapshot_time")}" : string.Empty;
+                return $"{label} {vdi.Str("uuid")} (type {vdi.Str("type")}, format {format}, CBT {(vdi.Bool("cbt_enabled") ? "on" : "off")}{time})";
+            }
+            catch (XapiException ex)
+            {
+                return $"{label}: {ex.Code}";
+            }
+        }
+
+        var parts = new List<string>
+        {
+            await Describe("previous backup's tracking data", baseRef).ConfigureAwait(false),
+            await Describe("this backup's snapshot", state.SnapshotVdiRef).ConfigureAwait(false),
+        };
+        if (!XapiRecord.IsNullRef(state.SourceVdiRef))
+        {
+            parts.Add(await Describe("the disk", state.SourceVdiRef).ConfigureAwait(false));
+        }
+
+        return "CBT state: " + string.Join("; ", parts) + ".";
     }
 
     private static string FormatBytes(long bytes) =>

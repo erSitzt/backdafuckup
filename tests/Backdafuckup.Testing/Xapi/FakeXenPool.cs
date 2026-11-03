@@ -71,6 +71,9 @@ public sealed class FakeXenPool : IAsyncDisposable
     /// </summary>
     public CbtBitOrder ChangedBlocksBitOrder { get; set; } = CbtBitOrder.MostSignificantBitFirst;
 
+    /// <summary>Answers VDI.list_changed_blocks with this error (e.g. the storage manager's SR_BACKEND_FAILURE_460).</summary>
+    public FakeXapiError? ChangedBlocksError { get; set; }
+
     public bool NbdEnabled { get; set; } = true;
 
     /// <summary>Extra endpoints returned by VDI.get_nbd_info before the working one, e.g. ports nobody listens on.</summary>
@@ -432,6 +435,11 @@ public sealed class FakeXenPool : IAsyncDisposable
 
     private JsonNode? ListChangedBlocks(string fromRef, string toRef)
     {
+        if (ChangedBlocksError is { } error)
+        {
+            throw error;
+        }
+
         var from = Get("VDI", fromRef);
         var to = Get("VDI", toRef);
         var source = to["snapshot_of"]!.GetValue<string>();

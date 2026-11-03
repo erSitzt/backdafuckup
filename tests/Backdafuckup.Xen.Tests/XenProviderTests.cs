@@ -154,6 +154,27 @@ public sealed class XenProviderTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_refused_changed_block_query_names_the_storage_managers_reason_and_the_cbt_state()
+    {
+        var (vmUuid, _) = _pool.AddVm("app04", DiskSize);
+        await using var session = await Provider().OpenAsync(Settings(), Ct);
+        var token = await FullBackupAsync(session, vmUuid);
+        _pool.ChangedBlocksError = new FakeXapiError("SR_BACKEND_FAILURE_460", "", "Failed to calculate changed blocks for given VDIs. [opterr=Source and target VDI are unrelated]", "");
+
+        await using var backup = await session.BeginBackupAsync(Request(vmUuid), Log, _ledger, Ct);
+        var changes = await backup.GetChangedExtentsAsync(backup.Disks[0], token, Log, Ct);
+
+        Assert.True(changes.IsFull);
+        Assert.Equal(
+            "changed blocks could not be determined (SR_BACKEND_FAILURE_460: Failed to calculate changed blocks for given VDIs. [opterr=Source and target VDI are unrelated])",
+            changes.FullReason);
+        var line = Assert.Single(_log, l => l.Contains("VDI.list_changed_blocks failed", StringComparison.Ordinal));
+        Assert.Contains($"previous backup's tracking data {token!.Value} (type cbt_metadata", line, StringComparison.Ordinal);
+        Assert.Contains("this backup's snapshot", line, StringComparison.Ordinal);
+        Assert.Contains("CBT on", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Falls_back_to_full_when_cbt_was_reset_or_metadata_is_gone()
     {
         var (vmUuid, disks) = _pool.AddVm("app03", DiskSize, DiskSize);
