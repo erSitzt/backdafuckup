@@ -45,6 +45,8 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             builder.UseSetting("Paths:DataDirectory", Path.Combine(_root, "data"));
             builder.UseSetting("Paths:LogDirectory", Path.Combine(_root, "logs"));
             builder.UseSetting("Agent:PollHold", "00:00:01");
+            // Lets a test publish for 0 minutes, so that the automatic unpublish runs at once.
+            builder.UseSetting("SqlRestore:MinAutoUnpublishMinutes", "0");
             builder.ConfigureTestServices(services =>
             {
                 services.RemoveAll<Backdafuckup.Smb.ISmbShareConnector>();
@@ -701,7 +703,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
 
     /// <summary>The real agent loop over HTTP with its file system mapped into a sandbox folder (C:\x → {sandbox}/C/x).</summary>
     private async Task<(Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)> StartAgentAsync(
-        string vmNativeId, IRestoreFileSystem? fs, ISqlEnvironment? sql = null, Func<string, IPublishHost>? publish = null)
+        string vmNativeId, IRestoreFileSystem? fs, ISqlEnvironment? sql = null, Func<string, IPublishHost>? publish = null, List<GuestSqlDatabase>? sqlDatabases = null)
     {
         var directory = Path.Combine(_root, "agent-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(directory);
@@ -709,13 +711,13 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         var secret = await _factory!.Services.GetRequiredService<AgentSettingsStore>().GetEnrollmentSecretAsync(Ct);
         await File.WriteAllTextAsync(paths.ConfigFile, System.Text.Json.JsonSerializer.Serialize(
             new AgentConfig { ServerUrl = "https://localhost/", EnrollmentSecret = secret }, Backdafuckup.Agent.Core.AgentJson.Options), Ct);
-        var runner = new AgentRunner(paths, new SimulatedHost(vmNativeId), new SimulatedVss(), new AgentLog(paths.LogFile), _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200), fs, sql, publish?.Invoke(directory));
+        var runner = new AgentRunner(paths, new SimulatedHost(vmNativeId), new SimulatedVss(sqlDatabases), new AgentLog(paths.LogFile), _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200), fs, sql, publish?.Invoke(directory));
         var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var running = Task.Run(() => runner.RunAsync(stop.Token), Ct);
         var agent = await _factory.Services.GetRequiredService<AgentService>().WaitForVmAsync(vmNativeId, TimeSpan.FromSeconds(30), Ct)
             ?? throw new TimeoutException("The agent did not come online.");
         var registry = _factory.Services.GetRequiredService<AgentRegistry>();
-        var capability = publish is not null ? AgentProtocol.CapabilityPublish : fs is null ? AgentProtocol.CapabilitySqlRestore : AgentProtocol.CapabilityRestoreFilesV2;
+        var capability = publish is not null ? (sql is not null ? AgentProtocol.CapabilitySqlPublish : AgentProtocol.CapabilityPublish) : fs is null ? AgentProtocol.CapabilitySqlRestore : AgentProtocol.CapabilityRestoreFilesV2;
         for (var i = 0; i < 100 && !registry.HasCapability(agent.Id, capability); i++)
         {
             await Task.Delay(100, Ct);
@@ -847,8 +849,10 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         // A failed mount ends the publish with the guest's reason and removes what was set up.
         guest.FailMount = true;
         guest.Steps.Clear();
-        var failed = await Assert.ThrowsAsync<InvalidOperationException>(() => publishes.PublishAsync(agent.Id, Info(), disks, _ => { }, TimeSpan.FromMinutes(1), Ct));
+        var failed = await Assert.ThrowsAsync<Backdafuckup.Server.Publishing.PublishFailedException>(() => publishes.PublishAsync(agent.Id, Info(), disks, _ => { }, TimeSpan.FromMinutes(1), Ct));
         Assert.Contains("Disk 0 has no partition at offset", failed.Message, StringComparison.Ordinal);
+        Assert.False(failed.TimedOut);
+        Assert.True(failed.LastStatus is { State: PublishStates.Failed, CleanedUp: true }, failed.LastStatus?.State);
         Assert.StartsWith("find BDFU", guest.Steps[1], StringComparison.Ordinal);
         Assert.Equal(Steps(guest.Steps[1]), guest.Steps);
         Assert.Empty(new PublishJournal(guest.WorkFolder).Read());
@@ -857,13 +861,157 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         await running;
     }
 
+    [Fact]
+    public async Task A_sql_database_is_published_from_a_restore_point_attached_in_the_guest_and_unpublished_again()
+    {
+        var client = await SignedInClientAsync();
+        var mdf = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11);
+        var ndf = WindowsTestDisk.SqlFile(3, 256 << 10, 0x33);
+        var ldf = WindowsTestDisk.SqlFile(2, 512 << 10, 0x22);
+        var image = WindowsTestDisk.Create(
+        [
+            new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+            new WindowsTestDisk.Volume('D', 8, new Dictionary<string, byte[]> { ["SQL/shop.mdf"] = mdf, ["SQL/shop_2.ndf"] = ndf }),
+            new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]> { ["Log/shop_log.ldf"] = ldf }),
+        ]);
+        IscsiGuestHost? guest = null;
+        var sql = new ScriptedSqlEnvironment(path => guest!.ReadFile(path));
+        sql.AddDatabase("shop", @"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf");
+        static GuestSqlFile F(string path, string spec) => new() { Path = path, Spec = spec };
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+        var point = await BackUpImageAsync(client, "sql04", image, async vm => started = await StartAgentAsync(
+            vm, null, sql, directory => guest = new IscsiGuestHost(Path.Combine(directory, "publish")),
+            [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", DataFiles = [F(@"D:\SQL\", "shop_2.ndf"), F(@"D:\SQL\", "shop.mdf")], LogFiles = [F(@"L:\Log\", "shop_log.ldf")], InBackup = true }]));
+        var (agent, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
+        Assert.Equal(1, point.SqlDatabaseCount);
+        Assert.Contains((await client.GetFromJsonAsync<List<AgentDto>>("/api/agents", Ct))!, a => a.Id == agent.Id && a.CanPublishSql);
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_publish", "Publish-1", null), Ct));
+        SqlPublishRequestDto Request(string name, int minutes = 60) => new(point.Id, "SQLEXPRESS", "shop", point.VmNativeId, "SQLEXPRESS", login.Id, name, minutes);
+        async Task<Guid> StartAsync(SqlPublishRequestDto request) => (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/publishes", request, Ct))).SessionId;
+        async Task<string> LogAsync(Guid session) => string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{session}/log", Ct))!.Select(l => l.Message));
+        string Folder(Guid session, string log) => log[(log.IndexOf("files under ", StringComparison.Ordinal) + 12)..].Split(')')[0];
+
+        // Checked before a session starts.
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/sql/publishes", Request(" "), Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/sql/publishes", Request("x", 100_000), Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/sql/publishes", Request("x") with { CredentialId = Guid.NewGuid() }, Ct)).StatusCode);
+
+        // The name is taken on the instance: the agent refuses before attaching and removes the volumes again.
+        var taken = await WaitForSessionAsync(client, await StartAsync(Request("shop")));
+        Assert.True(taken.Session.State == "Failed", taken.Session.Summary);
+        Assert.Contains("has a database [shop] already", taken.Session.Summary, StringComparison.Ordinal);
+        Assert.DoesNotContain(sql.Statements, s => s.StartsWith("CREATE DATABASE", StringComparison.Ordinal));
+        Assert.Empty(new PublishJournal(guest!.WorkFolder).Read());
+
+        // Published: both volumes mounted, the service may open the files, the files are attached as SQL Server reads
+        // them through the target; the session runs until Unpublish, and the repository cannot be removed meanwhile.
+        guest.Steps.Clear();
+        var published = await StartAsync(Request("shop_published"));
+        var log = await WaitForLogAsync(client, published, "Published: ");
+        var detail = (await client.GetFromJsonAsync<SessionDetailDto>($"/api/sessions/{published}", Ct))!;
+        Assert.Equal("Running", detail.Session.State);
+        Assert.Contains("Published as [shop_published] on ", detail.Session.Summary, StringComparison.Ordinal);
+        var folder = Folder(published, log);
+        Assert.Equal(
+            [Path.Combine(folder, "D", "SQL", "shop.mdf"), Path.Combine(folder, "D", "SQL", "shop_2.ndf"), Path.Combine(folder, "L", "Log", "shop_log.ldf")],
+            sql.DatabaseFiles("shop_published"));
+        Assert.Equal(mdf, sql.AttachedFiles[Path.Combine(folder, "D", "SQL", "shop.mdf")]);
+        Assert.Equal(ndf, sql.AttachedFiles[Path.Combine(folder, "D", "SQL", "shop_2.ndf")]);
+        Assert.Equal(ldf, sql.AttachedFiles[Path.Combine(folder, "L", "Log", "shop_log.ldf")]);
+        Assert.Equal(@"grant shop.mdf NT SERVICE\MSSQL$SQLEXPRESS", Assert.Single(guest.Steps, s => s.StartsWith("grant shop.mdf", StringComparison.Ordinal)));
+        Assert.Contains("attached database [shop_published] to instance SQLEXPRESS (ONLINE), as bdfu_publish.", log, StringComparison.Ordinal);
+        Assert.Contains("Volumes: D, L.", log, StringComparison.Ordinal);
+        Assert.All(sql.Accounts, a => Assert.Equal(("bdfu_publish", "Publish-1"), (a.UserName, a.Password)));
+        var removal = await client.DeleteAsync($"/api/repositories/{point.RepositoryId}", Ct);
+        Assert.Equal(HttpStatusCode.Conflict, removal.StatusCode);
+        Assert.Contains("are published", await removal.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+
+        // Unpublish: offline and drop first (the files stay), then the volumes go; nothing is left.
+        Assert.Equal(HttpStatusCode.NoContent, (await client.PostAsync($"/api/sessions/{published}/stop", null, Ct)).StatusCode);
+        var unpublished = await WaitForSessionAsync(client, published);
+        Assert.True(unpublished.Session.State == "Succeeded", unpublished.Session.Summary + "\n" + await LogAsync(published));
+        Assert.Contains("unpublished, nothing is left in the VM.", unpublished.Session.Summary, StringComparison.Ordinal);
+        Assert.Empty(sql.DatabaseFiles("shop_published"));
+        var tail = sql.Statements.SkipWhile(s => !s.StartsWith("SELECT database_id", StringComparison.Ordinal)).ToList();
+        Assert.Equal("ALTER DATABASE [shop_published] SET OFFLINE WITH ROLLBACK IMMEDIATE", tail[2]);
+        Assert.Equal("DROP DATABASE [shop_published]", tail[3]);
+        Assert.True(guest.Steps.IndexOf("unmount L") > guest.Steps.FindIndex(s => s.StartsWith("grant", StringComparison.Ordinal)));
+        Assert.Equal("detach", guest.Steps[^1]);
+        Assert.Empty(new PublishJournal(guest.WorkFolder).Read());
+        Assert.False(Directory.Exists(folder));
+        Assert.Empty(Directory.GetDirectories(guest.WorkFolder));
+
+        // An attach error is explained; the volumes are removed again.
+        sql.FailAttachWith = 948;
+        var newer = await WaitForSessionAsync(client, await StartAsync(Request("shop_published")));
+        Assert.True(newer.Session.State == "Failed", newer.Session.Summary);
+        Assert.Contains("newer SQL Server version than instance SQLEXPRESS", newer.Session.Summary, StringComparison.Ordinal);
+        Assert.Contains("SQL Server error 948", newer.Session.Summary, StringComparison.Ordinal);
+        Assert.Empty(new PublishJournal(guest.WorkFolder).Read());
+
+        // The agent cannot drop the database (SQL Server shuts down): it reports it, and the session removes it with the
+        // stored account once SQL Server answers again.
+        var leftover = await StartAsync(Request("shop_published"));
+        await WaitForLogAsync(client, leftover, "Published: ");
+        sql.FailDrops = 1;
+        await client.PostAsync($"/api/sessions/{leftover}/stop", null, Ct);
+        var removed = await WaitForSessionAsync(client, leftover);
+        var leftoverLog = await LogAsync(leftover);
+        Assert.True(removed.Session.State == "Warning", removed.Session.Summary + "\n" + leftoverLog);
+        Assert.Contains("the agent could not remove the database, the backup server removed it", removed.Session.Summary, StringComparison.Ordinal);
+        Assert.Contains("SHUTDOWN is in progress", leftoverLog, StringComparison.Ordinal);
+        Assert.Contains("removed database [shop_published] from instance SQLEXPRESS", leftoverLog, StringComparison.Ordinal);
+        Assert.Empty(sql.DatabaseFiles("shop_published"));
+
+        // The publish time is over: unpublished without a stop.
+        var expired = await WaitForSessionAsync(client, await StartAsync(Request("shop_published", minutes: 0)));
+        Assert.True(expired.Session.State == "Succeeded", expired.Session.Summary);
+        Assert.Contains("The publish time of 0 s is over; unpublishing.", await LogAsync(expired.Session.Id), StringComparison.Ordinal);
+        Assert.Empty(sql.DatabaseFiles("shop_published"));
+        Assert.Empty(new PublishJournal(guest.WorkFolder).Read());
+
+        // The password never reaches the agent's log or the session logs.
+        var agentLog = string.Join("\n", Directory.GetFiles(_root, "agent.log", SearchOption.AllDirectories).Select(File.ReadAllText));
+        Assert.DoesNotContain("Publish-1", agentLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("Publish-1", log + leftoverLog, StringComparison.Ordinal);
+
+        await stop.CancelAsync();
+        await running;
+    }
+
+    /// <summary>Waits until the session log has a line with <paramref name="text"/>; fails if the session ends first.</summary>
+    private static async Task<string> WaitForLogAsync(HttpClient client, Guid sessionId, string text)
+    {
+        var log = string.Empty;
+        for (var i = 0; i < 300; i++)
+        {
+            log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{sessionId}/log", Ct))!.Select(l => l.Message));
+            if (log.Contains(text, StringComparison.Ordinal))
+            {
+                return log;
+            }
+
+            var detail = (await client.GetFromJsonAsync<SessionDetailDto>($"/api/sessions/{sessionId}", Ct))!;
+            if (detail.Session.State is not ("Queued" or "Running" or "Stopping"))
+            {
+                Assert.Fail($"The session ended ({detail.Session.State}: {detail.Session.Summary}) before \"{text}\":\n{log}");
+            }
+
+            await Task.Delay(200, Ct);
+        }
+
+        throw new TimeoutException($"No \"{text}\" in the session log after 60 s:\n{log}");
+    }
+
     /// <summary>
     /// The guest side of a publish on Linux: the initiator is the iSCSI client of the library, and "mounting" reads the
-    /// partition through it and opens its NTFS with DiscUtils. Writes one sector, which must land in the overlay.
+    /// partition through it and opens its NTFS with DiscUtils (kept until the unmount, so that files on it can be read).
+    /// Writes one sector, which must land in the overlay.
     /// </summary>
     private sealed class IscsiGuestHost(string workFolder) : IPublishHost
     {
         private const string InitiatorName = "iqn.1991-05.com.microsoft:sql03";
+        private readonly Dictionary<string, DiscUtils.Ntfs.NtfsFileSystem> _volumes = [];
         private ISCSI.Client.ISCSIClient? _client;
 
         public string WorkFolder => workFolder;
@@ -911,16 +1059,58 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             }
 
             partition.Position = 0;
-            using (var ntfs = new DiscUtils.Ntfs.NtfsFileSystem(partition))
-            using (var file = new StreamReader(ntfs.OpenFile(@"SQL\readme.txt", FileMode.Open, FileAccess.Read)))
+            var ntfs = new DiscUtils.Ntfs.NtfsFileSystem(partition);
+            lock (_volumes)
             {
+                _volumes[folder] = ntfs;
+            }
+
+            if (ntfs.FileExists(@"SQL\readme.txt"))
+            {
+                using var file = new StreamReader(ntfs.OpenFile(@"SQL\readme.txt", FileMode.Open, FileAccess.Read));
                 Files[folder] = file.ReadToEnd();
             }
 
             Assert.True(_client.Write(lun, (ulong)((offset / bytesPerSector) + 2048), new byte[bytesPerSector], bytesPerSector));
         }
 
-        public void Unmount(string folder, Action<string> log) => Steps.Add("unmount " + Path.GetFileName(folder));
+        public void Unmount(string folder, Action<string> log)
+        {
+            Steps.Add("unmount " + Path.GetFileName(folder));
+            lock (_volumes)
+            {
+                if (_volumes.Remove(folder, out var ntfs))
+                {
+                    ntfs.Dispose();
+                }
+            }
+        }
+
+        /// <summary>A file on a mounted volume, by its path in the guest (mount folder + path within the volume).</summary>
+        public byte[] ReadFile(string path)
+        {
+            lock (_volumes)
+            {
+                foreach (var (folder, ntfs) in _volumes)
+                {
+                    if (path.StartsWith(folder + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                    {
+                        using var stream = ntfs.OpenFile(path[(folder.Length + 1)..].Replace(Path.DirectorySeparatorChar, '\\'), FileMode.Open, FileAccess.Read);
+                        var data = new byte[stream.Length];
+                        stream.ReadExactly(data);
+                        return data;
+                    }
+                }
+            }
+
+            throw new FileNotFoundException($"{path} is not on a mounted volume.");
+        }
+
+        public void GrantAccess(string path, IReadOnlyList<string> accounts, Action<string> log)
+        {
+            ReadFile(path);
+            Steps.Add($"grant {Path.GetFileName(path)} {string.Join(",", accounts)}");
+        }
 
         public void Offline(int disk, Action<string> log) => Steps.Add("offline " + disk);
 
@@ -1072,7 +1262,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         }
     }
 
-    private sealed class SimulatedVss : IVssBridge
+    private sealed class SimulatedVss(List<GuestSqlDatabase>? sqlDatabases = null) : IVssBridge
     {
         public List<string> Calls { get; } = [];
 
@@ -1087,7 +1277,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             return new GuestBackupInfo
             {
                 Writers = [new GuestWriter { Name = "SqlServerWriter", State = "Stable" }],
-                SqlDatabases = [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", Files = [@"D:\SQL\shop.mdf"] }],
+                SqlDatabases = sqlDatabases ?? [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", Files = [@"D:\SQL\shop.mdf"] }],
             };
         }
 

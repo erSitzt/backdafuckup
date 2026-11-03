@@ -54,6 +54,12 @@ public static class AgentProtocol
     public const string CapabilityPublish = "publish-v1";
 
     /// <summary>
+    /// The agent attaches a SQL Server database from a publish (<see cref="PublishInfo.Sql"/>) and removes it again before
+    /// it unpublishes; it runs <see cref="SqlJobKinds.DropPublished"/>.
+    /// </summary>
+    public const string CapabilitySqlPublish = "sql-publish-v1";
+
+    /// <summary>
     /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
     /// <see cref="PublishInfo.BlockSize"/> bytes), <c>POST {id}/status</c> (heartbeat; the answer says whether to stop).
     /// </summary>
@@ -520,6 +526,12 @@ public static class SqlJobKinds
 {
     /// <summary>The instances (registry, service), the volumes, and with an account the databases and the account's rights.</summary>
     public const string Inventory = "inventory";
+
+    /// <summary>
+    /// Removes a database that a publish attached and could not remove itself (agent or VM restarted while published):
+    /// <see cref="SqlJobRequest.Database"/> is dropped only if all its files lie in <see cref="SqlJobRequest.PublishFolder"/>.
+    /// </summary>
+    public const string DropPublished = "drop-published";
 }
 
 public static class SqlAccountKinds
@@ -555,6 +567,12 @@ public sealed class SqlJobRequest
     public string? Instance { get; set; }
 
     public SqlAccount? Account { get; set; }
+
+    /// <summary>DropPublished: the database to remove.</summary>
+    public string? Database { get; set; }
+
+    /// <summary>DropPublished: the publish's folder in the guest (<see cref="PublishStatus.Folder"/>).</summary>
+    public string? PublishFolder { get; set; }
 }
 
 public sealed class SqlJobResult
@@ -566,6 +584,9 @@ public sealed class SqlJobResult
     public string? Error { get; set; }
 
     public SqlInventory? Inventory { get; set; }
+
+    /// <summary>What the job did, for the session log (e.g. "removed database [shop_published]").</summary>
+    public List<string> Log { get; set; } = new List<string>();
 }
 
 public sealed class SqlInventory
@@ -683,6 +704,39 @@ public sealed class PublishInfo
 
     /// <summary>The partitions to mount into folders.</summary>
     public List<PublishVolume> Volumes { get; set; } = new List<PublishVolume>();
+
+    /// <summary>
+    /// A database to attach from the mounted volumes once they are mounted (agents with
+    /// <see cref="AgentProtocol.CapabilitySqlPublish"/>). Carries the account, so the agent never stores it.
+    /// </summary>
+    public PublishSqlDatabase? Sql { get; set; }
+}
+
+/// <summary>Attach a database from the published volumes; it is taken offline and dropped before the volumes go.</summary>
+public sealed class PublishSqlDatabase
+{
+    /// <summary>The local instance, e.g. <c>SQLEXPRESS</c> or <c>MSSQLSERVER</c>.</summary>
+    public string Instance { get; set; } = string.Empty;
+
+    public SqlAccount Account { get; set; } = new SqlAccount();
+
+    /// <summary>The name to attach the database as; it must not exist on the instance.</summary>
+    public string Database { get; set; } = string.Empty;
+
+    /// <summary>All files of the database, the primary data file first.</summary>
+    public List<PublishSqlFile> Files { get; set; } = new List<PublishSqlFile>();
+}
+
+public sealed class PublishSqlFile
+{
+    /// <summary><see cref="PublishVolume.Name"/> of the volume that holds the file.</summary>
+    public string Volume { get; set; } = string.Empty;
+
+    /// <summary>Path within the volume, e.g. <c>SQL\shop.mdf</c>.</summary>
+    public string Path { get; set; } = string.Empty;
+
+    /// <summary>"data" or "log".</summary>
+    public string Kind { get; set; } = "data";
 }
 
 public sealed class PublishDisk
@@ -724,7 +778,22 @@ public sealed class PublishStatus
 {
     public string State { get; set; } = PublishStates.Starting;
 
+    /// <summary>The publish's folder in the guest; the mount folders are below it.</summary>
+    public string? Folder { get; set; }
+
     public List<PublishMount> Mounts { get; set; } = new List<PublishMount>();
+
+    /// <summary>The database attached from the publish (<see cref="PublishInfo.Sql"/>), while it is attached.</summary>
+    public string? Database { get; set; }
+
+    /// <summary>
+    /// Set in the final report when the attached database could not be removed (SQL Server not reachable, …): the
+    /// server removes it with <see cref="SqlJobKinds.DropPublished"/>.
+    /// </summary>
+    public string? DatabaseLeft { get; set; }
+
+    /// <summary>Final report: everything was removed from the guest (otherwise the journal keeps it for another try).</summary>
+    public bool CleanedUp { get; set; }
 
     /// <summary>Bytes written into the overlay so far.</summary>
     public long OverlayBytes { get; set; }

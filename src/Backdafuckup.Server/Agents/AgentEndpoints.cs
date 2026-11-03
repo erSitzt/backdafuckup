@@ -79,7 +79,8 @@ public static class AgentEndpoints
             var list = await db.Agents.AsNoTracking().OrderBy(a => a.HostName).ToListAsync(ct);
             return list.Select(a => a.ToDto(
                 agents.IsOnline(a.Id), vms.FirstOrDefault(v => v.NativeId == a.VmNativeId)?.Name, packages.Get(a.Build)?.FilesHash, registry.HasCapability(a.Id, AgentProtocol.CapabilityRestoreFiles),
-                registry.HasCapability(a.Id, AgentProtocol.CapabilitySqlRestore))).ToList();
+                registry.HasCapability(a.Id, AgentProtocol.CapabilitySqlRestore),
+                registry.HasCapability(a.Id, AgentProtocol.CapabilitySqlPublish))).ToList();
         });
 
         console.MapGet("/settings", async (AgentSettingsStore settings, AgentPackages packages, CancellationToken ct) => new AgentSettingsDto
@@ -400,7 +401,7 @@ public static class AgentEndpoints
         });
     }
 
-    private static AgentDto ToDto(this AgentEntity a, bool online, string? vmName, string? currentFilesHash, bool canRestoreFiles, bool canRunSql) => new()
+    private static AgentDto ToDto(this AgentEntity a, bool online, string? vmName, string? currentFilesHash, bool canRestoreFiles, bool canRunSql, bool canPublishSql) => new()
     {
         Id = a.Id,
         HostName = a.HostName,
@@ -420,5 +421,6 @@ public static class AgentEndpoints
         LastContactUtc = a.LastContactUtc,
         CanRestoreFiles = canRestoreFiles,
         CanRunSql = canRunSql,
+        CanPublishSql = canPublishSql,
     };
 }

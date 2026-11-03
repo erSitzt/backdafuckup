@@ -266,6 +266,9 @@ public sealed record AgentDto
     /// <summary>The agent runs SQL Server jobs (inventory, restore, publish).</summary>
     public bool CanRunSql { get; init; }
 
+    /// <summary>The agent can publish a SQL Server database from a restore point into its guest.</summary>
+    public bool CanPublishSql { get; init; }
+
     public DateTimeOffset EnrolledUtc { get; init; }
 
     public DateTimeOffset LastContactUtc { get; init; }

@@ -170,6 +170,51 @@ internal sealed class WindowsPublishHost : IPublishHost
 
     public void Offline(int disk, Action<string> log) => Ps($"Set-Disk -Number {disk} -IsOffline $true");
 
+    /// <summary>
+    /// Allow ACEs (full control) on a file of a published volume, so that SQL Server (its service SID, the account it runs
+    /// as, and a Windows account that attaches) can open it. The change lands in the overlay.
+    /// </summary>
+    public void GrantAccess(string path, System.Collections.Generic.IReadOnlyList<string> accounts, Action<string> log)
+    {
+        var rules = new System.Collections.Generic.List<System.Security.AccessControl.FileSystemAccessRule>();
+        foreach (var account in accounts)
+        {
+            System.Security.Principal.SecurityIdentifier sid;
+            try
+            {
+                sid = account.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
+                    ? new System.Security.Principal.SecurityIdentifier(account)
+                    : (System.Security.Principal.SecurityIdentifier)new System.Security.Principal.NTAccount(account).Translate(typeof(System.Security.Principal.SecurityIdentifier));
+            }
+            catch (System.Security.Principal.IdentityNotMappedException)
+            {
+                throw new InvalidOperationException($"The account {account} is not known on this VM, so it cannot be given access to {path}.");
+            }
+
+            rules.Add(new System.Security.AccessControl.FileSystemAccessRule(
+                sid, System.Security.AccessControl.FileSystemRights.FullControl, System.Security.AccessControl.AccessControlType.Allow));
+        }
+
+#if NET48
+        var security = File.GetAccessControl(path, System.Security.AccessControl.AccessControlSections.Access);
+        foreach (var rule in rules)
+        {
+            security.AddAccessRule(rule);
+        }
+
+        File.SetAccessControl(path, security);
+#else
+        var file = new FileInfo(path);
+        var security = file.GetAccessControl(System.Security.AccessControl.AccessControlSections.Access);
+        foreach (var rule in rules)
+        {
+            security.AddAccessRule(rule);
+        }
+
+        file.SetAccessControl(security);
+#endif
+    }
+
     public void Detach(int port, string targetName, Action<string> log)
     {
         lock (_lock)

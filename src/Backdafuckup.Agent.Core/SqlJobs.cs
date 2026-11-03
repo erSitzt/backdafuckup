@@ -117,6 +117,12 @@ public sealed class SqlJobRunner
 
     private string Base => AgentProtocol.SqlJobsPath + "/" + _id.ToString("D");
 
+    /// <summary>The job's kind once its request is fetched.</summary>
+    public string? Kind { get; private set; }
+
+    /// <summary>True if the job did its work.</summary>
+    public bool Succeeded { get; private set; }
+
     public async Task RunAsync(CancellationToken stop)
     {
         var result = new SqlJobResult { JobId = _id };
@@ -134,6 +140,8 @@ public sealed class SqlJobRunner
                     ?? throw new InvalidOperationException("The SQL job request is empty.");
             }
 
+            Kind = request.Kind;
+
             // The account name may be logged, never its password.
             _log.Write($"SQL job {_id}: {request.Kind}{(request.Account is { } account ? $" as {account.UserName} ({account.Kind})" : string.Empty)}.");
             switch (request.Kind)
@@ -141,11 +149,24 @@ public sealed class SqlJobRunner
                 case SqlJobKinds.Inventory:
                     result.Inventory = Inventory(request);
                     break;
+                case SqlJobKinds.DropPublished:
+                    if (request.Account is null || string.IsNullOrEmpty(request.Instance) || string.IsNullOrEmpty(request.Database) || string.IsNullOrEmpty(request.PublishFolder))
+                    {
+                        throw new InvalidOperationException("The job names no instance, account, database or publish folder.");
+                    }
+
+                    SqlPublishDatabase.Drop(_sql, request.Instance!, request.Account, request.Database!, request.PublishFolder!, line =>
+                    {
+                        _log.Write($"SQL job {_id}: {line}");
+                        result.Log.Add(line);
+                    });
+                    break;
                 default:
                     throw new InvalidOperationException($"Unknown SQL job '{request.Kind}' (agent older than the server?).");
             }
 
             result.Success = true;
+            Succeeded = true;
         }
         catch (Exception ex) when (!(ex is OperationCanceledException && stop.IsCancellationRequested))
         {

@@ -18,18 +18,44 @@ else
         <MudSpacer />
         @if (_session.State is "Running" or "Queued")
         {
-            <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.Stop" OnClick="StopAsync">Stop</MudButton>
+            @if (_session.Kind == "SqlPublish")
+            {
+                <MudTooltip Text="Removes the database from the instance and the backup's volumes from the VM; changes made to the published database are discarded.">
+                    <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.LinkOff" OnClick="StopAsync">Unpublish</MudButton>
+                </MudTooltip>
+            }
+            else
+            {
+                <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.Stop" OnClick="StopAsync">Stop</MudButton>
+            }
         }
     </div>
     <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-3">
         @_session.Kind · started by @_session.TriggeredBy · @Fmt.Time(_session.StartedUtc ?? _session.CreatedUtc) · duration @Fmt.Duration(_session.StartedUtc, _session.EndedUtc)
         @if (_session.Summary is not null) { <span> · @_session.Summary</span> }
     </MudText>
-    <MudProgressLinear Color="Color.Primary" Value="@_session.Progress" Size="Size.Large" Class="mb-4">@($"{_session.Progress:0}%")</MudProgressLinear>
-
     var m = _session.Metrics ?? new TransferMetricsDto { ReadBytes = _session.ReadBytes, StoredBytes = _session.TransferredBytes };
     var running = _session.State is "Running" or "Stopping";
-    @if (_session.Kind == "Restore")
+    @if (_session.Kind == "SqlPublish")
+    {
+        @if (_session.State == "Running")
+        {
+            <MudAlert Severity="Severity.Info" Class="mb-4">
+                The database is attached from the backup: nothing was copied, and changes go to a temporary overlay in the VM.
+                <b>Unpublish</b> removes the database and the volumes again and discards the changes; the agent in the VM does no other
+                restore work until then.
+            </MudAlert>
+        }
+    }
+    else
+    {
+        <MudProgressLinear Color="Color.Primary" Value="@_session.Progress" Size="Size.Large" Class="mb-4">@($"{_session.Progress:0}%")</MudProgressLinear>
+    }
+
+    @if (_session.Kind == "SqlPublish")
+    {
+    }
+    else if (_session.Kind == "Restore")
     {
         <MudGrid Spacing="2" Class="mb-2">
             <MudItem xs="6" md="3"><StatTile Title="Duration" Value="@Fmt.Duration(_session.StartedUtc, _session.EndedUtc)" Detail="@($"{_tasks.Count} object(s)")" Icon="@Icons.Material.Filled.Timer" Color="Color.Primary" /></MudItem>

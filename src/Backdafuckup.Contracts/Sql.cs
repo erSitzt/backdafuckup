@@ -90,3 +90,22 @@ public sealed record SqlFileDto(
     string? Volume,
     string? GuestPath,
     string? Problem);
+
+/// <summary>
+/// Publish a database of a restore point: the agent in the target VM mounts the backup's volumes (reads come from the
+/// backup, writes go to a temporary overlay) and attaches the database, until the session is stopped or
+/// <see cref="AutoUnpublishMinutes"/> have passed.
+/// </summary>
+/// <param name="Instance">The database's instance in the backup.</param>
+/// <param name="Database">The database's name in the backup.</param>
+/// <param name="CredentialId">A Windows credential or a SQL Server login that may create databases on the target instance.</param>
+/// <param name="DatabaseName">The name to attach the database as; it must not exist on the target instance.</param>
+public sealed record SqlPublishRequestDto(
+    Guid RestorePointId,
+    string Instance,
+    string Database,
+    string TargetVmNativeId,
+    string TargetInstance,
+    Guid CredentialId,
+    string DatabaseName,
+    int AutoUnpublishMinutes);

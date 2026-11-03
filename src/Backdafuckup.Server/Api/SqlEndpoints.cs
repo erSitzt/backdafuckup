@@ -2,6 +2,7 @@ using Backdafuckup.Agent.Protocol;
 using Backdafuckup.Contracts;
 using Backdafuckup.Server.Agents;
 using Backdafuckup.Server.Data;
+using Backdafuckup.Server.Engine;
 using Backdafuckup.Server.Sql;
 using Microsoft.EntityFrameworkCore;
 
@@ -43,6 +44,8 @@ public static class SqlEndpoints
         logins.MapDelete("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>
             await db.Credentials.Where(c => c.Id == id && c.Kind == CredentialKind.SqlServer).ExecuteDeleteAsync(ct) > 0 ? Results.NoContent() : Results.NotFound());
 
+        app.MapPost("/api/sql/publishes", StartPublishAsync);
+
         app.MapPost("/api/sql/inventory", async (
             SqlInventoryRequestDto request, AgentService agents, AgentRegistry registry, SqlJobs jobs, IDbContextFactory<AppDbContext> dbFactory, CredentialProtector protector, CancellationToken ct) =>
         {
@@ -67,6 +70,62 @@ public static class SqlEndpoints
                 return Results.Problem("The agent did not answer in time; it may be busy or offline.", statusCode: StatusCodes.Status504GatewayTimeout);
             }
         });
+    }
+
+    /// <summary>
+    /// Starts a publish session. Checked here so that the wizard gets the reason at once: the restore point, the name,
+    /// the time, the account and an agent that can publish; the agent checks the name on the instance once more.
+    /// </summary>
+    private static async Task<IResult> StartPublishAsync(
+        SqlPublishRequestDto request, AppDbContext db, AgentService agents, AgentRegistry registry, SessionQueue queue, Microsoft.Extensions.Options.IOptions<SqlRestoreOptions> options, HttpContext http, CancellationToken ct)
+    {
+        var point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == request.RestorePointId, ct);
+        if (point is null || point.State != RestorePointState.Available)
+        {
+            return Results.Problem("The restore point is not available (deleted, or still being written).", statusCode: StatusCodes.Status404NotFound);
+        }
+
+        var name = request.DatabaseName?.Trim() ?? string.Empty;
+        if (name.Length is 0 or > 128 || name.Any(char.IsControl))
+        {
+            return Results.Problem("The database name must have 1 to 128 characters and no control characters.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var limits = options.Value;
+        if (request.AutoUnpublishMinutes < limits.MinAutoUnpublishMinutes || request.AutoUnpublishMinutes > limits.MaxAutoUnpublishMinutes)
+        {
+            return Results.Problem(
+                $"Unpublish after {limits.MinAutoUnpublishMinutes} minutes at the earliest and {limits.MaxAutoUnpublishMinutes / 60} hours at the latest.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (string.IsNullOrWhiteSpace(request.TargetInstance))
+        {
+            return Results.Problem("Choose the instance to publish to.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (!await db.Credentials.AnyAsync(c => c.Id == request.CredentialId && (c.Kind == CredentialKind.Windows || c.Kind == CredentialKind.SqlServer), ct))
+        {
+            return Results.Problem("The account no longer exists. Choose another one under Credentials.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        try
+        {
+            var agent = await SqlAgentAsync(request.TargetVmNativeId, agents, registry, ct);
+            if (!registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlPublish))
+            {
+                return Results.Problem(
+                    $"The agent in {agent.HostName} (version {agent.AgentVersion}) cannot publish SQL Server databases yet. It updates itself within a few minutes after a server update.",
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+        }
+
+        var id = await queue.EnqueueSqlPublishAsync(request with { DatabaseName = name }, point.RepositoryId, point.VmName, http.User.Identity?.Name ?? "user", ct);
+        return Results.Ok(new StartedDto(id));
     }
 
     /// <summary>The online agent of a VM that runs SQL jobs, or a message that says what is missing.</summary>

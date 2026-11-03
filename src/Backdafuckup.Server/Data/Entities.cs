@@ -435,6 +435,9 @@ public enum SessionKind
 
     /// <summary>Restore of single files into a VM or onto a share.</summary>
     FileRestore,
+
+    /// <summary>A SQL Server database attached from a restore point (published) until it is unpublished.</summary>
+    SqlPublish,
 }
 
 public enum GuestFailurePolicy

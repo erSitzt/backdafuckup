@@ -3,6 +3,7 @@
 @inject ApiClient Api
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
+@inject NavigationManager Navigation
 
 <PageTitle>Restore SQL databases – backdafuckup</PageTitle>
 
@@ -66,6 +67,10 @@ else
                             <MudText Typo="Typo.body2" Class="mud-text-secondary">@db.Instance@(instance?.Product is { } product ? $" · {product}" : "")</MudText>
                             <ConsistencyChip Consistency="@db.Consistency" Reason="@db.ConsistencyReason" />
                             <MudSpacer />
+                            <MudTooltip Text="Attach the database from the backup to an instance, without copying it, e.g. to take tables or rows out of it. Unpublish removes it again.">
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Link"
+                                           Disabled="@(!db.Restorable || !CanExport(db))" OnClick="@(() => OpenPublishAsync(db))">Publish</MudButton>
+                            </MudTooltip>
                             <MudTooltip Text="The database files as they are in the backup, plus a script that attaches them to an instance.">
                                 <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.FolderZip"
                                            Disabled="@(!CanExport(db) || _preparing)" OnClick="@(() => ExportFilesAsync(db))">Export files</MudButton>
@@ -149,6 +154,99 @@ else
     }
 }
 
+<MudDialog @bind-Visible="_publishOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true, CloseOnEscapeKey = true })">
+    <TitleContent>
+        <MudText Typo="Typo.h6">Publish @_publishDb?.Name</MudText>
+        <MudText Typo="Typo.body2">
+            @_publishDb?.Instance on @_mount?.VmName, restore point of @_mount?.RestorePointCreatedUtc.ToLocalTime().ToString("g") ·
+            @(_publishDb is null ? "" : Fmt.Bytes(_publishDb.TotalBytes))
+        </MudText>
+    </TitleContent>
+    <DialogContent>
+        <MudStack Spacing="3">
+            <MudText Typo="Typo.body2">
+                The agent in the target VM mounts the backup's volumes (read from the backup, nothing is copied) and attaches the
+                database to an instance there. Changes go to a temporary overlay in the VM and are discarded when it is unpublished.
+            </MudText>
+            <MudGrid Spacing="2">
+                <MudItem xs="12" md="6">
+                    <MudSelect T="string" Value="_targetVm" ValueChanged="OnTargetVmChanged" Label="Target VM" Variant="Variant.Outlined" Dense="true"
+                               HelperText="VMs whose agent can publish SQL Server databases.">
+                        @foreach (var a in _publishAgents)
+                        {
+                            <MudSelectItem T="string" Value="@a.VmNativeId">@($"{a.VmName ?? a.HostName} ({a.HostName}{(a.Online ? "" : ", offline")})")</MudSelectItem>
+                        }
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="12" md="6">
+                    <MudSelect T="Guid?" Value="_accountId" ValueChanged="OnAccountChanged" Label="Account" Variant="Variant.Outlined" Dense="true"
+                               HelperText="A Windows account or a SQL Server login with dbcreator or sysadmin on the instance.">
+                        @foreach (var (id, text) in _accounts)
+                        {
+                            <MudSelectItem T="Guid?" Value="@id">@text</MudSelectItem>
+                        }
+                    </MudSelect>
+                </MudItem>
+            </MudGrid>
+            @if (_publishAgents.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Dense="true">No VM has an agent that can publish SQL Server databases. Install the agent under Guest Agents; agents update themselves after a server update.</MudAlert>
+            }
+            @if (_accounts.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Dense="true">No account yet. Add a Windows credential or a SQL Server login under <MudLink Href="/infrastructure/credentials">Credentials</MudLink>.</MudAlert>
+            }
+            <div>
+                <MudButton Variant="Variant.Outlined" Size="Size.Small" StartIcon="@Icons.Material.Filled.Cable" Disabled="@(_targetVm is null || _accountId is null || _checking)"
+                           OnClick="CheckTargetAsync">Connect</MudButton>
+                @if (_checking)
+                {
+                    <MudProgressCircular Size="Size.Small" Indeterminate="true" Class="ml-2" />
+                }
+            </div>
+            @if (_checkError is not null)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true">@_checkError</MudAlert>
+            }
+            @if (_targetSql is { } target)
+            {
+                <MudGrid Spacing="2">
+                    <MudItem xs="12" md="6">
+                        <MudSelect T="string" Value="_targetInstance" ValueChanged="OnInstanceChanged" Label="Instance" Variant="Variant.Outlined" Dense="true"
+                                   HelperText="@($"{target.Host} ({target.Address ?? "address unknown"}), as {target.Account}")">
+                            @foreach (var i in target.Instances)
+                            {
+                                <MudSelectItem T="string" Value="@i.Name">@($"{i.Name} · {i.Product ?? i.SetupVersion ?? "SQL Server"}{(i.Connected ? "" : " · not connected")}")</MudSelectItem>
+                            }
+                        </MudSelect>
+                    </MudItem>
+                    <MudItem xs="12" md="6">
+                        <MudTextField T="string" @bind-Value="_publishName" Label="Database name" Variant="Variant.Outlined" Immediate="true" Margin="Margin.Dense"
+                                      HelperText="Must not exist on the instance." />
+                    </MudItem>
+                    <MudItem xs="12" md="6">
+                        <MudSelect T="int" @bind-Value="_publishHours" Label="Unpublish automatically after" Variant="Variant.Outlined" Dense="true"
+                                   HelperText="Or earlier with Unpublish in the session.">
+                            @foreach (var hours in new[] { 1, 2, 4, 8, 24, 72 })
+                            {
+                                <MudSelectItem T="int" Value="@hours">@(hours == 1 ? "1 hour" : $"{hours} hours")</MudSelectItem>
+                            }
+                        </MudSelect>
+                    </MudItem>
+                </MudGrid>
+                @foreach (var (severity, text) in PublishChecks())
+                {
+                    <MudAlert Severity="@severity" Dense="true">@text</MudAlert>
+                }
+            }
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="@(() => _publishOpen = false)">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Link" Disabled="@(!CanPublish || _starting)" OnClick="PublishAsync">Publish</MudButton>
+    </DialogActions>
+</MudDialog>
+
 @code {
     private const char Separator = '\u0001';
 
@@ -162,6 +260,211 @@ else
     private string? _selected;
     private bool _closed;
     private bool _preparing;
+
+    private bool _publishOpen;
+    private SqlDatabaseDto? _publishDb;
+    private List<AgentDto> _publishAgents = [];
+    private List<(Guid Id, string Text)> _accounts = [];
+    private string? _targetVm;
+    private Guid? _accountId;
+    private SqlTargetDto? _targetSql;
+    private string? _targetInstance;
+    private string _publishName = string.Empty;
+    private int _publishHours = 8;
+    private bool _checking;
+    private bool _starting;
+    private string? _checkError;
+
+    private SqlTargetInstanceDto? TargetInstance =>
+        _targetSql?.Instances.FirstOrDefault(i => string.Equals(i.Name, _targetInstance, StringComparison.OrdinalIgnoreCase));
+
+    private async Task OpenPublishAsync(SqlDatabaseDto db)
+    {
+        _publishDb = db;
+        _targetSql = null;
+        _checkError = null;
+        _targetInstance = null;
+        _publishName = db.Name;
+        try
+        {
+            _publishAgents = [.. (await Api.GetAsync<List<AgentDto>>("api/agents")).Where(a => a.CanPublishSql && a.VmNativeId is not null).OrderBy(a => a.VmName ?? a.HostName)];
+            var windows = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
+            var logins = await Api.GetAsync<List<SqlCredentialDto>>("api/credentials/sql");
+            _accounts = [.. windows.Select(c => (c.Id, $"{c.UserName} (Windows)")), .. logins.Select(c => (c.Id, $"{c.UserName} (SQL login)"))];
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+            return;
+        }
+
+        _targetVm = _publishAgents.FirstOrDefault(a => a.VmNativeId == _mount?.VmNativeId)?.VmNativeId ?? _publishAgents.FirstOrDefault()?.VmNativeId;
+        _accountId ??= _accounts.Count == 1 ? _accounts[0].Id : null;
+        if (_accountId is { } chosen && _accounts.All(a => a.Id != chosen))
+        {
+            _accountId = null;
+        }
+
+        _publishOpen = true;
+    }
+
+    private void OnTargetVmChanged(string? vm)
+    {
+        _targetVm = vm;
+        _targetSql = null;
+        _checkError = null;
+    }
+
+    private void OnAccountChanged(Guid? account)
+    {
+        _accountId = account;
+        _targetSql = null;
+        _checkError = null;
+    }
+
+    /// <summary>What the agent finds with the account: the instances, the account's rights and the databases there.</summary>
+    private async Task CheckTargetAsync()
+    {
+        if (_targetVm is null || _accountId is null || _publishDb is null)
+        {
+            return;
+        }
+
+        _checking = true;
+        _checkError = null;
+        _targetSql = null;
+        try
+        {
+            _targetSql = await Api.PostAsync<SqlTargetDto>("api/sql/inventory", new SqlInventoryRequestDto(_targetVm, _accountId, null));
+            var connected = _targetSql.Instances.Where(i => i.Connected).ToList();
+            var instance = connected.FirstOrDefault(i => string.Equals(i.Name, _publishDb.Instance, StringComparison.OrdinalIgnoreCase)) ?? connected.FirstOrDefault() ?? _targetSql.Instances.FirstOrDefault();
+            OnInstanceChanged(instance?.Name);
+        }
+        catch (ApiException ex)
+        {
+            _checkError = ex.Message;
+        }
+        finally
+        {
+            _checking = false;
+        }
+    }
+
+    /// <summary>Proposes the original name, or name_published (name_published2, …) if the instance has it already.</summary>
+    private void OnInstanceChanged(string? instance)
+    {
+        _targetInstance = instance;
+        if (_publishDb is null)
+        {
+            return;
+        }
+
+        var taken = TargetInstance?.Databases.Select(d => d.Name).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+        var name = _publishDb.Name;
+        for (var n = 1; taken.Contains(name); n++)
+        {
+            name = n == 1 ? $"{_publishDb.Name}_published" : $"{_publishDb.Name}_published{n}";
+        }
+
+        _publishName = name;
+    }
+
+    private static int? Major(string? version) =>
+        version?.Split('.') is [var first, ..] && int.TryParse(first, out var major) ? major : null;
+
+    /// <summary>What speaks against the publish (errors) and what the admin should know (warnings, notes).</summary>
+    private List<(Severity Severity, string Text)> PublishChecks()
+    {
+        var checks = new List<(Severity, string)>();
+        if (_publishDb is not { } db || TargetInstance is not { } target || _targetSql is null)
+        {
+            return checks;
+        }
+
+        if (!target.Connected)
+        {
+            checks.Add((Severity.Error, $"{_targetSql.Account} cannot connect to instance {target.Name}: {target.ConnectError ?? "unknown error"}"));
+            return checks;
+        }
+
+        if (target.IsSysadmin != true && target.IsDbCreator != true)
+        {
+            checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} may not create databases on instance {target.Name}; it needs the server role dbcreator or sysadmin."));
+        }
+
+        var name = _publishName.Trim();
+        if (name.Length is 0 or > 128)
+        {
+            checks.Add((Severity.Error, "Enter a database name (at most 128 characters)."));
+        }
+        else if (target.Databases.Any(d => string.Equals(d.Name, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            checks.Add((Severity.Error, $"Instance {target.Name} has a database {name} already; choose another name."));
+        }
+
+        var source = InstanceOf(db.Instance);
+        var sourceMajor = Major(source?.Version);
+        var targetMajor = Major(target.ProductVersion ?? target.SetupVersion);
+        if (sourceMajor is { } from && targetMajor is { } to)
+        {
+            if (to < from)
+            {
+                checks.Add((Severity.Error, $"The database comes from {source?.Product ?? "a newer SQL Server"}; instance {target.Name} is {target.Product ?? "older"}. SQL Server attaches databases only on the same or a newer version."));
+            }
+            else if (to > from)
+            {
+                checks.Add((Severity.Info, $"{target.Product} upgrades the database from {source?.Product} when it attaches it; the upgrade lands in the overlay, the backup stays as it is."));
+            }
+        }
+
+        var dataBytes = db.Files.Where(f => f.Kind == "data").Sum(f => f.SizeBytes ?? 0);
+        if (target.EngineEdition == 4)
+        {
+            var limit = (targetMajor ?? 0) >= 17 ? 50L << 30 : 10L << 30;
+            if (dataBytes > limit)
+            {
+                checks.Add((Severity.Error, $"Instance {target.Name} is SQL Server Express: databases up to {Fmt.Bytes(limit)}; this one has {Fmt.Bytes(dataBytes)} of data files."));
+            }
+        }
+
+        if (db.Consistency != "application")
+        {
+            checks.Add((Severity.Info, "The database is crash-consistent in this restore point; SQL Server recovers it when it attaches it, like after a power failure."));
+        }
+
+        var host = _publishAgents.FirstOrDefault(a => a.VmNativeId == _targetVm)?.HostName ?? "the VM";
+        checks.Add((Severity.Normal, $"While the database is published, the agent in {host} does no other restore work; restores into {host} wait until it is unpublished."));
+        return checks;
+    }
+
+    private bool CanPublish =>
+        _publishDb is not null && _targetVm is not null && _accountId is not null && TargetInstance is { Connected: true } &&
+        PublishChecks().All(c => c.Severity != Severity.Error);
+
+    private async Task PublishAsync()
+    {
+        if (!CanPublish || _publishDb is null || _mount is null)
+        {
+            return;
+        }
+
+        _starting = true;
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>("api/sql/publishes", new SqlPublishRequestDto(
+                _mount.RestorePointId, _publishDb.Instance, _publishDb.Name, _targetVm!, _targetInstance!, _accountId!.Value, _publishName.Trim(), _publishHours * 60));
+            _publishOpen = false;
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _starting = false;
+        }
+    }
 
     private SqlDatabaseDto? SelectedDatabase =>
         _selected is { } s && s.StartsWith("d:", StringComparison.Ordinal) && _sql is not null

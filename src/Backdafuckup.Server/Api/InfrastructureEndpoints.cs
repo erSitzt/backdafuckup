@@ -196,6 +196,12 @@ public static class InfrastructureEndpoints
 
         repositories.MapDelete("/{id:guid}", async (Guid id, AppDbContext db, RepositoryManager manager, FileRestore.FileRestoreMounts mounts, CancellationToken ct) =>
         {
+            // Checked first: a published database is the more urgent reason (the jobs may be removed meanwhile).
+            if (await db.Sessions.AnyAsync(s => s.RepositoryId == id && s.Kind == SessionKind.SqlPublish && (s.State == SessionState.Queued || s.State == SessionState.Running || s.State == SessionState.Stopping), ct))
+            {
+                return Results.Problem("SQL Server databases from this repository are published; unpublish them under Sessions first.", statusCode: StatusCodes.Status409Conflict);
+            }
+
             if (await db.Jobs.AnyAsync(j => j.RepositoryId == id, ct))
             {
                 return Results.Problem("The repository is still used by backup jobs.", statusCode: StatusCodes.Status409Conflict);

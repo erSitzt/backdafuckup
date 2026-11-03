@@ -571,6 +571,9 @@ public interface IPublishHost
 
     /// <summary>Logs out of the target and removes its portal.</summary>
     void Detach(int port, string targetName, Action<string> log);
+
+    /// <summary>Adds an allow ACE (full control) for each account to a file on a published volume (lands in the overlay).</summary>
+    void GrantAccess(string path, IReadOnlyList<string> accounts, Action<string> log);
 }
 
 /// <summary>Publishes that are not cleaned up yet, so that a restart of the agent or the VM can finish the cleanup.</summary>
@@ -622,6 +625,9 @@ public sealed class PublishJournal
         public string Folder { get; set; } = string.Empty;
 
         public List<string> Mounts { get; set; } = new List<string>();
+
+        /// <summary>A database attached from the publish (instance\name), until it is removed again.</summary>
+        public string? Database { get; set; }
     }
 }
 
@@ -640,17 +646,23 @@ public sealed class PublishRunner
     private readonly IPublishHost _host;
     private readonly AgentLog _log;
     private readonly PublishJournal _journal;
+    private readonly ISqlEnvironment? _sql;
     private readonly List<string> _lines = new List<string>();
     private readonly PublishStatus _status = new PublishStatus();
+    private bool _stopAnswered;
 
-    public PublishRunner(HttpClient http, Guid id, IPublishHost host, AgentLog log)
+    public PublishRunner(HttpClient http, Guid id, IPublishHost host, AgentLog log, ISqlEnvironment? sql = null)
     {
         _http = http;
         _id = id;
         _host = host;
         _log = log;
+        _sql = sql;
         _journal = new PublishJournal(host.WorkFolder);
     }
+
+    /// <summary>At least this much stays free on the volume of the overlays.</summary>
+    public const long FreeSpaceReserve = 1L << 30;
 
     private string Base => AgentProtocol.PublishesPath + "/" + _id.ToString("D");
 
@@ -664,6 +676,12 @@ public sealed class PublishRunner
         foreach (var entry in journal.Read())
         {
             void Log(string line) => log.Write($"Publish {entry.PublishId} (left over): {line}");
+            if (entry.Database is { } database)
+            {
+                // Needs the account, which the agent never stores: the backup server removes it (drop-published).
+                Log($"SQL Server database {database} may still be attached; the backup server removes it with the publish's account.");
+            }
+
             var clean = true;
             foreach (var mount in entry.Mounts.AsEnumerable().Reverse())
             {
@@ -695,14 +713,23 @@ public sealed class PublishRunner
         var diskNumbers = new List<int>();
         var mounts = new List<string>();
         var entry = new PublishJournal.Entry { PublishId = _id };
+        var failed = false;
         try
         {
             CleanupStale(_host, _log);
             var info = await GetAsync(stop).ConfigureAwait(false);
+            _lastInfo = info;
+            if (info.Sql is not null && _sql is null)
+            {
+                throw new InvalidOperationException("This agent cannot attach SQL Server databases (no SQL Server support in this build).");
+            }
+
             entry.Folder = Path.Combine(_host.WorkFolder, _id.ToString("N").Substring(0, 12));
             Directory.CreateDirectory(entry.Folder);
-            Write($"publishing {info.Title}: {info.Disks.Count} disk(s), {info.Volumes.Count} volume(s); writes go to an overlay in {entry.Folder} (at most {info.MaxOverlayBytes / (1024 * 1024)} MiB).");
-            var budget = new OverlayBudget(info.MaxOverlayBytes);
+            _status.Folder = entry.Folder;
+            var overlayLimit = OverlayLimit(info.MaxOverlayBytes, entry.Folder);
+            Write($"publishing {info.Title}: {info.Disks.Count} disk(s), {info.Volumes.Count} volume(s); writes go to an overlay in {entry.Folder} (at most {overlayLimit / (1024 * 1024)} MiB).");
+            var budget = new OverlayBudget(overlayLimit);
             foreach (var d in info.Disks)
             {
                 var source = new PublishBlockSource(_http, $"{Base}/disks/{d.Index.ToString(CultureInfo.InvariantCulture)}/blocks/", d.SizeBytes, info.BlockSize);
@@ -738,6 +765,32 @@ public sealed class PublishRunner
                 _host.Mount(diskNumbers[volume.DiskIndex], volume.StartOffset, folder, Write);
                 _status.Mounts.Add(new PublishMount { Name = volume.Name, Path = folder });
                 await CheckpointAsync(disks, stop).ConfigureAwait(false);
+            }
+
+            if (info.Sql is { } database)
+            {
+                // Recorded first: if the agent stops during the attach, the server still learns which database to remove.
+                entry.Database = database.Instance + "\\" + database.Database;
+                _journal.Remove(_id);
+                _journal.Add(entry);
+                var mountFolders = info.Volumes.Select((v, i) => (v.Name, Folder: mounts[i])).ToDictionary(m => m.Name, m => m.Folder, StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    await WithHeartbeatAsync(() => SqlPublishDatabase.Attach(_sql!, _host, database, mountFolders, Write, () => _status.Database = database.Database), disks).ConfigureAwait(false);
+                }
+                catch when (_status.Database is null)
+                {
+                    // Refused, or CREATE DATABASE failed: nothing is attached, nothing to remove.
+                    entry.Database = null;
+                    _journal.Remove(_id);
+                    _journal.Add(entry);
+                    throw;
+                }
+
+                if (_stopAnswered)
+                {
+                    throw new StopRequestedException();
+                }
             }
 
             _status.State = PublishStates.Mounted;
@@ -780,12 +833,33 @@ public sealed class PublishRunner
         }
         catch (Exception ex) when (!(ex is OutOfMemoryException))
         {
-            _status.State = PublishStates.Failed;
+            // Reported as failed only with the last report: the server takes "failed" as the end of the publish.
+            failed = true;
             _status.Error = ex.Message;
             Write($"failed: {ex.Message}");
         }
         finally
         {
+            // The database first: SQL Server must let go of the files before their volumes go. Offline, then drop, so it
+            // does not touch the files; if that fails, the server removes it later (DatabaseLeft).
+            if (_status.Database is { } attached && _lastInfo?.Sql is { } database)
+            {
+                try
+                {
+                    await WithHeartbeatAsync(() => SqlPublishDatabase.Drop(_sql!, database.Instance, database.Account, attached, entry.Folder, Write), disks).ConfigureAwait(false);
+                    _status.Database = null;
+                    entry.Database = null;
+                    _journal.Remove(_id);
+                    _journal.Add(entry);
+                }
+                catch (Exception ex) when (!(ex is OutOfMemoryException))
+                {
+                    _status.DatabaseLeft = attached;
+                    _status.Database = null;
+                    Write($"removing database {SqlPublishDatabase.Quote(attached)} from instance {database.Instance} failed: {ex.Message} The backup server removes it when it can reach this agent again.");
+                }
+            }
+
             // In reverse; a failed step is logged and the rest still runs. Offline only matters while the session exists.
             var clean = true;
             foreach (var mount in mounts.AsEnumerable().Reverse())
@@ -815,12 +889,10 @@ public sealed class PublishRunner
                 clean &= DeleteFolders(entry.Folder, mounts, Write);
             }
 
-            if (_status.State != PublishStates.Failed)
-            {
-                _status.State = PublishStates.Ended;
-            }
+            _status.State = failed ? PublishStates.Failed : PublishStates.Ended;
 
             _status.Mounts.Clear();
+            _status.CleanedUp = clean;
             if (clean)
             {
                 _journal.Remove(_id);
@@ -837,8 +909,57 @@ public sealed class PublishRunner
         }
     }
 
+    private PublishInfo? _lastInfo;
+
     private sealed class StopRequestedException : Exception
     {
+    }
+
+    /// <summary>
+    /// Runs a blocking step (attach, drop) on a worker thread and keeps reporting meanwhile, so that the server does not
+    /// take a long recovery for silence. A stop answered meanwhile is remembered; the step itself is not interrupted.
+    /// </summary>
+    private async Task WithHeartbeatAsync(Action step, List<CowDisk> disks)
+    {
+        var work = Task.Run(step);
+        while (await Task.WhenAny(work, Task.Delay(Heartbeat)).ConfigureAwait(false) != work)
+        {
+            if (await ReportAsync(disks, CancellationToken.None).ConfigureAwait(false) == Answer.Stop)
+            {
+                _stopAnswered = true;
+            }
+        }
+
+        await work.ConfigureAwait(false);
+    }
+
+    /// <summary>The overlay limit, lowered so that <see cref="FreeSpaceReserve"/> stays free on the overlay's volume.</summary>
+    private long OverlayLimit(long requested, string folder)
+    {
+        var root = Path.GetPathRoot(Path.GetFullPath(folder)) ?? folder;
+        long free;
+        try
+        {
+            free = new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch (Exception ex) when (ex is IOException || ex is ArgumentException || ex is UnauthorizedAccessException)
+        {
+            return requested;
+        }
+
+        var available = free - FreeSpaceReserve;
+        var limit = Math.Min(requested, available);
+        if (available < Math.Min(requested, 64L << 20))
+        {
+            throw new IOException($"Only {free / (1024 * 1024)} MiB are free on {root} of this VM; a publish keeps {FreeSpaceReserve >> 30} GiB free and needs room for its overlay there.");
+        }
+
+        if (limit < requested)
+        {
+            Write($"the overlay is limited to {limit / (1024 * 1024)} MiB: {free / (1024 * 1024)} MiB are free on {root} and {FreeSpaceReserve >> 30} GiB stay free.");
+        }
+
+        return limit;
     }
 
     private enum Answer

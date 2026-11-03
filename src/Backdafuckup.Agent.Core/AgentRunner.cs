@@ -326,7 +326,7 @@ public sealed class AgentRunner
 
         var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = TimeSpan.FromMinutes(2) };
         client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
-        var publish = new PublishRunner(client, command.PublishId, _publish, _log);
+        var publish = new PublishRunner(client, command.PublishId, _publish, _log, _sql);
         var busy = await StartWorkAsync($"publish {command.PublishId}", async () =>
         {
             using (client)
@@ -366,6 +366,13 @@ public sealed class AgentRunner
             using (client)
             {
                 await job.RunAsync(stop).ConfigureAwait(false);
+            }
+
+            // A database left attached from a publish kept its disk in use; with it gone, the journal's cleanup can finish
+            // now instead of at the next start. Only in a free work slot: a running publish has its own journal entry.
+            if (job.Succeeded && job.Kind == SqlJobKinds.DropPublished && _publish is { } publishHost && !stop.IsCancellationRequested)
+            {
+                await StartWorkAsync("cleanup of left-over publishes", () => Task.Run(() => PublishRunner.CleanupStale(publishHost, _log)), stop).ConfigureAwait(false);
             }
         });
         result.Success = true;
@@ -488,6 +495,11 @@ public sealed class AgentRunner
             if (_publish is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilityPublish))
             {
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilityPublish);
+            }
+
+            if (_publish is not null && _sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlPublish))
+            {
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlPublish);
             }
 
             if (_restoreFiles is not null)

@@ -20,8 +20,10 @@ public sealed class SessionRunnerService(
     MaintenanceSessionRunner maintenance,
     Agents.AgentDeploymentRunner deployments,
     FileRestore.FileRestoreSessionRunner fileRestores,
+    Sql.SqlPublishSessionRunner sqlPublishes,
     StartupRecovery recovery,
     IOptions<EngineOptions> options,
+    IOptions<Sql.SqlRestoreOptions> sqlOptions,
     TimeProvider time,
     ILogger<SessionRunnerService> logger) : BackgroundService
 {
@@ -93,6 +95,7 @@ public sealed class SessionRunnerService(
         SessionKind.RepositoryMaintenance => running.Count(SessionKind.RepositoryMaintenance) == 0 && running.Count(SessionKind.Backup) == 0,
         SessionKind.AgentDeployment => running.Count(SessionKind.AgentDeployment) < 2,
         SessionKind.FileRestore => running.Count(SessionKind.FileRestore) < options.Value.MaxConcurrentFileRestoreSessions,
+        SessionKind.SqlPublish => running.Count(SessionKind.SqlPublish) < sqlOptions.Value.MaxConcurrentPublishes,
         _ => false,
     };
 
@@ -111,10 +114,12 @@ public sealed class SessionRunnerService(
                 SessionKind.RepositoryMaintenance => await maintenance.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.AgentDeployment => await deployments.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.FileRestore => await fileRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.SqlPublish => await sqlPublishes.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 _ => (SessionState.Failed, "Unknown session kind."),
             };
 
-            if (cancellationToken.IsCancellationRequested && state != SessionState.Failed)
+            // Stopping a publish (Unpublish) is its normal end; the runner says itself how it ended.
+            if (cancellationToken.IsCancellationRequested && state != SessionState.Failed && session.Kind != SessionKind.SqlPublish)
             {
                 state = SessionState.Stopped;
             }
@@ -261,6 +266,23 @@ public sealed class StartupRecovery(
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         foreach (var session in stale)
         {
+            if (session.Kind == SessionKind.SqlPublish)
+            {
+                // The agent gets 404 for the publish now and unpublishes on its own (database first, then the volumes).
+                session.State = SessionState.Stopped;
+                session.EndedUtc = time.GetUtcNow();
+                session.Summary = "Unpublished: the backup service was restarted. The agent in the VM removes the database and the volumes when it notices (within a minute).";
+                foreach (var task in session.Tasks.Where(t => t.State is SessionState.Running or SessionState.Queued))
+                {
+                    task.State = SessionState.Stopped;
+                    task.Error = "Service restarted";
+                    task.EndedUtc = session.EndedUtc;
+                }
+
+                db.SessionLog.Add(new SessionLogEntry { SessionId = session.Id, TimestampUtc = time.GetUtcNow(), Severity = LogSeverity.Warning, Message = session.Summary });
+                continue;
+            }
+
             if (session.Kind == SessionKind.FileBrowse)
             {
                 // A file browser only reads; it simply ends with the service.
@@ -454,6 +476,8 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<FileRestore.FileRestoreSessionRunner>();
         services.AddSingleton<FileRestore.AgentTransfers>();
         services.AddSingleton<Sql.SqlJobs>();
+        services.Configure<Sql.SqlRestoreOptions>(configuration.GetSection("SqlRestore"));
+        services.AddSingleton<Sql.SqlPublishSessionRunner>();
         services.AddSingleton<Publishing.DiskPublishes>();
         services.TryAddSingleton<Backdafuckup.Smb.ISmbShareConnector, Backdafuckup.Smb.SmbShareConnector>();
         services.TryAddSingleton<Backdafuckup.Ssh.ISshConnector, Backdafuckup.Ssh.SshConnector>();

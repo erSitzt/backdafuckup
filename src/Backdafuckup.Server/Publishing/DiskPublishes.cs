@@ -53,6 +53,19 @@ public sealed class DiskPublish
     internal TaskCompletionSource<PublishStatus> Ended { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 }
 
+/// <summary>
+/// A publish that did not get mounted: refused, failed (<see cref="LastStatus"/> is the agent's final report), or the
+/// agent stopped reporting (<see cref="TimedOut"/>; <see cref="LastStatus"/> is its last report, if any).
+/// </summary>
+public sealed class PublishFailedException(string message, PublishStatus? lastStatus, bool timedOut, Exception? inner = null)
+    : InvalidOperationException(message, inner)
+{
+    public PublishStatus? LastStatus { get; } = lastStatus;
+
+    /// <summary>The agent did not end the publish with a report: what it set up may still be there.</summary>
+    public bool TimedOut { get; } = timedOut;
+}
+
 /// <summary>The publishes that run now. In memory only: after a server restart the agent gets 404 and unpublishes.</summary>
 public sealed class DiskPublishes(AgentRegistry registry, IOptions<AgentOptions> options, TimeProvider time)
 {
@@ -64,8 +77,10 @@ public sealed class DiskPublishes(AgentRegistry registry, IOptions<AgentOptions>
     /// Hands the disks to the agent and waits until it has mounted the volumes (or failed). On failure the publish is
     /// removed again; on success the caller ends it with <see cref="UnpublishAsync"/>.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The agent refused the publish or could not mount it; the message says why.</exception>
-    /// <exception cref="TimeoutException">The agent did not report the mount within <paramref name="timeout"/>.</exception>
+    /// <exception cref="PublishFailedException">
+    /// The agent refused the publish, could not mount it (the message says why), or did not report the mount within
+    /// <paramref name="timeout"/>.
+    /// </exception>
     public async Task<DiskPublish> PublishAsync(Guid agentId, PublishInfo info, IReadOnlyList<GuestDiskSource> disks, Action<string> log, TimeSpan timeout, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(info);
@@ -88,13 +103,22 @@ public sealed class DiskPublishes(AgentRegistry registry, IOptions<AgentOptions>
                 cancellationToken).ConfigureAwait(false);
             if (!accepted.Success)
             {
-                throw new InvalidOperationException(accepted.Error ?? "The agent did not accept the publish.");
+                throw new PublishFailedException(accepted.Error ?? "The agent did not accept the publish.", null, timedOut: false);
             }
 
-            var status = await WaitAsync(publish, publish.Mounted.Task, timeout, cancellationToken).ConfigureAwait(false);
+            PublishStatus status;
+            try
+            {
+                status = await WaitAsync(publish, publish.Mounted.Task, timeout, cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException ex)
+            {
+                throw new PublishFailedException(ex.Message, publish.Status, timedOut: true, ex);
+            }
+
             if (status.State != PublishStates.Mounted)
             {
-                throw new InvalidOperationException(status.Error ?? "The agent ended the publish before its volumes were mounted.");
+                throw new PublishFailedException(status.Error ?? "The agent ended the publish before its volumes were mounted.", status, timedOut: false);
             }
 
             mounted = true;
@@ -133,6 +157,9 @@ public sealed class DiskPublishes(AgentRegistry registry, IOptions<AgentOptions>
             _publishes.TryRemove(publish.Id, out _);
         }
     }
+
+    /// <summary>True once the agent has sent its final report (everything removed, or what was left).</summary>
+    public static bool HasEnded(DiskPublish publish) => publish.Ended.Task.IsCompleted;
 
     /// <summary>A running publish of this agent, or null.</summary>
     public DiskPublish? Get(Guid publishId, Guid agentId) =>
