@@ -24,7 +24,8 @@ public static class AgentEndpoints
                 ? Results.Json(response, AgentJson.Options)
                 : Results.Problem("The enrollment secret is not valid (renewed in the console?).", statusCode: StatusCodes.Status403Forbidden));
 
-        agent.MapPost("/poll", async (AgentPollRequest request, AgentService agents, AgentRegistry registry, AgentPackages packages, HttpContext http, CancellationToken ct) =>
+        agent.MapPost("/poll", async (
+            AgentPollRequest request, AgentService agents, AgentRegistry registry, AgentPackages packages, IHostApplicationLifetime lifetime, HttpContext http, CancellationToken ct) =>
         {
             if (await agents.AuthenticateAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
             {
@@ -43,7 +44,18 @@ public static class AgentEndpoints
                 return Results.Json(new AgentPollResponse { Update = build.ToOffer() }, AgentJson.Options);
             }
 
-            var command = await registry.NextCommandAsync(agentId, agents.Options.PollHold, ct);
+            // The long poll ends when the service stops: otherwise the shutdown waits for it (up to its timeout of 30 s).
+            using var poll = CancellationTokenSource.CreateLinkedTokenSource(ct, lifetime.ApplicationStopping);
+            AgentCommand? command;
+            try
+            {
+                command = await registry.NextCommandAsync(agentId, agents.Options.PollHold, poll.Token);
+            }
+            catch (OperationCanceledException) when (lifetime.ApplicationStopping.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                return Results.NoContent();
+            }
+
             return command is null ? Results.NoContent() : Results.Json(new AgentPollResponse { Command = command }, AgentJson.Options);
         });
 
