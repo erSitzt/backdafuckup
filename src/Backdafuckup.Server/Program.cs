@@ -6,6 +6,7 @@ using Backdafuckup.Server.Hosting;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Scalar.AspNetCore;
 using Serilog;
 
 Log.Logger = new LoggerConfiguration()
@@ -82,10 +83,17 @@ try
 
     builder.Services.AddSignalR();
     builder.Services.AddProblemDetails();
-    builder.Services.AddOpenApi();
+    builder.Services.AddOpenApi(options => options.AddDocumentTransformer((document, _, _) =>
+    {
+        document.Info.Title = "backdafuckup API";
+        document.Info.Version = ProductInfo.Current.Version;
+        document.Info.Description = "The API of the backdafuckup web console. Sign in to the console first: requests use its session cookie, and requests that change something need the header X-BDFU-Request: 1.";
+        return Task.CompletedTask;
+    }));
     builder.Services.AddHealthChecks();
 
     var app = builder.Build();
+    app.Logger.LogInformation("backdafuckup {Version} starting.", ProductInfo.Current.Describe());
 
     if (!builder.Configuration.GetValue("Catalog:SkipMigration", false))
     {
@@ -113,13 +121,32 @@ try
     // dotnet.js) map to the fingerprinted files, with compression and caching. Needed before the login.
     app.MapStaticAssets().AllowAnonymous();
     app.MapHealthChecks("/health").AllowAnonymous();
+    app.MapGet("/api/about", () => ProductInfo.Current.ToDto());
     app.MapOpenApi().AllowAnonymous();
+
+    // API reference for signed-in users (the console links to it). The page and its script come from the package, not
+    // from a CDN, so it also works without internet access.
+    // No telemetry, no AI chat, no links to Scalar's cloud services: an on-premises product sends nothing outside.
+    app.MapScalarApiReference("/api-docs", options =>
+    {
+        options.WithTitle("backdafuckup API").WithOpenApiRoutePattern("/openapi/{documentName}.json");
+        options.Telemetry = false;
+        options.Agent = new ScalarAgentOptions { Disabled = true };
+        options.Mcp = new ScalarMcpOptions { Disabled = true };
+        options.ShowDeveloperTools = DeveloperToolsVisibility.Never;
+        options.HideClientButton = true;
+        options.DisableDefaultFonts();
+
+        // "Generate SDK" leads to Scalar's cloud service; it has no option of its own.
+        options.CustomCss = ".generate-sdk-button, .selected-client-action { display: none !important; }";
+    });
     app.MapAuthEndpoints();
     app.MapInfrastructureEndpoints();
     app.MapOperationEndpoints();
     app.MapAgentEndpoints();
     app.MapFileRestoreEndpoints();
     app.MapLinuxCredentialEndpoints();
+    app.MapSqlEndpoints();
     app.MapHub<LiveHub>("/hubs/live");
     app.MapFallbackToFile("index.html").AllowAnonymous();
 

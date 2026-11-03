@@ -5,6 +5,10 @@
     <UserSecretsId>backdafuckup-server</UserSecretsId>
   </PropertyGroup>
   <ItemGroup>
+    <!-- Shown under About; the version itself comes from Directory.Build.props. -->
+    <AssemblyMetadata Include="BuildTimestamp" Value="$([System.DateTime]::UtcNow.ToString('o'))" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
     <ProjectReference Include="..\Backdafuckup.DataMover\Backdafuckup.DataMover.csproj" />
     <ProjectReference Include="..\Backdafuckup.Storage\Backdafuckup.Storage.csproj" />
@@ -18,6 +22,7 @@
     <ProjectReference Include="..\Backdafuckup.Web\Backdafuckup.Web.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Scalar.AspNetCore" />
     <PackageReference Include="Serilog.AspNetCore" />
     <PackageReference Include="Serilog.Sinks.File" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" />

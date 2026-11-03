@@ -15,6 +15,9 @@ public sealed record LoginRequestDto(string UserName, string Password);
 
 public sealed record CurrentUserDto(string UserName, IReadOnlyList<string> Roles);
 
+/// <summary>The running server: product version (e.g. 0.3.0), the Git commit it was built from, and when.</summary>
+public sealed record AboutDto(string Version, string? Commit, DateTimeOffset? BuildUtc);
+
 // ---- Connections (pools) ----
 public sealed record CertificateDto(
     string HostAddress,
@@ -259,6 +262,9 @@ public sealed record AgentDto
 
     /// <summary>The agent can restore files into its guest (reported with its last poll).</summary>
     public bool CanRestoreFiles { get; init; }
+
+    /// <summary>The agent runs SQL Server jobs (inventory, restore, publish).</summary>
+    public bool CanRunSql { get; init; }
 
     public DateTimeOffset EnrolledUtc { get; init; }
 

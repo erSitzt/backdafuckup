@@ -2,6 +2,7 @@
 @implements IDisposable
 @inject AuthState Auth
 @inject NavigationManager Navigation
+@inject ApiClient Api
 
 <MudThemeProvider Theme="_theme" />
 <MudPopoverProvider />
@@ -30,6 +31,12 @@ else
             <MudIconButton Icon="@Icons.Material.Filled.Menu" Color="Color.Inherit" Edge="Edge.Start" OnClick="@(() => _drawerOpen = !_drawerOpen)" />
             <a href="/" class="ml-1" title="Dashboard"><img src="img/backdafuckup-banner-512x128.png" alt="backdafuckup" class="appbar-logo" /></a>
             <MudSpacer />
+            @if (_about is { } about)
+            {
+                <MudTooltip Text="@($"backdafuckup {about.Version}{(about.Commit is null ? "" : $", commit {about.Commit}")}{(about.BuildUtc is { } built ? $", built {built.ToLocalTime():g}" : "")}")">
+                    <MudLink Href="/about" Typo="Typo.caption" Color="Color.Inherit" Class="mr-4" Style="opacity:0.75">v@(about.Version)</MudLink>
+                </MudTooltip>
+            }
             <MudText Typo="Typo.body2" Class="mr-2">@Auth.User.UserName</MudText>
             <MudTooltip Text="Sign out">
                 <MudIconButton Icon="@Icons.Material.Filled.Logout" Color="Color.Inherit" OnClick="LogoutAsync" />
@@ -48,6 +55,7 @@ else
 
 @code {
     private bool _drawerOpen = true;
+    private AboutDto? _about;
 
     private readonly MudTheme _theme = new()
     {
@@ -67,7 +75,30 @@ else
         await Auth.InitializeAsync();
     }
 
-    private void OnAuthChanged() => InvokeAsync(StateHasChanged);
+    private void OnAuthChanged() => InvokeAsync(async () =>
+    {
+        await LoadAboutAsync();
+        StateHasChanged();
+    });
+
+    protected override async Task OnParametersSetAsync() => await LoadAboutAsync();
+
+    /// <summary>The server's version, once signed in (the API needs a session).</summary>
+    private async Task LoadAboutAsync()
+    {
+        if (_about is not null || Auth.User is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _about = await Api.GetAsync<AboutDto>("api/about");
+        }
+        catch (ApiException)
+        {
+        }
+    }
 
     private async Task LogoutAsync()
     {

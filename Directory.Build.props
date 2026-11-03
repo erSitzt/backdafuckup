@@ -8,6 +8,11 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <Authors>backdafuckup contributors</Authors>
     <Product>backdafuckup</Product>
+    <!--
+      The product version of server, console and agent. The SDK adds the Git commit to the informational version
+      ("0.3.0+<commit>"), which the console shows under About.
+    -->
+    <VersionPrefix>0.3.0</VersionPrefix>
     <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
     <Copyright>Copyright (c) backdafuckup contributors</Copyright>
   </PropertyGroup>

@@ -7,6 +7,7 @@ using Backdafuckup.Core.Extents;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Server.Agents;
 using Backdafuckup.Server.Api;
+using Backdafuckup.Server.FileRestore;
 using Backdafuckup.Testing;
 using Backdafuckup.Testing.Xapi;
 using Backdafuckup.Xen;
@@ -78,6 +79,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
 
         // Anonymous access is limited to setup/login.
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/jobs", Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/about", Ct)).StatusCode);
         Assert.True((await client.GetFromJsonAsync<SetupStatusDto>("/api/setup/status", Ct))!.SetupRequired);
 
         // Setup with the token, then login. Requests without the CSRF header are rejected.
@@ -93,6 +95,12 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync("/api/auth/login", new LoginRequestDto("admin", "wrong password!"), Ct)).StatusCode);
         await Ok(client.PostAsJsonAsync("/api/auth/login", new LoginRequestDto("admin", "correct horse battery"), Ct));
         Assert.Equal("admin", (await client.GetFromJsonAsync<CurrentUserDto>("/api/auth/me", Ct))!.UserName);
+
+        // The version from Directory.Build.props, with the commit the SDK takes from Git.
+        var about = (await client.GetFromJsonAsync<AboutDto>("/api/about", Ct))!;
+        Assert.Matches(@"^\d+\.\d+\.\d+", about.Version);
+        Assert.Equal(typeof(Backdafuckup.Server.Hosting.ProductInfo).Assembly.GetName().Version!.ToString(3), about.Version);
+        Assert.NotNull(about.BuildUtc);
 
         // Pool, inventory, repository.
         var (vmUuid, disks) = _pool.AddVm("mail01", 4L * 1024 * 1024);
@@ -611,6 +619,166 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Agent_transfers_files_from_several_volumes_keeps_existing_files_and_holds_its_work_slot()
+    {
+        // Data on D:, log on L: (as SQL databases often are), restored into one folder of the guest.
+        var client = await SignedInClientAsync();
+        var data = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11);
+        var logFile = WindowsTestDisk.SqlFile(2, 256 << 10, 0x22);
+        var image = WindowsTestDisk.Create(
+        [
+            new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+            new WindowsTestDisk.Volume('D', 8, new Dictionary<string, byte[]> { ["SQL/shop.mdf"] = data }),
+            new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]> { ["Log/shop_log.ldf"] = logFile }),
+        ]);
+        var point = await BackUpImageAsync(client, "sql02", image);
+        var sandbox = Path.Combine(_root, "guest-volumes");
+        var gate = new ManualResetEventSlim(false);
+        var (agent, stop, running) = await StartAgentAsync(point.VmNativeId, new GatedSandbox(sandbox, gate));
+        var registry = _factory!.Services.GetRequiredService<AgentRegistry>();
+        var transfers = _factory.Services.GetRequiredService<AgentTransfers>();
+
+        // A file that exists at the target stays as it is when the transfer says "fail".
+        Directory.CreateDirectory(Path.Combine(sandbox, "E", "db"));
+        await File.WriteAllTextAsync(Path.Combine(sandbox, "E", "db", "shop_log.ldf"), "existing", Ct);
+
+        var repository = await _factory.Services.GetRequiredService<Backdafuckup.Server.Engine.RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+        await using var reader = await repository.OpenRestorePointAsync(point.Id, Ct);
+        var disks = await FileRestoreMounts.OpenDisksAsync(reader, _factory.Services.GetRequiredService<Backdafuckup.FileLevel.ChunkCache>(), Ct);
+        AgentTransferPlan plan;
+        string dataVolume;
+        using (var guestImage = Backdafuckup.FileLevel.GuestImage.Open(disks))
+        {
+            var d = guestImage.Volumes.Single(v => v.MountPoint == "D:");
+            var l = guestImage.Volumes.Single(v => v.MountPoint == "L:");
+            dataVolume = d.Id;
+            plan = AgentFilePlan.Plan(
+            [
+                (d.Id, guestImage.OpenFileSystem(d.Id), Backdafuckup.FileLevel.GuestPath.Parse("SQL/shop.mdf"), @"E:\db\shop.mdf", @"D:\SQL\shop.mdf"),
+                (l.Id, guestImage.OpenFileSystem(l.Id), Backdafuckup.FileLevel.GuestPath.Parse("Log/shop_log.ldf"), @"E:\db\shop_log.ldf", @"L:\Log\shop_log.ldf"),
+            ]);
+        }
+
+        var info = new FileTransferInfo { TransferId = Guid.NewGuid(), Roots = [@"E:\db"], IfExists = FileTransferIfExists.Fail, ItemCount = plan.Items.Count, TotalBytes = plan.Bytes };
+        var observer = new RecordingObserver();
+        using var transfer = new AgentTransfer(agent.Id, info, plan, disks, dataVolume, observer, TimeProvider.System);
+        transfers.Add(transfer);
+        var reservation = registry.TryReserveWork(agent.Id);
+        Assert.NotNull(reservation);
+        Assert.Null(registry.TryReserveWork(agent.Id));
+        var accepted = await registry.SendAsync(agent.Id, new AgentCommand { Id = Guid.NewGuid(), Kind = AgentCommandKinds.RestoreFiles, TransferId = info.TransferId }, TimeSpan.FromSeconds(30), Ct);
+        Assert.True(accepted.Success, accepted.Error);
+
+        // While the transfer waits at the gate, the agent reports its work slot and refuses a second restore.
+        for (var i = 0; i < 100 && !registry.WorkText(agent.Id).Contains(info.TransferId.ToString(), StringComparison.Ordinal); i++)
+        {
+            await Task.Delay(100, Ct);
+        }
+
+        Assert.Contains($"file restore {info.TransferId}", registry.WorkText(agent.Id), StringComparison.Ordinal);
+        var refused = await registry.SendAsync(agent.Id, new AgentCommand { Id = Guid.NewGuid(), Kind = AgentCommandKinds.RestoreFiles, TransferId = Guid.NewGuid() }, TimeSpan.FromSeconds(30), Ct);
+        Assert.False(refused.Success);
+        Assert.Contains("busy", refused.Error, StringComparison.Ordinal);
+
+        gate.Set();
+        var report = await transfer.Finished.Task.WaitAsync(TimeSpan.FromSeconds(60), Ct);
+        Assert.Null(report.Error);
+        reservation!.Dispose();
+        Assert.Equal(data, await File.ReadAllBytesAsync(Path.Combine(sandbox, "E", "db", "shop.mdf"), Ct));
+        Assert.Equal("existing", await File.ReadAllTextAsync(Path.Combine(sandbox, "E", "db", "shop_log.ldf"), Ct));
+        Assert.Equal(1, transfer.RestoredFiles);
+        Assert.Contains(observer.Problems, p => p.Contains(@"L:\Log\shop_log.ldf", StringComparison.Ordinal) && p.Contains("a file with this name exists; it is kept", StringComparison.Ordinal));
+
+        // The finished work frees the slot even though the agent's last report (from the start of its poll) still names it.
+        using (var next = registry.TryReserveWork(agent.Id))
+        {
+            Assert.NotNull(next);
+        }
+
+        await stop.CancelAsync();
+        await running;
+    }
+
+    /// <summary>The real agent loop over HTTP with its file system mapped into a sandbox folder (C:\x → {sandbox}/C/x).</summary>
+    private async Task<(Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)> StartAgentAsync(string vmNativeId, IRestoreFileSystem? fs, ISqlEnvironment? sql = null)
+    {
+        var directory = Path.Combine(_root, "agent-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(directory);
+        var paths = new AgentPaths(directory);
+        var secret = await _factory!.Services.GetRequiredService<AgentSettingsStore>().GetEnrollmentSecretAsync(Ct);
+        await File.WriteAllTextAsync(paths.ConfigFile, System.Text.Json.JsonSerializer.Serialize(
+            new AgentConfig { ServerUrl = "https://localhost/", EnrollmentSecret = secret }, Backdafuckup.Agent.Core.AgentJson.Options), Ct);
+        var runner = new AgentRunner(paths, new SimulatedHost(vmNativeId), new SimulatedVss(), new AgentLog(paths.LogFile), _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200), fs, sql);
+        var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var running = Task.Run(() => runner.RunAsync(stop.Token), Ct);
+        var agent = await _factory.Services.GetRequiredService<AgentService>().WaitForVmAsync(vmNativeId, TimeSpan.FromSeconds(30), Ct)
+            ?? throw new TimeoutException("The agent did not come online.");
+        var registry = _factory.Services.GetRequiredService<AgentRegistry>();
+        var capability = fs is null ? AgentProtocol.CapabilitySqlRestore : AgentProtocol.CapabilityRestoreFilesV2;
+        for (var i = 0; i < 100 && !registry.HasCapability(agent.Id, capability); i++)
+        {
+            await Task.Delay(100, Ct);
+        }
+
+        Assert.True(registry.HasCapability(agent.Id, capability));
+        return (agent, stop, running);
+    }
+
+    [Fact]
+    public async Task Sql_inventory_runs_in_the_agent_with_the_chosen_account()
+    {
+        var client = await SignedInClientAsync();
+        var vm = Guid.NewGuid().ToString();
+        var sql = new FakeSqlEnvironment();
+        var (_, stop, running) = await StartAgentAsync(vm, null, sql);
+        Assert.Contains((await client.GetFromJsonAsync<List<AgentDto>>("/api/agents", Ct))!, a => a.VmNativeId == vm && a.CanRunSql && !a.CanRestoreFiles);
+
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_restore", "Secret-1'\"x", "restores"), Ct));
+        Assert.Equal("bdfu_restore", Assert.Single((await client.GetFromJsonAsync<List<SqlCredentialDto>>("/api/credentials/sql", Ct))!).UserName);
+        var windows = await Read<WindowsCredentialDto>(client.PostAsJsonAsync("/api/credentials", new SaveWindowsCredentialDto(@"CORP\sqladmin", "Windows-2", null), Ct));
+
+        // Without an account: the instances from the registry and the service manager only.
+        var plain = await Read<SqlTargetDto>(client.PostAsJsonAsync("/api/sql/inventory", new SqlInventoryRequestDto(vm, null, null), Ct));
+        Assert.Equal("SQL01", plain.Host);
+        Assert.Null(plain.Account);
+        Assert.Equal(["OLD", "SQLEXPRESS"], plain.Instances.Select(i => i.Name).Order().ToList());
+        Assert.All(plain.Instances, i => Assert.False(i.Connected));
+        Assert.Empty(sql.Accounts);
+        Assert.Equal(10L << 30, Assert.Single(plain.Volumes).FreeBytes);
+
+        // With the SQL login: the agent gets the password; a stopped instance is not tried.
+        var withLogin = await Read<SqlTargetDto>(client.PostAsJsonAsync("/api/sql/inventory", new SqlInventoryRequestDto(vm, login.Id, null), Ct));
+        Assert.Equal("bdfu_restore (SQL login)", withLogin.Account);
+        var express = withLogin.Instances.Single(i => i.Name == "SQLEXPRESS");
+        Assert.Equal("SQL Server 2022", express.Product);
+        Assert.Contains("error 18456", express.ConnectError, StringComparison.Ordinal);
+        Assert.Equal("the service MSSQL$OLD is stopped", withLogin.Instances.Single(i => i.Name == "OLD").ConnectError);
+        var account = Assert.Single(sql.Accounts);
+        Assert.Equal((SqlAccountKinds.Sql, "bdfu_restore", "Secret-1'\"x"), (account.Kind, account.UserName, account.Password));
+
+        // With a Windows credential: the agent logs on with it; one instance only.
+        var withWindows = await Read<SqlTargetDto>(client.PostAsJsonAsync("/api/sql/inventory", new SqlInventoryRequestDto(vm, windows.Id, "SQLEXPRESS"), Ct));
+        Assert.Equal(@"CORP\sqladmin (Windows)", withWindows.Account);
+        Assert.Equal((SqlAccountKinds.Windows, @"CORP\sqladmin", "Windows-2"), (sql.Accounts[^1].Kind, sql.Accounts[^1].UserName, sql.Accounts[^1].Password));
+        Assert.Equal(2, sql.Accounts.Count);
+
+        // A VM without an agent, and an unknown account, are refused with a reason.
+        var noAgent = await client.PostAsJsonAsync("/api/sql/inventory", new SqlInventoryRequestDto(Guid.NewGuid().ToString(), null, null), Ct);
+        Assert.Equal(HttpStatusCode.Conflict, noAgent.StatusCode);
+        Assert.Contains("No backdafuckup agent", await noAgent.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("/api/sql/inventory", new SqlInventoryRequestDto(vm, Guid.NewGuid(), null), Ct)).StatusCode);
+
+        // The passwords never appear in the agent's log.
+        var agentLog = string.Join("\n", Directory.GetFiles(_root, "agent.log", SearchOption.AllDirectories).Select(File.ReadAllText));
+        Assert.Contains("SQL job", agentLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("Secret-1", agentLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("Windows-2", agentLog, StringComparison.Ordinal);
+
+        await stop.CancelAsync();
+        await running;
+    }
+
+    [Fact]
     public async Task File_level_restore_writes_into_a_linux_vm_over_ssh()
     {
         // A real OpenSSH with sudo (Debian container); the account alice needs her password for sudo.
@@ -674,6 +842,79 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
 
         protected override string Map(string windowsPath) =>
             Path.Combine([root, windowsPath[..1], .. windowsPath[3..].Split('\\', StringSplitOptions.RemoveEmptyEntries)]);
+    }
+
+    /// <summary>A sandbox whose first temporary file waits for <paramref name="gate"/>: keeps a transfer running.</summary>
+    private sealed class GatedSandbox(string root, ManualResetEventSlim gate) : PortableRestoreFileSystem
+    {
+        public override string? CheckRoot(string path) => null;
+
+        protected override string Map(string windowsPath)
+        {
+            if (windowsPath.Contains(".bdfu-restore-", StringComparison.Ordinal))
+            {
+                gate.Wait(TimeSpan.FromSeconds(60));
+            }
+
+            return Path.Combine([root, windowsPath[..1], .. windowsPath[3..].Split('\\', StringSplitOptions.RemoveEmptyEntries)]);
+        }
+    }
+
+    /// <summary>Two instances (one stopped) and a volume; every connection fails like a wrong login.</summary>
+    private sealed class FakeSqlEnvironment : ISqlEnvironment
+    {
+        public List<SqlAccount> Accounts { get; } = [];
+
+        public List<SqlInstanceInfo> Instances() =>
+        [
+            new() { Name = "SQLEXPRESS", InstanceId = "MSSQL16.SQLEXPRESS", SetupVersion = "16.0.1000.6", ServiceName = "MSSQL$SQLEXPRESS", ServiceState = "Running", ServiceAccount = @"NT Service\MSSQL$SQLEXPRESS", DefaultDataFolder = @"D:\SQL", DefaultLogFolder = @"L:\Log" },
+            new() { Name = "OLD", ServiceName = "MSSQL$OLD", ServiceState = "Stopped" },
+        ];
+
+        public List<SqlVolumeInfo> Volumes() => [new() { Root = @"D:\", Label = "SQLDATA", FreeBytes = 10L << 30, TotalBytes = 20L << 30 }];
+
+        public System.Data.Common.DbConnection Open(string instance, SqlAccount account)
+        {
+            lock (Accounts)
+            {
+                Accounts.Add(account);
+            }
+
+            throw new InvalidOperationException($"{account.UserName} could not connect to SQL Server instance {instance} on SQL01: Login failed (error 18456).");
+        }
+    }
+
+    private sealed class RecordingObserver : Backdafuckup.FileLevel.Restore.IFileRestoreObserver
+    {
+        public List<string> Problems { get; } = [];
+
+        public void Counting(long files, long bytes)
+        {
+        }
+
+        public void Planned(long files, long directories, long bytes)
+        {
+        }
+
+        public void Copied(long bytes)
+        {
+        }
+
+        public void FileRestored(long files)
+        {
+        }
+
+        public void Renamed(string source, string target)
+        {
+        }
+
+        public void Problem(Backdafuckup.FileLevel.Restore.FileRestoreProblem problem)
+        {
+            lock (Problems)
+            {
+                Problems.Add(problem.ToString());
+            }
+        }
     }
 
     private sealed class SimulatedVss : IVssBridge

@@ -38,6 +38,18 @@ public static class AgentProtocol
     /// <summary>The agent restores files (<see cref="AgentCommandKinds.RestoreFiles"/>); older agents are asked to update first.</summary>
     public const string CapabilityRestoreFiles = "restore-files-v1";
 
+    /// <summary>
+    /// The agent understands <see cref="FileTransferInfo.IfExists"/> (also "fail": an existing file fails the item) and
+    /// reports its work slot in <see cref="AgentPollRequest.Busy"/>.
+    /// </summary>
+    public const string CapabilityRestoreFilesV2 = "restore-files-v2";
+
+    /// <summary>The agent runs SQL Server jobs (<see cref="AgentCommandKinds.SqlJob"/>).</summary>
+    public const string CapabilitySqlRestore = "sql-restore-v1";
+
+    /// <summary>SQL Server jobs: <c>GET {id}</c> (the request, with the account), <c>POST {id}/result</c>.</summary>
+    public const string SqlJobsPath = "api/agent/sql-jobs";
+
     public const string ServiceName = "BackdafuckupAgent";
     public const string ServiceDisplayName = "backdafuckup Agent";
     public const string ExecutableName = "backdafuckup-agent.exe";
@@ -118,6 +130,12 @@ public sealed class AgentHostInfo
 public sealed class AgentPollRequest
 {
     public AgentHostInfo Host { get; set; } = new AgentHostInfo();
+
+    /// <summary>
+    /// What occupies the agent's work slot (a file restore, later SQL jobs), or null when it is idle. The server offers no
+    /// self-update while it is set, also after a server restart, and queues further work for this agent.
+    /// </summary>
+    public string? Busy { get; set; }
 }
 
 /// <summary>Answer to a poll: a command, or an update offer.</summary>
@@ -150,6 +168,12 @@ public static class AgentCommandKinds
     /// the items and reports through <see cref="AgentProtocol.TransfersPath"/>.
     /// </summary>
     public const string RestoreFiles = "RestoreFiles";
+
+    /// <summary>
+    /// Run SQL Server job <see cref="AgentCommand.JobId"/>. Answered at once; the agent then fetches the request and posts
+    /// the result through <see cref="AgentProtocol.SqlJobsPath"/>.
+    /// </summary>
+    public const string SqlJob = "SqlJob";
 }
 
 public sealed class AgentCommand
@@ -170,6 +194,9 @@ public sealed class AgentCommand
 
     /// <summary>RestoreFiles: the transfer to fetch.</summary>
     public Guid TransferId { get; set; }
+
+    /// <summary>SqlJob: the job to fetch.</summary>
+    public Guid JobId { get; set; }
 }
 
 public sealed class AgentCommandResult
@@ -344,6 +371,12 @@ public sealed class FileTransferInfo
     /// <summary>True: replace existing files. False: keep them and write <see cref="KeepPrefix"/>&lt;name&gt;.</summary>
     public bool Overwrite { get; set; }
 
+    /// <summary>
+    /// One of <see cref="FileTransferIfExists"/>; null for servers that only know <see cref="Overwrite"/>. Agents without
+    /// <see cref="AgentProtocol.CapabilityRestoreFilesV2"/> ignore it, so the server sends "fail" only to agents that have it.
+    /// </summary>
+    public string? IfExists { get; set; }
+
     public string KeepPrefix { get; set; } = "RESTORED-";
 
     /// <summary>Apply the stored security descriptors (owner, group, DACL).</summary>
@@ -352,6 +385,18 @@ public sealed class FileTransferInfo
     public int ItemCount { get; set; }
 
     public long TotalBytes { get; set; }
+}
+
+/// <summary>What happens to a file that exists at the target.</summary>
+public static class FileTransferIfExists
+{
+    public const string Replace = "replace";
+
+    /// <summary>Keep it and write the restored file as <see cref="FileTransferInfo.KeepPrefix"/>&lt;name&gt;.</summary>
+    public const string Keep = "keep";
+
+    /// <summary>Keep it and fail the item (e.g. database files, which must keep their names).</summary>
+    public const string Fail = "fail";
 }
 
 public static class FileTransferItemKinds
@@ -450,4 +495,153 @@ public sealed class FileTransferProgressResponse
 {
     /// <summary>The restore was stopped on the server: finish the current file and report Finished.</summary>
     public bool Cancel { get; set; }
+}
+
+public static class SqlJobKinds
+{
+    /// <summary>The instances (registry, service), the volumes, and with an account the databases and the account's rights.</summary>
+    public const string Inventory = "inventory";
+}
+
+public static class SqlAccountKinds
+{
+    /// <summary>A Windows account: the agent logs on with it and connects with Windows authentication.</summary>
+    public const string Windows = "windows";
+
+    /// <summary>A SQL Server login.</summary>
+    public const string Sql = "sql";
+}
+
+/// <summary>How the agent connects to SQL Server. Sent only inside a job request, never stored by the agent.</summary>
+public sealed class SqlAccount
+{
+    /// <summary>One of <see cref="SqlAccountKinds"/>.</summary>
+    public string Kind { get; set; } = SqlAccountKinds.Sql;
+
+    /// <summary><c>DOMAIN\user</c>, <c>user@domain</c> or <c>.\user</c> for Windows accounts; the login name for SQL logins.</summary>
+    public string UserName { get; set; } = string.Empty;
+
+    public string Password { get; set; } = string.Empty;
+}
+
+/// <summary>What a SQL job asks of the agent (<c>GET api/agent/sql-jobs/{id}</c>).</summary>
+public sealed class SqlJobRequest
+{
+    public Guid JobId { get; set; }
+
+    /// <summary>One of <see cref="SqlJobKinds"/>.</summary>
+    public string Kind { get; set; } = string.Empty;
+
+    /// <summary>The instance, e.g. <c>SQLEXPRESS</c> or <c>MSSQLSERVER</c>; null: all instances (inventory).</summary>
+    public string? Instance { get; set; }
+
+    public SqlAccount? Account { get; set; }
+}
+
+public sealed class SqlJobResult
+{
+    public Guid JobId { get; set; }
+
+    public bool Success { get; set; }
+
+    public string? Error { get; set; }
+
+    public SqlInventory? Inventory { get; set; }
+}
+
+public sealed class SqlInventory
+{
+    public List<SqlInstanceInfo> Instances { get; set; } = new List<SqlInstanceInfo>();
+
+    /// <summary>Local fixed volumes with their free space.</summary>
+    public List<SqlVolumeInfo> Volumes { get; set; } = new List<SqlVolumeInfo>();
+}
+
+/// <summary>A local SQL Server instance: what the registry and the service manager say, and with an account what SQL Server says.</summary>
+public sealed class SqlInstanceInfo
+{
+    /// <summary>MSSQLSERVER for the default instance, otherwise the instance name.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>E.g. <c>MSSQL16.SQLEXPRESS</c>.</summary>
+    public string? InstanceId { get; set; }
+
+    /// <summary>Setup version from the registry, e.g. <c>16.0.1000.6</c>.</summary>
+    public string? SetupVersion { get; set; }
+
+    public string? SetupEdition { get; set; }
+
+    public string? ServiceName { get; set; }
+
+    /// <summary>"Running", "Stopped", … or null if unknown.</summary>
+    public string? ServiceState { get; set; }
+
+    public string? ServiceAccount { get; set; }
+
+    public string? DefaultDataFolder { get; set; }
+
+    public string? DefaultLogFolder { get; set; }
+
+    public string? BackupFolder { get; set; }
+
+    /// <summary>True if the job's account could connect; then the fields below are filled.</summary>
+    public bool Connected { get; set; }
+
+    /// <summary>Why the connection failed (wrong password, no login, service stopped, …).</summary>
+    public string? ConnectError { get; set; }
+
+    /// <summary>SERVERPROPERTY('ProductVersion'), e.g. <c>16.0.4305.5</c>.</summary>
+    public string? ProductVersion { get; set; }
+
+    public string? Edition { get; set; }
+
+    /// <summary>SERVERPROPERTY('EngineEdition'): 4 = Express.</summary>
+    public int? EngineEdition { get; set; }
+
+    /// <summary>The login SQL Server sees (SUSER_SNAME()).</summary>
+    public string? LoginName { get; set; }
+
+    public bool? IsSysadmin { get; set; }
+
+    public bool? IsDbCreator { get; set; }
+
+    public List<SqlDatabaseInfo> Databases { get; set; } = new List<SqlDatabaseInfo>();
+}
+
+public sealed class SqlDatabaseInfo
+{
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>sys.databases.state_desc, e.g. ONLINE, OFFLINE, RESTORING.</summary>
+    public string State { get; set; } = string.Empty;
+
+    public string? RecoveryModel { get; set; }
+
+    public bool ReadOnly { get; set; }
+
+    public List<SqlDatabaseFileInfo> Files { get; set; } = new List<SqlDatabaseFileInfo>();
+}
+
+public sealed class SqlDatabaseFileInfo
+{
+    public string LogicalName { get; set; } = string.Empty;
+
+    public string PhysicalName { get; set; } = string.Empty;
+
+    /// <summary>sys.master_files.type_desc: ROWS, LOG, FILESTREAM, FULLTEXT.</summary>
+    public string Type { get; set; } = string.Empty;
+
+    public long SizeBytes { get; set; }
+}
+
+public sealed class SqlVolumeInfo
+{
+    /// <summary>E.g. <c>D:\</c>.</summary>
+    public string Root { get; set; } = string.Empty;
+
+    public string? Label { get; set; }
+
+    public long FreeBytes { get; set; }
+
+    public long TotalBytes { get; set; }
 }

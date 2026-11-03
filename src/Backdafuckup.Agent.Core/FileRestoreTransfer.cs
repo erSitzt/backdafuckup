@@ -46,6 +46,14 @@ public sealed class FileRestoreTransfer
 
     private string Base => AgentProtocol.TransfersPath + "/" + _id.ToString("D");
 
+    /// <summary>"replace", "keep" or "fail"; servers before <see cref="FileTransferInfo.IfExists"/> send only Overwrite. Unknown: fail.</summary>
+    private string IfExists => _info.IfExists switch
+    {
+        null => _info.Overwrite ? FileTransferIfExists.Replace : FileTransferIfExists.Keep,
+        FileTransferIfExists.Replace or FileTransferIfExists.Keep => _info.IfExists,
+        _ => FileTransferIfExists.Fail,
+    };
+
     public async Task RunAsync(CancellationToken stop)
     {
         string? error = null;
@@ -65,7 +73,7 @@ public sealed class FileRestoreTransfer
                 }
             }
 
-            _log.Write($"File restore {_id}: {_info.ItemCount} item(s) into {string.Join(", ", _info.Roots)}, " + (_info.Overwrite ? "replacing existing files." : "keeping existing files."));
+            _log.Write($"File restore {_id}: {_info.ItemCount} item(s) into {string.Join(", ", _info.Roots)}, existing files: {IfExists}.");
             var offset = 0;
             while (!_cancel && !stop.IsCancellationRequested)
             {
@@ -213,12 +221,14 @@ public sealed class FileRestoreTransfer
         {
             case RestorePathKind.Missing:
                 break;
-            case RestorePathKind.File when _info.Overwrite:
+            case RestorePathKind.File when IfExists == FileTransferIfExists.Replace:
                 replace = true;
                 break;
-            case RestorePathKind.File:
+            case RestorePathKind.File when IfExists == FileTransferIfExists.Keep:
                 target = FreeName(item.Path) ?? throw new IOException($"no free {_info.KeepPrefix} name was found next to it");
                 break;
+            case RestorePathKind.File:
+                return Failed(item, "a file with this name exists; it is kept");
             case RestorePathKind.Directory:
                 return Failed(item, "a folder with this name exists");
             default:

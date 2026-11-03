@@ -1,10 +1,21 @@
 @page "/about"
+@inject ApiClient Api
 
 <PageTitle>About – backdafuckup</PageTitle>
 <MudText Typo="Typo.h4" Class="mb-4">About</MudText>
 <MudPaper Class="pa-4" Elevation="1">
     <img src="img/backdafuckup-banner-512x128.png" alt="backdafuckup" width="384" height="96" style="border-radius:8px;display:block" class="mb-3" />
     <MudText Typo="Typo.body1" Class="mb-3">Open-source VM backup for XCP-ng / XenServer. Licensed under the GNU Affero General Public License v3.0.</MudText>
+    @if (_about is { } about)
+    {
+        <MudSimpleTable Dense="true" Elevation="0" Class="mb-4" Style="max-width:520px">
+            <tbody>
+                <tr><td>Version</td><td><b>@about.Version</b></td></tr>
+                <tr><td>Commit</td><td class="mono">@(about.Commit ?? "unknown")</td></tr>
+                <tr><td>Built</td><td>@(about.BuildUtc is { } built ? built.ToLocalTime().ToString("g") : "unknown")</td></tr>
+            </tbody>
+        </MudSimpleTable>
+    }
     <MudText Typo="Typo.subtitle1">Third-party components</MudText>
     <MudSimpleTable Dense="true" Elevation="0">
         <tbody>
@@ -15,7 +26,27 @@
             <tr><td>Serilog</td><td>Apache-2.0</td></tr>
             <tr><td>Npgsql</td><td>PostgreSQL License</td></tr>
             <tr><td>EFCore.NamingConventions</td><td>Apache-2.0</td></tr>
+            <tr><td>LTRData.DiscUtils (file-level restore; ext and XFS vendored with patches)</td><td>MIT</td></tr>
+            <tr><td>SMBLibrary (restore to shares, agent installation)</td><td>LGPL-3.0</td></tr>
+            <tr><td>SSH.NET (restore into Linux VMs)</td><td>MIT</td></tr>
+            <tr><td>Microsoft.Data.SqlClient (agent: SQL Server restores)</td><td>MIT</td></tr>
+            <tr><td>Scalar.AspNetCore (API reference)</td><td>MIT</td></tr>
         </tbody>
     </MudSimpleTable>
     <MudText Typo="Typo.body2" Class="mt-3">The NBD client and the XAPI client are own implementations of the public NBD protocol specification and the XAPI documentation.</MudText>
 </MudPaper>
+
+@code {
+    private AboutDto? _about;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _about = await Api.GetAsync<AboutDto>("api/about");
+        }
+        catch (ApiException)
+        {
+        }
+    }
+}

@@ -9,7 +9,8 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="${1:-$root/artifacts/agent}"
-version="${AGENT_VERSION:-$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$root/src/Backdafuckup.Agent/Backdafuckup.Agent.csproj")}"
+# The product version (Directory.Build.props); AGENT_VERSION overrides it.
+version="${AGENT_VERSION:-$(sed -n 's:.*<VersionPrefix>\(.*\)</VersionPrefix>.*:\1:p' "$root/Directory.Build.props")}"
 dotnet="${DOTNET:-$(command -v dotnet || echo "$HOME/.dotnet/dotnet")}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

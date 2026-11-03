@@ -24,23 +24,45 @@ public sealed class AgentRunner
     private readonly Func<AgentConfig, HttpMessageHandler> _handlerFactory;
     private readonly TimeSpan _retryDelay;
     private readonly IRestoreFileSystem? _restoreFiles;
-    private readonly object _transferLock = new object();
-    private Task? _transfer;
+    private readonly ISqlEnvironment? _sql;
+    private readonly object _workLock = new object();
+    private Task? _work;
+    private string? _workName;
+    private string? _postponedUpdate;
     private AgentConfig? _config;
     private AgentHostInfo? _hostInfo;
     private DateTime _hostInfoAt;
     private string? _failedUpdateHash;
 
     /// <param name="restoreFiles">File operations for file-level restores into this guest; null: the agent cannot restore files.</param>
-    public AgentRunner(AgentPaths paths, IHostInfoSource host, IVssBridge vss, AgentLog log, Func<AgentConfig, HttpMessageHandler>? handlerFactory = null, TimeSpan? retryDelay = null, IRestoreFileSystem? restoreFiles = null)
+    /// <param name="sql">The local SQL Server installation; null: the agent runs no SQL jobs.</param>
+    public AgentRunner(
+        AgentPaths paths, IHostInfoSource host, IVssBridge vss, AgentLog log, Func<AgentConfig, HttpMessageHandler>? handlerFactory = null, TimeSpan? retryDelay = null,
+        IRestoreFileSystem? restoreFiles = null, ISqlEnvironment? sql = null)
     {
         _restoreFiles = restoreFiles;
+        _sql = sql;
         _paths = paths;
         _host = host;
         _log = log;
         _executor = new CommandExecutor(vss, host, log);
         _handlerFactory = handlerFactory ?? (config => ServerCertificatePin.CreateHandler(config.ServerPins));
         _retryDelay = retryDelay ?? TimeSpan.FromSeconds(30);
+    }
+
+    /// <summary>
+    /// What occupies the work slot, or null. One piece of work at a time (a file restore, later SQL jobs): they write into
+    /// the guest and must not overlap, and the agent takes no self-update while one runs.
+    /// </summary>
+    public string? Busy
+    {
+        get
+        {
+            lock (_workLock)
+            {
+                return _work is { IsCompleted: false } ? _workName : null;
+            }
+        }
     }
 
     /// <summary>Runs until <paramref name="stop"/>; returns <see cref="AgentProtocol.RestartExitCode"/> after a self-update.</summary>
@@ -128,7 +150,7 @@ public sealed class AgentRunner
         _log.Write($"Connected to {http.BaseAddress}.");
         while (!stop.IsCancellationRequested)
         {
-            using (var response = await http.PostAsync(AgentProtocol.PollPath, Json(new AgentPollRequest { Host = HostInfo(force: false) }), stop).ConfigureAwait(false))
+            using (var response = await http.PostAsync(AgentProtocol.PollPath, Json(new AgentPollRequest { Host = HostInfo(force: false), Busy = Busy }), stop).ConfigureAwait(false))
             {
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
                 {
@@ -149,9 +171,22 @@ public sealed class AgentRunner
                 }
 
                 var poll = JsonSerializer.Deserialize<AgentPollResponse>(await response.Content.ReadAsStringAsync().ConfigureAwait(false), AgentJson.Options);
-                if (poll?.Update is { } update)
+                if (poll?.Update is { } update && Busy is { } busy)
                 {
-                    if (await UpdateAsync(http, update, stop).ConfigureAwait(false))
+                    // A server that does not know about the work (e.g. restarted meanwhile) offered an update: it waits.
+                    if (_postponedUpdate != update.FilesHash)
+                    {
+                        _log.Write($"Update to version {update.Version} postponed: {busy}.");
+                        _postponedUpdate = update.FilesHash;
+                    }
+
+                    await DelayAsync(TimeSpan.FromSeconds(5), stop).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (poll?.Update is { } offer)
+                {
+                    if (await UpdateAsync(http, offer, stop).ConfigureAwait(false))
                     {
                         return AgentProtocol.RestartExitCode;
                     }
@@ -174,7 +209,12 @@ public sealed class AgentRunner
 
     private async Task ExecuteAsync(HttpClient http, AgentCommand command, CancellationToken stop)
     {
-        var result = command.Kind == AgentCommandKinds.RestoreFiles ? await StartTransferAsync(http, command, stop).ConfigureAwait(false) : _executor.Execute(command);
+        var result = command.Kind switch
+        {
+            AgentCommandKinds.RestoreFiles => await StartTransferAsync(http, command, stop).ConfigureAwait(false),
+            AgentCommandKinds.SqlJob => StartSqlJob(http, command, stop),
+            _ => _executor.Execute(command),
+        };
         for (var attempt = 1; attempt <= 3 && !stop.IsCancellationRequested; attempt++)
         {
             try
@@ -212,12 +252,64 @@ public sealed class AgentRunner
             return result;
         }
 
-        // The server considers a restore done with its final report; the task here ends a moment later. A restore
-        // started right after the previous one waits for that instead of being refused.
-        Task? previous;
-        lock (_transferLock)
+        var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
+        client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
+        var transfer = new FileRestoreTransfer(client, command.TransferId, _restoreFiles, _log);
+        var busy = await StartWorkAsync($"file restore {command.TransferId}", async () =>
         {
-            previous = _transfer;
+            using (client)
+            {
+                await transfer.RunAsync(stop).ConfigureAwait(false);
+            }
+        }, stop).ConfigureAwait(false);
+        if (busy is not null)
+        {
+            client.Dispose();
+            result.Error = $"This guest is busy ({busy}); the server queues the restore until it has finished.";
+            return result;
+        }
+
+        result.Success = true;
+        return result;
+    }
+
+    /// <summary>
+    /// Accepts a SQL job and runs it in the background on its own connection. Jobs that only read (the inventory) run
+    /// beside other work; jobs that change the guest will take the work slot.
+    /// </summary>
+    private AgentCommandResult StartSqlJob(HttpClient http, AgentCommand command, CancellationToken stop)
+    {
+        var result = new AgentCommandResult { CommandId = command.Id };
+        if (_sql is null || _config is null)
+        {
+            result.Error = "This agent cannot run SQL Server jobs.";
+            return result;
+        }
+
+        var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
+        client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
+        var job = new SqlJobRunner(client, command.JobId, _sql, _log);
+        _ = Task.Run(async () =>
+        {
+            using (client)
+            {
+                await job.RunAsync(stop).ConfigureAwait(false);
+            }
+        });
+        result.Success = true;
+        return result;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="work"/> in the work slot; returns null when it started, or what holds the slot. Work that is
+    /// just finishing (the server already has its final report) is waited for briefly instead of refusing.
+    /// </summary>
+    private async Task<string?> StartWorkAsync(string name, Func<Task> work, CancellationToken stop)
+    {
+        Task? previous;
+        lock (_workLock)
+        {
+            previous = _work;
         }
 
         if (previous is { IsCompleted: false })
@@ -225,28 +317,17 @@ public sealed class AgentRunner
             await Task.WhenAny(previous, Task.Delay(TimeSpan.FromSeconds(5), stop)).ConfigureAwait(false);
         }
 
-        lock (_transferLock)
+        lock (_workLock)
         {
-            if (_transfer is { IsCompleted: false })
+            if (_work is { IsCompleted: false })
             {
-                result.Error = "Another file restore is running in this guest; try again when it has finished.";
-                return result;
+                return _workName;
             }
 
-            var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
-            client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
-            var transfer = new FileRestoreTransfer(client, command.TransferId, _restoreFiles, _log);
-            _transfer = Task.Run(async () =>
-            {
-                using (client)
-                {
-                    await transfer.RunAsync(stop).ConfigureAwait(false);
-                }
-            });
+            _workName = name;
+            _work = Task.Run(work);
+            return null;
         }
-
-        result.Success = true;
-        return result;
     }
 
     /// <summary>
@@ -327,9 +408,20 @@ public sealed class AgentRunner
         if (force || _hostInfo is null || DateTime.UtcNow - _hostInfoAt > TimeSpan.FromMinutes(10))
         {
             _hostInfo = _host.Collect();
-            if (_restoreFiles is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilityRestoreFiles))
+            if (_sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlRestore))
             {
-                _hostInfo.Capabilities.Add(AgentProtocol.CapabilityRestoreFiles);
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlRestore);
+            }
+
+            if (_restoreFiles is not null)
+            {
+                foreach (var capability in new[] { AgentProtocol.CapabilityRestoreFiles, AgentProtocol.CapabilityRestoreFilesV2 })
+                {
+                    if (!_hostInfo.Capabilities.Contains(capability))
+                    {
+                        _hostInfo.Capabilities.Add(capability);
+                    }
+                }
             }
 
             _hostInfoAt = DateTime.UtcNow;

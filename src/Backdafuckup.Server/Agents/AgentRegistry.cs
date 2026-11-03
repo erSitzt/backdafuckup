@@ -27,6 +27,9 @@ public sealed class AgentOptions
     /// <summary>A file restore into a VM fails when the agent neither downloads nor reports for this long.</summary>
     public TimeSpan TransferSilenceLimit { get; set; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>How long a restore waits for an agent that is busy with other work in its guest, before it fails.</summary>
+    public TimeSpan WorkWaitLimit { get; set; } = TimeSpan.FromHours(2);
+
     /// <summary>Push installation: how long a started agent service must keep running to count as working.</summary>
     public TimeSpan ServiceStableTime { get; set; } = TimeSpan.FromSeconds(10);
 
@@ -81,6 +84,42 @@ public sealed class AgentRegistry(TimeProvider time)
     /// <summary>True while an operation runs or commands wait for the agent: updates wait.</summary>
     public bool IsBusy(Guid agentId) =>
         _agents.TryGetValue(agentId, out var channel) && (Volatile.Read(ref channel.Operations) > 0 || channel.Commands.Reader.Count > 0);
+
+    /// <summary>What the agent reported at its last poll as occupying its work slot (null: idle).</summary>
+    public void SetReportedWork(Guid agentId, string? busy)
+    {
+        var channel = Channel(agentId);
+        lock (channel)
+        {
+            channel.ReportedWork = busy;
+            channel.ReportedWorkAt = time.GetUtcNow();
+        }
+    }
+
+    /// <summary>
+    /// Reserves the agent's work slot for a restore (or later a SQL job): null while other work of this server runs there,
+    /// or while the agent reports work the server does not know about (e.g. started before a server restart). A report
+    /// older than the end of this server's last work there is stale (the agent reports at the start of each long poll).
+    /// </summary>
+    public IDisposable? TryReserveWork(Guid agentId)
+    {
+        var channel = Channel(agentId);
+        lock (channel)
+        {
+            if (channel.Working || (channel.ReportedWork is not null && channel.ReportedWorkAt > channel.WorkEndedAt))
+            {
+                return null;
+            }
+
+            channel.Working = true;
+            Interlocked.Increment(ref channel.Operations);
+            return new WorkReservation(channel, time);
+        }
+    }
+
+    /// <summary>For log lines while waiting: what occupies the agent.</summary>
+    public string WorkText(Guid agentId) =>
+        _agents.TryGetValue(agentId, out var channel) && channel.ReportedWork is { } reported ? reported : "another restore of this server";
 
     /// <summary>Waits up to <paramref name="hold"/> for the next command of the agent (the long poll).</summary>
     public async Task<AgentCommand?> NextCommandAsync(Guid agentId, TimeSpan hold, CancellationToken cancellationToken)
@@ -155,11 +194,38 @@ public sealed class AgentRegistry(TimeProvider time)
         }
     }
 
+    private sealed class WorkReservation(AgentChannel channel, TimeProvider time) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                lock (channel)
+                {
+                    channel.Working = false;
+                    channel.WorkEndedAt = time.GetUtcNow();
+                }
+
+                Interlocked.Decrement(ref channel.Operations);
+            }
+        }
+    }
+
     private sealed class AgentChannel
     {
         public int OpenPollCount;
 
         public int Operations;
+
+        public bool Working;
+
+        public string? ReportedWork;
+
+        public DateTimeOffset ReportedWorkAt;
+
+        public DateTimeOffset WorkEndedAt;
 
         public Channel<AgentCommand> Commands { get; } = System.Threading.Channels.Channel.CreateUnbounded<AgentCommand>();
 

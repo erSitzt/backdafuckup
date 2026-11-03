@@ -1,5 +1,51 @@
 namespace Backdafuckup.Contracts;
 
+/// <summary>A stored SQL Server login (the password is never returned).</summary>
+public sealed record SqlCredentialDto(Guid Id, string UserName, string? Description, DateTimeOffset CreatedUtc);
+
+public sealed record SaveSqlCredentialDto(string UserName, string Password, string? Description);
+
+/// <summary>
+/// What the agent in a VM finds: SQL Server instances, and with an account (a Windows credential or a SQL login) what
+/// that account sees there.
+/// </summary>
+public sealed record SqlInventoryRequestDto(string VmNativeId, Guid? CredentialId, string? Instance);
+
+public sealed record SqlTargetDto(
+    string Host,
+    string? Address,
+    string? Account,
+    IReadOnlyList<SqlTargetInstanceDto> Instances,
+    IReadOnlyList<SqlTargetVolumeDto> Volumes);
+
+public sealed record SqlTargetInstanceDto(
+    string Name,
+    string? InstanceId,
+    string? SetupVersion,
+    string? Product,
+    string? SetupEdition,
+    string? ServiceName,
+    string? ServiceState,
+    string? ServiceAccount,
+    string? DefaultDataFolder,
+    string? DefaultLogFolder,
+    string? BackupFolder,
+    bool Connected,
+    string? ConnectError,
+    string? ProductVersion,
+    string? Edition,
+    int? EngineEdition,
+    string? LoginName,
+    bool? IsSysadmin,
+    bool? IsDbCreator,
+    IReadOnlyList<SqlTargetDatabaseDto> Databases);
+
+public sealed record SqlTargetDatabaseDto(string Name, string State, string? RecoveryModel, bool ReadOnly, IReadOnlyList<SqlTargetFileDto> Files);
+
+public sealed record SqlTargetFileDto(string LogicalName, string PhysicalName, string Type, long SizeBytes);
+
+public sealed record SqlTargetVolumeDto(string Root, string? Label, long FreeBytes, long TotalBytes);
+
 /// <summary>Download the files of one database as a ZIP (with an attach script).</summary>
 public sealed record SqlDownloadRequestDto(string Instance, string Database, string? TimeZone);
 

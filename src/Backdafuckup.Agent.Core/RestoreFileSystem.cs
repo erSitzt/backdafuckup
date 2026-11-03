@@ -41,6 +41,18 @@ public interface IRestoreFileSystem
 
     /// <summary>Applies owner, group and DACL of a self-relative security descriptor.</summary>
     void SetSecurity(string path, bool isDirectory, byte[] descriptor);
+
+    /// <summary>Renames a regular file in its folder or volume; <paramref name="newPath"/> must not exist.</summary>
+    void Rename(string path, string newPath);
+
+    /// <summary>Deletes a regular file (never a folder or a link).</summary>
+    void Delete(string path);
+
+    /// <summary>
+    /// Adds an "allow full control" entry for <paramref name="account"/> (a name such as <c>NT SERVICE\MSSQL$SQLEXPRESS</c>
+    /// or a SID) to the file's DACL; the other entries stay.
+    /// </summary>
+    void GrantFullControl(string path, string account);
 }
 
 /// <summary>
@@ -133,6 +145,57 @@ public abstract class PortableRestoreFileSystem : IRestoreFileSystem
 
     public virtual void SetSecurity(string path, bool isDirectory, byte[] descriptor) =>
         throw new PlatformNotSupportedException("permissions can only be restored on Windows");
+
+    public void Rename(string path, string newPath)
+    {
+        Guard(path);
+        Guard(newPath);
+        if (Probe(path) != RestorePathKind.File)
+        {
+            throw new IOException($"{path} is not a regular file.");
+        }
+
+        if (Probe(newPath) != RestorePathKind.Missing)
+        {
+            throw new IOException($"{newPath} exists already.");
+        }
+
+        File.Move(Map(path), Map(newPath));
+    }
+
+    public void Delete(string path)
+    {
+        Guard(path);
+        switch (Probe(path))
+        {
+            case RestorePathKind.Missing:
+                return;
+            case RestorePathKind.File:
+                var mapped = Map(path);
+                var attributes = File.GetAttributes(mapped);
+                if ((attributes & Blocking) != 0)
+                {
+                    File.SetAttributes(mapped, attributes & ~Blocking);
+                }
+
+                File.Delete(mapped);
+                return;
+            default:
+                throw new IOException($"{path} is not a regular file; it is not deleted.");
+        }
+    }
+
+    public virtual void GrantFullControl(string path, string account) =>
+        throw new PlatformNotSupportedException("permissions can only be set on Windows");
+
+    /// <summary>The same path guard as for restored items: never the agent's own folder.</summary>
+    protected void Guard(string path)
+    {
+        if (CheckPath(path) is string refused)
+        {
+            throw new UnauthorizedAccessException($"{path}: {refused}.");
+        }
+    }
 
     /// <summary>The real path for an absolute Windows path.</summary>
     protected abstract string Map(string windowsPath);

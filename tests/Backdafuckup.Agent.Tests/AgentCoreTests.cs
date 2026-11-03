@@ -207,6 +207,45 @@ public sealed class AgentCoreTests : IDisposable
 
     private static AgentCommand Command(string kind, Guid operation) => new() { Id = Guid.NewGuid(), Kind = kind, OperationId = operation, TimeoutMs = 30_000 };
 
+    [Fact]
+    public void Rename_and_delete_touch_only_regular_files_and_never_the_agent_folder()
+    {
+        var fs = new Sandbox(Path.Combine(_root, "guest"));
+        Directory.CreateDirectory(Path.Combine(_root, "guest", "D", "SQL"));
+        File.WriteAllText(Path.Combine(_root, "guest", "D", "SQL", "shop.mdf"), "data");
+        File.WriteAllText(Path.Combine(_root, "guest", "D", "SQL", "other.mdf"), "other");
+        File.SetAttributes(Path.Combine(_root, "guest", "D", "SQL", "other.mdf"), FileAttributes.ReadOnly);
+
+        fs.Rename(@"D:\SQL\shop.mdf", @"D:\SQL\shop.mdf.bdfu-replaced");
+        Assert.Equal("data", File.ReadAllText(Path.Combine(_root, "guest", "D", "SQL", "shop.mdf.bdfu-replaced")));
+        Assert.Equal(RestorePathKind.Missing, fs.Probe(@"D:\SQL\shop.mdf"));
+
+        // The target must not exist; a folder is not renamed or deleted; a read-only file is deleted.
+        Assert.Throws<IOException>(() => fs.Rename(@"D:\SQL\shop.mdf.bdfu-replaced", @"D:\SQL\other.mdf"));
+        Assert.Throws<IOException>(() => fs.Rename(@"D:\SQL", @"D:\SQL2"));
+        Assert.Throws<IOException>(() => fs.Delete(@"D:\SQL"));
+        fs.Delete(@"D:\SQL\other.mdf");
+        Assert.Equal(RestorePathKind.Missing, fs.Probe(@"D:\SQL\other.mdf"));
+        fs.Delete(@"D:\SQL\missing.mdf");
+
+        // A link is never deleted, and nothing in the agent's folder is touched.
+        Directory.CreateSymbolicLink(Path.Combine(_root, "guest", "D", "SQL", "link.mdf"), Path.Combine(_root, "guest", "D", "SQL", "shop.mdf.bdfu-replaced"));
+        Assert.Throws<IOException>(() => fs.Delete(@"D:\SQL\link.mdf"));
+        Assert.Throws<UnauthorizedAccessException>(() => fs.Delete(@"C:\Program Files\backdafuckup Agent\agent.key"));
+        Assert.Throws<PlatformNotSupportedException>(() => fs.GrantFullControl(@"D:\SQL\shop.mdf.bdfu-replaced", @"NT SERVICE\MSSQL$SQLEXPRESS"));
+    }
+
+    private sealed class Sandbox(string root) : PortableRestoreFileSystem
+    {
+        public override string? CheckRoot(string root) => null;
+
+        public override string? CheckPath(string path) =>
+            WindowsPath.IsBelow(path, @"C:\Program Files\backdafuckup Agent") ? "the agent's own folder is not restored" : null;
+
+        protected override string Map(string windowsPath) =>
+            Path.Combine([root, windowsPath[..1], .. windowsPath[3..].Split('\\', StringSplitOptions.RemoveEmptyEntries)]);
+    }
+
     private sealed class FakeVss : IVssBridge
     {
         public List<string> Calls { get; } = [];

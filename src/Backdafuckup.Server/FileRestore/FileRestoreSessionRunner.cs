@@ -184,6 +184,35 @@ public sealed class FileRestoreSessionRunner(
     }
 
     /// <summary>
+    /// The agent's work slot: one restore at a time per guest. Work of another session (or work the agent reports from
+    /// before a server restart) is waited for, with a log line, instead of failing.
+    /// </summary>
+    internal static async Task<IDisposable> ReserveAgentAsync(
+        AgentRegistry registry, Guid agentId, string host, IOperationLog log, TimeSpan limit, TimeProvider time, CancellationToken cancellationToken)
+    {
+        var reservation = registry.TryReserveWork(agentId);
+        if (reservation is not null)
+        {
+            return reservation;
+        }
+
+        log.Info($"The agent in {host} is busy ({registry.WorkText(agentId)}); this restore starts when it has finished.");
+        var started = time.GetUtcNow();
+        while ((reservation = registry.TryReserveWork(agentId)) is null)
+        {
+            if (time.GetUtcNow() - started > limit)
+            {
+                throw new TimeoutException($"The agent in {host} was still busy after {limit.TotalMinutes:0} minutes ({registry.WorkText(agentId)}).");
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(2), time, cancellationToken).ConfigureAwait(false);
+        }
+
+        log.Info($"The agent in {host} is free; starting.");
+        return reservation;
+    }
+
+    /// <summary>
     /// Into a Windows VM through its agent: plans the items here, then the agent fetches and writes them and reports back.
     /// The agent stays reserved (no self-update) until it has finished.
     /// </summary>
@@ -256,12 +285,13 @@ public sealed class FileRestoreSessionRunner(
             TransferId = Guid.NewGuid(),
             Roots = [root],
             Overwrite = request.Mode != FileRestoreModeDto.Keep,
+            IfExists = request.Mode != FileRestoreModeDto.Keep ? FileTransferIfExists.Replace : FileTransferIfExists.Keep,
             RestorePermissions = request.Target.RestorePermissions,
             ItemCount = planned.Items.Count,
             TotalBytes = planned.Bytes,
         };
         using var transfer = new AgentTransfer(agent.Id, info, planned, disks, request.Volume, progress, time);
-        using var reservation = registry.Reserve(agent.Id);
+        using var reservation = await ReserveAgentAsync(registry, agent.Id, host, log, agentOptions.Value.WorkWaitLimit, time, cancellationToken).ConfigureAwait(false);
         transfers.Add(transfer);
         try
         {

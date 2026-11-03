@@ -109,6 +109,9 @@ public enum CredentialKind
 
     /// <summary>Linux account for file restores over SSH; the secret is a protected <see cref="LinuxSecret"/> (JSON).</summary>
     Linux,
+
+    /// <summary>SQL Server login for SQL restores; the secret is the protected password.</summary>
+    SqlServer,
 }
 
 /// <summary>What a Linux credential holds (stored as protected JSON): password or private key, and the sudo password.</summary>

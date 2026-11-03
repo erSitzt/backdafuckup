@@ -33,11 +33,12 @@ public static class AgentEndpoints
 
             await agents.UpdateAsync(agentId, request.Host ?? new AgentHostInfo(), http.Connection.RemoteIpAddress?.ToString(), ct);
             registry.SetCapabilities(agentId, request.Host?.Capabilities);
+            registry.SetReportedWork(agentId, request.Busy);
 
             // A different set of files on the server (after a server update): offer the update, but never during a backup
             // operation or while commands wait (a restart between freeze and thaw would break the freeze).
             if (request.Host is { FilesHash.Length: > 0 } host && packages.Get(host.Build) is { } build && build.FilesHash != host.FilesHash
-                && !registry.IsBusy(agentId))
+                && !registry.IsBusy(agentId) && request.Busy is null)
             {
                 return Results.Json(new AgentPollResponse { Update = build.ToOffer() }, AgentJson.Options);
             }
@@ -76,7 +77,8 @@ public static class AgentEndpoints
             var vms = await db.Inventory.AsNoTracking().Where(i => i.Kind == InventoryKind.Vm).ToListAsync(ct);
             var list = await db.Agents.AsNoTracking().OrderBy(a => a.HostName).ToListAsync(ct);
             return list.Select(a => a.ToDto(
-                agents.IsOnline(a.Id), vms.FirstOrDefault(v => v.NativeId == a.VmNativeId)?.Name, packages.Get(a.Build)?.FilesHash, registry.HasCapability(a.Id, AgentProtocol.CapabilityRestoreFiles))).ToList();
+                agents.IsOnline(a.Id), vms.FirstOrDefault(v => v.NativeId == a.VmNativeId)?.Name, packages.Get(a.Build)?.FilesHash, registry.HasCapability(a.Id, AgentProtocol.CapabilityRestoreFiles),
+                registry.HasCapability(a.Id, AgentProtocol.CapabilitySqlRestore))).ToList();
         });
 
         console.MapGet("/settings", async (AgentSettingsStore settings, AgentPackages packages, CancellationToken ct) => new AgentSettingsDto
@@ -258,6 +260,30 @@ public static class AgentEndpoints
                 : (Results.Problem("The restore is not running (any more): stopped, finished, or the server was restarted.", statusCode: StatusCodes.Status404NotFound), null);
         }
 
+        // SQL jobs: the agent fetches the request (with the account's password, only over this pinned HTTPS channel) and
+        // posts the result. A job belongs to one agent; 404 after it ended or the server restarted.
+        agent.MapGet("/sql-jobs/{id:guid}", async (Guid id, AgentService agents, Sql.SqlJobs jobs, HttpContext http, CancellationToken ct) =>
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return Results.Unauthorized();
+            }
+
+            return jobs.Get(id, agentId) is { } request
+                ? Results.Json(request, AgentJson.Options)
+                : Results.Problem("The SQL job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
+        });
+
+        agent.MapPost("/sql-jobs/{id:guid}/result", async (Guid id, SqlJobResult result, AgentService agents, Sql.SqlJobs jobs, HttpContext http, CancellationToken ct) =>
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return Results.Unauthorized();
+            }
+
+            return jobs.Complete(id, agentId, result) ? Results.NoContent() : Results.Problem("The SQL job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
+        });
+
         agent.MapGet("/transfers/{id:guid}", async (Guid id, AgentService agents, FileRestore.AgentTransfers transfers, HttpContext http, CancellationToken ct) =>
         {
             var (error, transfer) = await FindAsync(id, agents, transfers, http, ct);
@@ -310,7 +336,7 @@ public static class AgentEndpoints
         });
     }
 
-    private static AgentDto ToDto(this AgentEntity a, bool online, string? vmName, string? currentFilesHash, bool canRestoreFiles) => new()
+    private static AgentDto ToDto(this AgentEntity a, bool online, string? vmName, string? currentFilesHash, bool canRestoreFiles, bool canRunSql) => new()
     {
         Id = a.Id,
         HostName = a.HostName,
@@ -329,5 +355,6 @@ public static class AgentEndpoints
         EnrolledUtc = a.EnrolledUtc,
         LastContactUtc = a.LastContactUtc,
         CanRestoreFiles = canRestoreFiles,
+        CanRunSql = canRunSql,
     };
 }

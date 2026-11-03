@@ -19,7 +19,6 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <Description>backdafuckup agent: application-consistent VM backups (VSS) for the backdafuckup backup server</Description>
-    <Version>0.2.0</Version>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(TargetFramework)' != 'net48' and '$(RuntimeIdentifier)' != ''">
@@ -42,11 +41,15 @@
     <Reference Include="System.ServiceProcess" />
     <Reference Include="System.Management" />
     <Reference Include="System.Net.Http" />
+    <!-- System.Data.SqlClient ships with the .NET Framework: no extra files for the 4.8 build. -->
+    <Reference Include="System.Data" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' != 'net48'">
     <PackageReference Include="System.Management" />
     <PackageReference Include="System.ServiceProcess.ServiceController" />
+    <PackageReference Include="Microsoft.Data.SqlClient" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" />
   </ItemGroup>
 
   <ItemGroup>

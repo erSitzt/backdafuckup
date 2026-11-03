@@ -78,10 +78,10 @@ public sealed class AgentTransfer : IDisposable
         {
             ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
             _contentImage ??= GuestImage.Open(_disks, describe: false);
-            var fs = _contentImage.OpenFileSystem(_volume);
             var source = Plan.Sources[index] ?? throw new KeyNotFoundException($"Item {index} is not a file.");
-            var entry = fs.Stat(source);
-            using var stream = fs.OpenRead(source);
+            var fs = _contentImage.OpenFileSystem(source.Volume ?? _volume);
+            var entry = fs.Stat(source.Path);
+            using var stream = fs.OpenRead(source.Path);
             return read(stream, entry);
         }
     }
@@ -105,8 +105,8 @@ internal sealed class AgentTransferPlan
 {
     public List<FileTransferItem> Items { get; } = [];
 
-    /// <summary>For file items, the path in the backup; null for folders and folder ends.</summary>
-    public List<GuestPath?> Sources { get; } = [];
+    /// <summary>For file items, where the content is in the backup; null for folders and folder ends.</summary>
+    public List<TransferSource?> Sources { get; } = [];
 
     /// <summary>How each item's source appears in the log (C:\Users\x\a.txt).</summary>
     public List<string> Descriptions { get; } = [];
@@ -124,6 +124,9 @@ internal sealed class AgentTransferPlan
     /// <summary>Items that could not even be read from the backup while planning.</summary>
     public long Failed { get; set; }
 }
+
+/// <summary>A file in the backup: on the transfer's volume (null) or on the given one (e.g. a database's log on L:).</summary>
+internal sealed record TransferSource(string? Volume, GuestPath Path);
 
 /// <summary>The transfers in progress (in memory: after a server restart the agent's next request gets 404 and it stops).</summary>
 public sealed class AgentTransfers(TimeProvider time)

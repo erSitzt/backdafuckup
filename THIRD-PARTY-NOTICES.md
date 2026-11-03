@@ -18,11 +18,13 @@ backdafuckup uses the following third-party components. Keep this list in sync w
 | DiscUtils.Ext and DiscUtils.Xfs, vendored with changes in `src/ThirdParty` (see their `NOTICE.md`) | MIT | FileLevel (ext2/3/4 and XFS) |
 | System.IO.Hashing (Microsoft) | MIT | FileLevel (CRC-32 for ZIP downloads) |
 | SSH.NET | MIT | Ssh (file restore into Linux VMs over SSH/SFTP) |
+| Microsoft.Data.SqlClient (and its dependencies, incl. System.Security.Cryptography.Pkcs) | MIT | Guest agent, .NET 10 build (SQL Server restores; the .NET Framework build uses the built-in System.Data.SqlClient) |
+| Scalar.AspNetCore | MIT | Server (API reference at /api-docs; telemetry and cloud features switched off) |
 | mingw-w64 runtime (headers, libraries) and GCC runtime libraries | mingw-w64: ZPL / public domain; libgcc, libstdc++: GPL-3.0 with GCC Runtime Library Exception | bdfu-vss.dll (statically linked runtime) |
 
 Build tools (not shipped): mingw-w64 GCC (GPL-3.0) and osslsigncode (GPL-3.0) in the Docker image of `native/bdfu-vss`.
 
-Test-only dependencies (not shipped): xUnit (Apache-2.0), Testcontainers (MIT), bUnit (MIT), BenchmarkDotNet (MIT), coverlet (MIT).
+Test-only dependencies (not shipped): xUnit (Apache-2.0), Testcontainers and Testcontainers.MsSql (MIT), the SQL Server container image (Developer edition, development and test use only), bUnit (MIT), BenchmarkDotNet (MIT), coverlet (MIT).
 
 Specifications implemented from public documents (no code copied):
 - NBD protocol (`doc/proto.md`, public domain)

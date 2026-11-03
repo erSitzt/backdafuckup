@@ -82,6 +82,26 @@ internal sealed class WindowsRestoreFileSystem : PortableRestoreFileSystem
         }
     }
 
+    public override void GrantFullControl(string path, string account)
+    {
+        Guard(path);
+        var identity = account.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
+            ? new System.Security.Principal.SecurityIdentifier(account)
+            : (System.Security.Principal.SecurityIdentifier)new System.Security.Principal.NTAccount(account).Translate(typeof(System.Security.Principal.SecurityIdentifier));
+        var rule = new FileSystemAccessRule(identity, FileSystemRights.FullControl, AccessControlType.Allow);
+        var mapped = Map(path);
+#if NET48
+        var security = File.GetAccessControl(mapped, AccessControlSections.Access);
+        security.AddAccessRule(rule);
+        File.SetAccessControl(mapped, security);
+#else
+        var file = new FileInfo(mapped);
+        var security = file.GetAccessControl(AccessControlSections.Access);
+        security.AddAccessRule(rule);
+        file.SetAccessControl(security);
+#endif
+    }
+
     protected override string Map(string windowsPath)
     {
         if (!WindowsPath.IsValidAbsolute(windowsPath))

@@ -128,7 +128,7 @@ internal static class AgentHost
         // need more at the same time.
         System.Net.ServicePointManager.DefaultConnectionLimit = Math.Max(System.Net.ServicePointManager.DefaultConnectionLimit, 16);
 #endif
-        var runner = new AgentRunner(paths, new WindowsHostInfo(paths, () => vss.ProviderState), vss, log, restoreFiles: new WindowsRestoreFileSystem());
+        var runner = new AgentRunner(paths, new WindowsHostInfo(paths, () => vss.ProviderState), vss, log, restoreFiles: new WindowsRestoreFileSystem(), sql: new WindowsSqlEnvironment());
         var code = runner.RunAsync(stop).GetAwaiter().GetResult();
         log.Write(code == AgentProtocol.RestartExitCode ? "Restarting for the update." : "Stopped.");
         return code;

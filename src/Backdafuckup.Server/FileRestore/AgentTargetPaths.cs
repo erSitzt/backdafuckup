@@ -156,7 +156,7 @@ internal static class AgentTargetPaths
                 Attributes = (int)((entry.Attributes ?? 0) & KeptAttributes),
                 Security = permissions && kind != FileTransferItemKinds.Directory ? Descriptor(path) : -1,
             });
-            plan.Sources.Add(source);
+            plan.Sources.Add(source is null ? null : new TransferSource(null, source));
             plan.Descriptions.Add(describe(path));
         }
 
@@ -188,6 +188,47 @@ internal static class AgentTargetPaths
 
             return index;
         }
+    }
+}
+
+/// <summary>Plans the transfer of single files from any volumes to given target paths (e.g. the files of a database).</summary>
+internal static class AgentFilePlan
+{
+    /// <param name="files">Volume and file system of the source, its path in the backup, the target path in the guest, and how it is logged.</param>
+    public static AgentTransferPlan Plan(IReadOnlyList<(string Volume, IGuestFileSystem Fs, GuestPath Source, string Target, string Description)> files)
+    {
+        var plan = new AgentTransferPlan();
+        foreach (var (volume, fs, source, target, description) in files)
+        {
+            if (!AgentTargetPaths.IsLocalAbsolute(target))
+            {
+                throw new ArgumentException($"{target} is not an absolute local path.");
+            }
+
+            var entry = fs.Stat(source);
+            if (entry.Kind != GuestEntryKind.File || entry.Unsupported is not null)
+            {
+                throw new InvalidDataException($"{description} cannot be restored: {entry.Unsupported ?? "it is not a regular file"}.");
+            }
+
+            plan.Items.Add(new FileTransferItem
+            {
+                Index = plan.Items.Count,
+                Kind = FileTransferItemKinds.File,
+                Path = target,
+                Size = entry.Size,
+                CreatedUtc = entry.CreatedUtc,
+                ModifiedUtc = entry.ModifiedUtc,
+                AccessedUtc = entry.AccessedUtc,
+                Attributes = (int)((entry.Attributes ?? 0) & (FileAttributes.ReadOnly | FileAttributes.Archive)),
+            });
+            plan.Sources.Add(new TransferSource(volume, source));
+            plan.Descriptions.Add(description);
+            plan.Files++;
+            plan.Bytes += entry.Size;
+        }
+
+        return plan;
     }
 }
 
