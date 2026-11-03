@@ -12,6 +12,8 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="System.Text.Json" />
+    <PackageReference Include="ISCSI" />
+    <PackageReference Include="DiskAccessLibrary" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Backdafuckup.Agent.Tests" />

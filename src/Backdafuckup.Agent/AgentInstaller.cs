@@ -130,6 +130,18 @@ internal static class AgentInstaller
         {
             if (Directory.Exists(TargetDirectory))
             {
+                // Published volumes are mounted into folders below the install folder: remove those mount points and
+                // iSCSI sessions first (the stopped service normally did), so the delete cannot reach into a volume.
+                var log = new AgentLog(Path.Combine(TargetDirectory, AgentProtocol.LogFile)) { Echo = true };
+                var publishHost = new WindowsPublishHost(TargetDirectory);
+                PublishRunner.CleanupStale(publishHost, log);
+                if (Directory.Exists(publishHost.WorkFolder)
+                    && Directory.EnumerateDirectories(publishHost.WorkFolder).SelectMany(d => Directory.EnumerateDirectories(d)).Any(d => (File.GetAttributes(d) & FileAttributes.ReparsePoint) != 0))
+                {
+                    Console.Error.WriteLine($"A published volume is still mounted below {publishHost.WorkFolder}; remove it with mountvol <folder> /D and run the removal again.");
+                    return Failed;
+                }
+
                 Directory.Delete(TargetDirectory, true);
             }
         }

@@ -12,6 +12,7 @@ backdafuckup uses the following third-party components. Keep this list in sync w
 | EFCore.NamingConventions | Apache-2.0 | Server |
 | MudBlazor | MIT | Web (UI components) |
 | SMBLibrary (Tal Aloni) | LGPL-3.0 (used as unmodified library) | Smb (push installation of the guest agent over SMB 2/3) |
+| ISCSI and DiskAccessLibrary (Tal Aloni) | LGPL-3.0-or-later (used as unmodified libraries) | Guest agent (publishing restore points into a VM through a loopback iSCSI target) |
 | System.Text.Json, System.Management, System.ServiceProcess.ServiceController (Microsoft) | MIT | Guest agent |
 | Microsoft.NETFramework.ReferenceAssemblies | MIT | Guest agent (build of the .NET Framework 4.8 variant) |
 | LTRData.DiscUtils (Core, Streams, Ntfs, Fat, Lvm, Registry) | MIT | FileLevel (reading partitions and file systems of restore points) |

@@ -25,6 +25,7 @@ public sealed class AgentRunner
     private readonly TimeSpan _retryDelay;
     private readonly IRestoreFileSystem? _restoreFiles;
     private readonly ISqlEnvironment? _sql;
+    private readonly IPublishHost? _publish;
     private readonly object _workLock = new object();
     private Task? _work;
     private string? _workName;
@@ -36,12 +37,14 @@ public sealed class AgentRunner
 
     /// <param name="restoreFiles">File operations for file-level restores into this guest; null: the agent cannot restore files.</param>
     /// <param name="sql">The local SQL Server installation; null: the agent runs no SQL jobs.</param>
+    /// <param name="publish">The guest's iSCSI initiator and disk management; null: the agent publishes nothing.</param>
     public AgentRunner(
         AgentPaths paths, IHostInfoSource host, IVssBridge vss, AgentLog log, Func<AgentConfig, HttpMessageHandler>? handlerFactory = null, TimeSpan? retryDelay = null,
-        IRestoreFileSystem? restoreFiles = null, ISqlEnvironment? sql = null)
+        IRestoreFileSystem? restoreFiles = null, ISqlEnvironment? sql = null, IPublishHost? publish = null)
     {
         _restoreFiles = restoreFiles;
         _sql = sql;
+        _publish = publish;
         _paths = paths;
         _host = host;
         _log = log;
@@ -69,6 +72,40 @@ public sealed class AgentRunner
     public async Task<int> RunAsync(CancellationToken stop)
     {
         AgentFiles.RemoveReplaced(_paths.BaseDirectory);
+        if (_publish is not null)
+        {
+            try
+            {
+                PublishRunner.CleanupStale(_publish, _log);
+            }
+            catch (Exception ex) when (!(ex is OutOfMemoryException))
+            {
+                _log.Write($"Cleaning up publishes left over from before the restart failed: {ex.Message}");
+            }
+        }
+
+        try
+        {
+            return await LoopAsync(stop).ConfigureAwait(false);
+        }
+        finally
+        {
+            // A publish removes its mounts and iSCSI session when it sees the stop; give it the time for that.
+            Task? work;
+            lock (_workLock)
+            {
+                work = _work;
+            }
+
+            if (work is { IsCompleted: false })
+            {
+                await Task.WhenAny(work, Task.Delay(TimeSpan.FromSeconds(25))).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task<int> LoopAsync(CancellationToken stop)
+    {
         while (!stop.IsCancellationRequested)
         {
             try
@@ -213,6 +250,7 @@ public sealed class AgentRunner
         {
             AgentCommandKinds.RestoreFiles => await StartTransferAsync(http, command, stop).ConfigureAwait(false),
             AgentCommandKinds.SqlJob => StartSqlJob(http, command, stop),
+            AgentCommandKinds.Publish => await StartPublishAsync(http, command, stop).ConfigureAwait(false),
             _ => _executor.Execute(command),
         };
         for (var attempt = 1; attempt <= 3 && !stop.IsCancellationRequested; attempt++)
@@ -266,6 +304,40 @@ public sealed class AgentRunner
         {
             client.Dispose();
             result.Error = $"This guest is busy ({busy}); the server queues the restore until it has finished.";
+            return result;
+        }
+
+        result.Success = true;
+        return result;
+    }
+
+    /// <summary>
+    /// Accepts a publish and runs it in the work slot until the server says stop: the published disks are in the guest
+    /// for that long, and nothing else may write into it meanwhile.
+    /// </summary>
+    private async Task<AgentCommandResult> StartPublishAsync(HttpClient http, AgentCommand command, CancellationToken stop)
+    {
+        var result = new AgentCommandResult { CommandId = command.Id };
+        if (_publish is null || _config is null)
+        {
+            result.Error = "This agent cannot publish restore points.";
+            return result;
+        }
+
+        var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = TimeSpan.FromMinutes(2) };
+        client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
+        var publish = new PublishRunner(client, command.PublishId, _publish, _log);
+        var busy = await StartWorkAsync($"publish {command.PublishId}", async () =>
+        {
+            using (client)
+            {
+                await publish.RunAsync(stop).ConfigureAwait(false);
+            }
+        }, stop).ConfigureAwait(false);
+        if (busy is not null)
+        {
+            client.Dispose();
+            result.Error = $"This guest is busy ({busy}); the server queues the publish until it has finished.";
             return result;
         }
 
@@ -411,6 +483,11 @@ public sealed class AgentRunner
             if (_sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlRestore))
             {
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlRestore);
+            }
+
+            if (_publish is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilityPublish))
+            {
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilityPublish);
             }
 
             if (_restoreFiles is not null)

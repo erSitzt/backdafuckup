@@ -12,6 +12,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Backdafuckup.Agent.Core\Backdafuckup.Agent.Core.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Testing\Backdafuckup.Testing.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />

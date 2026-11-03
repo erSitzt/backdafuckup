@@ -50,6 +50,15 @@ public static class AgentProtocol
     /// <summary>SQL Server jobs: <c>GET {id}</c> (the request, with the account), <c>POST {id}/result</c>.</summary>
     public const string SqlJobsPath = "api/agent/sql-jobs";
 
+    /// <summary>The agent publishes restore point disks into its guest (<see cref="AgentCommandKinds.Publish"/>).</summary>
+    public const string CapabilityPublish = "publish-v1";
+
+    /// <summary>
+    /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
+    /// <see cref="PublishInfo.BlockSize"/> bytes), <c>POST {id}/status</c> (heartbeat; the answer says whether to stop).
+    /// </summary>
+    public const string PublishesPath = "api/agent/publishes";
+
     public const string ServiceName = "BackdafuckupAgent";
     public const string ServiceDisplayName = "backdafuckup Agent";
     public const string ExecutableName = "backdafuckup-agent.exe";
@@ -174,6 +183,13 @@ public static class AgentCommandKinds
     /// the result through <see cref="AgentProtocol.SqlJobsPath"/>.
     /// </summary>
     public const string SqlJob = "SqlJob";
+
+    /// <summary>
+    /// Publish <see cref="AgentCommand.PublishId"/>: serve the restore point's disks to the guest's iSCSI initiator over
+    /// 127.0.0.1, bring them online and mount their volumes into folders. Answered at once; the agent reports through
+    /// <see cref="AgentProtocol.PublishesPath"/> and unpublishes when the server says stop or goes silent.
+    /// </summary>
+    public const string Publish = "Publish";
 }
 
 public sealed class AgentCommand
@@ -197,6 +213,9 @@ public sealed class AgentCommand
 
     /// <summary>SqlJob: the job to fetch.</summary>
     public Guid JobId { get; set; }
+
+    /// <summary>Publish: the publish to fetch.</summary>
+    public Guid PublishId { get; set; }
 }
 
 public sealed class AgentCommandResult
@@ -644,4 +663,91 @@ public sealed class SqlVolumeInfo
     public long FreeBytes { get; set; }
 
     public long TotalBytes { get; set; }
+}
+
+/// <summary>What to publish (<c>GET api/agent/publishes/{id}</c>).</summary>
+public sealed class PublishInfo
+{
+    public Guid PublishId { get; set; }
+
+    /// <summary>For the agent's log, e.g. "SQL01, restore point of 2026-11-03 10:11".</summary>
+    public string Title { get; set; } = string.Empty;
+
+    /// <summary>Size of the blocks the agent fetches (default 1 MiB).</summary>
+    public int BlockSize { get; set; } = 1 << 20;
+
+    /// <summary>Writes go to an overlay file in the guest; beyond this size they fail.</summary>
+    public long MaxOverlayBytes { get; set; }
+
+    public List<PublishDisk> Disks { get; set; } = new List<PublishDisk>();
+
+    /// <summary>The partitions to mount into folders.</summary>
+    public List<PublishVolume> Volumes { get; set; } = new List<PublishVolume>();
+}
+
+public sealed class PublishDisk
+{
+    /// <summary>Position in <see cref="PublishInfo.Disks"/>; also the disk's index in the block URLs and its LUN.</summary>
+    public int Index { get; set; }
+
+    public string Key { get; set; } = string.Empty;
+
+    public long SizeBytes { get; set; }
+}
+
+public sealed class PublishVolume
+{
+    /// <summary>Folder name for the mount, e.g. "D" (the volume's drive letter in the backup) or "volume2".</summary>
+    public string Name { get; set; } = string.Empty;
+
+    public int DiskIndex { get; set; }
+
+    /// <summary>Byte offset of the partition on its disk.</summary>
+    public long StartOffset { get; set; }
+}
+
+public static class PublishStates
+{
+    public const string Starting = "starting";
+
+    /// <summary>The volumes are mounted (<see cref="PublishStatus.Mounts"/>).</summary>
+    public const string Mounted = "mounted";
+
+    public const string Failed = "failed";
+
+    /// <summary>Unpublished: everything is removed again.</summary>
+    public const string Ended = "ended";
+}
+
+/// <summary>The agent's report about a publish, also its heartbeat (<c>POST api/agent/publishes/{id}/status</c>).</summary>
+public sealed class PublishStatus
+{
+    public string State { get; set; } = PublishStates.Starting;
+
+    public List<PublishMount> Mounts { get; set; } = new List<PublishMount>();
+
+    /// <summary>Bytes written into the overlay so far.</summary>
+    public long OverlayBytes { get; set; }
+
+    /// <summary>Bytes fetched from the server so far.</summary>
+    public long ReadBytes { get; set; }
+
+    public string? Error { get; set; }
+
+    /// <summary>Lines for the session log (what was done, in order), since the last report.</summary>
+    public List<string> Log { get; set; } = new List<string>();
+}
+
+public sealed class PublishMount
+{
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Where the volume is mounted in the guest, e.g. <c>C:\ProgramData\backdafuckup Agent\publish\1a2b\D</c>.</summary>
+    public string Path { get; set; } = string.Empty;
+}
+
+public sealed class PublishStatusResponse
+{
+    /// <summary>True: unpublish now.</summary>
+    public bool Stop { get; set; }
 }

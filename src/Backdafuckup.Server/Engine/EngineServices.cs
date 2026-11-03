@@ -454,6 +454,7 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<FileRestore.FileRestoreSessionRunner>();
         services.AddSingleton<FileRestore.AgentTransfers>();
         services.AddSingleton<Sql.SqlJobs>();
+        services.AddSingleton<Publishing.DiskPublishes>();
         services.TryAddSingleton<Backdafuckup.Smb.ISmbShareConnector, Backdafuckup.Smb.SmbShareConnector>();
         services.TryAddSingleton<Backdafuckup.Ssh.ISshConnector, Backdafuckup.Ssh.SshConnector>();
         services.AddHostedService<FileRestore.FileRestoreSweeper>();

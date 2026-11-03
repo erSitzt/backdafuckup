@@ -69,6 +69,7 @@ public static class AgentEndpoints
         });
 
         MapTransfers(agent);
+        MapPublishes(agent);
 
         var console = app.MapGroup("/api/agents");
 
@@ -333,6 +334,69 @@ public static class AgentEndpoints
         {
             var (error, transfer) = await FindAsync(id, agents, transfers, http, ct);
             return transfer is null ? error! : Results.Json(transfers.Report(transfer, progress), AgentJson.Options);
+        });
+    }
+
+    /// <summary>
+    /// Publishes (<see cref="AgentProtocol.PublishesPath"/>): what to publish, the disk content block by block, and the
+    /// agent's reports. Only for the agent the publish belongs to; 404 after it ended or the server restarted, which
+    /// makes the agent unpublish.
+    /// </summary>
+    private static void MapPublishes(RouteGroupBuilder agent)
+    {
+        static async Task<(IResult? Error, Publishing.DiskPublish? Publish)> FindAsync(Guid id, AgentService agents, Publishing.DiskPublishes publishes, HttpContext http, CancellationToken ct)
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return (Results.Unauthorized(), null);
+            }
+
+            return publishes.Get(id, agentId) is { } publish
+                ? (null, publish)
+                : (Results.Problem("The publish is not running (any more): stopped, or the server was restarted.", statusCode: StatusCodes.Status404NotFound), null);
+        }
+
+        agent.MapGet("/publishes/{id:guid}", async (Guid id, AgentService agents, Publishing.DiskPublishes publishes, HttpContext http, CancellationToken ct) =>
+        {
+            var (error, publish) = await FindAsync(id, agents, publishes, http, ct);
+            if (publish is null)
+            {
+                return error!;
+            }
+
+            publish.LastHeartbeat = publishes.Time.GetUtcNow();
+            return Results.Json(publish.Info, AgentJson.Options);
+        });
+
+        agent.MapGet("/publishes/{id:guid}/disks/{disk:int}/blocks/{block:long}", async (Guid id, int disk, long block, AgentService agents, Publishing.DiskPublishes publishes, HttpContext http, CancellationToken ct) =>
+        {
+            var (error, publish) = await FindAsync(id, agents, publishes, http, ct);
+            if (publish is null)
+            {
+                return error!;
+            }
+
+            try
+            {
+                http.Response.ContentType = "application/octet-stream";
+                await publishes.CopyBlockAsync(publish, disk, block, http.Response.Body, ct);
+                return Results.Empty;
+            }
+            catch (ArgumentOutOfRangeException ex)
+            {
+                return Results.Problem(ex.Message, statusCode: StatusCodes.Status404NotFound);
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or ObjectDisposedException)
+            {
+                publish.Log($"Reading block {block} of disk {disk} from the backup failed: {ex.Message}");
+                return Results.Problem($"Reading it from the backup failed: {ex.Message}", statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
+        });
+
+        agent.MapPost("/publishes/{id:guid}/status", async (Guid id, PublishStatus status, AgentService agents, Publishing.DiskPublishes publishes, HttpContext http, CancellationToken ct) =>
+        {
+            var (error, publish) = await FindAsync(id, agents, publishes, http, ct);
+            return publish is null ? error! : Results.Json(publishes.Report(publish, status), AgentJson.Options);
         });
     }
 

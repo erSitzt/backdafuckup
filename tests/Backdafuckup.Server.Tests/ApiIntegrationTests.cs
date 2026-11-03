@@ -700,7 +700,8 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     }
 
     /// <summary>The real agent loop over HTTP with its file system mapped into a sandbox folder (C:\x → {sandbox}/C/x).</summary>
-    private async Task<(Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)> StartAgentAsync(string vmNativeId, IRestoreFileSystem? fs, ISqlEnvironment? sql = null)
+    private async Task<(Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)> StartAgentAsync(
+        string vmNativeId, IRestoreFileSystem? fs, ISqlEnvironment? sql = null, Func<string, IPublishHost>? publish = null)
     {
         var directory = Path.Combine(_root, "agent-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(directory);
@@ -708,13 +709,13 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         var secret = await _factory!.Services.GetRequiredService<AgentSettingsStore>().GetEnrollmentSecretAsync(Ct);
         await File.WriteAllTextAsync(paths.ConfigFile, System.Text.Json.JsonSerializer.Serialize(
             new AgentConfig { ServerUrl = "https://localhost/", EnrollmentSecret = secret }, Backdafuckup.Agent.Core.AgentJson.Options), Ct);
-        var runner = new AgentRunner(paths, new SimulatedHost(vmNativeId), new SimulatedVss(), new AgentLog(paths.LogFile), _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200), fs, sql);
+        var runner = new AgentRunner(paths, new SimulatedHost(vmNativeId), new SimulatedVss(), new AgentLog(paths.LogFile), _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200), fs, sql, publish?.Invoke(directory));
         var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var running = Task.Run(() => runner.RunAsync(stop.Token), Ct);
         var agent = await _factory.Services.GetRequiredService<AgentService>().WaitForVmAsync(vmNativeId, TimeSpan.FromSeconds(30), Ct)
             ?? throw new TimeoutException("The agent did not come online.");
         var registry = _factory.Services.GetRequiredService<AgentRegistry>();
-        var capability = fs is null ? AgentProtocol.CapabilitySqlRestore : AgentProtocol.CapabilityRestoreFilesV2;
+        var capability = publish is not null ? AgentProtocol.CapabilityPublish : fs is null ? AgentProtocol.CapabilitySqlRestore : AgentProtocol.CapabilityRestoreFilesV2;
         for (var i = 0; i < 100 && !registry.HasCapability(agent.Id, capability); i++)
         {
             await Task.Delay(100, Ct);
@@ -776,6 +777,160 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
 
         await stop.CancelAsync();
         await running;
+    }
+
+    [Fact]
+    public async Task A_restore_point_is_published_into_the_guest_over_the_loopback_target_and_removed_again()
+    {
+        var client = await SignedInClientAsync();
+        var image = WindowsTestDisk.Create(
+        [
+            new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+            new WindowsTestDisk.Volume('D', 4, new Dictionary<string, byte[]> { ["SQL/readme.txt"] = "published from the backup"u8.ToArray() }),
+        ]);
+        var point = await BackUpImageAsync(client, "sql03", image);
+        IscsiGuestHost? guest = null;
+        var (agent, stop, running) = await StartAgentAsync(point.VmNativeId, null, null, directory => guest = new IscsiGuestHost(Path.Combine(directory, "publish")));
+        var publishes = _factory!.Services.GetRequiredService<Backdafuckup.Server.Publishing.DiskPublishes>();
+
+        var repository = await _factory.Services.GetRequiredService<Backdafuckup.Server.Engine.RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+        await using var reader = await repository.OpenRestorePointAsync(point.Id, Ct);
+        var disks = await FileRestoreMounts.OpenDisksAsync(reader, _factory.Services.GetRequiredService<Backdafuckup.FileLevel.ChunkCache>(), Ct);
+        long offset;
+        using (var guestImage = Backdafuckup.FileLevel.GuestImage.Open(disks))
+        {
+            offset = guestImage.Volumes.Single(v => v.MountPoint == "D:").StartOffset;
+        }
+
+        PublishInfo Info() => new()
+        {
+            Title = "sql03",
+            MaxOverlayBytes = 16 << 20,
+            Disks = [new PublishDisk { Index = 0, Key = disks[0].Key, SizeBytes = image.LongLength }],
+            Volumes = [new PublishVolume { Name = "D", DiskIndex = 0, StartOffset = offset }],
+        };
+
+        // Published: the guest's initiator reads the volume through the target, the copy-on-write disk and the block endpoint.
+        var log = new List<string>();
+        var publish = await publishes.PublishAsync(agent.Id, Info(), disks, line => { lock (log) { log.Add(line); } }, TimeSpan.FromMinutes(1), Ct);
+        Assert.NotNull(guest);
+        var mount = Assert.Single(publish.Status!.Mounts);
+        Assert.Equal("D", mount.Name);
+        Assert.Equal(Path.Combine(guest.WorkFolder, publish.Id.ToString("N")[..12], "D"), mount.Path);
+        Assert.Equal("published from the backup", guest.Files[mount.Path]);
+        Assert.Equal(3L * CowDisk.OverlayBlock, publish.Status.OverlayBytes);
+        Assert.True(publish.ServedBytes > 0);
+        Assert.Contains(log, l => l.StartsWith("iSCSI target iqn.2026-11.de.backdafuckup:publish-", StringComparison.Ordinal));
+        Assert.Contains(log, l => l.Contains("GPT disk GUID", StringComparison.Ordinal));
+        Assert.Single(new PublishJournal(guest.WorkFolder).Read());
+        var registry = _factory.Services.GetRequiredService<AgentRegistry>();
+        for (var i = 0; i < 100 && !registry.WorkText(agent.Id).Contains(publish.Id.ToString(), StringComparison.Ordinal); i++)
+        {
+            await Task.Delay(100, Ct);
+        }
+
+        Assert.Contains($"publish {publish.Id}", registry.WorkText(agent.Id), StringComparison.Ordinal);
+
+        // Only the agent of the publish gets its blocks.
+        var anonymous = _factory.CreateClient();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.GetAsync($"/api/agent/publishes/{publish.Id}/disks/0/blocks/0", Ct)).StatusCode);
+
+        // Unpublished: mount point, disk and iSCSI session are removed, the overlay is deleted, the journal is empty.
+        Assert.True(await publishes.UnpublishAsync(publish, TimeSpan.FromMinutes(1), Ct));
+        string[] Steps(string find) => ["attach", find, "online 0", "mount 0 " + offset, "unmount D", "offline 0", "detach"];
+        Assert.Equal(Steps("find BDFU" + publish.Id.ToString("N")[..8].ToUpperInvariant() + "-0"), guest.Steps);
+        Assert.Empty(new PublishJournal(guest.WorkFolder).Read());
+        Assert.False(Directory.Exists(Path.Combine(guest.WorkFolder, publish.Id.ToString("N")[..12])));
+        Assert.Null(publishes.Get(publish.Id, agent.Id));
+        Assert.Contains(log, l => l == "everything is removed again.");
+
+        // A failed mount ends the publish with the guest's reason and removes what was set up.
+        guest.FailMount = true;
+        guest.Steps.Clear();
+        var failed = await Assert.ThrowsAsync<InvalidOperationException>(() => publishes.PublishAsync(agent.Id, Info(), disks, _ => { }, TimeSpan.FromMinutes(1), Ct));
+        Assert.Contains("Disk 0 has no partition at offset", failed.Message, StringComparison.Ordinal);
+        Assert.StartsWith("find BDFU", guest.Steps[1], StringComparison.Ordinal);
+        Assert.Equal(Steps(guest.Steps[1]), guest.Steps);
+        Assert.Empty(new PublishJournal(guest.WorkFolder).Read());
+
+        await stop.CancelAsync();
+        await running;
+    }
+
+    /// <summary>
+    /// The guest side of a publish on Linux: the initiator is the iSCSI client of the library, and "mounting" reads the
+    /// partition through it and opens its NTFS with DiscUtils. Writes one sector, which must land in the overlay.
+    /// </summary>
+    private sealed class IscsiGuestHost(string workFolder) : IPublishHost
+    {
+        private const string InitiatorName = "iqn.1991-05.com.microsoft:sql03";
+        private ISCSI.Client.ISCSIClient? _client;
+
+        public string WorkFolder => workFolder;
+
+        public List<string> Steps { get; } = [];
+
+        /// <summary>Content of SQL/readme.txt per mount folder.</summary>
+        public Dictionary<string, string> Files { get; } = [];
+
+        public bool FailMount { get; set; }
+
+        public bool Authorize(IPEndPoint initiator, string initiatorName) => IPAddress.IsLoopback(initiator.Address) && initiatorName == InitiatorName;
+
+        public void Attach(int port, string targetName, Action<string> log)
+        {
+            Steps.Add("attach");
+            _client = new ISCSI.Client.ISCSIClient(InitiatorName);
+            Assert.True(_client.Connect(IPAddress.Loopback, port));
+            Assert.True(_client.Login(targetName));
+        }
+
+        public int FindDisk(string serial, Action<string> log)
+        {
+            Steps.Add("find " + serial);
+            return int.Parse(serial[(serial.LastIndexOf('-') + 1)..], System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        public void Online(int disk, Action<string> log) => Steps.Add("online " + disk);
+
+        public void Mount(int disk, long offset, string folder, Action<string> log)
+        {
+            Steps.Add("mount " + disk + " " + offset);
+            if (FailMount)
+            {
+                throw new InvalidOperationException($"Disk {disk} has no partition at offset {offset}.");
+            }
+
+            var lun = (ushort)disk;
+            var sectors = (long)_client!.ReadCapacity(lun, out var bytesPerSector) / bytesPerSector;
+            var partition = new MemoryStream();
+            for (var sector = offset / bytesPerSector; sector < sectors; sector += 256)
+            {
+                var data = _client.Read(lun, (ulong)sector, (uint)Math.Min(256, sectors - sector), bytesPerSector) ?? throw new IOException($"Reading sector {sector} failed.");
+                partition.Write(data);
+            }
+
+            partition.Position = 0;
+            using (var ntfs = new DiscUtils.Ntfs.NtfsFileSystem(partition))
+            using (var file = new StreamReader(ntfs.OpenFile(@"SQL\readme.txt", FileMode.Open, FileAccess.Read)))
+            {
+                Files[folder] = file.ReadToEnd();
+            }
+
+            Assert.True(_client.Write(lun, (ulong)((offset / bytesPerSector) + 2048), new byte[bytesPerSector], bytesPerSector));
+        }
+
+        public void Unmount(string folder, Action<string> log) => Steps.Add("unmount " + Path.GetFileName(folder));
+
+        public void Offline(int disk, Action<string> log) => Steps.Add("offline " + disk);
+
+        public void Detach(int port, string targetName, Action<string> log)
+        {
+            Steps.Add("detach");
+            _client?.Logout();
+            _client?.Disconnect();
+            _client = null;
+        }
     }
 
     [Fact]
