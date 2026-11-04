@@ -44,6 +44,9 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
     /// <summary>Makes the next ALTER DATABASE … SET ONLINE fail with this SQL Server error number.</summary>
     public int? FailOnlineWith { get; set; }
 
+    /// <summary>The .bak files written by BACKUP DATABASE … COPY_ONLY: path → database.</summary>
+    public Dictionary<string, string> Backups { get; } = [];
+
     /// <summary>The databases that are offline.</summary>
     public HashSet<string> Offline { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -194,6 +197,16 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                     return (null, table);
                 }
 
+                case "SELECT CAST(SERVERPROPERTY('EngineEdition') AS int), CAST(SERVERPROPERTY('InstanceDefaultBackupPath') AS nvarchar(4000))":
+                {
+                    var table = Table(("edition", typeof(int)), ("backup", typeof(string)));
+                    table.Rows.Add(4, BackupFolder ?? @"C:\Program Files\Microsoft SQL Server\MSSQL16.SQLEXPRESS\MSSQL\Backup");
+                    return (null, table);
+                }
+
+                case "RESTORE VERIFYONLY FROM DISK = @path WITH CHECKSUM":
+                    Assert.True(File.Exists((string)parameters["@path"]!), "verified a backup that does not exist");
+                    return (null, null);
                 case "SELECT state_desc, user_access_desc FROM sys.databases WHERE name = @name":
                 {
                     var table = Table(("state", typeof(string)), ("access", typeof(string)));
@@ -280,6 +293,25 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                     Assert.True(Suspended.Add(name), $"{name} is suspended twice");
                 }
 
+                return (null, null);
+            }
+
+            if (text == "BACKUP DATABASE @database TO DISK = @path WITH COPY_ONLY, CHECKSUM, INIT, FORMAT, NAME = @name, DESCRIPTION = @description")
+            {
+                // Express: no COMPRESSION. The "backup" is the database's files as SQL Server read them at the attach.
+                var database = (string)parameters["@database"]!;
+                var path = (string)parameters["@path"]!;
+                Assert.False(File.Exists(path), "a backup file was overwritten");
+                using (var file = File.Create(path))
+                {
+                    file.Write(System.Text.Encoding.ASCII.GetBytes($"TAPE {database};"));
+                    foreach (var name in _databases[database].Files)
+                    {
+                        file.Write(AttachedFiles[name]);
+                    }
+                }
+
+                Backups[path] = database;
                 return (null, null);
             }
 

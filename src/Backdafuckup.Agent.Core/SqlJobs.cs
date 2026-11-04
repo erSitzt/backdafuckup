@@ -185,6 +185,22 @@ public sealed class SqlJobRunner
 
                     SqlReplace.Replace(_sql, _files, _journalDirectory, request.Instance!, request.Account, request.Database!, request.Files, request.KeepReplaced, Log);
                     break;
+                case SqlJobKinds.BackupDatabase:
+                    if (request.Account is null || string.IsNullOrEmpty(request.Instance) || string.IsNullOrEmpty(request.Database) || string.IsNullOrEmpty(request.FileName))
+                    {
+                        throw new InvalidOperationException("The job names no instance, account, database or file name.");
+                    }
+
+                    var (path, bytes) = SqlBackupFile.Backup(_sql, request.Instance!, request.Account, request.Database!, request.Folder, request.FileName!, request.Description ?? string.Empty, Log);
+                    result.BackupPath = path;
+                    result.BackupBytes = bytes;
+                    if (request.Upload)
+                    {
+                        await UploadAsync(path, bytes, Log, stop).ConfigureAwait(false);
+                        result.Uploaded = true;
+                    }
+
+                    break;
                 case SqlJobKinds.SnapshotSuspend:
                     if (request.Account is null)
                     {
@@ -273,6 +289,29 @@ public sealed class SqlJobRunner
                     : $"the VM snapshot was not reported done within {limit.TotalSeconds:0} s; the writes were resumed before it may have been taken");
             result.SuspendedMs = suspend.SuspendedMs;
         }
+    }
+
+    /// <summary>Sends a backup file to the server (streamed; the server checks the length).</summary>
+    private async Task UploadAsync(string path, long bytes, Action<string> log, CancellationToken stop)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        using (var file = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read, 1 << 20, useAsync: true))
+        using (var content = new StreamContent(file, 1 << 20))
+        {
+            content.Headers.ContentLength = bytes;
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+            var name = Uri.EscapeDataString(System.IO.Path.GetFileName(path));
+            using (var response = await _http.PutAsync(Base + "/file?name=" + name, content, stop).ConfigureAwait(false))
+            {
+                if (!response.IsSuccessStatusCode)
+                {
+                    var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    throw new InvalidOperationException($"The server did not take the backup file ({(int)response.StatusCode}): {text}");
+                }
+            }
+        }
+
+        log($"sent {System.IO.Path.GetFileName(path)} to the backup server ({bytes:N0} bytes in {watch.Elapsed.TotalSeconds:0.0} s).");
     }
 
     /// <summary>The server's signal; null if the server could not be asked this time; abort if the job is gone (404).</summary>

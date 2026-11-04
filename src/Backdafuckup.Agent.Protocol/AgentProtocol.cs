@@ -78,6 +78,12 @@ public static class AgentProtocol
     public const string CapabilitySqlReplaceFiles = "sql-replace-files-v1";
 
     /// <summary>
+    /// The agent backs up a database to a <c>.bak</c> file and verifies it (<see cref="SqlJobKinds.BackupDatabase"/>), and
+    /// uploads it on request (<c>PUT {SqlJobsPath}/{id}/file?name=</c>).
+    /// </summary>
+    public const string CapabilitySqlBackup = "sql-backup-v1";
+
+    /// <summary>
     /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
     /// <see cref="PublishInfo.BlockSize"/> bytes), <c>POST {id}/status</c> (heartbeat; the answer says whether to stop).
     /// </summary>
@@ -577,6 +583,15 @@ public static class SqlJobKinds
     /// goes online again; on failure its own files go back. <see cref="SqlJobRequest.KeepReplaced"/> keeps the old files.
     /// </summary>
     public const string ReplaceFiles = "replace-files";
+
+    /// <summary>
+    /// Backs up <see cref="SqlJobRequest.Database"/> to <see cref="SqlJobRequest.FileName"/> in
+    /// <see cref="SqlJobRequest.Folder"/> (default: the instance's backup folder; an existing file is never replaced, the
+    /// name gets <c>_2</c>, <c>_3</c>, …): <c>BACKUP DATABASE … WITH COPY_ONLY, CHECKSUM</c> (and COMPRESSION except on
+    /// Express), then <c>RESTORE VERIFYONLY … WITH CHECKSUM</c>. With <see cref="SqlJobRequest.Upload"/> the agent then
+    /// sends the file to the server. The result names the file and its size.
+    /// </summary>
+    public const string BackupDatabase = "backup-database";
 }
 
 /// <summary>File names of <see cref="SqlJobKinds.ReplaceFiles"/>, shared by server and agent.</summary>
@@ -714,6 +729,21 @@ public sealed class SqlJobRequest
 
     /// <summary>ReplaceFiles: keep the database's previous files as <c>*.bdfu-replaced</c> instead of deleting them.</summary>
     public bool KeepReplaced { get; set; }
+
+    /// <summary>BackupDatabase: the folder in the guest; null: the instance's backup folder.</summary>
+    public string? Folder { get; set; }
+
+    /// <summary>BackupDatabase: the file name (e.g. <c>shop_20261104_2158.bak</c>).</summary>
+    public string? FileName { get; set; }
+
+    /// <summary>BackupDatabase: the description in the backup (e.g. where it came from).</summary>
+    public string? Description { get; set; }
+
+    /// <summary>BackupDatabase: send the file to the server after the verify.</summary>
+    public bool Upload { get; set; }
+
+    /// <summary>BackupDatabase with upload: where the server files it (the export session); set by the server.</summary>
+    public Guid? UploadId { get; set; }
 }
 
 public sealed class SqlJobResult
@@ -731,6 +761,14 @@ public sealed class SqlJobResult
 
     /// <summary>SnapshotSuspend: how long the first database's writes were suspended until the last one resumed.</summary>
     public long SuspendedMs { get; set; }
+
+    /// <summary>BackupDatabase: the backup file in the guest and its size.</summary>
+    public string? BackupPath { get; set; }
+
+    public long BackupBytes { get; set; }
+
+    /// <summary>BackupDatabase: the upload reached the server completely.</summary>
+    public bool Uploaded { get; set; }
 
     /// <summary>What the job did, for the session log (e.g. "removed database [shop_published]").</summary>
     public List<string> Log { get; set; } = new List<string>();

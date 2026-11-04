@@ -3,6 +3,7 @@
 @inject ApiClient Api
 @inject LiveConnection Live
 @inject ISnackbar Snackbar
+@inject IJSRuntime JS
 
 <PageTitle>Session – backdafuckup</PageTitle>
 
@@ -36,7 +37,26 @@ else
     </MudText>
     var m = _session.Metrics ?? new TransferMetricsDto { ReadBytes = _session.ReadBytes, StoredBytes = _session.TransferredBytes };
     var running = _session.State is "Running" or "Stopping";
-    @if (_session.Kind == "SqlPublish")
+    @if (_session.Kind == "SqlExport")
+    {
+        @if (_session.State is "Running" or "Queued")
+        {
+            <MudAlert Severity="Severity.Info" Class="mb-4">
+                The database is published in the VM (nothing is copied), backed up copy-only with checksums, verified, and unpublished
+                again. The backup itself cannot be stopped halfway.
+            </MudAlert>
+        }
+        else if (_exportFile is { } file)
+        {
+            <MudAlert Severity="Severity.Success" Class="mb-4">
+                <div class="d-flex align-center flex-wrap" style="gap: 12px">
+                    <span><b>@file.FileName</b> (@Fmt.Bytes(file.SizeBytes)) is on the backup server until @Fmt.Time(file.ExpiresUtc).</span>
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" Size="Size.Small" StartIcon="@Icons.Material.Filled.Download" OnClick="DownloadExportAsync">Download .bak</MudButton>
+                </div>
+            </MudAlert>
+        }
+    }
+    else if (_session.Kind == "SqlPublish")
     {
         @if (_session.State == "Running")
         {
@@ -52,7 +72,7 @@ else
         <MudProgressLinear Color="Color.Primary" Value="@_session.Progress" Size="Size.Large" Class="mb-4">@($"{_session.Progress:0}%")</MudProgressLinear>
     }
 
-    @if (_session.Kind is "SqlPublish" or "SqlRestore")
+    @if (_session.Kind is "SqlPublish" or "SqlRestore" or "SqlExport")
     {
     }
     else if (_session.Kind == "Restore")
@@ -180,6 +200,7 @@ else
     [Parameter] public Guid Id { get; set; }
 
     private SessionSummaryDto? _session;
+    private SqlExportFileDto? _exportFile;
 
     private static IEnumerable<(string Label, long Bytes, string Css)> Breakdown(TransferMetricsDto m) =>
     [
@@ -216,6 +237,39 @@ else
         {
             _log[e.Id] = e;
         }
+
+        await LoadExportFileAsync();
+    }
+
+    /// <summary>The .bak of a finished export, if it was sent to the backup server and is not older than 24 hours.</summary>
+    private async Task LoadExportFileAsync()
+    {
+        if (_session is not { Kind: "SqlExport", State: "Succeeded" or "Warning" })
+        {
+            return;
+        }
+
+        try
+        {
+            _exportFile = await Api.GetAsync<SqlExportFileDto>($"api/sql/exports/{Id}");
+        }
+        catch (ApiException)
+        {
+            _exportFile = null;
+        }
+    }
+
+    private async Task DownloadExportAsync()
+    {
+        try
+        {
+            var ticket = await Api.PostAsync<FileDownloadTicketDto>($"api/sql/exports/{Id}/link", new { });
+            await JS.InvokeVoidAsync("bdfuDownload", ticket.Url);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Warning);
+        }
     }
 
     private void OnSession(SessionSummaryDto s)
@@ -223,7 +277,11 @@ else
         if (s.Id == Id)
         {
             _session = s;
-            _ = InvokeAsync(StateHasChanged);
+            _ = InvokeAsync(async () =>
+            {
+                await LoadExportFileAsync();
+                StateHasChanged();
+            });
         }
     }
 

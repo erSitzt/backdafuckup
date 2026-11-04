@@ -46,6 +46,19 @@ public static class SqlEndpoints
 
         app.MapPost("/api/sql/publishes", StartPublishAsync);
         app.MapPost("/api/sql/restores", StartRestoreAsync);
+        app.MapPost("/api/sql/exports", StartExportAsync);
+
+        // The .bak of an export session on the server: its name and size, a one-time link, the download.
+        app.MapGet("/api/sql/exports/{sessionId:guid}", (Guid sessionId, SqlExportFiles files) =>
+            files.Find(sessionId) is { } file ? Results.Ok(file) : Results.NotFound());
+        app.MapPost("/api/sql/exports/{sessionId:guid}/link", (Guid sessionId, SqlExportFiles files, HttpContext http) =>
+            files.Find(sessionId) is { } file && files.IssueLink(sessionId, http.User.Identity?.Name ?? string.Empty) is { } url
+                ? Results.Ok(new FileDownloadTicketDto(url, file.FileName, 60))
+                : Results.Problem("The .bak of this export is not on the backup server (not downloaded, or older than 24 hours).", statusCode: StatusCodes.Status404NotFound));
+        app.MapGet("/api/sql/exports/downloads/{token}", (string token, SqlExportFiles files, HttpContext http) =>
+            files.Redeem(token, http.User.Identity?.Name ?? string.Empty) is { } file
+                ? Results.File(file.Path, "application/octet-stream", file.Name, enableRangeProcessing: true)
+                : Results.Problem("This download link has expired or was used already. Start the download again on the session page.", statusCode: StatusCodes.Status404NotFound));
 
         app.MapPost("/api/sql/inventory", async (
             SqlInventoryRequestDto request, AgentService agents, AgentRegistry registry, SqlJobs jobs, IDbContextFactory<AppDbContext> dbFactory, CredentialProtector protector, CancellationToken ct) =>
@@ -126,6 +139,54 @@ public static class SqlEndpoints
         }
 
         var id = await queue.EnqueueSqlPublishAsync(request with { DatabaseName = name }, point.RepositoryId, point.VmName, http.User.Identity?.Name ?? "user", ct);
+        return Results.Ok(new StartedDto(id));
+    }
+
+    /// <summary>
+    /// Starts a .bak export. Checked here: the restore point, the staging instance, the folder, the account and an agent
+    /// that can publish and back up; the session checks the instance with the account.
+    /// </summary>
+    private static async Task<IResult> StartExportAsync(
+        SqlExportRequestDto request, AppDbContext db, AgentService agents, AgentRegistry registry, SessionQueue queue, HttpContext http, CancellationToken ct)
+    {
+        var point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == request.RestorePointId, ct);
+        if (point is null || point.State != RestorePointState.Available)
+        {
+            return Results.Problem("The restore point is not available (deleted, or still being written).", statusCode: StatusCodes.Status404NotFound);
+        }
+
+        if (string.IsNullOrWhiteSpace(request.TargetInstance))
+        {
+            return Results.Problem("Choose the instance that makes the backup.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var folder = request.Folder?.Trim();
+        if (!string.IsNullOrEmpty(folder) && !FileRestore.AgentTargetPaths.IsLocalAbsolute(folder.Length == 2 ? folder + "\\" : folder))
+        {
+            return Results.Problem($"'{folder}' is not a local folder in the VM; enter it as D:\\Backup.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (!await db.Credentials.AnyAsync(c => c.Id == request.CredentialId && (c.Kind == CredentialKind.Windows || c.Kind == CredentialKind.SqlServer), ct))
+        {
+            return Results.Problem("The account no longer exists. Choose another one under Credentials.", statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        try
+        {
+            var agent = await SqlAgentAsync(request.TargetVmNativeId, agents, registry, ct);
+            if (!registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlPublish) || !registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlBackup))
+            {
+                return Results.Problem(
+                    $"The agent in {agent.HostName} (version {agent.AgentVersion}) cannot export SQL Server databases yet. It updates itself within a few minutes after a server update.",
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+        }
+
+        var id = await queue.EnqueueSqlExportAsync(request with { Folder = string.IsNullOrEmpty(folder) ? null : folder }, point.RepositoryId, point.VmName, http.User.Identity?.Name ?? "user", ct);
         return Results.Ok(new StartedDto(id));
     }
 

@@ -96,7 +96,7 @@ public sealed class SessionRunnerService(
         SessionKind.RepositoryMaintenance => running.Count(SessionKind.RepositoryMaintenance) == 0 && running.Count(SessionKind.Backup) == 0,
         SessionKind.AgentDeployment => running.Count(SessionKind.AgentDeployment) < 2,
         SessionKind.FileRestore => running.Count(SessionKind.FileRestore) < options.Value.MaxConcurrentFileRestoreSessions,
-        SessionKind.SqlPublish => running.Count(SessionKind.SqlPublish) < sqlOptions.Value.MaxConcurrentPublishes,
+        SessionKind.SqlPublish or SessionKind.SqlExport => running.Count(SessionKind.SqlPublish) + running.Count(SessionKind.SqlExport) < sqlOptions.Value.MaxConcurrentPublishes,
         SessionKind.SqlRestore => running.Count(SessionKind.SqlRestore) < sqlOptions.Value.MaxConcurrentRestores,
         _ => false,
     };
@@ -118,6 +118,7 @@ public sealed class SessionRunnerService(
                 SessionKind.FileRestore => await fileRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.SqlPublish => await sqlPublishes.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.SqlRestore => await sqlRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.SqlExport => await sqlPublishes.RunExportAsync(session, cancellationToken).ConfigureAwait(false),
                 _ => (SessionState.Failed, "Unknown session kind."),
             };
 
@@ -269,12 +270,14 @@ public sealed class StartupRecovery(
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         foreach (var session in stale)
         {
-            if (session.Kind == SessionKind.SqlPublish)
+            if (session.Kind is SessionKind.SqlPublish or SessionKind.SqlExport)
             {
                 // The agent gets 404 for the publish now and unpublishes on its own (database first, then the volumes).
                 session.State = SessionState.Stopped;
                 session.EndedUtc = time.GetUtcNow();
-                session.Summary = "Unpublished: the backup service was restarted. The agent in the VM removes the database and the volumes when it notices (within a minute).";
+                session.Summary = session.Kind == SessionKind.SqlExport
+                    ? "Stopped: the backup service was restarted during the export. The agent in the VM removes the published database and the volumes when it notices (within a minute); a .bak it wrote stays in its folder."
+                    : "Unpublished: the backup service was restarted. The agent in the VM removes the database and the volumes when it notices (within a minute).";
                 foreach (var task in session.Tasks.Where(t => t.State is SessionState.Running or SessionState.Queued))
                 {
                     task.State = SessionState.Stopped;
@@ -487,6 +490,8 @@ public static class EngineServiceCollectionExtensions
         services.TryAddSingleton<Backdafuckup.Ssh.ISshConnector, Backdafuckup.Ssh.SshConnector>();
         services.AddHostedService<FileRestore.FileRestoreSweeper>();
         services.AddSingleton<Sql.SqlCatalog>();
+        services.AddSingleton<Sql.SqlExportFiles>();
+        services.AddHostedService<Sql.SqlExportSweeper>();
         services.AddSingleton<Sql.SqlCatalogBackfill>();
         services.AddHostedService(sp => sp.GetRequiredService<Sql.SqlCatalogBackfill>());
         return services;

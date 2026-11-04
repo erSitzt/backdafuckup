@@ -284,8 +284,16 @@ Restore points show their consistency ("application", or "crash" plus the reason
 
 *Backups & Restore → SQL databases* opens the SQL browser for a restore point of a Windows VM backed up with guest processing. It lists the instances (from the backup's registry), their databases with files, sizes and consistency, and the reasons a database cannot be restored. The databases come from the SQL Server writer's metadata. Its plain file lists are told apart by the first page of each file: file id 1 is the primary data file, 2 the log file, higher ids go by the extension.
 
-**Four ways to get a database back**
+**Five ways to get a database back**
 - **Export files:** a ZIP with the database's files straight from the backup (primary data file first) and an attach script. No agent is involved.
+- **Export .bak:** a native SQL Server backup of the database as it is in the restore point, for restoring it anywhere with `RESTORE DATABASE`.
+  1. The database is published on an instance in a VM with the agent (the staging instance; the original VM works too). It keeps its name if that is free there, else it becomes `<name>_bdfu_export`.
+  2. It is backed up with `BACKUP DATABASE … WITH COPY_ONLY, CHECKSUM` (and `COMPRESSION`, except on Express) into the instance's backup folder or a chosen folder, and checked with `RESTORE VERIFYONLY … WITH CHECKSUM`.
+  3. It is unpublished again, also when the backup fails.
+
+  The file is named `<database>_<restore point time>.bak` and never replaces an existing file (`_2`, `_3`, …). SQL Server's service writes it, so a chosen folder must be writable for the service (the backup folder is).
+  - *Also keep it on the backup server for download:* the agent then sends the file to the backup server. The session page offers it for 24 hours (`<data directory>\sql-exports`).
+  - What the .bak shows: a copy-only full backup taken on the staging instance (its version: a newer instance upgrades the database, and the .bak then restores only there or on newer versions). TRUSTWORTHY is off, and the attaching account is the owner. The staging instance's `msdb` keeps a backup history row.
 - **Publish:** the agent in a target VM mounts the backup's volumes over a local iSCSI connection (nothing is copied) and attaches the database. Writes go to a temporary overlay in the VM. *Unpublish* (stopping the session), or the chosen time running out, removes the database, the mounts and the overlay. The agent does no other restore work while it publishes.
 - **Restore as a new database:** the agent writes the files under the new database's name into the chosen folders, checks each one against the backup (SHA-256) and attaches them. Existing files are never replaced: if a file exists, the restore stops and deletes what it wrote.
 - **Overwrite the original database:**
@@ -309,7 +317,7 @@ Restore points show their consistency ("application", or "crash" plus the reason
 
 **What an attach changes** (publish, restore as a new database): the attaching account becomes the owner, TRUSTWORTHY is off, Service Broker is off. Database users whose login does not exist on the target instance are listed in the session log, with the `ALTER USER … WITH LOGIN` to fix them. SQL Server sets the files' permissions itself (its service, Administrators).
 
-**Not yet:** system databases (restore them with the VM), In-Memory OLTP and FILESTREAM databases, point-in-time restore with log backups, export as `.bak`.
+**Not yet:** system databases (restore them with the VM), In-Memory OLTP and FILESTREAM databases, point-in-time restore with log backups.
 
 ## Data and backups of the server itself
 

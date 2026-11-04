@@ -44,6 +44,12 @@ public sealed class SqlServerFixture : IAsyncLifetime
     public async Task<byte[]> ReadFileAsync(string path) =>
         await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ReadFileAsync(path);
 
+    public async Task<bool> FileExistsAsync(string path) =>
+        (await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["test", "-f", path])).ExitCode == 0;
+
+    public async Task<long> FileSizeAsync(string path) =>
+        long.Parse((await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["stat", "-c", "%s", path])).Stdout.Trim(), System.Globalization.CultureInfo.InvariantCulture);
+
     public async Task DeleteFileAsync(string path) =>
         await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["rm", "-f", path]);
 

@@ -74,6 +74,23 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Queues a SQL database export as .bak; its repository is recorded like for a publish.</summary>
+    public async Task<Guid> EnqueueSqlExportAsync(SqlExportRequestDto request, Guid repositoryId, string vmName, string triggeredBy, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var session = new SessionEntity
+        {
+            Kind = SessionKind.SqlExport,
+            Name = $"Export SQL database {request.Database} ({vmName}) as .bak",
+            TriggeredBy = triggeredBy,
+            RepositoryId = repositoryId,
+            State = SessionState.Queued,
+            CreatedUtc = time.GetUtcNow(),
+            Parameters = JsonSerializer.Serialize(request),
+        };
+        return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Queues a SQL database restore; its repository is recorded like for a publish.</summary>
     public async Task<Guid> EnqueueSqlRestoreAsync(SqlRestoreRequestDto request, Guid repositoryId, string vmName, string triggeredBy, CancellationToken cancellationToken)
     {

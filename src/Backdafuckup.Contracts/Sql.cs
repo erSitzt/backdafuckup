@@ -136,6 +136,25 @@ public sealed record SqlRestoreRequestDto(
     bool Overwrite = false,
     bool KeepReplacedFiles = false);
 
+/// <summary>
+/// Export a database of a restore point as a .bak: it is published on <see cref="TargetInstance"/> (a staging instance,
+/// same or newer version), backed up copy-only with checksums into <see cref="Folder"/> in that VM (null: the instance's
+/// backup folder), verified, and unpublished. With <see cref="Download"/> the file can also be downloaded from the
+/// console for 24 hours.
+/// </summary>
+public sealed record SqlExportRequestDto(
+    Guid RestorePointId,
+    string Instance,
+    string Database,
+    string TargetVmNativeId,
+    string TargetInstance,
+    Guid CredentialId,
+    string? Folder,
+    bool Download);
+
+/// <summary>The .bak of an export session kept on the server for download.</summary>
+public sealed record SqlExportFileDto(string FileName, long SizeBytes, DateTimeOffset ExpiresUtc);
+
 /// <summary>Where the files of a restored database go and how they are named (shared by the console and the server).</summary>
 public static class SqlRestoreFiles
 {

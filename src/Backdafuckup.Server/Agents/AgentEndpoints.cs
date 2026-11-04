@@ -312,6 +312,34 @@ public static class AgentEndpoints
                 : Results.Problem("The SQL job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
         });
 
+        // A backup-database job with upload sends its .bak here; it is filed under the export session (UploadId).
+        agent.MapPut("/sql-jobs/{id:guid}/file", async (Guid id, string? name, AgentService agents, Sql.SqlJobs jobs, Sql.SqlExportFiles files, HttpContext http, CancellationToken ct) =>
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return Results.Unauthorized();
+            }
+
+            if (jobs.Get(id, agentId) is not { Kind: SqlJobKinds.BackupDatabase, Upload: true, UploadId: { } session })
+            {
+                return Results.Problem("The SQL job is not running (any more) or sends no file.", statusCode: StatusCodes.Status404NotFound);
+            }
+
+            try
+            {
+                await files.SaveAsync(session, name ?? string.Empty, http.Request.Body, http.Request.ContentLength, ct);
+                return Results.NoContent();
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.Problem(ex.Message, statusCode: StatusCodes.Status400BadRequest);
+            }
+            catch (IOException ex)
+            {
+                return Results.Problem($"The backup server could not store the file: {ex.Message}", statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }).WithMetadata(new Microsoft.AspNetCore.Mvc.DisableRequestSizeLimitAttribute());
+
         agent.MapPost("/sql-jobs/{id:guid}/result", async (Guid id, SqlJobResult result, AgentService agents, Sql.SqlJobs jobs, HttpContext http, CancellationToken ct) =>
         {
             if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)

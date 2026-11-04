@@ -2,6 +2,7 @@ using System.Text.Json;
 using Backdafuckup.Agent.Protocol;
 using Backdafuckup.Contracts;
 using Backdafuckup.Core.Operations;
+using Backdafuckup.Core.Repository;
 using Backdafuckup.FileLevel;
 using Backdafuckup.Server.Agents;
 using Backdafuckup.Server.Api;
@@ -57,34 +58,9 @@ public sealed class SqlPublishSessionRunner(
         var target = $"instance {request.TargetInstance}";
         try
         {
-            var repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
-            using var pin = repository.Pin(point.Id);
-            await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var pointState = await db.RestorePoints.Where(r => r.Id == point.Id).Select(r => (RestorePointState?)r.State).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-                if (pointState != RestorePointState.Available)
-                {
-                    throw new InvalidOperationException($"The restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} is not available ({pointState?.ToString() ?? "deleted"}).");
-                }
-            }
-
-            await using var reader = await repository.OpenRestorePointAsync(point.Id, cancellationToken).ConfigureAwait(false);
-            var sources = await FileRestoreMounts.OpenDisksAsync(reader, cache, cancellationToken).ConfigureAwait(false);
-            var stored = await StoredGuestMetadata.ReadAsync(reader, cancellationToken).ConfigureAwait(false);
-            Plan? plan = null;
-            await FileLevelWorkers.RunDedicated(() => plan = PlanPublish(sources, stored, request, point), "sql-publish-plan").ConfigureAwait(false);
-            var planned = plan!;
-
-            var agent = await SqlEndpoints.SqlAgentAsync(request.TargetVmNativeId, agents, registry, cancellationToken).ConfigureAwait(false);
-            var host = $"{agent.HostName} ({agent.IpAddresses ?? agent.RemoteAddress ?? "address unknown"})";
+            await using var setup = await SetUpAsync(request, point, "publish", [AgentProtocol.CapabilitySqlPublish], cancellationToken).ConfigureAwait(false);
+            var (planned, agent, host, account) = (setup.Planned, setup.Agent, setup.Host, setup.Account);
             target = $"{host}, instance {request.TargetInstance}";
-            if (!registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlPublish))
-            {
-                throw new InvalidOperationException($"The agent in {host} (version {agent.AgentVersion}) cannot publish SQL Server databases yet. It updates itself within a few minutes after a server update; try again then.");
-            }
-
-            var account = await SqlEndpoints.AccountAsync(request.CredentialId, dbFactory, protector, cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException("Choose the account that attaches the database.");
             planned.Info.Sql = new PublishSqlDatabase { Instance = request.TargetInstance, Account = account, Database = request.DatabaseName, Files = planned.Files };
             planned.Info.MaxOverlayBytes = options.Value.MaxOverlayBytes;
             log.Info(
@@ -200,6 +176,196 @@ public sealed class SqlPublishSessionRunner(
             log.Warning("Stopped before the database was published.");
             await FinishTaskAsync(task.Id, SessionState.Stopped, "Stopped").ConfigureAwait(false);
             return (SessionState.Stopped, "Stopped before the database was published.");
+        }
+    }
+
+    /// <summary>
+    /// What publish and export need before the publish: the restore point (pinned and open), the plan of disks, volumes
+    /// and files, the target agent (with <paramref name="capabilities"/>) and the account.
+    /// </summary>
+    private async Task<Setup> SetUpAsync(SqlPublishRequestDto request, RestorePointEntity point, string verb, string[] capabilities, CancellationToken cancellationToken)
+    {
+        var repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
+        var pin = repository.Pin(point.Id);
+        IRestorePointReader? reader = null;
+        try
+        {
+            await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var pointState = await db.RestorePoints.Where(r => r.Id == point.Id).Select(r => (RestorePointState?)r.State).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+                if (pointState != RestorePointState.Available)
+                {
+                    throw new InvalidOperationException($"The restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} is not available ({pointState?.ToString() ?? "deleted"}).");
+                }
+            }
+
+            reader = await repository.OpenRestorePointAsync(point.Id, cancellationToken).ConfigureAwait(false);
+            var sources = await FileRestoreMounts.OpenDisksAsync(reader, cache, cancellationToken).ConfigureAwait(false);
+            var stored = await StoredGuestMetadata.ReadAsync(reader, cancellationToken).ConfigureAwait(false);
+            Plan? plan = null;
+            await FileLevelWorkers.RunDedicated(() => plan = PlanPublish(sources, stored, request, point, verb == "export" ? "exported" : "published"), "sql-publish-plan").ConfigureAwait(false);
+
+            var agent = await SqlEndpoints.SqlAgentAsync(request.TargetVmNativeId, agents, registry, cancellationToken).ConfigureAwait(false);
+            var host = $"{agent.HostName} ({agent.IpAddresses ?? agent.RemoteAddress ?? "address unknown"})";
+            if (capabilities.Any(c => !registry.HasCapability(agent.Id, c)))
+            {
+                throw new InvalidOperationException($"The agent in {host} (version {agent.AgentVersion}) cannot {verb} SQL Server databases yet. It updates itself within a few minutes after a server update; try again then.");
+            }
+
+            var account = await SqlEndpoints.AccountAsync(request.CredentialId, dbFactory, protector, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("Choose the account that attaches the database.");
+            return new Setup(pin, reader, plan!, agent, host, account);
+        }
+        catch
+        {
+            if (reader is not null)
+            {
+                await reader.DisposeAsync().ConfigureAwait(false);
+            }
+
+            pin.Dispose();
+            throw;
+        }
+    }
+
+    private sealed record Setup(IRestorePointPin Pin, IRestorePointReader Reader, Plan Planned, AgentEntity Agent, string Host, SqlAccount Account) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            await Reader.DisposeAsync().ConfigureAwait(false);
+            Pin.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Exports a database of a restore point as a .bak (session kind SqlExport): publishes it on the staging instance
+    /// (under its own name if that is free there, else as <c>name_bdfu_export</c>), has the agent back it up copy-only
+    /// with checksums and verify it (and send it to the server for download), and unpublishes it again in any case.
+    /// </summary>
+    public async Task<(SessionState State, string Summary)> RunExportAsync(SessionEntity session, CancellationToken cancellationToken)
+    {
+        var export = JsonSerializer.Deserialize<SqlExportRequestDto>(session.Parameters ?? "null")
+            ?? throw new InvalidOperationException("The export session has no parameters.");
+        RestorePointEntity point;
+        await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == export.RestorePointId, cancellationToken).ConfigureAwait(false)
+                ?? throw new KeyNotFoundException("The restore point no longer exists.");
+        }
+
+        var source = $"{export.Instance}\\{export.Database}";
+        var task = await tracker.AddTaskAsync(session.Id, point.VmNativeId, source, cancellationToken).ConfigureAwait(false);
+        var log = events.CreateLog(session.Id, task.Id, point.VmName);
+        await tracker.UpdateTaskAsync(task.Id, t => { t.State = SessionState.Running; t.StartedUtc = time.GetUtcNow(); }, CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            var request = new SqlPublishRequestDto(export.RestorePointId, export.Instance, export.Database, export.TargetVmNativeId, export.TargetInstance, export.CredentialId, export.Database, 60);
+            await using var setup = await SetUpAsync(request, point, "export", [AgentProtocol.CapabilitySqlPublish, AgentProtocol.CapabilitySqlBackup], cancellationToken).ConfigureAwait(false);
+            var (planned, agent, host, account) = (setup.Planned, setup.Agent, setup.Host, setup.Account);
+            var target = $"{host}, instance {export.TargetInstance}";
+
+            // The staging instance: the database's own name if it is free there (a nicer .bak), else name_bdfu_export.
+            var inventory = await jobs.RunAsync(
+                agent.Id, new SqlJobRequest { Kind = SqlJobKinds.Inventory, Instance = export.TargetInstance, Account = account }, TimeSpan.FromMinutes(2), cancellationToken).ConfigureAwait(false);
+            var instance = inventory.Inventory?.Instances.FirstOrDefault(i => string.Equals(i.Name, export.TargetInstance, StringComparison.OrdinalIgnoreCase));
+            if (!inventory.Success || instance is null || !instance.Connected)
+            {
+                throw new InvalidOperationException($"{account.UserName} cannot connect to {target}: {instance?.ConnectError ?? inventory.Error ?? "no such instance"}");
+            }
+
+            var taken = instance.Databases.Select(d => d.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var name = export.Database;
+            for (var n = 1; taken.Contains(name); n++)
+            {
+                name = n == 1 ? export.Database + "_bdfu_export" : $"{export.Database}_bdfu_export{n}";
+            }
+
+            request = request with { DatabaseName = name };
+            planned.Info.Sql = new PublishSqlDatabase { Instance = export.TargetInstance, Account = account, Database = name, Files = planned.Files };
+            planned.Info.MaxOverlayBytes = options.Value.MaxOverlayBytes;
+            var folder = string.IsNullOrWhiteSpace(export.Folder) ? instance.BackupFolder ?? "the instance's backup folder" : export.Folder;
+            log.Info(
+                $"Exporting SQL Server database {source} ({planned.Database.Files.Count} file(s), {VmBackupTask.Format(planned.Database.TotalBytes)}, {planned.Database.Consistency}) " +
+                $"from the restore point of {point.CreatedUtc.ToLocalTime():g} as a .bak: it is published on {target} as {SqlCatalog.QuoteName(name)} (nothing is copied), " +
+                $"backed up copy-only with checksums into {folder}, verified{(export.Download ? ", sent to the backup server for download" : string.Empty)} and unpublished again. " +
+                $"Account: {account.UserName}.");
+
+            using var reservation = await FileRestoreSessionRunner.ReserveAgentAsync(
+                registry, agent.Id, host, log, agentOptions.Value.WorkWaitLimit, time, cancellationToken).ConfigureAwait(false);
+            DiskPublish publish;
+            try
+            {
+                publish = await publishes.PublishAsync(agent.Id, planned.Info, planned.Disks, line => log.Info(line), options.Value.PublishTimeout, cancellationToken).ConfigureAwait(false);
+            }
+            catch (PublishFailedException ex)
+            {
+                var left = await RemoveLeftoverAsync(agent, account, request, ex.LastStatus, ex.TimedOut, log).ConfigureAwait(false);
+                throw new InvalidOperationException($"Publishing {source} on {target} for the export failed: {ex.Message}{(left is null ? string.Empty : " " + left)}", ex);
+            }
+
+            SqlJobResult backup;
+            try
+            {
+                var fileName = $"{SqlRestoreFiles.Stem(export.Database)}_{point.CreatedUtc.ToLocalTime():yyyyMMdd_HHmm}.bak";
+                backup = await jobs.RunAsync(
+                    agent.Id,
+                    new SqlJobRequest
+                    {
+                        Kind = SqlJobKinds.BackupDatabase, Instance = export.TargetInstance, Account = account, Database = name, Folder = export.Folder, FileName = fileName,
+                        Description = $"{source} of {point.VmName} from the restore point of {point.CreatedUtc.ToLocalTime():g} (backdafuckup export)",
+                        Upload = export.Download, UploadId = export.Download ? session.Id : null,
+                    },
+                    options.Value.AttachTimeout,
+                    CancellationToken.None).ConfigureAwait(false);
+                foreach (var line in backup.Log)
+                {
+                    log.Info(line);
+                }
+            }
+            finally
+            {
+                if (!await publishes.UnpublishAsync(publish, TimeSpan.FromMinutes(5), CancellationToken.None).ConfigureAwait(false))
+                {
+                    log.Warning($"The agent in {host} did not confirm the unpublish within 5 minutes.");
+                }
+            }
+
+            var leftover = await RemoveLeftoverAsync(agent, account, request, publish.Status, timedOut: !DiskPublishes.HasEnded(publish), log).ConfigureAwait(false);
+            if (!backup.Success)
+            {
+                throw new InvalidOperationException($"{target}: {backup.Error ?? "the agent did not report the backup."}{(leftover is null ? " The database was unpublished again." : " " + leftover)}");
+            }
+
+            var notes = new List<string>();
+            if (DiskPublishes.HasEnded(publish) && publish.Status?.CleanedUp != true)
+            {
+                notes.Add("not everything of the publish could be removed in the VM (see the log); the agent retries before its next publish and when it starts");
+            }
+
+            if (leftover is not null)
+            {
+                notes.Add(leftover);
+            }
+
+            var summary = $"Exported {source} from the restore point of {point.CreatedUtc.ToLocalTime():g} to {backup.BackupPath} on {host} " +
+                $"({VmBackupTask.Format(backup.BackupBytes)}, copy-only, verified){(backup.Uploaded ? "; it can be downloaded here for 24 hours" : string.Empty)}" +
+                (notes.Count == 0 ? "." : $"; but {string.Join("; ", notes)}.");
+            var state = leftover is not null ? SessionState.Failed : notes.Count > 0 ? SessionState.Warning : SessionState.Succeeded;
+            log.Write(state == SessionState.Succeeded ? LogSeverity.Info : state == SessionState.Warning ? LogSeverity.Warning : LogSeverity.Error, summary);
+            await FinishTaskAsync(task.Id, state, state == SessionState.Succeeded ? null : summary).ConfigureAwait(false);
+            return (state, summary);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            log.Error(ex.Message);
+            await FinishTaskAsync(task.Id, SessionState.Failed, ex.Message).ConfigureAwait(false);
+            return (SessionState.Failed, ex.Message);
+        }
+        catch (OperationCanceledException)
+        {
+            log.Warning("Stopped before the backup; the agent removes what it has set up when it sees the stop.");
+            await FinishTaskAsync(task.Id, SessionState.Stopped, "Stopped").ConfigureAwait(false);
+            return (SessionState.Stopped, "Stopped before the backup.");
         }
     }
 
@@ -333,10 +499,10 @@ public sealed class SqlPublishSessionRunner(
     /// The disks and volumes that hold the database's files, named by their drive letter in the backup, and the files
     /// within them (primary data file first). Refuses databases that cannot be restored, with the reasons.
     /// </summary>
-    private static Plan PlanPublish(List<GuestDiskSource> sources, StoredGuestMetadata? stored, SqlPublishRequestDto request, RestorePointEntity point)
+    private static Plan PlanPublish(List<GuestDiskSource> sources, StoredGuestMetadata? stored, SqlPublishRequestDto request, RestorePointEntity point, string verb)
     {
         using var image = GuestImage.Open(sources);
-        var database = SqlCatalog.Restorable(SqlCatalog.Describe(image, stored), request.Instance, request.Database, point.VmName, point.CreatedUtc, "published");
+        var database = SqlCatalog.Restorable(SqlCatalog.Describe(image, stored), request.Instance, request.Database, point.VmName, point.CreatedUtc, verb);
 
         var info = new PublishInfo { Title = $"{point.VmName}, restore point of {point.CreatedUtc.ToLocalTime():g}" };
         var disks = new List<GuestDiskSource>();

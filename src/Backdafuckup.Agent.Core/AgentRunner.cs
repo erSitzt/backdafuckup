@@ -530,6 +530,11 @@ public sealed class AgentRunner
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlReplaceFiles);
             }
 
+            if (_sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlBackup))
+            {
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlBackup);
+            }
+
             if (_restoreFiles is not null)
             {
                 foreach (var capability in new[] { AgentProtocol.CapabilityRestoreFiles, AgentProtocol.CapabilityRestoreFilesV2 })

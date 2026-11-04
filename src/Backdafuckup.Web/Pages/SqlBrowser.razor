@@ -79,6 +79,8 @@ else
                             <MudTooltip Text="The database files as they are in the backup, plus a script that attaches them to an instance.">
                                 <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.FolderZip"
                                            Disabled="@(!CanExport(db) || _preparing)" OnClick="@(() => ExportFilesAsync(db))">Export files</MudButton>
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Inventory2"
+                                           Disabled="@(!db.Restorable || !CanExport(db))" OnClick="@(() => OpenPublishAsync(db, restore: false, export: true))">Export .bak</MudButton>
                             </MudTooltip>
                         </MudStack>
 
@@ -161,7 +163,7 @@ else
 
 <MudDialog @bind-Visible="_publishOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true, CloseOnEscapeKey = true })">
     <TitleContent>
-        <MudText Typo="Typo.h6">@(_restoreMode ? (_overwrite ? $"Overwrite {_publishDb?.Name} with the restore point" : $"Restore {_publishDb?.Name} as a new database") : $"Publish {_publishDb?.Name}")</MudText>
+        <MudText Typo="Typo.h6">@(_exportMode ? $"Export {_publishDb?.Name} as .bak" : _restoreMode ? (_overwrite ? $"Overwrite {_publishDb?.Name} with the restore point" : $"Restore {_publishDb?.Name} as a new database") : $"Publish {_publishDb?.Name}")</MudText>
         <MudText Typo="Typo.body2">
             @_publishDb?.Instance on @_mount?.VmName, restore point of @_mount?.RestorePointCreatedUtc.ToLocalTime().ToString("g") ·
             @(_publishDb is null ? "" : Fmt.Bytes(_publishDb.TotalBytes))
@@ -190,6 +192,15 @@ else
                         against the backup and attaches them to an instance there. The database in the backup and existing databases stay as they are.
                     </MudText>
                 }
+            }
+            else if (_exportMode)
+            {
+                <MudText Typo="Typo.body2">
+                    The database is published on an instance in the target VM (read from the backup, nothing is copied), backed up there
+                    copy-only with checksums into a .bak, verified with RESTORE VERIFYONLY, and unpublished again. Choose an instance of
+                    the same or a newer SQL Server version; the original VM works too (the database gets the name <i>name</i>_bdfu_export if
+                    its own name is taken there).
+                </MudText>
             }
             else
             {
@@ -250,11 +261,22 @@ else
                             }
                         </MudSelect>
                     </MudItem>
-                    <MudItem xs="12" md="6">
-                        <MudTextField T="string" @bind-Value="_publishName" Label="Database name" Variant="Variant.Outlined" Immediate="true" Margin="Margin.Dense"
-                                      Disabled="_overwrite" HelperText="@(_overwrite ? "The database that is overwritten." : "Must not exist on the instance.")" />
-                    </MudItem>
-                    @if (!_restoreMode)
+                    @if (_exportMode)
+                    {
+                        <MudItem xs="12" md="6">
+                            <MudTextField T="string" @bind-Value="_exportFolder" Label="Folder for the .bak (in the VM)" Variant="Variant.Outlined" Immediate="true" Margin="Margin.Dense"
+                                          Placeholder="@(TargetInstance?.BackupFolder ?? "the instance's backup folder")"
+                                          HelperText="Empty: the instance's backup folder. SQL Server's service must be able to write there." />
+                        </MudItem>
+                    }
+                    else
+                    {
+                        <MudItem xs="12" md="6">
+                            <MudTextField T="string" @bind-Value="_publishName" Label="Database name" Variant="Variant.Outlined" Immediate="true" Margin="Margin.Dense"
+                                          Disabled="_overwrite" HelperText="@(_overwrite ? "The database that is overwritten." : "Must not exist on the instance.")" />
+                        </MudItem>
+                    }
+                    @if (!_restoreMode && !_exportMode)
                     {
                         <MudItem xs="12" md="6">
                             <MudSelect T="int" @bind-Value="_publishHours" Label="Unpublish automatically after" Variant="Variant.Outlined" Dense="true"
@@ -267,6 +289,10 @@ else
                         </MudItem>
                     }
                 </MudGrid>
+                @if (_exportMode)
+                {
+                    <MudCheckBox T="bool" @bind-Value="_exportDownload" Color="Color.Primary" Label="Also keep it on the backup server for download (24 hours)" />
+                }
                 @if (_restoreMode && _overwrite)
                 {
                     <MudSimpleTable Dense="true" Elevation="0">
@@ -324,7 +350,7 @@ else
     <DialogActions>
         <MudButton OnClick="@(() => _publishOpen = false)">Cancel</MudButton>
         <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@(_restoreMode ? Icons.Material.Filled.SettingsBackupRestore : Icons.Material.Filled.Link)"
-                   Disabled="@(!CanPublish || _starting)" OnClick="PublishAsync">@(_restoreMode ? (_overwrite ? "Overwrite" : "Restore") : "Publish")</MudButton>
+                   Disabled="@(!CanPublish || _starting)" OnClick="PublishAsync">@(_exportMode ? "Export" : _restoreMode ? (_overwrite ? "Overwrite" : "Restore") : "Publish")</MudButton>
     </DialogActions>
 </MudDialog>
 
@@ -344,6 +370,9 @@ else
 
     private bool _publishOpen;
     private bool _restoreMode;
+    private bool _exportMode;
+    private string? _exportFolder;
+    private bool _exportDownload = true;
     private bool _overwrite;
     private bool _keepReplaced;
     private string _fileLocation = SqlRestoreFiles.Original;
@@ -395,9 +424,11 @@ else
         }
     }
 
-    private async Task OpenPublishAsync(SqlDatabaseDto db, bool restore)
+    private async Task OpenPublishAsync(SqlDatabaseDto db, bool restore, bool export = false)
     {
         _restoreMode = restore;
+        _exportMode = export;
+        _exportFolder = null;
         _overwrite = false;
         _keepReplaced = false;
         _publishDb = db;
@@ -542,6 +573,19 @@ else
                 }
             }
         }
+        else if (_exportMode)
+        {
+            if (target.IsSysadmin != true && target.IsDbCreator != true)
+            {
+                checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} may not create databases on instance {target.Name}; it needs the server role dbcreator or sysadmin."));
+            }
+
+            var exportFolder = _exportFolder?.Trim();
+            if (!string.IsNullOrEmpty(exportFolder) && !(exportFolder.Length >= 2 && char.IsAsciiLetter(exportFolder[0]) && exportFolder[1] == ':' && (exportFolder.Length == 2 || exportFolder[2] == '\\')))
+            {
+                checks.Add((Severity.Error, $"'{exportFolder}' is not a local folder in the VM; enter it as D:\\Backup."));
+            }
+        }
         else
         {
             if (target.IsSysadmin != true && target.IsDbCreator != true)
@@ -570,7 +614,9 @@ else
             }
             else if (to > from)
             {
-                checks.Add((Severity.Info, $"{target.Product} upgrades the database from {source?.Product} when it attaches it; the upgrade lands in the overlay, the backup stays as it is."));
+                checks.Add((Severity.Info, _exportMode
+                    ? $"{target.Product} upgrades the database from {source?.Product} when it attaches it: the .bak can then be restored only on {target.Product} or newer. Use an instance of {source?.Product} for a .bak of the original version."
+                    : $"{target.Product} upgrades the database from {source?.Product} when it attaches it; the upgrade lands in the overlay, the backup stays as it is."));
             }
         }
 
@@ -617,6 +663,11 @@ else
             checks.Add((Severity.Normal, _overwrite
                 ? "The restored files need the space of the database once more until the previous files are deleted."
                 : "Existing files are never replaced: if a file of that name exists, the restore stops and deletes what it has written."));
+        }
+        else if (_exportMode)
+        {
+            checks.Add((Severity.Normal, $"The .bak is a copy-only full backup. The export leaves backup history rows in msdb of instance {target.Name}; " +
+                "TRUSTWORTHY is off in the backup and the attaching account is its owner."));
         }
         else
         {
@@ -671,7 +722,11 @@ else
         _starting = true;
         try
         {
-            var started = _restoreMode
+            var started = _exportMode
+                ? await Api.PostAsync<StartedDto>("api/sql/exports", new SqlExportRequestDto(
+                    _mount.RestorePointId, _publishDb.Instance, _publishDb.Name, _targetVm!, _targetInstance!, _accountId!.Value,
+                    string.IsNullOrWhiteSpace(_exportFolder) ? null : _exportFolder.Trim(), _exportDownload))
+                : _restoreMode
                 ? await Api.PostAsync<StartedDto>("api/sql/restores", new SqlRestoreRequestDto(
                     _mount.RestorePointId, _publishDb.Instance, _publishDb.Name, _targetVm!, _targetInstance!, _accountId!.Value, _publishName.Trim(),
                     _fileLocation, _dataFolder, _logFolder, _overwrite, _overwrite && _keepReplaced))

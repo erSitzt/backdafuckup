@@ -1149,6 +1149,68 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_sql_database_is_exported_as_bak_through_a_publish_and_offered_for_download()
+    {
+        var client = await SignedInClientAsync();
+        var mdf = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11);
+        var ldf = WindowsTestDisk.SqlFile(2, 512 << 10, 0x22);
+        var image = WindowsTestDisk.Create(
+        [
+            new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+            new WindowsTestDisk.Volume('D', 8, new Dictionary<string, byte[]> { ["SQL/shop.mdf"] = mdf }),
+            new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]> { ["Log/shop_log.ldf"] = ldf }),
+        ]);
+        IscsiGuestHost? guest = null;
+        var backupFolder = Path.Combine(_root, "sql-export-backup");
+        Directory.CreateDirectory(backupFolder);
+        var sql = new ScriptedSqlEnvironment(path => guest!.ReadFile(path)) { BackupFolder = backupFolder };
+        sql.AddDatabase("shop", @"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf");
+        static GuestSqlFile F(string path, string spec) => new() { Path = path, Spec = spec };
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+        var point = await BackUpImageAsync(client, "sql08", image, async vm => started = await StartAgentAsync(
+            vm, null, sql, directory => guest = new IscsiGuestHost(Path.Combine(directory, "publish")),
+            [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", DataFiles = [F(@"D:\SQL\", "shop.mdf")], LogFiles = [F(@"L:\Log\", "shop_log.ldf")], InBackup = true }]));
+        var (_, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
+        try
+        {
+            var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_export", "Export-1", null), Ct));
+            var request = new SqlExportRequestDto(point.Id, "SQLEXPRESS", "shop", point.VmNativeId, "SQLEXPRESS", login.Id, null, Download: true);
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/sql/exports", request with { Folder = @"Backup\here" }, Ct)).StatusCode);
+
+            var session = (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/exports", request, Ct))).SessionId;
+            var detail = await WaitForSessionAsync(client, session);
+            var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{session}/log", Ct))!.Select(l => l.Message));
+            Assert.True(detail.Session.State == "Succeeded", detail.Session.Summary + "\n" + log);
+
+            // Published under another name (shop exists on the instance), backed up from there, unpublished again.
+            var bak = Path.Combine(backupFolder, $"shop_{point.CreatedUtc.ToLocalTime():yyyyMMdd_HHmm}.bak");
+            Assert.Equal("shop_bdfu_export", sql.Backups[bak]);
+            Assert.Equal([.. "TAPE shop_bdfu_export;"u8.ToArray(), .. mdf, .. ldf], File.ReadAllBytes(bak));
+            Assert.Contains("DROP DATABASE [shop_bdfu_export]", sql.Statements);
+            Assert.Empty(new PublishJournal(guest!.WorkFolder).Read());
+            Assert.Contains("it is published on ", log, StringComparison.Ordinal);
+            Assert.Contains("as [shop_bdfu_export] (nothing is copied)", log, StringComparison.Ordinal);
+            Assert.Contains("SQL Server Express does not compress backups", log, StringComparison.Ordinal);
+            Assert.Contains("RESTORE VERIFYONLY with checksums passed", log, StringComparison.Ordinal);
+            Assert.Contains($"Exported SQLEXPRESS\\shop from the restore point of", detail.Session.Summary, StringComparison.Ordinal);
+            Assert.Contains("it can be downloaded here for 24 hours", detail.Session.Summary, StringComparison.Ordinal);
+            Assert.All(sql.Accounts, a => Assert.Equal("bdfu_export", a.UserName));
+
+            // The download: the file's name and size, a one-time link, the same bytes as in the VM.
+            var file = (await client.GetFromJsonAsync<SqlExportFileDto>($"/api/sql/exports/{session}", Ct))!;
+            Assert.Equal((Path.GetFileName(bak), new FileInfo(bak).Length), (file.FileName, file.SizeBytes));
+            var ticket = await Read<FileDownloadTicketDto>(client.PostAsJsonAsync($"/api/sql/exports/{session}/link", new { }, Ct));
+            Assert.Equal(File.ReadAllBytes(bak), await client.GetByteArrayAsync("/" + ticket.Url, Ct));
+            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/" + ticket.Url, Ct)).StatusCode);
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
+    }
+
+    [Fact]
     public async Task A_sql_database_is_restored_as_a_new_database_through_the_agent_and_attached()
     {
         var client = await SignedInClientAsync();

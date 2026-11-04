@@ -450,6 +450,9 @@ public enum SessionKind
 
     /// <summary>A SQL Server database restored from a restore point (its files written into a VM and attached).</summary>
     SqlRestore,
+
+    /// <summary>A SQL Server database of a restore point exported as a .bak (published, backed up, unpublished).</summary>
+    SqlExport,
 }
 
 public enum GuestProcessingMode

@@ -198,11 +198,11 @@ public static class InfrastructureEndpoints
         {
             // Checked first: a published database is the more urgent reason (the jobs may be removed meanwhile).
             if (await db.Sessions.AnyAsync(
-                    s => s.RepositoryId == id && (s.Kind == SessionKind.SqlPublish || s.Kind == SessionKind.SqlRestore) &&
+                    s => s.RepositoryId == id && (s.Kind == SessionKind.SqlPublish || s.Kind == SessionKind.SqlRestore || s.Kind == SessionKind.SqlExport) &&
                          (s.State == SessionState.Queued || s.State == SessionState.Running || s.State == SessionState.Stopping),
                     ct))
             {
-                return Results.Problem("SQL Server databases from this repository are published or being restored; unpublish or stop them under Sessions first.", statusCode: StatusCodes.Status409Conflict);
+                return Results.Problem("SQL Server databases from this repository are published, being restored or exported; unpublish or stop them under Sessions first.", statusCode: StatusCodes.Status409Conflict);
             }
 
             if (await db.Jobs.AnyAsync(j => j.RepositoryId == id, ct))
