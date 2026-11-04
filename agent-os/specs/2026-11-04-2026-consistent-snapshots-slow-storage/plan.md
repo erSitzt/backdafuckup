@@ -12,10 +12,15 @@ See `shape.md` for the measurements, how XO, Veeam and Hyper-V do it, and what t
   - The manifest lists them in `ExcludedDisks`. A VM restore creates them empty (`IVmRestoreSession.CreateEmptyDiskAsync`) and maps them in `import_metadata`.
   - Pools without `ignore_vdis` (`MESSAGE_PARAMETER_COUNT_MISMATCH`) back them up with a warning.
 - **Free space:** every storage of the VM needs at least `Xen:MinStorageFreePercent` (default 5 %), checked after the gate and before the freeze. Otherwise the VM fails with `XenStorageSpaceException`.
-- **Measurement:** "Snapshot … created in 8.1 s (3 disk(s) on 'Alletra')" and "Creating snapshot … on 'Alletra' (12.3 % free)".
+- **Measurement:** "Snapshot … created in 8.1 s: 3 disk(s) on 'Alletra' (12.3 % free)." (it replaces the "Creating snapshot" line, which has the same log key).
 - **Hardening:** `ReleaseChangeTokensAsync` deletes a disk only if it is a snapshot or `cbt_metadata` disk with the `backdafuckup.session` tag.
 
-**Still to do for step 1:** deploy, then run the lab job with sql1 and sql2. The log then shows the single-VM snapshot time on Alletra, with and without the config drive marked `[NOBAK]`.
+**Measured after the deployment (2026-11-04 20:56, lab job, storage `alletra-mp02`):**
+- sql2 (3 disks) took 24.7 s.
+- sql1 (4 disks) waited 28.6 s for sql2, then took 46.9 s.
+- That is about 8–12 s per disk, even alone. Both are crash-consistent (`VSS_E_HOLD_WRITES_TIMEOUT`), as expected: shortening alone does not bring multi-disk VMs on this storage under 10 s.
+
+Steps 2 and 3 are needed.
 
 ## Step 2 — T-SQL snapshot backup for SQL Server 2022+ (approach A)
 
@@ -51,7 +56,7 @@ See `shape.md` for the measurements, how XO, Veeam and Hyper-V do it, and what t
 - Agent.Core against the mssql container (Developer edition, 2022 CU): suspend, a write that blocks, `BACKUP … METADATA_ONLY`, the `msdb` rows, the watchdog thaw.
 - Server: the orchestration with a fake agent, the `.bkm` blob in the manifest.
 
-**Spike 2a (first):** on bdfu-lab-sql1 (SQL Server 2022 Express), check:
+**Spike 2a (first):** on bdfu-lab-sql1 (SQL Server 2025 Express, 17.00.1000; the download link of the lab now delivers 2025), check:
 - whether Express supports the T-SQL snapshot backup at all (Microsoft Learn says "SQL Server 2022 and later" and names no edition);
 - the length of the write pause on Alletra;
 - the `msdb` rows;

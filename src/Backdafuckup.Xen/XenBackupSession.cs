@@ -144,9 +144,10 @@ internal sealed class XenBackupSession : IVmBackupSession
         Guid? taskArtifact = null;
         TimeSpan snapshotTime;
         GuestFreezeResult? freezeResult;
+        string free;
         try
         {
-            var free = await CheckStorageSpaceAsync(xapi, snapshotStorages, options.MinStorageFreePercent, vm.Str("name_label"), cancellationToken).ConfigureAwait(false);
+            free = await CheckStorageSpaceAsync(xapi, snapshotStorages, options.MinStorageFreePercent, vm.Str("name_label"), cancellationToken).ConfigureAwait(false);
 
             // Guest processing: freeze the guest as late as possible. Everything slow (CBT, record reads, waiting for
             // other snapshots) is done by now, because VSS holds writes for at most 10 s and only the snapshot itself
@@ -208,7 +209,8 @@ internal sealed class XenBackupSession : IVmBackupSession
             await ledger.UpdateAsync(t, ArtifactState.Done, null, cancellationToken).ConfigureAwait(false);
         }
 
-        log.Info($"Snapshot {request.SnapshotName} created in {Seconds(snapshotTime)} ({diskCount} disk(s) on {storageText}).", "snapshot");
+        // Same log key as "Creating snapshot", which this line replaces: it repeats the storages with their free space.
+        log.Info($"Snapshot {request.SnapshotName} created in {Seconds(snapshotTime)}: {diskCount} disk(s) on {free}.", "snapshot");
 
         var disks = new Dictionary<string, DiskState>(StringComparer.Ordinal);
         XenBackupSession? session = null;

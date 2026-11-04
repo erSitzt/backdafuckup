@@ -2,9 +2,9 @@
 
 | Step | State |
 |---|---|
-| 1 — one snapshot per storage, `[NOBAK]`, free-space check, timing, change-token hardening | built and tested (2026-11-04); not deployed yet |
-| 1 — measure single-VM snapshot times on Alletra | open (after deployment, lab job sql1 + sql2) |
-| 2a — spike: T-SQL snapshot backup on SQL Server 2022 Express | open |
+| 1 — one snapshot per storage, `[NOBAK]`, free-space check, timing, change-token hardening | done, deployed on backup01 (2026-11-04) |
+| 1 — measure single-VM snapshot times on Alletra | done: 24.7 s (3 disks), 46.9 s (4 disks); still over 10 s |
+| 2a — spike: T-SQL snapshot backup on SQL Server Express (sql1 runs 2025 Express, 17.00.1000) | open |
 | 2 — T-SQL snapshot backup (approach A) | open |
 | 3a — spike: shadow copy readable in the XAPI snapshot | open |
 | 3 — in-guest shadow copy with read-time revert (approach B) | open |

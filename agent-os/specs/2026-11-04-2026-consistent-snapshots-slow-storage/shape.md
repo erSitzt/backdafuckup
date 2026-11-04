@@ -11,6 +11,8 @@ Measured on backup01, 2026-11-02 to 2026-11-04 (session log):
 | app01 | 1 | – | 7.3–8.8 s | application-consistent (held 7.1–7.8 s) |
 | bdfu-lab-sql1/sql2, both at once | 4 each | Alletra (shared LVM) | 38–103 s | crash-consistent, writers `VSS_E_WRITERERROR_TIMEOUT` |
 | bdfu-lab-sql1/sql2, both at once, no guest processing | 4 each | Alletra | ~60–80 s | crash-consistent by choice |
+| bdfu-lab-sql2, one snapshot per storage (step 1) | 3 | Alletra | 24.7 s | crash-consistent |
+| bdfu-lab-sql1, one snapshot per storage (step 1), after 28.6 s wait | 4 | Alletra | 46.9 s | crash-consistent |
 
 XAPI snapshots the disks one after another, and parallel snapshots on one LVM storage wait for each other. In the second guest run sql1 finished 18 s after sql2, which points to about 5–9 s per disk. A SQL Server with C:, data and log disks will not fit into 10 s on this storage, even alone.
 

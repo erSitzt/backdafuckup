@@ -639,7 +639,7 @@ public sealed class XenProviderTests : IAsyncDisposable
         Assert.DoesNotContain(_pool.Records("VDI"), v => v.Bool("is_a_snapshot") && v.Str("name_label").Contains("[NOBAK]", StringComparison.Ordinal));
         Assert.False(_pool.Records("VDI").Single(v => v.Str("uuid") == disks[2]).Bool("cbt_enabled"));
         Assert.Contains(_log, l => l.Contains("Disk app01 scratch [NOBAK] (8.0 MiB) is not backed up", StringComparison.Ordinal));
-        Assert.Contains(_log, l => l.Contains("created in", StringComparison.Ordinal) && l.Contains("(2 disk(s) on 'Local storage')", StringComparison.Ordinal));
+        Assert.Contains(_log, l => l.Contains("created in", StringComparison.Ordinal) && l.Contains(": 2 disk(s) on 'Local storage' (99.9 % free).", StringComparison.Ordinal));
 
         var targetSr = _pool.Uuid("SR", _pool.SecondSrRef);
         var plan = new VmRestorePlan
