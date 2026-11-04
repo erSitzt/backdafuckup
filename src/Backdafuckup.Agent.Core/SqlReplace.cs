@@ -86,7 +86,10 @@ public static class SqlReplace
                     }
 
                     fs.Rename(file + NewSuffix, file);
-                    foreach (var grantee in SqlAttach.Accounts(instance, account))
+
+                    // Only the service: SET ONLINE opens the files as the service, unlike an attach, which also checks the
+                    // attaching account (and SQL Server keeps these entries, unlike after an attach).
+                    foreach (var grantee in SqlAttach.Accounts(instance, account).Where(a => !string.Equals(a, account.UserName, StringComparison.OrdinalIgnoreCase)))
                     {
                         fs.GrantFullControl(file, grantee);
                     }
