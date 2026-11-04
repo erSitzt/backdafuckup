@@ -82,30 +82,51 @@ public sealed class ConnectionManager(IEnumerable<IHypervisorProvider> providers
     public async Task<IHypervisorSession> OpenAsync(Guid connectionId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var connection = await db.Connections.Include(c => c.Credential).Include(c => c.Hosts)
+        var connection = await db.Connections.AsNoTracking().Include(c => c.Credential).Include(c => c.Hosts)
             .FirstOrDefaultAsync(c => c.Id == connectionId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"Connection {connectionId} does not exist.");
+
+        // The status columns are written with plain updates, without the connection's row version: several VMs of a job
+        // open the same connection at the same time (e.g. automatic agent installations), and a version conflict on this
+        // bookkeeping must not fail them.
+        IHypervisorSession session;
         try
         {
-            var session = await Provider(connection.Kind).OpenAsync(BuildSettings(connection), cancellationToken).ConfigureAwait(false);
-            connection.Status = ConnectionStatus.Connected;
-            connection.LastConnectedUtc = DateTimeOffset.UtcNow;
-            connection.LastError = null;
-            if (!string.Equals(session.Platform.MasterAddress, connection.CurrentMasterAddress, StringComparison.OrdinalIgnoreCase))
-            {
-                connection.CurrentMasterAddress = session.Platform.MasterAddress;
-            }
-
-            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            return session;
+            session = await Provider(connection.Kind).OpenAsync(BuildSettings(connection), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            connection.Status = ConnectionStatus.Error;
-            connection.LastError = ex.Message;
-            await db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                await db.Connections.Where(c => c.Id == connectionId).ExecuteUpdateAsync(s => s
+                    .SetProperty(c => c.Status, ConnectionStatus.Error)
+                    .SetProperty(c => c.LastError, ex.Message), CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception statusError) when (statusError is not OperationCanceledException)
+            {
+                // The connection error is what counts; the status is shown again at the next attempt.
+            }
+
             throw;
         }
+
+        try
+        {
+            var master = session.Platform.MasterAddress;
+            var now = DateTimeOffset.UtcNow;
+            await db.Connections.Where(c => c.Id == connectionId).ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.Status, ConnectionStatus.Connected)
+                .SetProperty(c => c.LastConnectedUtc, now)
+                .SetProperty(c => c.LastError, (string?)null)
+                .SetProperty(c => c.CurrentMasterAddress, master), cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await session.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        return session;
     }
 }
 

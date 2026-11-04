@@ -427,6 +427,29 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task The_same_connection_opens_in_parallel_without_a_version_conflict()
+    {
+        // Several VMs of a job open the connection at once (automatic agent installations); the status bookkeeping
+        // used to fail all but one with "expected to affect 1 row(s), but actually affected 0 row(s)".
+        var (vmUuid, _) = _pool.AddVm("parallel", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 1);
+        var connectionId = await ConnectionOfAsync(jobId);
+        var manager = Services.GetRequiredService<ConnectionManager>();
+
+        var sessions = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(() => manager.OpenAsync(connectionId, Ct), Ct)));
+        foreach (var session in sessions)
+        {
+            await session.DisposeAsync();
+        }
+
+        await using var db = await DbAsync();
+        var connection = await db.Connections.AsNoTracking().SingleAsync(c => c.Id == connectionId, Ct);
+        Assert.Equal(ConnectionStatus.Connected, connection.Status);
+        Assert.Null(connection.LastError);
+        Assert.NotNull(connection.LastConnectedUtc);
+    }
+
+    [Fact]
     public async Task Recovery_removes_snapshots_left_behind_by_a_crash()
     {
         var (vmUuid, _) = _pool.AddVm("crashy", DiskSize);
