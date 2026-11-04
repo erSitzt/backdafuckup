@@ -328,7 +328,10 @@ public static class GuestProcessingModes
     /// <summary>VSS: every VSS-aware application; the VM snapshot must finish within 10 s.</summary>
     public const string Vss = "Vss";
 
-    /// <summary>SQL Server 2022+: the databases' writes are suspended for the snapshot, without a time limit.</summary>
+    /// <summary>
+    /// SQL Server 2022+: the databases' writes are suspended for the snapshot, without a time limit. VMs where no database
+    /// can be suspended (no SQL Server, an older one, no rights) use VSS.
+    /// </summary>
     public const string SqlSnapshot = "SqlSnapshot";
 }
 

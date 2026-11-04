@@ -459,7 +459,8 @@ public enum GuestProcessingMode
 
     /// <summary>
     /// SQL Server 2022 and later: the agent suspends the writes of the SQL Server databases (no time limit), VSS only
-    /// gathers the metadata. The databases are application-consistent, the rest of the guest crash-consistent.
+    /// gathers the metadata. The databases are application-consistent, the rest of the guest crash-consistent. A VM where
+    /// no database can be suspended uses <see cref="Vss"/>.
     /// </summary>
     SqlSnapshot,
 }

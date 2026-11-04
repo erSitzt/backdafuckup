@@ -490,22 +490,40 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         Assert.False(agent.SqlSuspended);
     }
 
-    [Fact]
-    public async Task Sql_snapshot_falls_back_to_crash_consistent_for_an_agent_without_the_capability()
+    [Theory]
+    [InlineData(false, "cannot suspend SQL Server for a snapshot yet (it updates itself after a server update); VSS is used for this VM.")]
+    [InlineData(true, "could not suspend any SQL Server database (MSSQLSERVER: SQL Server 15.0.4382.1 has no T-SQL snapshot backup (SQL Server 2022 or later)); VSS is used for this VM.")]
+    public async Task Sql_snapshot_falls_back_to_vss_when_nothing_can_be_suspended(bool capable, string reason)
     {
-        var (vmUuid, _) = _pool.AddVm("sql04", DiskSize);
+        // An agent that is not updated yet, or a VM whose SQL Server is older than 2022: VSS as in a VSS job.
+        var (vmUuid, _) = _pool.AddVm(capable ? "sql2019" : "sql04", DiskSize);
         var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
         await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
         await EnableSqlSnapshotAsync(jobId, "bdfu_backup", "Sql-Secret-4");
-        await using var agent = new FakeGuestAgent(Services, vmUuid);
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { SqlSnapshotCapable = capable, SqlOlderThan2022 = capable };
         await agent.StartAsync(Ct);
+        var frozenAtSnapshot = false;
+        _pool.OnSnapshot = _ => frozenAtSnapshot = agent.Frozen;
 
         var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
 
-        Assert.Equal(SessionState.Warning, session.State);
+        Assert.Equal(SessionState.Succeeded, session.State);
+        Assert.True(frozenAtSnapshot);
+        lock (agent.Commands)
+        {
+            Assert.Equal(
+                capable
+                    ? [AgentCommandKinds.PrepareBackup, AgentCommandKinds.Abort, AgentCommandKinds.SqlJob, AgentCommandKinds.PrepareBackup, AgentCommandKinds.Freeze, AgentCommandKinds.Thaw]
+                    : [AgentCommandKinds.PrepareBackup, AgentCommandKinds.Freeze, AgentCommandKinds.Thaw],
+                agent.Commands);
+        }
+
         var point = await LatestRestorePointAsync();
-        Assert.Equal("crash", point.Consistency);
-        Assert.Contains("cannot suspend SQL Server for a snapshot yet", point.ConsistencyReason, StringComparison.Ordinal);
+        Assert.Equal("application", point.Consistency);
+        await using var db = await DbAsync();
+        var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => new { l.Severity, l.Message }).ToListAsync(Ct);
+        var line = Assert.Single(log, l => l.Message.Contains(reason, StringComparison.Ordinal));
+        Assert.Equal(LogSeverity.Info, line.Severity);
     }
 
     private async Task EnableSqlSnapshotAsync(Guid jobId, string userName, string password)

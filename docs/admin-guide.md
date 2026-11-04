@@ -135,9 +135,9 @@ XCP-ng / XenServer removed the quiesced snapshot in 8.1, so a VM snapshot is cra
    - What shortens it: fewer disks in the snapshot (mark disks without backup value with `[NOBAK]`, see [VM snapshots](#vm-snapshots)), and only one snapshot at a time per storage (the default).
 5. **Copy-only:** the backup is a VSS copy-only backup (`VSS_BT_COPY`). The SQL Server backup chain (differential base, log backups) of other backup products stays untouched. Logs are not truncated.
 
-**Method "SQL Server snapshot" (SQL Server 2022 and later)**
+**Method "SQL Server snapshot where SQL Server 2022+ runs, VSS for all other VMs"**
 
-When the VM snapshot takes longer than VSS allows (see the 10 s limit above), choose *Method: SQL Server snapshot* in the job (Advanced → Guest processing) and a SQL Server account. It uses SQL Server's T-SQL snapshot backup instead of the VSS freeze:
+When the VM snapshot takes longer than VSS allows (see the 10 s limit above), choose this method in the job (Advanced → Guest processing) and a SQL Server account. For VMs with SQL Server 2022 or later it uses SQL Server's T-SQL snapshot backup instead of the VSS freeze:
 1. VSS only gathers the metadata (databases, files, volumes), as above, and ends right away.
 2. The agent suspends the writes of every user database with `ALTER DATABASE … SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON (MODE = COPY_ONLY)`.
    - It does this database by database, each on its own connection. This also covers databases that `AUTO_CLOSE` has closed, the default in SQL Server Express.
@@ -148,9 +148,16 @@ When the VM snapshot takes longer than VSS allows (see the 10 s limit above), ch
    - The snapshot backup metadata (`.bkm`) goes into the restore point, and the agent deletes it in the guest.
 5. If the snapshot fails, the agent resumes the writes without recording anything. It also resumes them if the server does not report the snapshot within 2 minutes (`Agent:SqlSnapshotHoldLimit`). If the agent stops or loses its connection to SQL Server, SQL Server resumes by itself.
 
+**VSS for all other VMs:** if the agent cannot suspend a single database, the same backup uses the VSS freeze, as with the method "VSS for every VM". The session log says why:
+- the VM has no SQL Server, or only one older than 2022 (a note);
+- the agent has not updated itself yet (a note);
+- the SQL Server is 2022 or later, but no database could be suspended, e.g. missing rights (a warning).
+
+A job can therefore hold SQL Servers and other VMs. If at least one database was suspended, the VM stays with the SQL Server snapshot; databases of other instances in it (e.g. an older SQL Server next to SQL Server 2022) are then crash-consistent with the reason.
+
 What it means:
 - **Consistency:** the SQL Server databases are application-consistent; files outside SQL Server are crash-consistent. The restore point shows "crash" with this explanation, and the SQL browser shows each database's own state.
-  - The session ends with a warning if a database could not be suspended (offline, a SQL Server older than 2022, missing rights).
+  - The session ends with a warning if a database of a VM with the SQL Server snapshot could not be suspended (offline, missing rights).
   - System databases (`master`, `model`, `msdb`) cannot be suspended; restore them from a native SQL Server backup.
 - **Writes wait as long as the snapshot takes.** On the shared LVM storage of the lab that was 25–47 s for three or four disks. Applications with the usual 30 s command timeout may see timeouts; a write whose client gave up is still committed afterwards. Keep the snapshot short with `[NOBAK]` and one snapshot per storage.
 - **Account:** a Windows account or a SQL Server login that is `sysadmin` on the instances. Windows accounts log on in the guest; the agent never stores the account.

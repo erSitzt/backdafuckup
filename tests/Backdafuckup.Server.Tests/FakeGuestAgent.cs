@@ -50,6 +50,9 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
     /// <summary>The account the server sent with the last SQL job (the test checks it, never logs it).</summary>
     public SqlAccount? LastSqlAccount { get; private set; }
 
+    /// <summary>The guest's SQL Server is older than 2022: the snapshot job suspends nothing.</summary>
+    public bool SqlOlderThan2022 { get; set; }
+
     /// <summary>The databases the SQL snapshot fails to suspend (reported as failed).</summary>
     public HashSet<string> SqlDatabasesFailingSuspend { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -180,8 +183,13 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
             return;
         }
 
-        var instance = new SqlSnapshotInstance { Name = "MSSQLSERVER", ProductVersion = "16.0.4135.4" };
-        foreach (var name in new[] { "shop", "notselected" })
+        var instance = new SqlSnapshotInstance { Name = "MSSQLSERVER", ProductVersion = SqlOlderThan2022 ? "15.0.4382.1" : "16.0.4135.4" };
+        if (SqlOlderThan2022)
+        {
+            instance.Error = "SQL Server 15.0.4382.1 has no T-SQL snapshot backup (SQL Server 2022 or later)";
+        }
+
+        foreach (var name in SqlOlderThan2022 ? [] : new[] { "shop", "notselected" })
         {
             instance.Databases.Add(SqlDatabasesFailingSuspend.Contains(name)
                 ? new SqlSnapshotDatabase { Name = name, State = SqlSnapshotStates.Failed, Reason = "suspending failed: permission denied" }

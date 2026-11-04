@@ -39,7 +39,9 @@ Steps 2 and 3 are needed.
    - Per database "application" (guest metadata v2 already stores it per database).
    - The restore point says "application (SQL)" or "crash (system)": the VM image without VSS is crash-consistent for the rest of the guest.
 
-**Job option *Guest processing mode*:**
+**Job option *Guest processing mode* (built 2026-11-04 as "VSS for every VM" and "SQL Server snapshot where SQL Server 2022+ runs, VSS for all other VMs"):**
+- The SQL Server snapshot falls back to VSS in the same backup when no database can be suspended: no SQL Server, one older than 2022, an agent without the capability, or missing rights (the last one with a warning).
+- The original idea:
 - **VSS:** as today.
 - **SQL suspend:** SQL 2022+ only; other VSS writers are not involved.
 - **Automatic:**

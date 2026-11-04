@@ -15,6 +15,8 @@ public sealed record SqlSnapshotSettings(Sql.SqlJobs Jobs, SqlAccount Account, s
 /// provider holds the writes), thaw (writer results). The hypervisor provider calls it right around the snapshot.
 /// With <see cref="SqlSnapshotSettings"/> the freeze is SQL Server's T-SQL snapshot backup instead: VSS only gathers
 /// the metadata, the agent suspends the databases' writes (no time limit) and records the snapshot in msdb afterwards.
+/// If no database can be suspended (no SQL Server 2022 or later in the VM, an agent without the capability, no rights),
+/// the VM falls back to the VSS freeze.
 /// </summary>
 public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, Guid agentId, string agentName, SqlSnapshotSettings? sql = null) : IGuestQuiescer
 {
@@ -39,9 +41,6 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
     /// <summary>SQL Server snapshot: how long the databases' writes were suspended.</summary>
     public long SqlSuspendedMs { get; private set; }
 
-    /// <summary>True if the freeze is the SQL Server snapshot (<see cref="SqlSnapshotSettings"/>).</summary>
-    public bool UsesSqlSnapshot => sql is not null;
-
     public async Task<IGuestFreeze> FreezeAsync(IOperationLog log, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(log);
@@ -61,7 +60,30 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
         log.Info($"Guest processing: VSS prepared by the {agentName}. {Describe(Prepared)}");
         if (sql is not null)
         {
-            return await SuspendSqlAsync(sql, log, cancellationToken).ConfigureAwait(false);
+            if (!registry.HasCapability(agentId, AgentProtocol.CapabilitySqlSnapshot))
+            {
+                // VSS is still prepared: freeze with it right away.
+                log.Info($"Guest processing: the {agentName} cannot suspend SQL Server for a snapshot yet (it updates itself after a server update); VSS is used for this VM.");
+            }
+            else if (await SuspendSqlAsync(sql, log, cancellationToken).ConfigureAwait(false) is { } sqlFreeze)
+            {
+                return sqlFreeze;
+            }
+            else
+            {
+                // The SQL path ended the VSS backup: prepare it again for the VSS freeze.
+                try
+                {
+                    prepare = await SendAsync(AgentCommandKinds.PrepareBackup, options.PrepareTimeout, "preparing VSS", cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    Release();
+                    throw;
+                }
+
+                Prepared = prepare.Prepare ?? new GuestBackupInfo();
+            }
         }
 
         var watch = Stopwatch.StartNew();
@@ -81,20 +103,17 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
 
     /// <summary>
     /// SQL Server snapshot: ends the VSS backup (it only gathered the metadata), then has the agent suspend the user
-    /// databases. Fails (crash-consistent) if no database could be suspended at all.
+    /// databases. Returns null if no database could be suspended (the reason is logged): the caller falls back to VSS.
+    /// A failing command throws (crash-consistent) as for VSS.
     /// </summary>
-    private async Task<IGuestFreeze> SuspendSqlAsync(SqlSnapshotSettings settings, IOperationLog log, CancellationToken cancellationToken)
+    private async Task<IGuestFreeze?> SuspendSqlAsync(SqlSnapshotSettings settings, IOperationLog log, CancellationToken cancellationToken)
     {
         RunningSqlJob? job = null;
         var handedOver = false;
+        var failedHard = false;
         try
         {
             await SendAsync(AgentCommandKinds.Abort, TimeSpan.FromSeconds(30), "ending the VSS metadata backup", cancellationToken).ConfigureAwait(false);
-            if (!registry.HasCapability(agentId, AgentProtocol.CapabilitySqlSnapshot))
-            {
-                throw new GuestQuiesceException($"the {agentName} cannot suspend SQL Server for a snapshot yet; it updates itself after a server update (or reinstall it).");
-            }
-
             var watch = Stopwatch.StartNew();
             job = await settings.Jobs.StartAsync(
                 agentId,
@@ -109,14 +128,27 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
             var (progress, failed) = await job.WaitForProgressAsync(options.PrepareTimeout, cancellationToken).ConfigureAwait(false);
             if (progress is null)
             {
-                throw new GuestQuiesceException($"suspending SQL Server failed in the {agentName}: {failed?.Error ?? "no details"}");
+                log.Warning($"Guest processing: suspending SQL Server failed in the {agentName}: {failed?.Error ?? "no details"}. VSS is used for this VM.");
+                return null;
             }
 
             var suspended = progress.Instances.Sum(i => i.Databases.Count(d => d.State == SqlSnapshotStates.Suspended));
             if (suspended == 0)
             {
-                job.SetSignal(SqlJobSignals.Abort);
-                throw new GuestQuiesceException($"the {agentName} could not suspend any SQL Server database: {DescribeProblems(progress.Instances)}");
+                // Expected for VMs without SQL Server 2022 or later; a misconfiguration (rights, connection) if they have one.
+                var text = progress.Instances.Count == 0
+                    ? $"Guest processing: the {agentName} found no SQL Server instance to suspend; VSS is used for this VM."
+                    : $"Guest processing: the {agentName} could not suspend any SQL Server database ({DescribeProblems(progress.Instances)}); VSS is used for this VM.";
+                if (progress.Instances.Any(i => MajorVersion(i.ProductVersion) >= 16))
+                {
+                    log.Warning(text);
+                }
+                else
+                {
+                    log.Info(text);
+                }
+
+                return null;
             }
 
             log.Info($"Guest processing: the {agentName} suspended the writes of {suspended} SQL Server database(s) in {Seconds1(watch.Elapsed)} " +
@@ -131,21 +163,34 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
             handedOver = true;
             return freeze;
         }
-        catch (Exception ex) when (ex is TimeoutException or InvalidOperationException)
+        catch (Exception ex)
         {
-            throw new GuestQuiesceException($"suspending SQL Server through the {agentName} failed: {ex.Message}", ex);
+            failedHard = true;
+            if (ex is TimeoutException or InvalidOperationException)
+            {
+                throw new GuestQuiesceException($"suspending SQL Server through the {agentName} failed: {ex.Message}", ex);
+            }
+
+            throw;
         }
         finally
         {
             if (!handedOver)
             {
-                // Tell a running job to resume (it also does after its hold limit or when the job is gone), and free the agent.
+                // Tell a running job to resume (it also does after its hold limit or when the job is gone). The agent stays
+                // reserved for the VSS fallback, unless this failed.
                 job?.SetSignal(SqlJobSignals.Abort);
                 job?.Dispose();
-                Release();
+                if (failedHard)
+                {
+                    Release();
+                }
             }
         }
     }
+
+    private static int MajorVersion(string? version) =>
+        int.TryParse(version?.Split('.')[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var major) ? major : 0;
 
     internal static string DescribeSuspended(IEnumerable<SqlSnapshotInstance> instances) => string.Join("; ", instances
         .Where(i => i.Databases.Any(d => d.State is SqlSnapshotStates.Suspended or SqlSnapshotStates.Recorded))
