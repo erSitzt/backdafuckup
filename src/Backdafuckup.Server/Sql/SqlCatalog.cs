@@ -141,7 +141,16 @@ public sealed class SqlCatalog(FileLevelWorkers workers)
         var problems = new List<string>();
         var files = new List<SqlFileDto>();
         var classified = database.DataFiles.Count + database.LogFiles.Count + database.OtherFiles.Count > 0;
-        if (classified)
+        if (classified && database.DataFiles.Count == 0 && database.LogFiles.Count == 0)
+        {
+            // The SQL Server writer reports its databases as file groups with plain file lists (FILE_LIST), not as database
+            // and log files: every file arrives as "other". Page 0 of each file tells them apart.
+            foreach (var description in database.OtherFiles)
+            {
+                AddUnclassified(description);
+            }
+        }
+        else if (classified)
         {
             Add(database.DataFiles, "data");
             Add(database.LogFiles, "log");
@@ -203,6 +212,29 @@ public sealed class SqlCatalog(FileLevelWorkers workers)
                     ? file with { Problem = "a file other than data and log files (e.g. a full-text catalog); not supported yet" }
                     : file);
             }
+        }
+
+        // A folder (FILESTREAM or In-Memory OLTP container) or a file classified by its header: file id 1 is the primary data
+        // file and 2 the first log file; higher ids (more data or log files) go by the extension, .ldf being a log file.
+        void AddUnclassified(GuestSqlFile description)
+        {
+            var path = description.FullPath();
+            if (path is null)
+            {
+                Add([description], "data");
+                return;
+            }
+
+            var file = DescribeFile(image, path, "data");
+            if (file.Problem is not null)
+            {
+                files.Add(file with { Kind = path.EndsWith(".ldf", StringComparison.OrdinalIgnoreCase) ? "log" : "data" });
+                return;
+            }
+
+            var id = FileId(image, file);
+            var log = id == 2 || (id != 1 && path.EndsWith(".ldf", StringComparison.OrdinalIgnoreCase));
+            files.Add(file with { Kind = log ? "log" : "data" });
         }
     }
 

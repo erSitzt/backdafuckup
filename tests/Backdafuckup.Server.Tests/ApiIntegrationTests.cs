@@ -411,11 +411,16 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
                         new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "master", DataFiles = [F(@"C:\Program Files\SQL\", "master.mdf")], LogFiles = [F(@"C:\Program Files\SQL\", "mastlog.ldf")], InBackup = true },
                         // Guest metadata from an older agent: a flat file list.
                         new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "legacy", Files = [@"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf"] },
+
+                        // What the real SQL Server writer reports (SQL Server 2025 Express in the lab): file groups with plain
+                        // file lists, so every file arrives as "other"; a memory-optimized file group as a folder.
+                        new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "writer", OtherFiles = [F(@"D:\SQL", "shop.mdf"), F(@"L:\Log", "shop_log.ldf"), F(@"D:\SQL", "shop_2.ndf")], InBackup = true },
+                        new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "writer_imoltp", OtherFiles = [F(@"D:\SQL", "docs.mdf"), F(@"L:\Log", "docs_log.ldf"), F(@"D:\SQL\imoltp_mod1", "*", recursive: true)], InBackup = true },
                     ],
                 };
                 await agent.StartAsync(Ct);
             });
-            Assert.Equal(5, point.SqlDatabaseCount);
+            Assert.Equal(7, point.SqlDatabaseCount);
 
             var mount = await Read<FileMountDto>(client.PostAsJsonAsync("/api/file-restore/mounts", new OpenFileMountRequestDto(point.Id), Ct));
             Assert.Equal(["C:", "D:", "L:"], mount.Volumes.Where(v => v.Readable).Select(v => v.MountPoint).Order().ToList());
@@ -449,6 +454,14 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             var legacy = sql.Databases.Single(d => d.Name == "legacy");
             Assert.True(legacy.Restorable, string.Join("; ", legacy.Problems));
             Assert.Equal(["data", "log"], legacy.Files.Select(f => f.Kind).ToList());
+
+            // The writer's plain file lists are told apart by page 0 (file id 1: primary data file, 2: log file).
+            var writer = sql.Databases.Single(d => d.Name == "writer");
+            Assert.True(writer.Restorable, string.Join("; ", writer.Problems));
+            Assert.Equal([(@"D:\SQL\shop.mdf", "data", true), (@"L:\Log\shop_log.ldf", "log", false), (@"D:\SQL\shop_2.ndf", "data", false)], writer.Files.Select(f => (f.Path, f.Kind, f.Primary)).ToList());
+            var memory = sql.Databases.Single(d => d.Name == "writer_imoltp");
+            Assert.False(memory.Restorable);
+            Assert.Equal([@"D:\SQL\imoltp_mod1\*: a FILESTREAM or In-Memory OLTP container (a whole folder); databases with containers are not supported yet"], memory.Problems);
 
             // Export the files of "shop" as a ZIP: primary file first, content as in the backup, plus an attach script.
             var ticket = await Read<FileDownloadTicketDto>(client.PostAsJsonAsync($"/api/file-restore/mounts/{mount.Id}/sql/downloads", new SqlDownloadRequestDto("SQLEXPRESS", "shop", "UTC"), Ct));
