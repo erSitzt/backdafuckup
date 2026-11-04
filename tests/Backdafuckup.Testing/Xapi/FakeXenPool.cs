@@ -312,7 +312,7 @@ public sealed class FakeXenPool : IAsyncDisposable
             (_, "add_to_other_config") => SetMap(Get(table, S(1)), "other_config", S(2), S(3)),
             (_, "remove_from_other_config") => SetMap(Get(table, S(1)), "other_config", S(2), null),
             ("host", "get_server_certificate") => HostCertificatePem,
-            ("VM", "snapshot") => Snapshot(S(1), S(2)),
+            ("VM", "snapshot") => Snapshot(S(1), S(2), p.Count > 3 ? (JsonArray)p[3]! : null),
             ("VM", "destroy") => DestroyVm(S(1)),
             ("VM", "set_name_label") => Set(Get("VM", S(1)), "name_label", S(2)),
             ("VM", "set_affinity") => Set(Get("VM", S(1)), "affinity", S(2)),
@@ -389,8 +389,35 @@ public sealed class FakeXenPool : IAsyncDisposable
     /// <summary>Called when VM.snapshot runs (e.g. to check that the guest is frozen at that moment).</summary>
     public Action<string>? OnSnapshot { get; set; }
 
-    private JsonNode? Snapshot(string vmRef, string name)
+    /// <summary>Simulates XAPI before XCP-ng 8.3: VM.snapshot has no list of disks to leave out (ignore_vdis).</summary>
+    public bool SnapshotWithoutIgnoreVdis { get; set; }
+
+    /// <summary>Renames a disk (e.g. to mark it [NOBAK]).</summary>
+    public void RenameDisk(string vdiUuid, string name)
     {
+        lock (_lock)
+        {
+            Get("VDI", RefByUuid("VDI", vdiUuid))["name_label"] = name;
+        }
+    }
+
+    /// <summary>Sets the used space of the default storage (SrRef).</summary>
+    public void SetStorageUsage(long physicalUtilisation)
+    {
+        lock (_lock)
+        {
+            Get("SR", SrRef)["physical_utilisation"] = physicalUtilisation;
+        }
+    }
+
+    private JsonNode? Snapshot(string vmRef, string name, JsonArray? ignoredVdis)
+    {
+        if (ignoredVdis is not null && SnapshotWithoutIgnoreVdis)
+        {
+            throw new FakeXapiError("MESSAGE_PARAMETER_COUNT_MISMATCH", "VM.snapshot", "3", "4");
+        }
+
+        var ignored = ignoredVdis?.Select(n => n!.GetValue<string>()).ToHashSet(StringComparer.Ordinal) ?? [];
         OnSnapshot?.Invoke(name);
         var vm = Get("VM", vmRef);
         _generation++;
@@ -413,6 +440,11 @@ public sealed class FakeXenPool : IAsyncDisposable
         {
             var vbd = Get("VBD", vbdRef);
             var sourceRef = vbd["VDI"]!.GetValue<string>();
+            if (ignored.Contains(sourceRef))
+            {
+                continue;
+            }
+
             var source = Get("VDI", sourceRef);
             var snapVdi = Add("VDI", new JsonObject
             {

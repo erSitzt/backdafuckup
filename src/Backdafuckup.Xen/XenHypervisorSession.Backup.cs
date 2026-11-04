@@ -73,6 +73,21 @@ internal sealed partial class XenHypervisorSession
     {
         foreach (var token in tokens.Where(t => t.Kind == XenTags.ChangeTokenKind))
         {
+            // Only backdafuckup's own change tracking data: a snapshot disk or its CBT metadata with our tag. Anything
+            // else under that UUID (another tool's CBT reference, a user disk) is left alone.
+            var vdiRef = await Xapi.TryGetByUuidAsync("VDI", token.Value, cancellationToken).ConfigureAwait(false);
+            if (vdiRef is null)
+            {
+                continue;
+            }
+
+            var vdi = await Xapi.GetRecordAsync("VDI", vdiRef, cancellationToken).ConfigureAwait(false);
+            if (!vdi.Map("other_config").ContainsKey(XenTags.Session) || !(vdi.Str("type") == "cbt_metadata" || vdi.Bool("is_a_snapshot")))
+            {
+                log.Warning($"Disk {token.Value} '{vdi.Str("name_label")}' was not deleted: it is not change tracking data of backdafuckup (type {vdi.Str("type")}, no {XenTags.Session} tag or not a snapshot).");
+                continue;
+            }
+
             await DestroyVdiByUuidAsync(Xapi, token.Value, log, cancellationToken).ConfigureAwait(false);
         }
     }

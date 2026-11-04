@@ -39,16 +39,18 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         var srs = await xapi.GetAllRecordsAsync("SR", cancellationToken).ConfigureAwait(false);
         var networks = await xapi.GetAllRecordsAsync("network", cancellationToken).ConfigureAwait(false);
 
+        // Disks left out of the backup are created empty, but on LVM storage they still take their full size.
         var needed = new Dictionary<string, long>(StringComparer.Ordinal);
-        foreach (var disk in plan.Manifest.Disks)
+        foreach (var (key, name, capacity) in plan.Manifest.Disks.Select(d => (d.Key, d.Name, d.CapacityBytes))
+                     .Concat(plan.Manifest.ExcludedDisks.Select(d => (d.Key, d.Name, d.CapacityBytes))))
         {
-            if (!plan.DiskStorage.TryGetValue(disk.Key, out var srUuid))
+            if (!plan.DiskStorage.TryGetValue(key, out var srUuid))
             {
-                errors.Add($"No target storage selected for disk {disk.Name}.");
+                errors.Add($"No target storage selected for disk {name}.");
                 continue;
             }
 
-            needed[srUuid] = needed.GetValueOrDefault(srUuid) + disk.CapacityBytes;
+            needed[srUuid] = needed.GetValueOrDefault(srUuid) + capacity;
         }
 
         foreach (var (srUuid, bytes) in needed)
@@ -121,6 +123,17 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
 
     public async Task<IDiskWriter> CreateDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken)
     {
+        var (srRef, vdiRef, vdiUuid) = await CreateVdiAsync(target, cancellationToken).ConfigureAwait(false);
+        var importHost = await ResolveImportHostAsync(srRef, cancellationToken).ConfigureAwait(false);
+        return new XenImportWriter(
+            owner, xapi, log, target.Name, importHost, vdiRef, vdiUuid, target.CapacityBytes, owner.Provider.Options.HttpImportFormat, owner.Provider.Options.ImportTimeout);
+    }
+
+    public async Task<string> CreateEmptyDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken) =>
+        (await CreateVdiAsync(target, cancellationToken).ConfigureAwait(false)).VdiUuid;
+
+    private async Task<(string SrRef, string VdiRef, string VdiUuid)> CreateVdiAsync(RestoreDiskTarget target, CancellationToken cancellationToken)
+    {
         var srRef = await xapi.TryGetByUuidAsync("SR", target.StorageId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Storage {target.StorageId} does not exist.");
         var record = new JsonObject
@@ -142,11 +155,9 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         var artifact = await ledger.RecordAsync(XenArtifactKinds.RestoredVdi, vdi.Str("uuid"), vdiRef, null, cancellationToken).ConfigureAwait(false);
         _createdVdis.Add((vdiRef, vdi.Str("uuid"), artifact));
 
-        var importHost = await ResolveImportHostAsync(srRef, cancellationToken).ConfigureAwait(false);
         var srName = (await xapi.GetRecordAsync("SR", srRef, cancellationToken).ConfigureAwait(false)).Str("name_label");
         log.Info($"Created disk {target.Name} ({XenFormat.Bytes(target.CapacityBytes)}) on storage '{srName}' ({target.StorageId}).");
-        return new XenImportWriter(
-            owner, xapi, log, target.Name, importHost, vdiRef, vdi.Str("uuid"), target.CapacityBytes, owner.Provider.Options.HttpImportFormat, owner.Provider.Options.ImportTimeout);
+        return (srRef, vdiRef, vdi.Str("uuid"));
     }
 
     public async Task<RestoredVm> CreateVmAsync(IReadOnlyDictionary<string, string> sourceToNewDiskId, CancellationToken cancellationToken)

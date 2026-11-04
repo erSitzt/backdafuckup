@@ -55,6 +55,12 @@ A job processes several VMs at the same time ("VMs processed in parallel", defau
 
 Parallel streams help as long as the network has room. On a 1 Gbit/s link (about 110 MB/s of data), two HTTP export streams already reach the line rate; more streams only share it. For NBD, keep the total number of connections in mind: VMs × disks × "NBD connections per disk" should not exceed the 16 connections XAPI allows.
 
+### VM snapshots
+
+- **One snapshot per storage at a time** (`"Xen": { "OneSnapshotPerStorage": true }`, the default): VMs on the same storage repository are snapshotted one after another. On shared LVM storage the storage manager handles snapshots one by one anyway; started together, each one takes as long as all of them. The wait happens before the guest is frozen and shows in the session log ("Waited 12.3 s for the snapshot of another VM on 'storage'"). Reading the disks still runs in parallel.
+- **Disks left out (`[NOBAK]`):** a disk with `[NOBAK]` in its name (the same marker as in Xen Orchestra) is not snapshotted and not backed up, e.g. a scratch disk or the cloud-init config drive. A restore of the VM creates it again as an empty disk of the same size: on the storage chosen for it, at the original location on its original storage, otherwise next to the first restored disk. It needs XCP-ng 8.3 (`VM.snapshot` with `ignore_vdis`); older pools back the disk up anyway and log a warning.
+- **Free space:** before the snapshot every storage of the VM must have at least `"Xen": { "MinStorageFreePercent": 5 }` percent free (0 turns the check off). A snapshot takes space until it is released, and a full storage stops the running VMs and the storage's own coalesce. The VM then fails with the storage name, its free space and the limit; nothing is snapshotted and the guest is not frozen. The session log shows the free space of every snapshot.
+
 ### Restore upload
 
 Restores write each disk with `import_raw_vdi` over HTTPS to the pool master, or for local storage to the host that has it attached. By default the disk is sent as a dynamic VHD that contains only the 2 MiB blocks with data. Empty regions are neither transferred nor written. The session log names the target host and how much is sent, and the session page shows the restored and transferred bytes.
@@ -125,6 +131,8 @@ XCP-ng / XenServer removed the quiesced snapshot in 8.1, so a VM snapshot is cra
 2. Right before `VM.snapshot` the agent starts a VSS snapshot set. The writers flush and freeze. Then our own VSS provider (`bdfu-vss.dll`) holds the writes and reports "frozen".
 3. The server takes the VM snapshot and thaws the guest right away. The session log shows the freeze, snapshot and hold times and the writer states.
 4. **10 s limit:** Windows releases held writes after **10 seconds** at the latest (`VSS_E_HOLD_WRITES_TIMEOUT`). Only the VM snapshot runs inside that window, so it must finish within 10 s. Otherwise the backup is crash-consistent and the session ends with a warning, or the VM fails if the job says so.
+   - XAPI snapshots the disks of a VM one after another, so the time grows with the number of disks. Measured on shared LVM storage (FC/iSCSI): 7–9 s for a VM with one disk, 20–40 s for four disks. The session log shows the time of every snapshot ("Snapshot … created in 8.1 s (1 disk(s) on 'storage')").
+   - What shortens it: fewer disks in the snapshot (mark disks without backup value with `[NOBAK]`, see [VM snapshots](#vm-snapshots)), and only one snapshot at a time per storage (the default).
 5. **Copy-only:** the backup is a VSS copy-only backup (`VSS_BT_COPY`). The SQL Server backup chain (differential base, log backups) of other backup products stays untouched. Logs are not truncated.
 
 Restore points show their consistency ("application", or "crash" plus the reason) under *Backups & Restore*.

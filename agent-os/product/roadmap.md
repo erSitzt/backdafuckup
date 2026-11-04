@@ -16,6 +16,7 @@
 - **Restore:** restore a VM to its original or an alternate host / SR
 - **Status & alerting:** job logs, success/failure reporting and notifications
 - **Application awareness:** application-consistent backups of Windows guests (VSS). Needs our own in-guest agent (VSS requester), because XAPI's quiesced snapshots were removed in XenServer / XCP-ng 8.1
+  - On storage where the XAPI snapshot takes longer than VSS's 10 s (shared LVM, several disks): T-SQL snapshot backup for SQL Server 2022+, then an in-guest shadow copy that is reverted when the backup is read (spec `2026-11-04-2026-consistent-snapshots-slow-storage`)
 - **Active Directory objects:** application-aware AD backup with object-level restore
 - **MS SQL Server:** application-aware backup and restore of SQL Server databases
 - **File-level restore:** restore single files and folders from guest disks without restoring the whole VM. It moved here from phase 2 as a knock-out criterion (2026-11-02).

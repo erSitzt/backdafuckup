@@ -57,7 +57,7 @@ public sealed class RestoreSessionRunner(
                 Metadata = new VmMetadataBlob(manifest.Metadata.Format, metadata),
                 VmName = string.IsNullOrWhiteSpace(request.VmName) ? manifest.Vm.Name : request.VmName,
                 TargetHostId = request.TargetHostId,
-                DiskStorage = manifest.Disks.ToDictionary(d => d.Key, d => request.DiskStorage.GetValueOrDefault(d.Key) ?? d.StorageId ?? string.Empty),
+                DiskStorage = DiskStorage(manifest, request.DiskStorage, originalLocation: request.Mode == RestoreModeDto.OriginalLocation),
                 NetworkMap = request.NetworkMap,
                 RegenerateMacs = request.Mode == RestoreModeDto.AlternateLocation && request.RegenerateMacs,
                 PowerOn = request.PowerOn,
@@ -133,6 +133,14 @@ public sealed class RestoreSessionRunner(
                 log.Info($"Disk {disk.Name}: restored ({BackupFormat(disk.CapacityBytes)}, {BackupFormat(writer.TransferredBytes)} transferred).", $"disk-{disk.Key}");
             }
 
+            foreach (var disk in manifest.ExcludedDisks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                mapping[disk.SourceDiskId] = await restore.CreateEmptyDiskAsync(
+                    new RestoreDiskTarget(disk.Key, disk.SourceDiskId, disk.Name, disk.CapacityBytes, plan.DiskStorage[disk.Key]), cancellationToken).ConfigureAwait(false);
+                log.Info($"Disk {disk.Name}: created empty ({BackupFormat(disk.CapacityBytes)}); it was left out of the backup.", $"disk-{disk.Key}");
+            }
+
             await restore.CreateVmAsync(mapping, cancellationToken).ConfigureAwait(false);
             var restored = await restore.CompleteAsync(cancellationToken).ConfigureAwait(false);
             var final = Metrics(done, transferred) with { CurrentBytesPerSecond = 0 };
@@ -189,6 +197,23 @@ public sealed class RestoreSessionRunner(
         }, CancellationToken.None);
 
     private static string BackupFormat(long bytes) => VmBackupTask.Format(bytes);
+
+    /// <summary>
+    /// Target storage per disk: the chosen one, else the original storage. Disks that were left out of the backup are
+    /// created empty: on the storage chosen for them, else on their original storage (restore to the original location),
+    /// else next to the first restored disk (another location: where the user put the VM).
+    /// </summary>
+    internal static Dictionary<string, string> DiskStorage(RestorePointManifest manifest, IReadOnlyDictionary<string, string> chosen, bool originalLocation)
+    {
+        var storage = manifest.Disks.ToDictionary(d => d.Key, d => chosen.GetValueOrDefault(d.Key) ?? d.StorageId ?? string.Empty);
+        var first = manifest.Disks.OrderBy(d => d.Key, StringComparer.Ordinal).Select(d => storage[d.Key]).FirstOrDefault(s => s.Length > 0);
+        foreach (var disk in manifest.ExcludedDisks)
+        {
+            storage[disk.Key] = chosen.GetValueOrDefault(disk.Key) ?? (originalLocation ? disk.StorageId : null) ?? first ?? string.Empty;
+        }
+
+        return storage;
+    }
 }
 
 /// <summary>Garbage collection of a repository (after retention or on demand).</summary>

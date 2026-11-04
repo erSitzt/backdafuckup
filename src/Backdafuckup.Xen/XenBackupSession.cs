@@ -80,8 +80,13 @@ internal sealed class XenBackupSession : IVmBackupSession
             throw new InvalidOperationException($"{vm.Str("name_label")} is not a regular VM.");
         }
 
-        // Make sure every disk tracks changes; disks where CBT was just enabled need a full read this time.
+        // Make sure every disk tracks changes; disks where CBT was just enabled need a full read this time. Disks marked
+        // [NOBAK] are left out of the snapshot: fewer disks also make the snapshot shorter.
         var cbtJustEnabled = new HashSet<string>(StringComparer.Ordinal);
+        var excluded = new List<(string VdiRef, SnapshotDisk Disk)>();
+        var storages = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        var snapshotStorages = new HashSet<string>(StringComparer.Ordinal);
+        var diskCount = 0;
         foreach (var vbdRef in vm.Set("VBDs"))
         {
             var vbd = await xapi.GetRecordAsync("VBD", vbdRef, cancellationToken).ConfigureAwait(false);
@@ -91,6 +96,22 @@ internal sealed class XenBackupSession : IVmBackupSession
             }
 
             var vdi = await xapi.GetRecordAsync("VDI", vbd.Str("VDI"), cancellationToken).ConfigureAwait(false);
+            if (!storages.TryGetValue(vdi.Str("SR"), out var storage))
+            {
+                storages[vdi.Str("SR")] = storage = await xapi.GetRecordAsync("SR", vdi.Str("SR"), cancellationToken).ConfigureAwait(false);
+            }
+
+            if (vdi.Str("name_label").Contains(XenTags.ExcludeDiskMarker, StringComparison.Ordinal))
+            {
+                var key = vbd.Str("userdevice");
+                excluded.Add((vbd.Str("VDI"), new SnapshotDisk(
+                    key, vdi.Str("uuid"), string.Empty, vdi.Str("name_label"), vdi.Long("virtual_size"), vbd.Bool("bootable"),
+                    storage.Str("uuid"), storage.Str("name_label"), new Dictionary<string, string> { ["srType"] = storage.Str("type"), ["userdevice"] = key })));
+                continue;
+            }
+
+            snapshotStorages.Add(vdi.Str("SR"));
+            diskCount++;
             if (!vdi.Bool("cbt_enabled"))
             {
                 try
@@ -106,37 +127,79 @@ internal sealed class XenBackupSession : IVmBackupSession
             }
         }
 
-        // Guest processing: freeze the guest as late as possible. Everything slow (CBT, record reads) is done by now,
-        // because VSS holds writes for at most 10 s and only the snapshot itself may run in that window.
-        var (freeze, freezeResult) = await FreezeGuestAsync(request.Quiescer, log, cancellationToken).ConfigureAwait(false);
+        var storageText = snapshotStorages.Count == 0 ? "no storage"
+            : string.Join(", ", snapshotStorages.Select(s => $"'{storages[s].Str("name_label")}'"));
+        var options = owner.Provider.Options;
+        XenSnapshotGate.Lease? gate = null;
+        if (options.OneSnapshotPerStorage)
+        {
+            gate = await owner.Provider.SnapshotGate.EnterAsync(snapshotStorages.Select(s => storages[s].Str("uuid")), cancellationToken).ConfigureAwait(false);
+            if (gate.Waited is { } waited)
+            {
+                log.Info($"Waited {Seconds(waited)} for the snapshot of another VM on {storageText} (one snapshot at a time per storage).");
+            }
+        }
 
-        // Snapshot. The task is recorded before waiting so a crash never leaks the snapshot.
-        log.Info($"Creating snapshot of {vm.Str("name_label")}.", "snapshot");
-        Guid? taskArtifact = null;
-        var snapshotWatch = Stopwatch.StartNew();
         string snapshotRef;
+        Guid? taskArtifact = null;
+        TimeSpan snapshotTime;
+        GuestFreezeResult? freezeResult;
         try
         {
-            // Polled every 250 ms: with a frozen guest, every second after the snapshot completes counts against the 10 s.
-            snapshotRef = await xapi.RunTaskAsync(
-                "VM.snapshot",
-                async taskRef => taskArtifact = await ledger.RecordAsync(XenArtifactKinds.XapiTask, string.Empty, taskRef, null, cancellationToken).ConfigureAwait(false),
-                owner.Provider.Options.TaskTimeout,
-                TimeSpan.FromMilliseconds(250),
-                cancellationToken,
-                vmRef,
-                request.SnapshotName).ConfigureAwait(false);
+            var free = await CheckStorageSpaceAsync(xapi, snapshotStorages, options.MinStorageFreePercent, vm.Str("name_label"), cancellationToken).ConfigureAwait(false);
+
+            // Guest processing: freeze the guest as late as possible. Everything slow (CBT, record reads, waiting for
+            // other snapshots) is done by now, because VSS holds writes for at most 10 s and only the snapshot itself
+            // may run in that window.
+            (var freeze, freezeResult) = await FreezeGuestAsync(request.Quiescer, log, cancellationToken).ConfigureAwait(false);
+
+            // Snapshot. The task is recorded before waiting so a crash never leaks the snapshot.
+            log.Info($"Creating snapshot of {vm.Str("name_label")}: {diskCount} disk(s) on {free}.", "snapshot");
+            var snapshotWatch = Stopwatch.StartNew();
+            try
+            {
+                try
+                {
+                    snapshotRef = await SnapshotAsync(excluded.Count == 0 ? null : new JsonArray([.. excluded.Select(e => (JsonNode?)e.VdiRef)])).ConfigureAwait(false);
+                }
+                catch (XapiException ex) when (ex.Code == "MESSAGE_PARAMETER_COUNT_MISMATCH" && excluded.Count > 0)
+                {
+                    // XAPI before XCP-ng 8.3 has no list of disks to leave out (ignore_vdis).
+                    log.Warning($"XAPI on this pool cannot leave disks out of a snapshot ({ex.Code}); {string.Join(", ", excluded.Select(e => e.Disk.Name))} are backed up as well.");
+                    excluded.Clear();
+                    snapshotRef = await SnapshotAsync(null).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                // Thaw right away, also when the snapshot failed.
+                snapshotTime = snapshotWatch.Elapsed;
+                freezeResult = await ThawGuestAsync(freeze, freezeResult).ConfigureAwait(false);
+            }
         }
         finally
         {
-            // Thaw right away, also when the snapshot failed.
-            freezeResult = await ThawGuestAsync(freeze, freezeResult).ConfigureAwait(false);
+            gate?.Dispose();
+        }
+
+        // Polled every 250 ms: with a frozen guest, every second after the snapshot completes counts against the 10 s.
+        Task<string> SnapshotAsync(JsonArray? ignoredDisks)
+        {
+            JsonNode?[] args = ignoredDisks is null ? [vmRef, request.SnapshotName] : [vmRef, request.SnapshotName, ignoredDisks];
+            return xapi.RunTaskAsync(
+                "VM.snapshot",
+                async taskRef => taskArtifact = await ledger.RecordAsync(XenArtifactKinds.XapiTask, string.Empty, taskRef, null, cancellationToken).ConfigureAwait(false),
+                options.TaskTimeout,
+                TimeSpan.FromMilliseconds(250),
+                cancellationToken,
+                args);
         }
 
         if (freezeResult is not null)
         {
-            ReportGuestFreeze(log, freezeResult, snapshotWatch.Elapsed);
+            ReportGuestFreeze(log, freezeResult, snapshotTime);
         }
+
         var snapshot = await xapi.GetRecordAsync("VM", snapshotRef, cancellationToken).ConfigureAwait(false);
         var snapshotUuid = snapshot.Str("uuid");
         var snapshotArtifact = await ledger.RecordAsync(XenArtifactKinds.VmSnapshot, snapshotUuid, snapshotRef, null, cancellationToken).ConfigureAwait(false);
@@ -145,7 +208,7 @@ internal sealed class XenBackupSession : IVmBackupSession
             await ledger.UpdateAsync(t, ArtifactState.Done, null, cancellationToken).ConfigureAwait(false);
         }
 
-        log.Info($"Snapshot {request.SnapshotName} created.", "snapshot");
+        log.Info($"Snapshot {request.SnapshotName} created in {Seconds(snapshotTime)} ({diskCount} disk(s) on {storageText}).", "snapshot");
 
         var disks = new Dictionary<string, DiskState>(StringComparer.Ordinal);
         XenBackupSession? session = null;
@@ -164,6 +227,13 @@ internal sealed class XenBackupSession : IVmBackupSession
 
                 var snapVdiRef = vbd.Str("VDI");
                 var snapVdi = await xapi.GetRecordAsync("VDI", snapVdiRef, cancellationToken).ConfigureAwait(false);
+                if (excluded.FindIndex(e => e.VdiRef == snapVdi.Str("snapshot_of")) is var index and >= 0)
+                {
+                    // XAPI snapshotted the disk after all: back it up rather than leave its snapshot behind.
+                    log.Warning($"XAPI included the disk {excluded[index].Disk.Name} in the snapshot although it was left out; it is backed up.");
+                    excluded.RemoveAt(index);
+                }
+
                 var artifact = await ledger.RecordAsync(XenArtifactKinds.SnapshotVdi, snapVdi.Str("uuid"), snapVdiRef, null, cancellationToken).ConfigureAwait(false);
                 await xapi.CallAsync("VDI.add_to_other_config", cancellationToken, snapVdiRef, XenTags.Session, request.SessionId.ToString()).ConfigureAwait(false);
                 await xapi.CallAsync("VDI.add_to_other_config", cancellationToken, snapVdiRef, XenTags.RestorePoint, request.RestorePointId.ToString()).ConfigureAwait(false);
@@ -188,11 +258,17 @@ internal sealed class XenBackupSession : IVmBackupSession
                 };
             }
 
+            foreach (var (_, disk) in excluded)
+            {
+                log.Info($"Disk {disk.Name} ({XenFormat.Bytes(disk.CapacityBytes)}) is not backed up: its name contains {XenTags.ExcludeDiskMarker}. A restore of the VM creates it as an empty disk.");
+            }
+
             var metadata = await ExportMetadataAsync(xapi, request.VmId, cancellationToken).ConfigureAwait(false);
             var descriptor = await XenInventory.DescribeVmAsync(xapi, vm, cancellationToken).ConfigureAwait(false);
             session = new XenBackupSession(owner, xapi, log, ledger, descriptor, snapshotRef, snapshotUuid, snapshotArtifact, disks, metadata)
             {
                 GuestFreeze = freezeResult,
+                ExcludedDisks = [.. excluded.Select(e => e.Disk).OrderBy(d => d.Key, StringComparer.Ordinal)],
             };
             return session;
         }
@@ -206,6 +282,42 @@ internal sealed class XenBackupSession : IVmBackupSession
     }
 
     public GuestFreezeResult? GuestFreeze { get; private init; }
+
+    public IReadOnlyList<SnapshotDisk> ExcludedDisks { get; private init; } = [];
+
+    /// <summary>
+    /// Refuses the snapshot when a storage of the VM has less than <paramref name="minPercent"/> free. Returns the
+    /// storages with their free space for the log ("'Alletra' (12.3 % free)").
+    /// </summary>
+    private static async Task<string> CheckStorageSpaceAsync(XapiSession xapi, IEnumerable<string> storageRefs, double minPercent, string vmName, CancellationToken cancellationToken)
+    {
+        var parts = new List<string>();
+        foreach (var storageRef in storageRefs)
+        {
+            // Read now, after waiting for other snapshots: they took space meanwhile.
+            var storage = await xapi.GetRecordAsync("SR", storageRef, cancellationToken).ConfigureAwait(false);
+            var size = storage.Long("physical_size");
+            if (size <= 0)
+            {
+                parts.Add($"'{storage.Str("name_label")}'");
+                continue;
+            }
+
+            var free = Math.Max(0, size - storage.Long("physical_utilisation"));
+            var percent = free * 100.0 / size;
+            if (minPercent > 0 && percent < minPercent)
+            {
+                throw new XenStorageSpaceException(
+                    $"Storage '{storage.Str("name_label")}' ({storage.Str("uuid")}) has only {percent.ToString("0.0", CultureInfo.InvariantCulture)} % free " +
+                    $"({XenFormat.Bytes(free)} of {XenFormat.Bytes(size)}); a snapshot needs at least {minPercent.ToString("0.#", CultureInfo.InvariantCulture)} % free there. " +
+                    $"{vmName} was not snapshotted, so the running VMs keep that space. Free up space on the storage, or change Xen:MinStorageFreePercent.");
+            }
+
+            parts.Add($"'{storage.Str("name_label")}' ({percent.ToString("0.0", CultureInfo.InvariantCulture)} % free)");
+        }
+
+        return parts.Count == 0 ? "no storage" : string.Join(", ", parts);
+    }
 
     private static async Task<(IGuestFreeze? Freeze, GuestFreezeResult? Result)> FreezeGuestAsync(IGuestQuiescer? quiescer, IOperationLog log, CancellationToken cancellationToken)
     {

@@ -63,7 +63,20 @@ public sealed record RestorePointManifest
     public required ManifestChunking Chunking { get; init; }
 
     public required IReadOnlyList<ManifestDisk> Disks { get; init; }
+
+    /// <summary>Disks of the VM that were deliberately not backed up; a restore of the VM creates them empty.</summary>
+    public IReadOnlyList<ManifestExcludedDisk> ExcludedDisks { get; init; } = [];
 }
+
+/// <summary>A disk that was left out of the backup (e.g. marked [NOBAK]): what is needed to create it empty again.</summary>
+public sealed record ManifestExcludedDisk(
+    string Key,
+    string SourceDiskId,
+    string Name,
+    long CapacityBytes,
+    bool Bootable,
+    string? StorageId,
+    string? StorageName);
 
 public sealed record ManifestJob(Guid Id, string Name);
 

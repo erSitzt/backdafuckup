@@ -27,7 +27,8 @@ public sealed class XenProviderTests : IAsyncDisposable
     private XenProvider Provider(
         CbtBitOrder? bitOrder = CbtBitOrder.MostSignificantBitFirst,
         XenHttpExportFormat exportFormat = XenHttpExportFormat.Vhd,
-        XenHttpImportFormat importFormat = XenHttpImportFormat.Vhd) => new(
+        XenHttpImportFormat importFormat = XenHttpImportFormat.Vhd,
+        bool oneSnapshotPerStorage = true) => new(
         new XenOptions
         {
             CbtBitOrder = bitOrder,
@@ -36,6 +37,7 @@ public sealed class XenProviderTests : IAsyncDisposable
             HttpExportFormat = exportFormat,
             HttpImportFormat = importFormat,
             SnapshotReleaseTimeout = TimeSpan.FromMilliseconds(300),
+            OneSnapshotPerStorage = oneSnapshotPerStorage,
         },
         (_, host) => new XapiTransport(new Uri($"https://{host}/"), _pool.CreateHandler()));
 
@@ -607,6 +609,176 @@ public sealed class XenProviderTests : IAsyncDisposable
         Assert.Single(_pool.Records("VM"), v => v.Str("name_label") == "erp01");
     }
 
+    [Fact]
+    public async Task Releasing_change_tokens_deletes_only_backdafuckups_own_tracking_data()
+    {
+        var (vmUuid, _) = _pool.AddVm("web05", DiskSize);
+        var (_, foreignDisks) = _pool.AddVm("other", DiskSize);
+        await using var session = await Provider().OpenAsync(Settings(), Ct);
+        var own = await FullBackupAsync(session, vmUuid);
+
+        await session.ReleaseChangeTokensAsync([own, new ChangeToken(XenTags.ChangeTokenKind, foreignDisks[0])], Log, Ct);
+
+        Assert.DoesNotContain(_pool.Records("VDI"), v => v.Str("uuid") == own.Value);
+        Assert.Contains(_pool.Records("VDI"), v => v.Str("uuid") == foreignDisks[0]);
+        Assert.Contains(_log, l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains($"Disk {foreignDisks[0]} 'other disk 0' was not deleted", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Disks_marked_nobak_are_left_out_of_the_snapshot_and_restored_empty()
+    {
+        var (vmUuid, disks) = _pool.AddVm("app01", DiskSize, DiskSize, DiskSize);
+        _pool.RenameDisk(disks[2], "app01 scratch [NOBAK]");
+        await using var session = await Provider().OpenAsync(Settings(), Ct);
+
+        var (manifest, metadata) = await CaptureAsync(session, vmUuid);
+
+        Assert.Equal(["0", "1"], manifest.Disks.Select(d => d.Key));
+        var excluded = Assert.Single(manifest.ExcludedDisks);
+        Assert.Equal(("2", disks[2], DiskSize, _pool.Uuid("SR", _pool.SrRef)), (excluded.Key, excluded.SourceDiskId, excluded.CapacityBytes, excluded.StorageId));
+        Assert.DoesNotContain(_pool.Records("VDI"), v => v.Bool("is_a_snapshot") && v.Str("name_label").Contains("[NOBAK]", StringComparison.Ordinal));
+        Assert.False(_pool.Records("VDI").Single(v => v.Str("uuid") == disks[2]).Bool("cbt_enabled"));
+        Assert.Contains(_log, l => l.Contains("Disk app01 scratch [NOBAK] (8.0 MiB) is not backed up", StringComparison.Ordinal));
+        Assert.Contains(_log, l => l.Contains("created in", StringComparison.Ordinal) && l.Contains("(2 disk(s) on 'Local storage')", StringComparison.Ordinal));
+
+        var targetSr = _pool.Uuid("SR", _pool.SecondSrRef);
+        var plan = new VmRestorePlan
+        {
+            Mode = RestoreMode.AlternateLocation, Manifest = manifest, Metadata = metadata, VmName = "app01-restored",
+            DiskStorage = new Dictionary<string, string> { ["0"] = targetSr, ["1"] = targetSr, ["2"] = targetSr }, RegenerateMacs = true, SessionId = Guid.NewGuid(),
+        };
+        string emptyDisk;
+        await using (var restore = await session.BeginRestoreAsync(plan, Log, _ledger, Ct))
+        {
+            Assert.True((await restore.ValidateAsync(Ct)).Ok);
+            var mapping = new Dictionary<string, string>();
+            foreach (var disk in manifest.Disks)
+            {
+                await using var writer = await restore.CreateDiskAsync(new RestoreDiskTarget(disk.Key, disk.SourceDiskId, disk.Name, DiskSize, targetSr), Ct);
+                await writer.WriteAsync(new ByteImage(_pool.DiskContent(disk.SourceDiskId)), null, Ct);
+                mapping[disk.SourceDiskId] = writer.DiskId;
+            }
+
+            // import_metadata needs every disk of the VM: the one left out comes back empty.
+            emptyDisk = mapping[disks[2]] = await restore.CreateEmptyDiskAsync(new RestoreDiskTarget("2", disks[2], excluded.Name, DiskSize, targetSr), Ct);
+            await restore.CreateVmAsync(mapping, Ct);
+            await restore.CompleteAsync(Ct);
+        }
+
+        var vm = _pool.Records("VM").Single(v => v.Str("name_label") == "app01-restored");
+        Assert.Equal(3, vm.Set("VBDs").Count);
+        Assert.DoesNotContain(_pool.DiskContent(emptyDisk), b => b != 0);
+        Assert.All(_ledger.Items, a => Assert.Equal(ArtifactState.Done, a.State));
+    }
+
+    [Fact]
+    public async Task A_pool_that_cannot_leave_disks_out_backs_up_the_marked_disks_with_a_warning()
+    {
+        var (vmUuid, disks) = _pool.AddVm("app02", DiskSize, DiskSize);
+        _pool.RenameDisk(disks[1], "app02 temp [NOBAK]");
+        _pool.SnapshotWithoutIgnoreVdis = true;
+        await using var session = await Provider().OpenAsync(Settings(), Ct);
+
+        await using var backup = await session.BeginBackupAsync(Request(vmUuid), Log, _ledger, Ct);
+
+        Assert.Equal(2, backup.Disks.Count);
+        Assert.Empty(backup.ExcludedDisks);
+        Assert.Contains(_log, l => l.StartsWith("Warning:", StringComparison.Ordinal) && l.Contains("cannot leave disks out of a snapshot (MESSAGE_PARAMETER_COUNT_MISMATCH); app02 temp [NOBAK] are backed up", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_nearly_full_storage_is_not_snapshotted_and_the_guest_is_not_frozen()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql03", DiskSize);
+        _pool.SetStorageUsage((1L << 40) - ((1L << 40) * 3 / 100));
+        var quiescer = new RecordingQuiescer();
+        await using var session = await Provider().OpenAsync(Settings(), Ct);
+
+        var error = await Assert.ThrowsAsync<XenStorageSpaceException>(() => session.BeginBackupAsync(Request(vmUuid) with { Quiescer = quiescer }, Log, _ledger, Ct));
+
+        Assert.Contains($"Storage 'Local storage' ({_pool.Uuid("SR", _pool.SrRef)}) has only 3.0 % free (30.7 GiB of 1.0 TiB)", error.Message, StringComparison.Ordinal);
+        Assert.Contains("at least 5 % free", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(_pool.Records("VM"), vm => vm.Bool("is_a_snapshot"));
+        Assert.Empty(quiescer.Events);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Snapshots_on_one_storage_wait_for_each_other_before_the_guest_is_frozen(bool oneSnapshotPerStorage)
+    {
+        var (vmA, _) = _pool.AddVm("sql-a", DiskSize);
+        var (vmB, _) = _pool.AddVm("sql-b", DiskSize);
+        var events = new List<string>();
+        var aFrozen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bFrozen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var session = await Provider(oneSnapshotPerStorage: oneSnapshotPerStorage).OpenAsync(Settings(), Ct);
+
+        var a = BackupAsync(vmA, new HoldingQuiescer("a", events, aFrozen, releaseA.Task));
+        await aFrozen.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        var b = BackupAsync(vmB, new HoldingQuiescer("b", events, bFrozen, Task.CompletedTask));
+        if (oneSnapshotPerStorage)
+        {
+            await Task.Delay(300, Ct);
+            Assert.False(bFrozen.Task.IsCompleted, "the second VM was frozen while the first one held the storage");
+        }
+        else
+        {
+            await bFrozen.Task.WaitAsync(TimeSpan.FromSeconds(10), Ct);
+        }
+
+        releaseA.SetResult();
+        await Task.WhenAll(a, b).WaitAsync(TimeSpan.FromSeconds(30), Ct);
+
+        lock (events)
+        {
+            // Without the gate both guests are frozen at the same time; the order of the thaws is then up to XAPI.
+            Assert.Equal(oneSnapshotPerStorage ? ["freeze a", "thaw a", "freeze b", "thaw b"] : ["freeze a", "freeze b"], oneSnapshotPerStorage ? events : events.Take(2));
+            Assert.Equal(4, events.Count);
+        }
+
+        Assert.Equal(oneSnapshotPerStorage, _log.Any(l => l.Contains("for the snapshot of another VM on 'Local storage' (one snapshot at a time per storage)", StringComparison.Ordinal)));
+
+        async Task BackupAsync(string vmUuid, IGuestQuiescer quiescer)
+        {
+            await Task.Yield();
+            await using var backup = await session.BeginBackupAsync(Request(vmUuid) with { Quiescer = quiescer }, Log, _ledger, Ct);
+        }
+    }
+
+    /// <summary>Records freeze and thaw, and holds the freeze until <paramref name="release"/> completes.</summary>
+    private sealed class HoldingQuiescer(string name, List<string> events, TaskCompletionSource frozen, Task release) : IGuestQuiescer
+    {
+        public async Task<IGuestFreeze> FreezeAsync(IOperationLog log, CancellationToken cancellationToken)
+        {
+            Add($"freeze {name}");
+            frozen.TrySetResult();
+            await release.WaitAsync(cancellationToken);
+            return new Handle(() => Add($"thaw {name}"));
+        }
+
+        private void Add(string item)
+        {
+            lock (events)
+            {
+                events.Add(item);
+            }
+        }
+
+        private sealed class Handle(Action thawed) : IGuestFreeze
+        {
+            public Task<GuestFreezeResult> ThawAsync(CancellationToken cancellationToken)
+            {
+                thawed();
+
+                return Task.FromResult(new GuestFreezeResult(true, null, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(200), []));
+            }
+
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
     private static VmBackupRequest Request(string vmUuid) => new(vmUuid, Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "backdafuckup test");
 
     private async Task<ChangeToken> FullBackupAsync(IHypervisorSession session, string vmUuid)
@@ -638,6 +810,7 @@ public sealed class XenProviderTests : IAsyncDisposable
                 Index = new ManifestIndexRef("x", "x", 1),
                 Stats = new DiskBackupStats(),
             }).ToList(),
+            ExcludedDisks = [.. backup.ExcludedDisks.Select(d => new ManifestExcludedDisk(d.Key, d.SourceDiskId, d.Name, d.CapacityBytes, d.Bootable, d.StorageId, d.StorageName))],
         };
         var metadata = backup.Metadata;
         await backup.CommitAsync(Log, Ct);

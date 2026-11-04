@@ -143,6 +143,55 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_disk_marked_nobak_is_not_backed_up_and_comes_back_empty_on_restore()
+    {
+        var (vmUuid, disks) = _pool.AddVm("appserver", DiskSize, DiskSize / 2);
+        _pool.RenameDisk(disks[1], "appserver scratch [NOBAK]");
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        var queue = Services.GetRequiredService<SessionQueue>();
+
+        var backup = await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Succeeded, backup.State);
+        var point = await LatestRestorePointAsync();
+        Assert.Equal([disks[0]], point.Disks.Select(d => d.SourceDiskId));
+        var repository = await Services.GetRequiredService<RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+        await using (var reader = await repository.OpenRestorePointAsync(point.Id, Ct))
+        {
+            var excluded = Assert.Single(reader.Manifest.ExcludedDisks);
+            Assert.Equal((disks[1], "appserver scratch [NOBAK]", DiskSize / 2), (excluded.SourceDiskId, excluded.Name, excluded.CapacityBytes));
+        }
+
+        // The VM comes back with both disks; the one left out is empty, on the storage of the restored disk.
+        var targetSr = _pool.Uuid("SR", _pool.SecondSrRef);
+        var restore = await RunAsync(queue.EnqueueRestoreAsync(
+            new RestoreRequestDto
+            {
+                RestorePointId = point.Id,
+                Mode = RestoreModeDto.AlternateLocation,
+                VmName = "appserver-restored",
+                DiskStorage = point.Disks.ToDictionary(d => d.DiskKey, _ => targetSr),
+            },
+            "appserver",
+            "test",
+            Ct));
+        Assert.Equal(SessionState.Succeeded, restore.State);
+        var restoredVm = _pool.Records("VM").Single(v => v.Str("name_label") == "appserver-restored");
+        var restoredDisks = _pool.Records("VBD").Where(b => b.Str("VM") == RefOf("VM", restoredVm.Str("uuid")))
+            .Select(b => _pool.Records("VDI").Single(v => v.Str("uuid") == _pool.Uuid("VDI", b.Str("VDI"))))
+            .ToList();
+        Assert.Equal(2, restoredDisks.Count);
+        Assert.All(restoredDisks, d => Assert.Equal(_pool.SecondSrRef, d.Str("SR")));
+        var empty = restoredDisks.Single(d => d.Long("virtual_size") == DiskSize / 2);
+        Assert.DoesNotContain(_pool.DiskContent(empty.Str("uuid")), b => b != 0);
+
+        await using var db = await DbAsync();
+        var log = await db.SessionLog.Where(l => l.SessionId == backup.Id || l.SessionId == restore.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("Disk appserver scratch [NOBAK] (3.0 MiB) is not backed up", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains("Disk appserver scratch [NOBAK]: created empty", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Guest_processing_freezes_the_guest_for_the_snapshot_and_stores_the_guest_metadata()
     {
         var (vmUuid, _) = _pool.AddVm("sql01", DiskSize);

@@ -32,6 +32,9 @@ public sealed class XenProvider : IHypervisorProvider
 
     public XenOptions Options { get; }
 
+    /// <summary>Shared by all connections of the server, so snapshots of different jobs on one storage also queue.</summary>
+    internal XenSnapshotGate SnapshotGate { get; } = new();
+
     public async Task<CertificateProbe> ProbeCertificateAsync(string address, int port, CancellationToken cancellationToken)
     {
         var (certificate, valid) = await CertificatePinning.ProbeAsync(address, port, cancellationToken).ConfigureAwait(false);

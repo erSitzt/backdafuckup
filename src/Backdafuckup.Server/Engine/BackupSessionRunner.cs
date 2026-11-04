@@ -286,6 +286,7 @@ internal sealed class VmBackupTask(
                 VssDocuments = vssBlob,
                 Chunking = new ManifestChunking(repository.Info.ChunkSize, repository.Info.Hash, repository.Info.Compression),
                 Disks = manifestDisks,
+                ExcludedDisks = [.. backup.ExcludedDisks.Select(d => new ManifestExcludedDisk(d.Key, d.SourceDiskId, d.Name, d.CapacityBytes, d.Bootable, d.StorageId, d.StorageName))],
             };
             var committed = await writer.CommitAsync(manifest, cancellationToken).ConfigureAwait(false);
 

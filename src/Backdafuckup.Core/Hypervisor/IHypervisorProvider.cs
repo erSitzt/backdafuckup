@@ -63,6 +63,12 @@ public interface IVmBackupSession : IAsyncDisposable
     GuestFreezeResult? GuestFreeze { get; }
 
     /// <summary>
+    /// Disks of the VM that were deliberately left out of the snapshot and the backup (e.g. marked [NOBAK]). A restore of
+    /// the VM creates them empty. <see cref="SnapshotDisk.SnapshotDiskId"/> is empty for them.
+    /// </summary>
+    IReadOnlyList<SnapshotDisk> ExcludedDisks => [];
+
+    /// <summary>
     /// Returns the changed extents of <paramref name="disk"/> since <paramref name="since"/>, or a full read with a reason.
     /// Must be called before <see cref="OpenReaderAsync"/> for the same disk.
     /// </summary>
@@ -87,6 +93,9 @@ public interface IVmRestoreSession : IAsyncDisposable
     Task<RestoreValidation> ValidateAsync(CancellationToken cancellationToken);
 
     Task<IDiskWriter> CreateDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken);
+
+    /// <summary>Creates an empty disk (for a disk that was left out of the backup) and returns its id.</summary>
+    Task<string> CreateEmptyDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken);
 
     /// <summary>Creates the VM from the stored metadata, attached to the restored disks (source disk id → new disk id).</summary>
     Task<RestoredVm> CreateVmAsync(IReadOnlyDictionary<string, string> sourceToNewDiskId, CancellationToken cancellationToken);
