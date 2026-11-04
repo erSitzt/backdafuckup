@@ -17,4 +17,14 @@
 | 11. Export .bak | open | |
 | 12. Leftovers and robustness | open | |
 | 13. Docs | open | |
-| 14. Lab | open | |
+| 14. Lab | in progress | **2026-11-04, bdfu-lab-sql1 (Server 2025, SQL Server 2025 Express 17.0.1000.7, data on D:, log on L:, agent as Local System, net10), restore point of 21:58 taken with the SQL Server snapshot:**
+- **Publish into the original VM with a Windows account (`.\Administrator`): works.** Loopback target, both disks online and writable, D: and L: mounted into folders, ACEs for `NT SERVICE\MSSQL$SQLEXPRESS` and the account, `[small_published]` attached ONLINE (confirmed by the user).
+- **Unpublish: nothing left.** Published 13 min; 72 MB read from the backup, 5.8 MB written to the overlay. Checked in the VM over WinRM: no database, no BDFU disks, no access paths, no listening port, journal `[]`, MSiSCSI Stopped/Manual as before.
+- **Export files (ZIP download) of `shop`: works.** 3 files, 112 MiB, as a ZIP of 2.3 MiB with the attach script.
+- **Restore as a new database: works.** `shop` restored as `[shop_restored]` on the same instance into D:\SQL and L:\Log in 2 s: 3 files written and checked with SHA-256, ACEs, attached ONLINE, owner the attaching account.
+  - Checked in the VM: row counts and CHECKSUM_AGG of `orders` equal to the original, `DBCC CHECKDB` without errors.
+  - After the attach SQL Server sets the files' ACL itself (OWNER RIGHTS, Administrators, `NT SERVICE\MSSQL$SQLEXPRESS`).
+- **Found and fixed by the lab:**
+  - The real SqlServerWriter reports databases as file groups with plain `FILE_LIST` entries, so every file was "other" and nothing was restorable. The catalog now classifies them by page 0 (file id 1 = primary data, 2 = log, else the extension) (`08745ec`).
+  - `.\name` accounts could not be translated to a SID for the ACEs (`9b0f875`).
+- **Open:** publish and restore into another VM, a SQL login, the net48 agent on Server 2012 R2, agent or VM restart while published, the overwrite and .bak tasks. |
