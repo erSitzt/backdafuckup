@@ -56,7 +56,7 @@ Steps 2 and 3 are needed.
 - Agent.Core against the mssql container (Developer edition, 2022 CU): suspend, a write that blocks, `BACKUP … METADATA_ONLY`, the `msdb` rows, the watchdog thaw.
 - Server: the orchestration with a fake agent, the `.bkm` blob in the manifest.
 
-**Spike 2a (first):** on bdfu-lab-sql1 (SQL Server 2025 Express, 17.00.1000; the download link of the lab now delivers 2025), check:
+**Spike 2a: done, see `spike.md`.** Express supports it. Suspend per database (`GROUP` fails, and the server-wide suspend skips closed `AUTO_CLOSE` databases), on a dedicated unpooled connection (its end resumes SQL Server). The `.bkm` goes to a folder the SQL service account can write. The original checklist: on bdfu-lab-sql1 (SQL Server 2025 Express, 17.00.1000; the download link of the lab now delivers 2025), check:
 - whether Express supports the T-SQL snapshot backup at all (Microsoft Learn says "SQL Server 2022 and later" and names no edition);
 - the length of the write pause on Alletra;
 - the `msdb` rows;
