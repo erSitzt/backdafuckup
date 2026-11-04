@@ -15,6 +15,13 @@ trap 'rm -rf "$out"' EXIT
 
 echo "== build (win-x64, self-contained)"
 "$dotnet" publish "$root/src/Backdafuckup.Server" -c Release -r win-x64 --self-contained -o "$out/publish" --nologo -v quiet
+
+# The agent package is built every time from the same sources: a package left over from an older build would make the
+# agents report "up to date" while the server expects their new commands. SKIP_AGENT_BUILD=1 reuses artifacts/agent.
+if [[ "${SKIP_AGENT_BUILD:-0}" != "1" ]]; then
+  echo "== build agent package"
+  "$root/scripts/build-agent.sh" "$root/artifacts/agent"
+fi
 if [[ -d "$root/artifacts/agent" ]]; then
   cp -r "$root/artifacts/agent" "$out/publish/agent"
 else
