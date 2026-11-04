@@ -223,13 +223,13 @@ internal sealed class VmBackupTask(
                 restorePointCreated = true;
             }
 
-            var guest = await PrepareGuestAsync(cancellationToken).ConfigureAwait(false);
+            var guest = await PrepareGuestAsync(restorePointId, cancellationToken).ConfigureAwait(false);
             var ledger = new DbArtifactLedger(dbFactory, job.ConnectionId, session.Id, restorePointId, time);
             await using var writer = repository.BeginWrite(restorePointId, vm.NativeId, basePin);
             var snapshotName = $"{vm.CachedName} backdafuckup {time.GetUtcNow().ToLocalTime():yyyy-MM-dd HH:mm}";
             await using var backup = await hypervisor.BeginBackupAsync(
                 new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer), _log, ledger, cancellationToken).ConfigureAwait(false);
-            var (consistency, consistencyReason) = CheckConsistency(guest, backup.GuestFreeze);
+            var (consistency, consistencyReason, consistencyWarning) = CheckConsistency(guest, backup.GuestFreeze);
 
             _totalBytes = Math.Max(1, backup.Disks.Sum(d => d.CapacityBytes));
             lock (_metricsLock)
@@ -245,15 +245,22 @@ internal sealed class VmBackupTask(
 
             await tracker.UpdateTaskAsync(taskId, t => t.Metrics = CurrentMetrics(), CancellationToken.None).ConfigureAwait(false);
             var (manifestDisks, warnings) = await BackupDisksAsync(backup, writer, baseline, baseReader, cancellationToken).ConfigureAwait(false);
-            warnings |= consistencyReason is not null;
+            warnings |= consistencyWarning;
             ManifestBlob? guestBlob = null;
             ManifestBlob? vssBlob = null;
+            ManifestBlob? sqlSnapshotBlob = null;
             int? sqlDatabases = null;
             if (guest?.Quiescer is { Prepared: { } prepared } quiescer)
             {
-                var stored = StoredGuestMetadata.Build(prepared, quiescer.Thawed, consistency, consistencyReason);
+                var stored = StoredGuestMetadata.Build(prepared, quiescer.Thawed, consistency, consistencyReason, quiescer.SqlSnapshot);
                 sqlDatabases = stored.SqlDatabases.Count;
                 guestBlob = await writer.WriteBlobAsync("guest-metadata", StoredGuestMetadata.FormatV2, new MemoryStream(stored.Serialize()), cancellationToken).ConfigureAwait(false);
+                if (quiescer.SqlSnapshot is { Count: > 0 } snapshot)
+                {
+                    var blob = new StoredSqlSnapshot { Instances = [.. snapshot], SuspendedMs = quiescer.SqlSuspendedMs };
+                    sqlSnapshotBlob = await writer.WriteBlobAsync("sql-snapshot", StoredSqlSnapshot.Format, new MemoryStream(blob.Serialize()), cancellationToken).ConfigureAwait(false);
+                }
+
                 if (StoredVssDocuments.From(prepared, quiescer.Thawed) is { } documents)
                 {
                     vssBlob = await writer.WriteBlobAsync("vss-documents", StoredVssDocuments.Format, new MemoryStream(documents.Serialize()), cancellationToken).ConfigureAwait(false);
@@ -284,6 +291,7 @@ internal sealed class VmBackupTask(
                 Guest = guestBlob,
                 SqlDatabaseCount = guest?.Quiescer is { Prepared: not null } ? sqlDatabases : 0,
                 VssDocuments = vssBlob,
+                SqlSnapshot = sqlSnapshotBlob,
                 Chunking = new ManifestChunking(repository.Info.ChunkSize, repository.Info.Hash, repository.Info.Compression),
                 Disks = manifestDisks,
                 ExcludedDisks = [.. backup.ExcludedDisks.Select(d => new ManifestExcludedDisk(d.Key, d.SourceDiskId, d.Name, d.CapacityBytes, d.Bootable, d.StorageId, d.StorageName))],
@@ -353,14 +361,14 @@ internal sealed class VmBackupTask(
     /// Guest processing before the snapshot: the agent of the VM (installed first if needed), or the reason why the backup
     /// will be crash-consistent. With the policy "fail the VM" a missing agent fails the VM before any snapshot.
     /// </summary>
-    private async Task<GuestPreparation?> PrepareGuestAsync(CancellationToken cancellationToken)
+    private async Task<GuestPreparation?> PrepareGuestAsync(Guid restorePointId, CancellationToken cancellationToken)
     {
         if (!job.GuestProcessing)
         {
             return null;
         }
 
-        var guest = await guestProcessing.PrepareAsync(job, vm, _log, cancellationToken).ConfigureAwait(false);
+        var guest = await guestProcessing.PrepareAsync(job, vm, _log, cancellationToken, $"backdafuckup restore point {restorePointId}").ConfigureAwait(false);
         if (guest.Quiescer is null)
         {
             if (job.GuestFailurePolicy == GuestFailurePolicy.FailVm)
@@ -375,17 +383,33 @@ internal sealed class VmBackupTask(
         return guest;
     }
 
-    /// <summary>"application" or "crash" plus the reason; with the policy "fail the VM" a failed freeze fails the VM.</summary>
-    private (string Consistency, string? Reason) CheckConsistency(GuestPreparation? guest, GuestFreezeResult? freeze)
+    /// <summary>
+    /// "application" or "crash" plus the reason and whether it is a warning; with the policy "fail the VM" a failed freeze
+    /// fails the VM. A SQL Server snapshot is "crash" for the guest's files without a warning when every database was
+    /// recorded: that is what it promises.
+    /// </summary>
+    private (string Consistency, string? Reason, bool Warning) CheckConsistency(GuestPreparation? guest, GuestFreezeResult? freeze)
     {
         if (guest is null)
         {
-            return ("crash", null);
+            return ("crash", null, false);
         }
 
         if (freeze is { ApplicationConsistent: true })
         {
-            return ("application", null);
+            return ("application", null, false);
+        }
+
+        if (freeze?.Sql is { } sql)
+        {
+            if (!sql.AllDatabasesConsistent && job.GuestFailurePolicy == GuestFailurePolicy.FailVm)
+            {
+                throw new InvalidOperationException($"Guest processing: not every SQL Server database is consistent: {freeze.Reason ?? sql.Summary}");
+            }
+
+            return ("crash", sql.AllDatabasesConsistent
+                ? "SQL Server snapshot: the SQL Server databases are application-consistent; files outside SQL Server are crash-consistent."
+                : $"SQL Server snapshot: {freeze.Reason ?? sql.Summary} Files outside SQL Server are crash-consistent.", !sql.AllDatabasesConsistent);
         }
 
         var reason = freeze?.Reason ?? guest.Reason ?? "the guest could not be frozen";
@@ -395,7 +419,7 @@ internal sealed class VmBackupTask(
         }
 
         // A missing agent was reported before the snapshot, a failed freeze by the hypervisor provider.
-        return ("crash", reason);
+        return ("crash", reason, true);
     }
 
     /// <summary>

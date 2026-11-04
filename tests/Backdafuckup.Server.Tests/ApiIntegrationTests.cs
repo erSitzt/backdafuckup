@@ -8,6 +8,8 @@ using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Server.Agents;
 using Backdafuckup.Server.Api;
 using Backdafuckup.Server.FileRestore;
+using Backdafuckup.Server.Sql;
+
 using Backdafuckup.Testing;
 using Backdafuckup.Testing.Xapi;
 using Backdafuckup.Xen;
@@ -237,7 +239,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         await using (var freeze = await quiescer.FreezeAsync(new ListLog(log), Ct))
         {
             Assert.True(vss.Frozen);
-            var result = await freeze.ThawAsync(Ct);
+            var result = await freeze.ThawAsync(snapshotTaken: true, Ct);
             Assert.True(result.ApplicationConsistent);
             Assert.Equal(TimeSpan.FromMilliseconds(1200), result.HeldTime);
         }
@@ -334,7 +336,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         await BackUpImageAsync(client, vmName, await File.ReadAllBytesAsync(FsFixtures.Image(fixture), Ct));
 
     /// <summary>A VM whose disk holds <paramref name="image"/>, backed up once (with guest processing if an agent is set up).</summary>
-    private async Task<RestorePointDto> BackUpImageAsync(HttpClient client, string vmName, byte[] image, Func<string, Task>? beforeBackup = null)
+    private async Task<RestorePointDto> BackUpImageAsync(HttpClient client, string vmName, byte[] image, Func<string, Task>? beforeBackup = null, Func<SaveJobDto, SaveJobDto>? configureJob = null)
     {
         var (vmUuid, disks) = _pool.AddVm(vmName, image.LongLength);
         _pool.WriteDisk(disks[0], 0, image);
@@ -344,7 +346,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         }
         var connection = await Read<ConnectionDto>(client.PostAsJsonAsync("/api/connections", new CreateConnectionDto { DisplayName = "Lab pool", Address = "xcp1", UserName = "root", Password = "secret" }, Ct));
         var repository = await Read<RepositoryDto>(client.PostAsJsonAsync("/api/repositories", new CreateRepositoryDto { Name = "Local", Path = Path.Combine(_root, "repo") }, Ct));
-        var job = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", new SaveJobDto
+        var save = new SaveJobDto
         {
             Name = "Files",
             ConnectionId = connection.Id,
@@ -354,7 +356,8 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Objects = [new JobObjectDto(vmUuid, vmName)],
             RetryCount = 0,
             GuestProcessing = beforeBackup is not null,
-        }, Ct));
+        };
+        var job = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", configureJob?.Invoke(save) ?? save, Ct));
         var backup = await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{job.Id}/run", new RunJobDto(), Ct));
         Assert.Equal("Succeeded", (await WaitForSessionAsync(client, backup.SessionId)).Session.State);
         return Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!);
@@ -979,6 +982,57 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
 
         await stop.CancelAsync();
         await running;
+    }
+
+    [Fact]
+    public async Task The_real_agent_suspends_sql_server_for_the_snapshot_and_records_it_over_http()
+    {
+        var client = await SignedInClientAsync();
+        var image = WindowsTestDisk.Create([new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>())]);
+        var backupFolder = Path.Combine(_root, "sql-backup");
+        Directory.CreateDirectory(backupFolder);
+        var sql = new ScriptedSqlEnvironment(_ => []) { BackupFolder = backupFolder };
+        sql.AddDatabase("shop", @"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf");
+        sql.AddDatabase("small", @"D:\SQL\small.mdf", @"L:\Log\small_log.ldf");
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_backup", "Backup-1", null), Ct));
+        var suspendedAtSnapshot = new List<string>();
+        _pool.OnSnapshot = _ => suspendedAtSnapshot.AddRange(sql.Suspended.Order(StringComparer.Ordinal));
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+
+        var point = await BackUpImageAsync(
+            client,
+            "sql06",
+            image,
+            async vm => started = await StartAgentAsync(vm, null, sql, null, [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", InBackup = true }]),
+            job => job with { GuestProcessingMode = GuestProcessingModes.SqlSnapshot, SqlCredentialId = login.Id });
+
+        var (_, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
+        try
+        {
+            // Both databases were suspended, each on its own connection, while XAPI took the snapshot; recorded afterwards.
+            Assert.Equal(["shop", "small"], suspendedAtSnapshot);
+            Assert.Empty(sql.Suspended);
+            Assert.Contains("ALTER DATABASE [shop] SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON (MODE = COPY_ONLY)", sql.Statements);
+            Assert.Equal(2, sql.Statements.Count(t => t.StartsWith("BACKUP DATABASE @database TO DISK = @path WITH METADATA_ONLY, ", StringComparison.Ordinal)));
+            Assert.All(sql.Accounts, a => Assert.Equal(("bdfu_backup", "Backup-1"), (a.UserName, a.Password)));
+
+            // The .bkm went into the restore point and was deleted in the guest.
+            Assert.Empty(Directory.GetFiles(backupFolder));
+            Assert.Equal("crash", point.Consistency);
+            var repository = await _factory!.Services.GetRequiredService<Backdafuckup.Server.Engine.RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+            await using var reader = await repository.OpenRestorePointAsync(point.Id, Ct);
+            var snapshot = await StoredSqlSnapshot.ReadAsync(reader, Ct);
+            var instance = Assert.Single(snapshot!.Instances);
+            Assert.Equal("TAPE shop;TAPE small;", System.Text.Encoding.ASCII.GetString(instance.Metadata!));
+            Assert.All(instance.Databases, d => Assert.Equal(SqlSnapshotStates.Recorded, d.State));
+            var stored = await StoredGuestMetadata.ReadAsync(reader, Ct);
+            Assert.Equal("application", stored!.SqlDatabases.Single(d => d.Database == "shop").Consistency);
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
     }
 
     [Fact]

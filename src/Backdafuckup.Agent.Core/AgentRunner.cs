@@ -507,6 +507,11 @@ public sealed class AgentRunner
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlAttachFiles);
             }
 
+            if (_sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlSnapshot))
+            {
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlSnapshot);
+            }
+
             if (_restoreFiles is not null)
             {
                 foreach (var capability in new[] { AgentProtocol.CapabilityRestoreFiles, AgentProtocol.CapabilityRestoreFilesV2 })

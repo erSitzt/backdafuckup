@@ -38,6 +38,21 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
 
     public string? FailCommand { get; set; }
 
+    /// <summary>The agent can suspend SQL Server for a snapshot (and runs snapshot-suspend jobs).</summary>
+    public bool SqlSnapshotCapable { get; set; }
+
+    /// <summary>SQL Server snapshot: true while the simulated databases' writes are suspended.</summary>
+    public bool SqlSuspended { get; private set; }
+
+    /// <summary>SQL Server snapshot: true if a VM snapshot happened while the databases were suspended (set by the test).</summary>
+    public string? LastSignal { get; private set; }
+
+    /// <summary>The account the server sent with the last SQL job (the test checks it, never logs it).</summary>
+    public SqlAccount? LastSqlAccount { get; private set; }
+
+    /// <summary>The databases the SQL snapshot fails to suspend (reported as failed).</summary>
+    public HashSet<string> SqlDatabasesFailingSuspend { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         var settings = _services.GetRequiredService<AgentSettingsStore>();
@@ -61,6 +76,11 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
             cancellationToken) ?? throw new InvalidOperationException("Enrollment failed.");
         AgentId = enrolled.AgentId;
         var registry = _services.GetRequiredService<AgentRegistry>();
+        if (SqlSnapshotCapable)
+        {
+            registry.SetCapabilities(AgentId, [AgentProtocol.CapabilitySqlSnapshot]);
+        }
+
         _loop = Task.Run(async () =>
         {
             while (!_stop.IsCancellationRequested)
@@ -140,9 +160,57 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
             case AgentCommandKinds.Abort:
                 Frozen = false;
                 break;
+            case AgentCommandKinds.SqlJob:
+                _ = Task.Run(() => RunSqlJobAsync(command.JobId));
+                break;
         }
 
         return result;
+    }
+
+    /// <summary>Like the real agent's snapshot-suspend job, over the server's in-memory job channel.</summary>
+    private async Task RunSqlJobAsync(Guid jobId)
+    {
+        var jobs = _services.GetRequiredService<Sql.SqlJobs>();
+        var request = jobs.Get(jobId, AgentId) ?? throw new InvalidOperationException("no job");
+        LastSqlAccount = request.Account;
+        if (request.Kind != SqlJobKinds.SnapshotSuspend)
+        {
+            jobs.Complete(jobId, AgentId, new SqlJobResult { JobId = jobId, Error = "not simulated" });
+            return;
+        }
+
+        var instance = new SqlSnapshotInstance { Name = "MSSQLSERVER", ProductVersion = "16.0.4135.4" };
+        foreach (var name in new[] { "shop", "notselected" })
+        {
+            instance.Databases.Add(SqlDatabasesFailingSuspend.Contains(name)
+                ? new SqlSnapshotDatabase { Name = name, State = SqlSnapshotStates.Failed, Reason = "suspending failed: permission denied" }
+                : new SqlSnapshotDatabase { Name = name, State = SqlSnapshotStates.Suspended });
+        }
+
+        SqlSuspended = true;
+        jobs.Progress(jobId, AgentId, new SqlSnapshotProgress { Instances = [instance] });
+        string? signal;
+        while ((signal = jobs.Signal(jobId, AgentId)) == SqlJobSignals.Wait)
+        {
+            await Task.Delay(20);
+        }
+
+        LastSignal = signal;
+        foreach (var database in instance.Databases.Where(d => d.State == SqlSnapshotStates.Suspended))
+        {
+            database.State = signal == SqlJobSignals.SnapshotTaken ? SqlSnapshotStates.Recorded : SqlSnapshotStates.Failed;
+            database.Reason = signal == SqlJobSignals.SnapshotTaken ? null : "the server took no VM snapshot";
+        }
+
+        if (signal == SqlJobSignals.SnapshotTaken)
+        {
+            instance.Metadata = [0x54, 0x41, 0x50, 0x45];
+            instance.MetadataPath = @"C:\SQLBackup\backdafuckup.bkm";
+        }
+
+        SqlSuspended = false;
+        jobs.Complete(jobId, AgentId, new SqlJobResult { JobId = jobId, Success = true, Snapshot = [instance], SuspendedMs = 2500 });
     }
 
     public async ValueTask DisposeAsync()

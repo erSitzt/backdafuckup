@@ -312,7 +312,7 @@ public sealed class XenProviderTests : IAsyncDisposable
 
         private sealed class FreezeHandle(RecordingQuiescer owner) : IGuestFreeze
         {
-            public Task<GuestFreezeResult> ThawAsync(CancellationToken cancellationToken)
+            public Task<GuestFreezeResult> ThawAsync(bool snapshotTaken, CancellationToken cancellationToken)
             {
                 owner.Events.Add("thaw");
                 owner.Frozen = false;
@@ -768,7 +768,7 @@ public sealed class XenProviderTests : IAsyncDisposable
 
         private sealed class Handle(Action thawed) : IGuestFreeze
         {
-            public Task<GuestFreezeResult> ThawAsync(CancellationToken cancellationToken)
+            public Task<GuestFreezeResult> ThawAsync(bool snapshotTaken, CancellationToken cancellationToken)
             {
                 thawed();
 

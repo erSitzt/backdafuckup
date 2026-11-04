@@ -49,6 +49,9 @@ public sealed record RestorePointManifest
     /// <summary>The VSS documents of the guest (SQL Server writer metadata, Backup Components Document), if any.</summary>
     public ManifestBlob? VssDocuments { get; init; }
 
+    /// <summary>The SQL Server snapshot (recorded databases and their <c>.bkm</c>), if the guest was frozen that way.</summary>
+    public ManifestBlob? SqlSnapshot { get; init; }
+
     /// <summary>Informational only: the restore point whose indexes were reused for unchanged chunks.</summary>
     public Guid? BaseRestorePointId { get; init; }
 

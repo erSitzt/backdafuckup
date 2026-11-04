@@ -83,12 +83,44 @@ else
                         <MudNumericField @bind-Value="_retries" Label="Retries for failed VMs" Min="0" Max="10" Variant="Variant.Outlined" />
                     </MudExpansionPanel>
                     <MudExpansionPanel Text="@(_guest ? "Guest processing (application-consistent)" : "Guest processing")">
-                        <MudSwitch T="bool" @bind-Value="_guest" Color="Color.Primary" Label="Application-consistent backups through the backdafuckup agent (VSS)" />
+                        <MudSwitch T="bool" @bind-Value="_guest" Color="Color.Primary" Label="Application-consistent backups through the backdafuckup agent" />
                         <MudText Typo="Typo.caption" Class="d-block mb-3">
                             The agent freezes SQL Server, Active Directory, Exchange and other VSS-aware applications in Windows VMs while
                             the snapshot is taken (copy-only: other backup products are not disturbed). Without it, backups are
                             crash-consistent, like after a power failure.
                         </MudText>
+                        <MudSelect T="string" @bind-Value="_guestMode" Label="Method" Variant="Variant.Outlined" Disabled="!_guest" Class="mb-1">
+                            <MudSelectItem T="string" Value="@GuestProcessingModes.Vss">VSS: all VSS-aware applications (the VM snapshot must take less than 10 s)</MudSelectItem>
+                            <MudSelectItem T="string" Value="@GuestProcessingModes.SqlSnapshot">SQL Server snapshot: SQL Server 2022 or later, any snapshot duration</MudSelectItem>
+                        </MudSelect>
+                        <MudText Typo="Typo.caption" Class="d-block mb-3">
+                            @if (_guestMode == GuestProcessingModes.SqlSnapshot)
+                            {
+                                <text>
+                                    The agent suspends the writes of every SQL Server database (reads go on) until the VM snapshot is
+                                    taken, then records it in msdb as a copy-only backup. The databases are application-consistent, other
+                                    files crash-consistent. Writes wait for as long as the snapshot takes; applications with short
+                                    timeouts may see errors meanwhile.
+                                </text>
+                            }
+                            else
+                            {
+                                <text>
+                                    Windows holds the writes for at most 10 s. On slow storage or with many disks the snapshot takes
+                                    longer, and the backup is then crash-consistent; the session log shows the snapshot time.
+                                </text>
+                            }
+                        </MudText>
+                        @if (_guestMode == GuestProcessingModes.SqlSnapshot)
+                        {
+                            <MudSelect T="Guid?" @bind-Value="_sqlCredentialId" Label="SQL Server account" Variant="Variant.Outlined" Disabled="!_guest" Clearable="true" Class="mb-3"
+                                       HelperText="A Windows account or SQL Server login that is sysadmin on the instances (Credentials).">
+                                @foreach (var (id, label) in _sqlAccounts)
+                                {
+                                    <MudSelectItem T="Guid?" Value="id">@label</MudSelectItem>
+                                }
+                            </MudSelect>
+                        }
                         <MudSelect T="string" @bind-Value="_guestPolicy" Label="If the guest cannot be frozen" Variant="Variant.Outlined" Disabled="!_guest" Class="mb-3">
                             <MudSelectItem T="string" Value="@GuestFailurePolicies.CrashConsistentWithWarning">Back up crash-consistently and warn</MudSelectItem>
                             <MudSelectItem T="string" Value="@GuestFailurePolicies.FailVm">Fail the VM</MudSelectItem>
@@ -137,7 +169,7 @@ else
                         <tr><td>Schedule</td><td>@Jobs.Describe(Schedule())</td></tr>
                         <tr><td>Disk transport</td><td>@TransportText(_transport)</td></tr>
                         <tr><td>Parallel processing</td><td>@_parallelVms VM(s), @_parallelDisks disk(s) per VM</td></tr>
-                        <tr><td>Guest processing</td><td>@(_guest ? $"application-consistent (VSS); on failure: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with warning")}" + (_guestCredentialId is null ? "" : "; installs missing agents") : "off (crash-consistent)")</td></tr>
+                        <tr><td>Guest processing</td><td>@(_guest ? $"application-consistent ({(_guestMode == GuestProcessingModes.SqlSnapshot ? "SQL Server snapshot" : "VSS")}); on failure: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with warning")}" + (_guestCredentialId is null ? "" : "; installs missing agents") : "off (crash-consistent)")</td></tr>
                     </tbody>
                 </MudSimpleTable>
                 <MudCheckBox @bind-Value="_enabled" Label="Job enabled" Class="mt-2" />
@@ -199,6 +231,9 @@ else
     private string _guestPolicy = GuestFailurePolicies.CrashConsistentWithWarning;
     private Guid? _guestCredentialId;
     private List<WindowsCredentialDto> _credentials = [];
+    private string _guestMode = GuestProcessingModes.Vss;
+    private Guid? _sqlCredentialId;
+    private List<(Guid Id, string Label)> _sqlAccounts = [];
     private string _transport = TransportModes.Automatic;
     private int _retries = 2;
     private string _scheduleKind = "Daily";
@@ -214,6 +249,8 @@ else
         _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections");
         _repositories = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
         _credentials = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
+        var logins = await Api.GetAsync<List<SqlCredentialDto>>("api/credentials/sql");
+        _sqlAccounts = [.. _credentials.Select(c => (c.Id, $"{c.UserName} (Windows)")), .. logins.Select(c => (c.Id, $"{c.UserName} (SQL login)"))];
         if (Id is { } id)
         {
             var job = await Api.GetAsync<JobDto>($"api/jobs/{id}");
@@ -228,6 +265,8 @@ else
             _guest = job.GuestProcessing;
             _guestPolicy = job.GuestFailurePolicy;
             _guestCredentialId = job.GuestCredentialId;
+            _guestMode = job.GuestProcessingMode;
+            _sqlCredentialId = job.SqlCredentialId;
             _transport = job.TransportMode;
             _retries = job.RetryCount;
             _enabled = job.Enabled;
@@ -338,6 +377,8 @@ else
             GuestProcessing = _guest,
             GuestFailurePolicy = _guestPolicy,
             GuestCredentialId = _guest ? _guestCredentialId : null,
+            GuestProcessingMode = _guestMode,
+            SqlCredentialId = _guest && _guestMode == GuestProcessingModes.SqlSnapshot ? _sqlCredentialId : null,
             RetryCount = _retries,
             TransportMode = _transport,
         };

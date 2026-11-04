@@ -135,6 +135,28 @@ XCP-ng / XenServer removed the quiesced snapshot in 8.1, so a VM snapshot is cra
    - What shortens it: fewer disks in the snapshot (mark disks without backup value with `[NOBAK]`, see [VM snapshots](#vm-snapshots)), and only one snapshot at a time per storage (the default).
 5. **Copy-only:** the backup is a VSS copy-only backup (`VSS_BT_COPY`). The SQL Server backup chain (differential base, log backups) of other backup products stays untouched. Logs are not truncated.
 
+**Method "SQL Server snapshot" (SQL Server 2022 and later)**
+
+When the VM snapshot takes longer than VSS allows (see the 10 s limit above), choose *Method: SQL Server snapshot* in the job (Advanced → Guest processing) and a SQL Server account. It uses SQL Server's T-SQL snapshot backup instead of the VSS freeze:
+1. VSS only gathers the metadata (databases, files, volumes), as above, and ends right away.
+2. The agent suspends the writes of every user database with `ALTER DATABASE … SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON (MODE = COPY_ONLY)`.
+   - It does this database by database, each on its own connection. This also covers databases that `AUTO_CLOSE` has closed, the default in SQL Server Express.
+   - Reads go on. Writes wait; the session log shows how many databases were suspended.
+3. The server takes the VM snapshot, which may take as long as it needs.
+4. The agent records the snapshot with `BACKUP DATABASE … WITH METADATA_ONLY`, which resumes the writes.
+   - Each database gets a copy-only full backup in `msdb` (`is_snapshot = 1`, named "backdafuckup restore point …"). The backup chain of other products stays untouched.
+   - The snapshot backup metadata (`.bkm`) goes into the restore point, and the agent deletes it in the guest.
+5. If the snapshot fails, the agent resumes the writes without recording anything. It also resumes them if the server does not report the snapshot within 2 minutes (`Agent:SqlSnapshotHoldLimit`). If the agent stops or loses its connection to SQL Server, SQL Server resumes by itself.
+
+What it means:
+- **Consistency:** the SQL Server databases are application-consistent; files outside SQL Server are crash-consistent. The restore point shows "crash" with this explanation, and the SQL browser shows each database's own state.
+  - The session ends with a warning if a database could not be suspended (offline, a SQL Server older than 2022, missing rights).
+  - System databases (`master`, `model`, `msdb`) cannot be suspended; restore them from a native SQL Server backup.
+- **Writes wait as long as the snapshot takes.** On the shared LVM storage of the lab that was 25–47 s for three or four disks. Applications with the usual 30 s command timeout may see timeouts; a write whose client gave up is still committed afterwards. Keep the snapshot short with `[NOBAK]` and one snapshot per storage.
+- **Account:** a Windows account or a SQL Server login that is `sysadmin` on the instances. Windows accounts log on in the guest; the agent never stores the account.
+- **Edition:** works with SQL Server Express too (tested with SQL Server 2025 Express and 2022 Developer).
+- The SQL Server service account writes the `.bkm` into the instance's backup folder (registry `BackupDirectory`, else `InstanceDefaultBackupPath`).
+
 Restore points show their consistency ("application", or "crash" plus the reason) under *Backups & Restore*.
 
 **Requirements**

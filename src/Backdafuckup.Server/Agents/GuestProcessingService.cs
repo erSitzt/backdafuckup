@@ -1,5 +1,7 @@
+using Backdafuckup.Agent.Protocol;
 using Backdafuckup.Core.Operations;
 using Backdafuckup.Server.Data;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
 namespace Backdafuckup.Server.Agents;
@@ -20,17 +22,38 @@ public interface IAgentInstaller
 /// Decides for a backup with guest processing: use the online agent of the VM, install it first (if the job has Windows
 /// credentials), or fall back to a crash-consistent backup with the reason.
 /// </summary>
-public sealed class GuestProcessingService(AgentService agents, AgentRegistry registry, IOptions<AgentOptions> options, IAgentInstaller? installer = null)
+public sealed class GuestProcessingService(
+    AgentService agents,
+    AgentRegistry registry,
+    IOptions<AgentOptions> options,
+    IAgentInstaller? installer = null,
+    Sql.SqlJobs? sqlJobs = null,
+    IDbContextFactory<AppDbContext>? dbFactory = null,
+    CredentialProtector? protector = null)
 {
-    public async Task<GuestPreparation> PrepareAsync(BackupJob job, BackupJobObject vm, IOperationLog log, CancellationToken cancellationToken)
+    /// <param name="backupName">The backup's name in SQL Server's msdb (SQL Server snapshot), e.g. with the restore point.</param>
+    public async Task<GuestPreparation> PrepareAsync(BackupJob job, BackupJobObject vm, IOperationLog log, CancellationToken cancellationToken, string? backupName = null)
     {
         ArgumentNullException.ThrowIfNull(job);
         ArgumentNullException.ThrowIfNull(vm);
         ArgumentNullException.ThrowIfNull(log);
         var agent = await agents.FindForVmAsync(vm.NativeId, cancellationToken).ConfigureAwait(false);
+        SqlSnapshotSettings? sql = null;
+        if (job.GuestProcessingMode == GuestProcessingMode.SqlSnapshot)
+        {
+            try
+            {
+                sql = await SqlSettingsAsync(job, backupName ?? $"backdafuckup {job.Name}", cancellationToken).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return new GuestPreparation(null, $"SQL Server snapshot: {ex.Message}");
+            }
+        }
+
         if (agent is not null && agents.IsOnline(agent.Id))
         {
-            return Use(agent);
+            return Use(agent, sql);
         }
 
         var missing = agent is null
@@ -54,11 +77,29 @@ public sealed class GuestProcessingService(AgentService agents, AgentRegistry re
         agent = await agents.WaitForVmAsync(vm.NativeId, options.Value.InstallWaitTimeout, cancellationToken).ConfigureAwait(false);
         return agent is null
             ? new GuestPreparation(null, $"The agent was installed in VM {vm.CachedName}, but did not report to the server within {options.Value.InstallWaitTimeout.TotalMinutes:0} minutes (check the address under Guest agents → Settings and port 9555 from the guest).")
-            : Use(agent);
+            : Use(agent, sql);
     }
 
-    private GuestPreparation Use(AgentEntity agent) =>
-        new(new AgentQuiescer(registry, options.Value, agent.Id, $"agent on {agent.HostName} ({agent.RemoteAddress ?? agent.IpAddresses ?? "address unknown"})"), null);
+    private GuestPreparation Use(AgentEntity agent, SqlSnapshotSettings? sql) =>
+        new(new AgentQuiescer(registry, options.Value, agent.Id, $"agent on {agent.HostName} ({agent.RemoteAddress ?? agent.IpAddresses ?? "address unknown"})", sql), null);
+
+    /// <summary>The job's SQL account (decrypted only into this in-memory setting, which reaches the agent in the SQL job).</summary>
+    private async Task<SqlSnapshotSettings> SqlSettingsAsync(BackupJob job, string backupName, CancellationToken cancellationToken)
+    {
+        if (sqlJobs is null || dbFactory is null || protector is null)
+        {
+            throw new InvalidOperationException("this server cannot run SQL Server jobs.");
+        }
+
+        if (job.SqlCredentialId is not { } credentialId)
+        {
+            throw new InvalidOperationException("the job has no SQL Server account. Choose one under Advanced → Guest processing.");
+        }
+
+        var account = await Api.SqlEndpoints.AccountAsync(credentialId, dbFactory, protector, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("the job's SQL Server account no longer exists.");
+        return new SqlSnapshotSettings(sqlJobs, account, backupName);
+    }
 
     private static string Capitalize(string text) => text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text[1..];
 }

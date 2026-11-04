@@ -246,6 +246,12 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("guest_processing");
 
+                    b.Property<string>("GuestProcessingMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("guest_processing_mode");
+
                     b.Property<string>("LastResult")
                         .HasMaxLength(16)
                         .HasColumnType("character varying(16)")
@@ -292,6 +298,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("retry_delay_minutes");
 
+                    b.Property<Guid?>("SqlCredentialId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("sql_credential_id");
+
                     b.Property<string>("TransportMode")
                         .IsRequired()
                         .HasMaxLength(16)
@@ -319,6 +329,9 @@ namespace Backdafuckup.Server.Data.Migrations
 
                     b.HasIndex("RepositoryId")
                         .HasDatabaseName("ix_jobs_repository_id");
+
+                    b.HasIndex("SqlCredentialId")
+                        .HasDatabaseName("ix_jobs_sql_credential_id");
 
                     b.ToTable("jobs", (string)null);
                 });
@@ -1346,6 +1359,12 @@ namespace Backdafuckup.Server.Data.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_jobs_repositories_repository_id");
+
+                    b.HasOne("Backdafuckup.Server.Data.Credential", null)
+                        .WithMany()
+                        .HasForeignKey("SqlCredentialId")
+                        .OnDelete(DeleteBehavior.SetNull)
+                        .HasConstraintName("fk_jobs_credentials_sql_credential_id");
 
                     b.OwnsOne("Backdafuckup.Server.Data.JobSchedule", "Schedule", b1 =>
                         {

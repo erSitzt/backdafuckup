@@ -227,7 +227,7 @@ public static class AgentEndpoints
                 GuestFreezeResult result;
                 await using (var freeze = await quiescer.FreezeAsync(new ListOperationLog(lines), ct))
                 {
-                    result = await freeze.ThawAsync(ct);
+                    result = await freeze.ThawAsync(snapshotTaken: false, ct);
                 }
 
                 var writers = string.Join(", ", result.Writers.Select(w => w.Failure is null ? $"{w.Name} ({w.State})" : $"{w.Name} ({w.State}: {w.Failure})"));
@@ -286,6 +286,29 @@ public static class AgentEndpoints
 
             return jobs.Get(id, agentId) is { } request
                 ? Results.Json(request, AgentJson.Options)
+                : Results.Problem("The SQL job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
+        });
+
+        agent.MapPost("/sql-jobs/{id:guid}/progress", async (Guid id, SqlSnapshotProgress progress, AgentService agents, Sql.SqlJobs jobs, HttpContext http, CancellationToken ct) =>
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return Results.Unauthorized();
+            }
+
+            return jobs.Progress(id, agentId, progress) ? Results.NoContent() : Results.Problem("The SQL job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
+        });
+
+        // Polled by a snapshot-suspend job every 200 ms while SQL Server's writes are suspended; 404 tells it to resume.
+        agent.MapGet("/sql-jobs/{id:guid}/signal", async (Guid id, AgentService agents, Sql.SqlJobs jobs, HttpContext http, CancellationToken ct) =>
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return Results.Unauthorized();
+            }
+
+            return jobs.Signal(id, agentId) is { } signal
+                ? Results.Json(new SqlJobSignal { Signal = signal }, AgentJson.Options)
                 : Results.Problem("The SQL job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
         });
 

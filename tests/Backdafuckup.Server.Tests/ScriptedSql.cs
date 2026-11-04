@@ -35,6 +35,12 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
     /// <summary>SERVERPROPERTY('ProductVersion') of the instance (SQL Server 2022 Express by default).</summary>
     public string ProductVersion { get; set; } = "16.0.4305.5";
 
+    /// <summary>The instance's backup folder (registry BackupDirectory): where BACKUP … METADATA_ONLY writes the .bkm.</summary>
+    public string? BackupFolder { get; set; }
+
+    /// <summary>The databases whose writes are suspended for a snapshot right now.</summary>
+    public HashSet<string> Suspended { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Database users of attached databases that have no login on the instance (name, type_desc).</summary>
     public List<(string Name, string Type)> OrphanedUsers { get; } = [];
 
@@ -59,7 +65,7 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
         new()
         {
             Name = "SQLEXPRESS", InstanceId = "MSSQL16.SQLEXPRESS", SetupVersion = "16.0.1000.6", ServiceName = "MSSQL$SQLEXPRESS", ServiceState = "Running",
-            ServiceAccount = @"NT Service\MSSQL$SQLEXPRESS", DefaultDataFolder = @"D:\Data", DefaultLogFolder = @"L:\Logs",
+            ServiceAccount = @"NT Service\MSSQL$SQLEXPRESS", DefaultDataFolder = @"D:\Data", DefaultLogFolder = @"L:\Logs", BackupFolder = BackupFolder,
         },
     ];
 
@@ -133,6 +139,24 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                     return (null, table);
                 }
 
+                case "SELECT CAST(SERVERPROPERTY('ProductMajorVersion') AS int), CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)), CAST(SERVERPROPERTY('InstanceDefaultBackupPath') AS nvarchar(4000))":
+                {
+                    var table = Table(("major", typeof(int)), ("version", typeof(string)), ("backup", typeof(string)));
+                    table.Rows.Add(int.Parse(ProductVersion.Split('.')[0], System.Globalization.CultureInfo.InvariantCulture), ProductVersion, @"C:\Program Files\Microsoft SQL Server\MSSQL16.SQLEXPRESS\MSSQL\Backup\");
+                    return (null, table);
+                }
+
+                case "SELECT name, state_desc, is_read_only, CAST(CASE WHEN source_database_id IS NULL THEN 0 ELSE 1 END AS bit) FROM sys.databases WHERE database_id > 4 ORDER BY name":
+                {
+                    var table = Table(("name", typeof(string)), ("state", typeof(string)), ("ro", typeof(bool)), ("snapshot", typeof(bool)));
+                    foreach (var name in _databases.Keys.Order(StringComparer.OrdinalIgnoreCase))
+                    {
+                        table.Rows.Add(name, "ONLINE", false, false);
+                    }
+
+                    return (null, table);
+                }
+
                 case "SELECT physical_name FROM sys.master_files WHERE database_id = @id":
                 {
                     var table = new DataTable();
@@ -181,6 +205,29 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 return (null, null);
             }
 
+            if (SuspendStatement().Match(text) is { Success: true } suspend)
+            {
+                var name = suspend.Groups["name"].Value.Replace("]]", "]", StringComparison.Ordinal);
+                if (suspend.Groups["on"].Value == "OFF")
+                {
+                    Suspended.Remove(name);
+                }
+                else
+                {
+                    Assert.True(Suspended.Add(name), $"{name} is suspended twice");
+                }
+
+                return (null, null);
+            }
+
+            if (text.StartsWith("BACKUP DATABASE @database TO DISK = @path WITH METADATA_ONLY, ", StringComparison.Ordinal))
+            {
+                var database = (string)parameters["@database"]!;
+                Assert.True(Suspended.Remove(database), $"{database} was not suspended when it was recorded");
+                File.AppendAllText((string)parameters["@path"]!, $"TAPE {database};");
+                return (null, null);
+            }
+
             if (DropStatement().Match(text) is { Success: true } drop)
             {
                 if (FailDrops > 0)
@@ -219,6 +266,9 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
 
     [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET OFFLINE WITH ROLLBACK IMMEDIATE$")]
     private static partial Regex OfflineStatement();
+
+    [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET SUSPEND_FOR_SNAPSHOT_BACKUP = (?<on>ON \(MODE = COPY_ONLY\)|OFF)$")]
+    private static partial Regex SuspendStatement();
 
     [GeneratedRegex(@"^DROP DATABASE \[(?<name>(?:[^\]]|\]\])+)\]$")]
     private static partial Regex DropStatement();

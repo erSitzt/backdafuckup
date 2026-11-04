@@ -28,7 +28,10 @@ public sealed class StoredGuestMetadata
     /// The metadata stored for a backup: the writers keep the components of the prepare step and take the state of the
     /// thaw step; each SQL database gets its own consistency.
     /// </summary>
-    public static StoredGuestMetadata Build(GuestBackupInfo prepared, ThawReport? thawed, string pointConsistency, string? pointReason)
+    /// <param name="sqlSnapshot">
+    /// SQL Server snapshot instead of VSS: a database is application-consistent exactly when the agent recorded it.
+    /// </param>
+    public static StoredGuestMetadata Build(GuestBackupInfo prepared, ThawReport? thawed, string pointConsistency, string? pointReason, IReadOnlyList<SqlSnapshotInstance>? sqlSnapshot = null)
     {
         var writers = prepared.Writers.Select(w =>
         {
@@ -55,7 +58,9 @@ public sealed class StoredGuestMetadata
             Writers = writers,
             SqlDatabases = prepared.SqlDatabases.Select(d =>
             {
-                var (consistency, reason) = DatabaseConsistency(d, sqlWriter, thawed is not null, pointConsistency, pointReason);
+                var (consistency, reason) = sqlSnapshot is not null
+                    ? SnapshotConsistency(d, sqlSnapshot)
+                    : DatabaseConsistency(d, sqlWriter, thawed is not null, pointConsistency, pointReason);
                 return StoredSqlDatabase.From(d, consistency, reason);
             }).ToList(),
         };
@@ -85,6 +90,27 @@ public sealed class StoredGuestMetadata
     }
 
     public byte[] Serialize() => JsonSerializer.SerializeToUtf8Bytes(this, AgentJson.Options);
+
+    private static (string Consistency, string? Reason) SnapshotConsistency(GuestSqlDatabase database, IReadOnlyList<SqlSnapshotInstance> instances)
+    {
+        var instance = instances.FirstOrDefault(i => string.Equals(i.Name, database.Instance, StringComparison.OrdinalIgnoreCase));
+        if (instance is null)
+        {
+            return ("crash", $"the SQL Server snapshot did not cover the instance {database.Instance}");
+        }
+
+        var recorded = instance.Databases.FirstOrDefault(d => string.Equals(d.Name, database.Database, StringComparison.OrdinalIgnoreCase));
+        if (recorded is null)
+        {
+            return ("crash", database.Database is "master" or "model" or "msdb"
+                ? "system databases cannot be suspended for a SQL Server snapshot; restore them from a native SQL Server backup"
+                : $"the SQL Server snapshot did not cover this database{(instance.Error is null ? string.Empty : $" ({instance.Error})")}");
+        }
+
+        return recorded.State == SqlSnapshotStates.Recorded
+            ? ("application", null)
+            : ("crash", $"SQL Server snapshot: {recorded.Reason ?? recorded.State}");
+    }
 
     private static (string Consistency, string? Reason) DatabaseConsistency(
         GuestSqlDatabase database, GuestWriter? sqlWriter, bool thawed, string pointConsistency, string? pointReason)
@@ -153,6 +179,34 @@ public sealed class StoredSqlDatabase
         Consistency = consistency,
         ConsistencyReason = reason,
     };
+}
+
+/// <summary>
+/// The SQL Server snapshot of a restore point (blob <c>sql-snapshot</c>): per instance the recorded databases and the
+/// snapshot backup metadata (<c>.bkm</c>), with which <c>RESTORE DATABASE … WITH METADATA_ONLY, NORECOVERY</c> can
+/// start a restore that log backups continue.
+/// </summary>
+public sealed class StoredSqlSnapshot
+{
+    public const string Format = "backdafuckup-sql-snapshot-v1";
+
+    public List<SqlSnapshotInstance> Instances { get; set; } = [];
+
+    /// <summary>How long the databases' writes were suspended.</summary>
+    public long SuspendedMs { get; set; }
+
+    public byte[] Serialize() => JsonSerializer.SerializeToUtf8Bytes(this, AgentJson.Options);
+
+    public static async Task<StoredSqlSnapshot?> ReadAsync(IRestorePointReader reader, CancellationToken cancellationToken)
+    {
+        if (reader.Manifest.SqlSnapshot is not { } blob)
+        {
+            return null;
+        }
+
+        await using var stream = await reader.OpenBlobAsync(blob, cancellationToken).ConfigureAwait(false);
+        return await JsonSerializer.DeserializeAsync<StoredSqlSnapshot>(stream, AgentJson.Options, cancellationToken).ConfigureAwait(false);
+    }
 }
 
 /// <summary>

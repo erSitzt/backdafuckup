@@ -400,6 +400,130 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         return await db.Jobs.Where(j => j.Id == jobId).Select(j => j.ConnectionId).SingleAsync(Ct);
     }
 
+    [Fact]
+    public async Task Sql_snapshot_suspends_the_databases_for_the_snapshot_and_records_them()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql01", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await EnableSqlSnapshotAsync(jobId, "bdfu_backup", "Sql-Secret-1");
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { IncludeUnselectedDatabase = true, SqlSnapshotCapable = true };
+        await agent.StartAsync(Ct);
+        var suspendedAtSnapshot = false;
+        _pool.OnSnapshot = _ => suspendedAtSnapshot = agent.SqlSuspended;
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        // Every database was recorded: no warning, although files outside SQL Server are crash-consistent.
+        Assert.Equal(SessionState.Succeeded, session.State);
+        Assert.True(suspendedAtSnapshot);
+        Assert.False(agent.SqlSuspended);
+        Assert.Equal(SqlJobSignals.SnapshotTaken, agent.LastSignal);
+        Assert.Equal(("bdfu_backup", SqlAccountKinds.Sql), (agent.LastSqlAccount!.UserName, agent.LastSqlAccount.Kind));
+        lock (agent.Commands)
+        {
+            // VSS gathers the metadata only: no VSS freeze, the VSS backup is ended right away.
+            Assert.Equal([AgentCommandKinds.PrepareBackup, AgentCommandKinds.Abort, AgentCommandKinds.SqlJob], agent.Commands);
+        }
+
+        var point = await LatestRestorePointAsync();
+        Assert.Equal("crash", point.Consistency);
+        Assert.Contains("SQL Server databases are application-consistent", point.ConsistencyReason, StringComparison.Ordinal);
+        var repository = await Services.GetRequiredService<RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+        await using (var reader = await repository.OpenRestorePointAsync(point.Id, Ct))
+        {
+            var stored = await StoredGuestMetadata.ReadAsync(reader, Ct);
+            Assert.All(stored!.SqlDatabases, d => Assert.Equal(("application", (string?)null), (d.Consistency, d.ConsistencyReason)));
+            var snapshot = await StoredSqlSnapshot.ReadAsync(reader, Ct);
+            var instance = Assert.Single(snapshot!.Instances);
+            Assert.Equal([0x54, 0x41, 0x50, 0x45], instance.Metadata);
+            Assert.All(instance.Databases, d => Assert.Equal(SqlSnapshotStates.Recorded, d.State));
+            Assert.Equal(2500, snapshot.SuspendedMs);
+        }
+
+        await using var db = await DbAsync();
+        var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("suspended the writes of 2 SQL Server database(s)", StringComparison.Ordinal) && m.Contains("MSSQLSERVER (16.0.4135.4): shop, notselected", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains("Guest processing (SQL Server snapshot): 2 database(s) recorded in msdb", StringComparison.Ordinal) && m.Contains("Writes were suspended for 2.5 s", StringComparison.Ordinal));
+        Assert.DoesNotContain(log, m => m.Contains("Sql-Secret-1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Sql_snapshot_reports_databases_that_could_not_be_suspended()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql02", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await EnableSqlSnapshotAsync(jobId, "bdfu_backup", "Sql-Secret-2");
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { IncludeUnselectedDatabase = true, SqlSnapshotCapable = true };
+        agent.SqlDatabasesFailingSuspend.Add("notselected");
+        await agent.StartAsync(Ct);
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Warning, session.State);
+        var point = await LatestRestorePointAsync();
+        var repository = await Services.GetRequiredService<RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+        await using var reader = await repository.OpenRestorePointAsync(point.Id, Ct);
+        var stored = await StoredGuestMetadata.ReadAsync(reader, Ct);
+        Assert.Equal("application", stored!.SqlDatabases.Single(d => d.Database == "shop").Consistency);
+        var failed = stored.SqlDatabases.Single(d => d.Database == "notselected");
+        Assert.Equal("crash", failed.Consistency);
+        Assert.Contains("suspending failed: permission denied", failed.ConsistencyReason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Sql_snapshot_resumes_without_recording_when_the_vm_snapshot_fails()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql03", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await EnableSqlSnapshotAsync(jobId, "bdfu_backup", "Sql-Secret-3");
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { SqlSnapshotCapable = true };
+        await agent.StartAsync(Ct);
+        _pool.OnSnapshot = _ => throw new Backdafuckup.Testing.Xapi.FakeXapiError("SR_BACKEND_FAILURE_44", "", "There is insufficient space", "");
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Failed, session.State);
+        Assert.Equal(SqlJobSignals.Abort, agent.LastSignal);
+        Assert.False(agent.SqlSuspended);
+    }
+
+    [Fact]
+    public async Task Sql_snapshot_falls_back_to_crash_consistent_for_an_agent_without_the_capability()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql04", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await EnableSqlSnapshotAsync(jobId, "bdfu_backup", "Sql-Secret-4");
+        await using var agent = new FakeGuestAgent(Services, vmUuid);
+        await agent.StartAsync(Ct);
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Warning, session.State);
+        var point = await LatestRestorePointAsync();
+        Assert.Equal("crash", point.Consistency);
+        Assert.Contains("cannot suspend SQL Server for a snapshot yet", point.ConsistencyReason, StringComparison.Ordinal);
+    }
+
+    private async Task EnableSqlSnapshotAsync(Guid jobId, string userName, string password)
+    {
+        await using var db = await DbAsync();
+        var credential = new Credential
+        {
+            Kind = CredentialKind.SqlServer,
+            Username = userName,
+            ProtectedSecret = Services.GetRequiredService<CredentialProtector>().Protect(password),
+            CreatedUtc = DateTimeOffset.UtcNow,
+            UpdatedUtc = DateTimeOffset.UtcNow,
+        };
+        db.Credentials.Add(credential);
+        await db.SaveChangesAsync(Ct);
+        await db.Jobs.Where(j => j.Id == jobId).ExecuteUpdateAsync(s => s.SetProperty(j => j.GuestProcessingMode, GuestProcessingMode.SqlSnapshot).SetProperty(j => j.SqlCredentialId, credential.Id), Ct);
+    }
+
     private async Task EnableGuestProcessingAsync(Guid jobId, GuestFailurePolicy policy)
     {
         await using var db = await DbAsync();

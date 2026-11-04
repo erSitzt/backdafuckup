@@ -302,6 +302,20 @@ public static class OperationEndpoints
             errors["transportMode"] = [$"Unknown transport mode '{request.TransportMode}'. Use Automatic, NbdOnly or HttpExportOnly."];
         }
 
+        if (!Enum.TryParse<GuestProcessingMode>(request.GuestProcessingMode, true, out var guestMode) || int.TryParse(request.GuestProcessingMode, out _))
+        {
+            errors["guestProcessingMode"] = [$"Unknown guest processing mode '{request.GuestProcessingMode}'. Use Vss or SqlSnapshot."];
+        }
+        else if (request.GuestProcessing && guestMode == GuestProcessingMode.SqlSnapshot && request.SqlCredentialId is null)
+        {
+            errors["sqlCredentialId"] = ["The SQL Server snapshot needs an account with the right to back up the databases (sysadmin): a Windows account or a SQL Server login."];
+        }
+        else if (request.GuestProcessing && guestMode == GuestProcessingMode.SqlSnapshot
+                 && !await db.Credentials.AnyAsync(c => c.Id == request.SqlCredentialId && (c.Kind == CredentialKind.Windows || c.Kind == CredentialKind.SqlServer), ct))
+        {
+            errors["sqlCredentialId"] = ["Unknown account: choose a Windows account or a SQL Server login under Credentials."];
+        }
+
         if (request.Schedule.Kind.Equals("Weekly", StringComparison.OrdinalIgnoreCase) && request.Schedule.Days.Count == 0)
         {
             errors["schedule"] = ["Select at least one weekday."];
@@ -325,6 +339,8 @@ public static class OperationEndpoints
         job.GuestProcessing = request.GuestProcessing;
         job.GuestFailurePolicy = Enum.TryParse<GuestFailurePolicy>(request.GuestFailurePolicy, true, out var policy) ? policy : GuestFailurePolicy.CrashConsistentWithWarning;
         job.GuestCredentialId = request.GuestCredentialId;
+        job.GuestProcessingMode = Enum.TryParse<GuestProcessingMode>(request.GuestProcessingMode, true, out var mode) && !int.TryParse(request.GuestProcessingMode, out _) ? mode : GuestProcessingMode.Vss;
+        job.SqlCredentialId = job.GuestProcessingMode == GuestProcessingMode.SqlSnapshot ? request.SqlCredentialId : null;
         job.RetryCount = Math.Clamp(request.RetryCount, 0, 10);
         job.TransportMode = Enum.TryParse<Backdafuckup.Core.DataMover.DiskTransportMode>(request.TransportMode, true, out var transport) ? transport : Backdafuckup.Core.DataMover.DiskTransportMode.Automatic;
         job.Objects = request.Objects.Select((o, i) => new BackupJobObject { JobId = job.Id, NativeId = o.NativeId, CachedName = o.Name, Order = i }).ToList();

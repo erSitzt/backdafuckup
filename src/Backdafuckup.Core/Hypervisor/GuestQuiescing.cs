@@ -20,7 +20,10 @@ public interface IGuestQuiescer
 public interface IGuestFreeze : IAsyncDisposable
 {
     /// <summary>Releases the guest and reports whether the snapshot taken meanwhile is application-consistent.</summary>
-    Task<GuestFreezeResult> ThawAsync(CancellationToken cancellationToken);
+    /// <param name="snapshotTaken">
+    /// False if the snapshot failed: nothing may be recorded for it in the guest (e.g. no SQL Server backup history).
+    /// </param>
+    Task<GuestFreezeResult> ThawAsync(bool snapshotTaken, CancellationToken cancellationToken);
 }
 
 public sealed class GuestQuiesceException(string message, Exception? inner = null) : Exception(message, inner);
@@ -39,6 +42,16 @@ public sealed record GuestFreezeResult(
     IReadOnlyList<GuestWriterResult> Writers)
 {
     public static GuestFreezeResult NotConsistent(string reason) => new(false, reason, TimeSpan.Zero, TimeSpan.Zero, []);
+
+    /// <summary>
+    /// Set by a SQL Server snapshot (no VSS): the SQL Server databases were suspended for the snapshot, the rest of the
+    /// guest is crash-consistent. <see cref="ApplicationConsistent"/> is then false.
+    /// </summary>
+    public SqlSnapshotOutcome? Sql { get; init; }
 }
+
+/// <param name="AllDatabasesConsistent">Every user database of the guest's SQL Server instances was recorded.</param>
+/// <param name="Summary">For the session log: instances, recorded, skipped and failed databases, the write pause.</param>
+public sealed record SqlSnapshotOutcome(bool AllDatabasesConsistent, string Summary);
 
 public sealed record GuestWriterResult(string Name, string State, string? Failure);

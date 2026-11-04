@@ -168,6 +168,14 @@ public sealed class SqlJobRunner
                 case SqlJobKinds.AttachFiles:
                     AttachFiles(request, Log);
                     break;
+                case SqlJobKinds.SnapshotSuspend:
+                    if (request.Account is null)
+                    {
+                        throw new InvalidOperationException("The job names no account.");
+                    }
+
+                    await SnapshotAsync(request, result, Log, stop).ConfigureAwait(false);
+                    break;
                 case SqlJobKinds.DeleteFiles:
                     var files = request.Files ?? new List<string>();
                     if (_files is null || files.Count == 0)
@@ -212,6 +220,84 @@ public sealed class SqlJobRunner
             }
 
             await Task.Delay(TimeSpan.FromSeconds(2), stop).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The T-SQL snapshot backup around the VM snapshot: suspends, reports it, waits for the server's signal (polled every
+    /// 200 ms), then records the snapshot or resumes without recording. The connections close at the end in any case,
+    /// which resumes SQL Server also if anything here fails.
+    /// </summary>
+    private async Task SnapshotAsync(SqlJobRequest request, SqlJobResult result, Action<string> log, CancellationToken stop)
+    {
+        var limit = TimeSpan.FromMilliseconds(request.HoldLimitMs > 0 ? request.HoldLimitMs : 120000);
+        using (var suspend = new SqlSnapshotSuspend(_sql, request.Account!, log))
+        {
+            var progress = suspend.Suspend(_sql.Instances(), request.Instance);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            await PostJsonAsync(Base + "/progress", progress, stop).ConfigureAwait(false);
+            string? signal = null;
+            while (watch.Elapsed < limit && !stop.IsCancellationRequested)
+            {
+                signal = await TryGetSignalAsync(stop).ConfigureAwait(false);
+                if (signal is not null && signal != SqlJobSignals.Wait)
+                {
+                    break;
+                }
+
+                signal = null;
+                await Task.Delay(TimeSpan.FromMilliseconds(200), stop).ConfigureAwait(false);
+            }
+
+            result.Snapshot = signal == SqlJobSignals.SnapshotTaken
+                ? suspend.Record(request.BackupName ?? "backdafuckup", _id)
+                : suspend.Resume(signal == SqlJobSignals.Abort
+                    ? "the server took no VM snapshot (it failed or the backup stopped), so nothing was recorded"
+                    : $"the VM snapshot was not reported done within {limit.TotalSeconds:0} s; the writes were resumed before it may have been taken");
+            result.SuspendedMs = suspend.SuspendedMs;
+        }
+    }
+
+    /// <summary>The server's signal; null if the server could not be asked this time; abort if the job is gone (404).</summary>
+    private async Task<string?> TryGetSignalAsync(CancellationToken stop)
+    {
+        try
+        {
+            using (var response = await _http.GetAsync(Base + "/signal", stop).ConfigureAwait(false))
+            {
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    return SqlJobSignals.Abort;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                var signal = JsonSerializer.Deserialize<SqlJobSignal>(await response.Content.ReadAsStringAsync().ConfigureAwait(false), AgentJson.Options);
+                return signal?.Signal;
+            }
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+        catch (TaskCanceledException) when (!stop.IsCancellationRequested)
+        {
+            return null;
+        }
+    }
+
+    private async Task PostJsonAsync<T>(string path, T body, CancellationToken stop)
+    {
+        using (var content = new StringContent(JsonSerializer.Serialize(body, AgentJson.Options), Encoding.UTF8, "application/json"))
+        using (var response = await _http.PostAsync(path, content, stop).ConfigureAwait(false))
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException($"The server did not take the progress of SQL job {_id} ({(int)response.StatusCode}).");
+            }
         }
     }
 

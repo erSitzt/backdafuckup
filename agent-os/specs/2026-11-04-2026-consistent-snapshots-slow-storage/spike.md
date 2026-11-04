@@ -23,9 +23,16 @@ SQL side only, over WinRM, with no snapshot in the pool. The instance is SQL Ser
   - "… acquired suspend locks in session N", "I/O is frozen on database X", "… successfully resumed in session N", "I/O was resumed on database X", "Database backed up … first LSN … last LSN".
   - Support can read the pause from these lines.
 
+### Finding while building step 2 (SQL Server 2022 container, 2026-11-04)
+
+- **A session that has suspended one database cannot suspend another.** The second `ALTER DATABASE … SUSPEND_FOR_SNAPSHOT_BACKUP = ON` on the same connection fails with "Atleast one 'database' was previously suspended for snapshot backup".
+  - This is the same error as `GROUP`, and it explains the failure seen in the lab.
+- So the agent suspends every database **on its own unpooled connection**, and records it on that connection with `BACKUP DATABASE … WITH METADATA_ONLY`. The records go into one media set per instance: the first with `FORMAT`, the rest appended.
+- Closing a database's connection resumes exactly that database: the dead-man switch works per database. Tested: the connections were disposed while suspended, SQL Server resumed, and `msdb` had no entries.
+
 ### Consequences for step 2
 
-1. **Suspend per database, not `GROUP`:**
+1. **Suspend per database, not `GROUP`, each on its own connection (see the finding above):**
    - The agent runs `ALTER DATABASE [x] SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON (MODE = COPY_ONLY)` for each user database it backs up. Each one takes milliseconds, and closed `AUTO_CLOSE` databases are included.
    - After the snapshot it runs `BACKUP DATABASE [x] TO DISK = … WITH METADATA_ONLY` for each database into one media set: the first with `FORMAT`, the others appended.
    - To check: several database-level suspends in one session, and the 64-database limit for database-level suspends.

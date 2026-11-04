@@ -24,6 +24,12 @@ public sealed class AgentOptions
 
     public TimeSpan ThawTimeout { get; set; } = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// SQL Server snapshot: the longest time the agent keeps the databases' writes suspended. After it the agent resumes
+    /// them (the databases are then crash-consistent); the server takes no snapshot later than this.
+    /// </summary>
+    public TimeSpan SqlSnapshotHoldLimit { get; set; } = TimeSpan.FromMinutes(2);
+
     /// <summary>A file restore into a VM fails when the agent neither downloads nor reports for this long.</summary>
     public TimeSpan TransferSilenceLimit { get; set; } = TimeSpan.FromMinutes(5);
 

@@ -140,7 +140,7 @@ internal sealed class XenBackupSession : IVmBackupSession
             }
         }
 
-        string snapshotRef;
+        string? snapshotRef = null;
         Guid? taskArtifact = null;
         TimeSpan snapshotTime;
         GuestFreezeResult? freezeResult;
@@ -175,7 +175,7 @@ internal sealed class XenBackupSession : IVmBackupSession
             {
                 // Thaw right away, also when the snapshot failed.
                 snapshotTime = snapshotWatch.Elapsed;
-                freezeResult = await ThawGuestAsync(freeze, freezeResult).ConfigureAwait(false);
+                freezeResult = await ThawGuestAsync(freeze, freezeResult, snapshotTaken: snapshotRef is not null).ConfigureAwait(false);
             }
         }
         finally
@@ -338,7 +338,7 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
     }
 
-    private static async Task<GuestFreezeResult?> ThawGuestAsync(IGuestFreeze? freeze, GuestFreezeResult? result)
+    private static async Task<GuestFreezeResult?> ThawGuestAsync(IGuestFreeze? freeze, GuestFreezeResult? result, bool snapshotTaken)
     {
         if (freeze is null)
         {
@@ -349,7 +349,7 @@ internal sealed class XenBackupSession : IVmBackupSession
         {
             try
             {
-                return await freeze.ThawAsync(CancellationToken.None).ConfigureAwait(false);
+                return await freeze.ThawAsync(snapshotTaken, CancellationToken.None).ConfigureAwait(false);
             }
             catch (GuestQuiesceException ex)
             {
@@ -360,6 +360,21 @@ internal sealed class XenBackupSession : IVmBackupSession
 
     private static void ReportGuestFreeze(IOperationLog log, GuestFreezeResult result, TimeSpan snapshotTime)
     {
+        if (result.Sql is { } sql)
+        {
+            var text = $"Guest processing (SQL Server snapshot): {sql.Summary} VM snapshot took {Seconds(snapshotTime)}.";
+            if (sql.AllDatabasesConsistent)
+            {
+                log.Info(text);
+            }
+            else
+            {
+                log.Warning(text);
+            }
+
+            return;
+        }
+
         var writers = result.Writers.Count == 0 ? string.Empty
             : " Writers: " + string.Join(", ", result.Writers.Select(w => w.Failure is null ? $"{w.Name} ({w.State})" : $"{w.Name} ({w.State}: {w.Failure})")) + ".";
         if (result.ApplicationConsistent)

@@ -39,7 +39,7 @@ internal static class ApiMapping
         j.Repository?.Name ?? string.Empty, j.RetentionPoints, j.Schedule.ToDto(),
         j.Objects.OrderBy(o => o.Order).Select(o => new JobObjectDto(o.NativeId, o.CachedName)).ToList(),
         j.NextRunUtc, j.LastRunUtc, j.LastResult?.ToString(), running, j.MaxParallelVms, j.NbdConnectionsPerDisk, j.RetryCount, j.TransportMode.ToString(), j.MaxParallelDisks,
-        j.GuestProcessing, j.GuestFailurePolicy.ToString(), j.GuestCredentialId);
+        j.GuestProcessing, j.GuestFailurePolicy.ToString(), j.GuestCredentialId, j.GuestProcessingMode.ToString(), j.SqlCredentialId);
 
     public static RestorePointDto ToDto(this RestorePointEntity r) => new(
         r.Id, r.RepositoryId, r.JobId, r.JobName, r.ConnectionId, r.VmNativeId, r.VmName, r.CreatedUtc, r.Kind.ToString(), r.State.ToString(),

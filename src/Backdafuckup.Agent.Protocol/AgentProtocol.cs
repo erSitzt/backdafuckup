@@ -47,7 +47,10 @@ public static class AgentProtocol
     /// <summary>The agent runs SQL Server jobs (<see cref="AgentCommandKinds.SqlJob"/>).</summary>
     public const string CapabilitySqlRestore = "sql-restore-v1";
 
-    /// <summary>SQL Server jobs: <c>GET {id}</c> (the request, with the account), <c>POST {id}/result</c>.</summary>
+    /// <summary>
+    /// SQL Server jobs: <c>GET {id}</c> (the request, with the account), <c>POST {id}/result</c>; for
+    /// <see cref="SqlJobKinds.SnapshotSuspend"/> also <c>POST {id}/progress</c> (suspended) and <c>GET {id}/signal</c>.
+    /// </summary>
     public const string SqlJobsPath = "api/agent/sql-jobs";
 
     /// <summary>The agent publishes restore point disks into its guest (<see cref="AgentCommandKinds.Publish"/>).</summary>
@@ -64,6 +67,12 @@ public static class AgentProtocol
     /// failed restore (<see cref="SqlJobKinds.DeleteFiles"/>).
     /// </summary>
     public const string CapabilitySqlAttachFiles = "sql-attach-files-v1";
+
+    /// <summary>
+    /// The agent suspends SQL Server databases for the VM snapshot (<see cref="SqlJobKinds.SnapshotSuspend"/>): the T-SQL
+    /// snapshot backup of SQL Server 2022 and later, which has no time limit, instead of VSS.
+    /// </summary>
+    public const string CapabilitySqlSnapshot = "sql-snapshot-v1";
 
     /// <summary>
     /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
@@ -548,6 +557,86 @@ public static class SqlJobKinds
 
     /// <summary>Deletes <see cref="SqlJobRequest.Files"/>: the files a failed or stopped restore had written.</summary>
     public const string DeleteFiles = "delete-files";
+
+    /// <summary>
+    /// T-SQL snapshot backup around the VM snapshot (SQL Server 2022 and later): suspends the writes of every user database
+    /// on its own connection (<c>MODE = COPY_ONLY</c>), reports <see cref="SqlSnapshotProgress"/>, waits for
+    /// <see cref="SqlJobSignals"/>, then records the snapshot in <c>msdb</c> with <c>BACKUP DATABASE … WITH METADATA_ONLY</c>
+    /// (which resumes the writes) and returns the <c>.bkm</c> files in <see cref="SqlJobResult.Snapshot"/>. Closing the
+    /// connections resumes SQL Server too: on abort, after <see cref="SqlJobRequest.HoldLimitMs"/>, or if the agent dies.
+    /// </summary>
+    public const string SnapshotSuspend = "snapshot-suspend";
+}
+
+/// <summary>What the server tells a running <see cref="SqlJobKinds.SnapshotSuspend"/> job (<c>GET {id}/signal</c>).</summary>
+public static class SqlJobSignals
+{
+    /// <summary>Keep the databases suspended: the VM snapshot is not done yet.</summary>
+    public const string Wait = "wait";
+
+    /// <summary>The VM snapshot is taken: record it and resume.</summary>
+    public const string SnapshotTaken = "snapshot-taken";
+
+    /// <summary>No snapshot (it failed or the backup stopped): resume without recording anything.</summary>
+    public const string Abort = "abort";
+}
+
+public sealed class SqlJobSignal
+{
+    /// <summary>One of <see cref="SqlJobSignals"/>.</summary>
+    public string Signal { get; set; } = SqlJobSignals.Wait;
+}
+
+/// <summary>The suspend of a <see cref="SqlJobKinds.SnapshotSuspend"/> job is in place (<c>POST {id}/progress</c>).</summary>
+public sealed class SqlSnapshotProgress
+{
+    public List<SqlSnapshotInstance> Instances { get; set; } = new List<SqlSnapshotInstance>();
+}
+
+/// <summary>One SQL Server instance in a <see cref="SqlJobKinds.SnapshotSuspend"/> job.</summary>
+public sealed class SqlSnapshotInstance
+{
+    /// <summary>Instance name, e.g. <c>SQLEXPRESS</c> or <c>MSSQLSERVER</c>.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    public string? ProductVersion { get; set; }
+
+    /// <summary>Why the instance was left out or failed as a whole (stopped, too old, no connection, no rights).</summary>
+    public string? Error { get; set; }
+
+    public List<SqlSnapshotDatabase> Databases { get; set; } = new List<SqlSnapshotDatabase>();
+
+    /// <summary>Result only: the snapshot backup metadata (<c>.bkm</c>) of the recorded databases.</summary>
+    public byte[]? Metadata { get; set; }
+
+    /// <summary>Result only: where SQL Server wrote the <c>.bkm</c> (the agent deletes it after reading).</summary>
+    public string? MetadataPath { get; set; }
+}
+
+public sealed class SqlSnapshotDatabase
+{
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>One of <see cref="SqlSnapshotStates"/>.</summary>
+    public string State { get; set; } = SqlSnapshotStates.Skipped;
+
+    /// <summary>Why the database was skipped or failed.</summary>
+    public string? Reason { get; set; }
+}
+
+public static class SqlSnapshotStates
+{
+    /// <summary>Progress: the database's writes are suspended.</summary>
+    public const string Suspended = "suspended";
+
+    /// <summary>Result: recorded with <c>BACKUP … METADATA_ONLY</c> (copy-only, in <c>msdb</c> and the <c>.bkm</c>).</summary>
+    public const string Recorded = "recorded";
+
+    /// <summary>Not suspended (offline, read-only, a database snapshot); no writes could go into the VM snapshot from SQL Server.</summary>
+    public const string Skipped = "skipped";
+
+    /// <summary>Suspending or recording failed, or the suspend ended before the VM snapshot was taken.</summary>
+    public const string Failed = "failed";
 }
 
 public static class SqlAccountKinds
@@ -592,6 +681,15 @@ public sealed class SqlJobRequest
 
     /// <summary>AttachFiles, DeleteFiles: the database's files in the guest, the primary data file first.</summary>
     public List<string>? Files { get; set; }
+
+    /// <summary>
+    /// SnapshotSuspend: the longest time the databases stay suspended. After it the agent closes its connections, which
+    /// resumes SQL Server, and the databases are reported as failed.
+    /// </summary>
+    public int HoldLimitMs { get; set; }
+
+    /// <summary>SnapshotSuspend: the backup's name in <c>msdb</c> and in the <c>.bkm</c> (e.g. "backdafuckup restore point …").</summary>
+    public string? BackupName { get; set; }
 }
 
 public sealed class SqlJobResult
@@ -603,6 +701,12 @@ public sealed class SqlJobResult
     public string? Error { get; set; }
 
     public SqlInventory? Inventory { get; set; }
+
+    /// <summary>SnapshotSuspend: per instance the recorded, skipped and failed databases and the <c>.bkm</c>.</summary>
+    public List<SqlSnapshotInstance>? Snapshot { get; set; }
+
+    /// <summary>SnapshotSuspend: how long the first database's writes were suspended until the last one resumed.</summary>
+    public long SuspendedMs { get; set; }
 
     /// <summary>What the job did, for the session log (e.g. "removed database [shop_published]").</summary>
     public List<string> Log { get; set; } = new List<string>();

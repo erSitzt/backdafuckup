@@ -131,7 +131,9 @@ public sealed record JobDto(
     int MaxParallelDisks,
     bool GuestProcessing,
     string GuestFailurePolicy,
-    Guid? GuestCredentialId);
+    Guid? GuestCredentialId,
+    string GuestProcessingMode = GuestProcessingModes.Vss,
+    Guid? SqlCredentialId = null);
 
 public sealed record SaveJobDto
 {
@@ -166,6 +168,12 @@ public sealed record SaveJobDto
 
     /// <summary>Windows credentials to install the agent where it is missing (optional).</summary>
     public Guid? GuestCredentialId { get; init; }
+
+    /// <summary><see cref="GuestProcessingModes"/>: VSS (default) or the SQL Server snapshot.</summary>
+    public string GuestProcessingMode { get; init; } = GuestProcessingModes.Vss;
+
+    /// <summary>SQL Server snapshot: the Windows account or SQL Server login the agent uses (sysadmin).</summary>
+    public Guid? SqlCredentialId { get; init; }
 
     public int RetryCount { get; init; } = 2;
 
@@ -314,6 +322,15 @@ public sealed record SaveLinuxCredentialDto(string UserName, string? Password, s
 
 /// <summary>An SSH host key trusted on first use.</summary>
 public sealed record SshHostKeyDto(Guid Id, string Host, int Port, string KeyType, string Fingerprint, DateTimeOffset TrustedUtc, string? TrustedBy);
+
+public static class GuestProcessingModes
+{
+    /// <summary>VSS: every VSS-aware application; the VM snapshot must finish within 10 s.</summary>
+    public const string Vss = "Vss";
+
+    /// <summary>SQL Server 2022+: the databases' writes are suspended for the snapshot, without a time limit.</summary>
+    public const string SqlSnapshot = "SqlSnapshot";
+}
 
 public static class GuestFailurePolicies
 {

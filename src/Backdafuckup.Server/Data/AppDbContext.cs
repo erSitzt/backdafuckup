@@ -93,6 +93,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.TransportMode).HasConversion<string>().HasMaxLength(16);
             e.Property(x => x.GuestFailurePolicy).HasConversion<string>().HasMaxLength(32);
             e.HasOne<Credential>().WithMany().HasForeignKey(x => x.GuestCredentialId).OnDelete(DeleteBehavior.SetNull);
+            e.Property(x => x.GuestProcessingMode).HasConversion<string>().HasMaxLength(16);
+            e.HasOne<Credential>().WithMany().HasForeignKey(x => x.SqlCredentialId).OnDelete(DeleteBehavior.SetNull);
             e.HasOne(x => x.Connection).WithMany().HasForeignKey(x => x.ConnectionId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Repository).WithMany().HasForeignKey(x => x.RepositoryId).OnDelete(DeleteBehavior.Restrict);
             e.HasMany(x => x.Objects).WithOne().HasForeignKey(x => x.JobId).OnDelete(DeleteBehavior.Cascade);

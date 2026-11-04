@@ -40,6 +40,13 @@ public sealed class SqlServerFixture : IAsyncLifetime
         }
     }
 
+    /// <summary>Reads a file inside the container (e.g. a backup SQL Server wrote).</summary>
+    public async Task<byte[]> ReadFileAsync(string path) =>
+        await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ReadFileAsync(path);
+
+    public async Task DeleteFileAsync(string path) =>
+        await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["rm", "-f", path]);
+
     /// <summary>A connection string for another login on the same server.</summary>
     public string ConnectionStringFor(string login, string password) =>
         new SqlConnectionStringBuilder(AdminConnectionString) { UserID = login, Password = password, InitialCatalog = "master" }.ConnectionString;

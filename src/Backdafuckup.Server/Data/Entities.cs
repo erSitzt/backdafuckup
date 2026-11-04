@@ -315,6 +315,15 @@ public sealed class BackupJob
     /// <summary>Windows credentials to install the agent automatically where it is missing (optional).</summary>
     public Guid? GuestCredentialId { get; set; }
 
+    /// <summary>How the guest is made consistent for the snapshot: VSS (default) or SQL Server's T-SQL snapshot backup.</summary>
+    public GuestProcessingMode GuestProcessingMode { get; set; } = GuestProcessingMode.Vss;
+
+    /// <summary>
+    /// The account the agent uses for <see cref="GuestProcessingMode.SqlSnapshot"/>: a Windows account or a SQL Server
+    /// login with the right to suspend and back up the databases (sysadmin).
+    /// </summary>
+    public Guid? SqlCredentialId { get; set; }
+
     public DateTimeOffset? NextRunUtc { get; set; }
 
     public DateTimeOffset? LastRunUtc { get; set; }
@@ -441,6 +450,18 @@ public enum SessionKind
 
     /// <summary>A SQL Server database restored from a restore point (its files written into a VM and attached).</summary>
     SqlRestore,
+}
+
+public enum GuestProcessingMode
+{
+    /// <summary>VSS with our provider holding the writes during the VM snapshot (Windows allows at most 10 s).</summary>
+    Vss,
+
+    /// <summary>
+    /// SQL Server 2022 and later: the agent suspends the writes of the SQL Server databases (no time limit), VSS only
+    /// gathers the metadata. The databases are application-consistent, the rest of the guest crash-consistent.
+    /// </summary>
+    SqlSnapshot,
 }
 
 public enum GuestFailurePolicy
