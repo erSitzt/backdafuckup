@@ -109,13 +109,17 @@ public sealed class SqlJobRunner
 
     private readonly IRestoreFileSystem? _files;
 
-    public SqlJobRunner(HttpClient http, Guid id, ISqlEnvironment sql, AgentLog log, IRestoreFileSystem? files = null)
+    private readonly string? _journalDirectory;
+
+    /// <param name="journalDirectory">Where an overwrite keeps its journal (the agent's folder); null: no overwrites.</param>
+    public SqlJobRunner(HttpClient http, Guid id, ISqlEnvironment sql, AgentLog log, IRestoreFileSystem? files = null, string? journalDirectory = null)
     {
         _http = http;
         _id = id;
         _sql = sql;
         _log = log;
         _files = files;
+        _journalDirectory = journalDirectory;
     }
 
     private string Base => AgentProtocol.SqlJobsPath + "/" + _id.ToString("D");
@@ -167,6 +171,19 @@ public sealed class SqlJobRunner
                     break;
                 case SqlJobKinds.AttachFiles:
                     AttachFiles(request, Log);
+                    break;
+                case SqlJobKinds.ReplaceFiles:
+                    if (request.Account is null || string.IsNullOrEmpty(request.Instance) || string.IsNullOrEmpty(request.Database) || request.Files is not { Count: > 0 })
+                    {
+                        throw new InvalidOperationException("The job names no instance, account, database or files.");
+                    }
+
+                    if (_files is null || _journalDirectory is null)
+                    {
+                        throw new InvalidOperationException("This agent cannot overwrite databases.");
+                    }
+
+                    SqlReplace.Replace(_sql, _files, _journalDirectory, request.Instance!, request.Account, request.Database!, request.Files, request.KeepReplaced, Log);
                     break;
                 case SqlJobKinds.SnapshotSuspend:
                     if (request.Account is null)

@@ -74,6 +74,9 @@ public static class AgentProtocol
     /// </summary>
     public const string CapabilitySqlSnapshot = "sql-snapshot-v1";
 
+    /// <summary>The agent overwrites a database with restored files (<see cref="SqlJobKinds.ReplaceFiles"/>).</summary>
+    public const string CapabilitySqlReplaceFiles = "sql-replace-files-v1";
+
     /// <summary>
     /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
     /// <see cref="PublishInfo.BlockSize"/> bytes), <c>POST {id}/status</c> (heartbeat; the answer says whether to stop).
@@ -566,6 +569,24 @@ public static class SqlJobKinds
     /// connections resumes SQL Server too: on abort, after <see cref="SqlJobRequest.HoldLimitMs"/>, or if the agent dies.
     /// </summary>
     public const string SnapshotSuspend = "snapshot-suspend";
+
+    /// <summary>
+    /// Overwrites <see cref="SqlJobRequest.Database"/> with restored files: <see cref="SqlJobRequest.Files"/> are the
+    /// database's files (exactly the ones it has now); the restored copies lie beside them as <c>*.bdfu-new</c>. The
+    /// database goes offline, its files are moved aside (<c>*.bdfu-replaced</c>), the restored ones put in place, and it
+    /// goes online again; on failure its own files go back. <see cref="SqlJobRequest.KeepReplaced"/> keeps the old files.
+    /// </summary>
+    public const string ReplaceFiles = "replace-files";
+}
+
+/// <summary>File names of <see cref="SqlJobKinds.ReplaceFiles"/>, shared by server and agent.</summary>
+public static class SqlReplaceNames
+{
+    /// <summary>A restored file beside the database's own, until it is swapped in.</summary>
+    public const string NewSuffix = ".bdfu-new";
+
+    /// <summary>The database's previous file after the swap (deleted unless kept).</summary>
+    public const string ReplacedSuffix = ".bdfu-replaced";
 }
 
 /// <summary>What the server tells a running <see cref="SqlJobKinds.SnapshotSuspend"/> job (<c>GET {id}/signal</c>).</summary>
@@ -690,6 +711,9 @@ public sealed class SqlJobRequest
 
     /// <summary>SnapshotSuspend: the backup's name in <c>msdb</c> and in the <c>.bkm</c> (e.g. "backdafuckup restore point …").</summary>
     public string? BackupName { get; set; }
+
+    /// <summary>ReplaceFiles: keep the database's previous files as <c>*.bdfu-replaced</c> instead of deleting them.</summary>
+    public bool KeepReplaced { get; set; }
 }
 
 public sealed class SqlJobResult

@@ -19,6 +19,11 @@ namespace Backdafuckup.Server.Sql;
 /// instance with the chosen account, writes the files through the agent (named after the new database, never over an
 /// existing file, each checked with SHA-256), then the agent gives SQL Server access to them and attaches them. Files
 /// of a failed or stopped restore are deleted again; the backup's database is never touched.
+/// <para>
+/// With <see cref="SqlRestoreRequestDto.Overwrite"/> it overwrites the original database instead: the files are written
+/// beside the database's own as <c>*.bdfu-new</c>, then the agent swaps them in while the database is offline and brings
+/// it online (<see cref="SqlJobKinds.ReplaceFiles"/>); if that fails, the database gets its own files back.
+/// </para>
 /// </summary>
 public sealed class SqlRestoreSessionRunner(
     IDbContextFactory<AppDbContext> dbFactory,
@@ -101,14 +106,21 @@ public sealed class SqlRestoreSessionRunner(
             var instance = inventory.Inventory.Instances.FirstOrDefault(i => string.Equals(i.Name, request.TargetInstance, StringComparison.OrdinalIgnoreCase))
                 ?? throw new InvalidOperationException($"{host} has no SQL Server instance {request.TargetInstance}.");
             var target = $"{host}, instance {instance.Name}";
+            if (request.Overwrite && !registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlReplaceFiles))
+            {
+                throw new InvalidOperationException($"The agent in {host} (version {agent.AgentVersion}) cannot overwrite SQL Server databases yet. It updates itself within a few minutes after a server update; try again then.");
+            }
 
             // Primary data file first (it names the database's files), then the other data files, then the logs.
             var files = database.Files.OrderByDescending(f => f.Primary).ThenBy(f => f.Kind == "log" ? 1 : 0).ToList();
             IReadOnlyList<string> targets;
             try
             {
-                targets = SqlRestoreFiles.TargetPaths(
-                    request.DatabaseName, [.. files.Select(f => (f.Path, f.Kind))], request.FileLocation, request.DataFolder, request.LogFolder, instance.DefaultDataFolder, instance.DefaultLogFolder);
+                // Overwrite: the files go back where they are (the server checks that the database has exactly these).
+                targets = request.Overwrite
+                    ? [.. files.Select(f => f.Path)]
+                    : SqlRestoreFiles.TargetPaths(
+                        request.DatabaseName, [.. files.Select(f => (f.Path, f.Kind))], request.FileLocation, request.DataFolder, request.LogFolder, instance.DefaultDataFolder, instance.DefaultLogFolder);
             }
             catch (ArgumentException ex)
             {
@@ -116,10 +128,17 @@ public sealed class SqlRestoreSessionRunner(
             }
 
             Check(described!, database, request, instance, inventory.Inventory.Volumes, files, targets, account, target, log);
-            log.Info(
-                $"Restoring SQL Server database {source} ({files.Count} file(s), {VmBackupTask.Format(database.TotalBytes)}, {database.Consistency}) from the restore point of " +
-                $"{point.CreatedUtc.ToLocalTime():g} to {target} as {SqlCatalog.QuoteName(request.DatabaseName)}, attached as {account.UserName}: " +
-                string.Join(", ", files.Select((f, i) => $"{f.Path} → {targets[i]}")) + ". Existing files are never replaced.");
+
+            // What the agent writes: the target paths, or for an overwrite the copies beside the database's own files.
+            IReadOnlyList<string> written = request.Overwrite ? [.. targets.Select(t => t + SqlReplaceNames.NewSuffix)] : targets;
+            log.Info(request.Overwrite
+                ? $"Overwriting SQL Server database {SqlCatalog.QuoteName(request.DatabaseName)} on {target} with {source} ({files.Count} file(s), {VmBackupTask.Format(database.TotalBytes)}, " +
+                  $"{database.Consistency}) from the restore point of {point.CreatedUtc.ToLocalTime():g}, as {account.UserName}. The files are written beside the database's own " +
+                  $"(*{SqlReplaceNames.NewSuffix}); then it goes offline (open transactions are rolled back), gets the restored files and goes online again. Owner, users and " +
+                  $"settings stay. The previous files are {(request.KeepReplacedFiles ? $"kept as *{SqlReplaceNames.ReplacedSuffix}" : "deleted once it is online")}: {string.Join(", ", targets)}."
+                : $"Restoring SQL Server database {source} ({files.Count} file(s), {VmBackupTask.Format(database.TotalBytes)}, {database.Consistency}) from the restore point of " +
+                  $"{point.CreatedUtc.ToLocalTime():g} to {target} as {SqlCatalog.QuoteName(request.DatabaseName)}, attached as {account.UserName}: " +
+                  string.Join(", ", files.Select((f, i) => $"{f.Path} → {targets[i]}")) + ". Existing files are never replaced.");
             if (database.Consistency != "application")
             {
                 log.Info("The database is crash-consistent in this restore point; SQL Server recovers it when it is attached, like after a power failure.");
@@ -130,14 +149,14 @@ public sealed class SqlRestoreSessionRunner(
                 () =>
                 {
                     using var image = GuestImage.Open(sources, describe: false);
-                    plan = AgentFilePlan.Plan([.. files.Select((f, i) => (f.Volume!, image.OpenFileSystem(f.Volume!), GuestPath.Parse(f.GuestPath!), targets[i], f.Path))]);
+                    plan = AgentFilePlan.Plan([.. files.Select((f, i) => (f.Volume!, image.OpenFileSystem(f.Volume!), GuestPath.Parse(f.GuestPath!), written[i], f.Path))]);
                 },
                 "sql-restore-plan").ConfigureAwait(false);
 
             var info = new FileTransferInfo
             {
                 TransferId = Guid.NewGuid(),
-                Roots = [.. targets.Select(t => t[..t.LastIndexOf('\\')]).Distinct(StringComparer.OrdinalIgnoreCase).Select(r => r.Length == 2 ? r + "\\" : r)],
+                Roots = [.. written.Select(t => t[..t.LastIndexOf('\\')]).Distinct(StringComparer.OrdinalIgnoreCase).Select(r => r.Length == 2 ? r + "\\" : r)],
                 Overwrite = false,
                 IfExists = FileTransferIfExists.Fail,
                 RestorePermissions = false,
@@ -169,11 +188,11 @@ public sealed class SqlRestoreSessionRunner(
                 transfers.Remove(transfer);
             }
 
-            var written = targets.Where((_, i) => transfer.Written[i]).ToList();
+            var writtenSoFar = written.Where((_, i) => transfer.Written[i]).ToList();
             var verified = transfer.Verified.All(v => v);
             if (cancellationToken.IsCancellationRequested || !verified)
             {
-                var removed = await DeleteAsync(agent, account, written, log).ConfigureAwait(false);
+                var removed = await DeleteAsync(agent, account, writtenSoFar, log).ConfigureAwait(false);
                 var outcome = removed ? "the files written so far were deleted again" : "not all files written so far could be deleted (see the log)";
                 if (cancellationToken.IsCancellationRequested)
                 {
@@ -182,9 +201,14 @@ public sealed class SqlRestoreSessionRunner(
                     return (SessionState.Stopped, $"Stopped before the database was attached; {outcome}.");
                 }
 
-                var missing = targets.Where((_, i) => !transfer.Verified[i]).ToList();
+                var missing = written.Where((_, i) => !transfer.Verified[i]).ToList();
                 throw new InvalidOperationException(
                     $"Writing the files to {target} failed ({report?.Error ?? $"{missing.Count} of {targets.Count} file(s) not written or not as in the backup: {string.Join(", ", missing)}; see the log"}); {outcome}.");
+            }
+
+            if (request.Overwrite)
+            {
+                return await OverwriteAsync(request, agent, account, instance, target, source, point, targets, written, plan.Bytes, task.Id, log).ConfigureAwait(false);
             }
 
             log.Info($"All {targets.Count} file(s) written and checked (SHA-256, {VmBackupTask.Format(plan.Bytes)}); attaching them. This cannot be stopped halfway.");
@@ -225,8 +249,46 @@ public sealed class SqlRestoreSessionRunner(
     }
 
     /// <summary>
+    /// The restored files lie beside the database's own: the agent swaps them in while the database is offline (it rolls
+    /// back on failure). Not stoppable: it ends with the database online, either with the restored or with its own files.
+    /// </summary>
+    private async Task<(SessionState State, string Summary)> OverwriteAsync(
+        SqlRestoreRequestDto request, AgentEntity agent, SqlAccount account, SqlInstanceInfo instance, string target, string source, RestorePointEntity point,
+        IReadOnlyList<string> targets, IReadOnlyList<string> written, long bytes, Guid taskId, IOperationLog log)
+    {
+        log.Info($"All {targets.Count} file(s) written beside the database's own and checked (SHA-256, {VmBackupTask.Format(bytes)}); overwriting the database. This cannot be stopped halfway.");
+        var replace = await jobs.RunAsync(
+            agent.Id,
+            new SqlJobRequest
+            {
+                Kind = SqlJobKinds.ReplaceFiles, Instance = instance.Name, Account = account, Database = request.DatabaseName, Files = [.. targets], KeepReplaced = request.KeepReplacedFiles,
+            },
+            options.Value.AttachTimeout,
+            CancellationToken.None).ConfigureAwait(false);
+        foreach (var line in replace.Log)
+        {
+            log.Write(line.Contains("failed", StringComparison.Ordinal) || line.Contains("by hand", StringComparison.Ordinal) ? LogSeverity.Warning : LogSeverity.Info, line);
+        }
+
+        if (!replace.Success)
+        {
+            // The agent put the database's own files back; the restored copies are *.bdfu-new again.
+            var removed = await DeleteAsync(agent, account, [.. written], log).ConfigureAwait(false);
+            throw new InvalidOperationException($"{target}: {replace.Error ?? "the agent did not report the overwrite."}" +
+                (removed ? " The restored files were deleted again." : " Not all restored files could be deleted (see the log)."));
+        }
+
+        var summary = $"Overwrote {SqlCatalog.QuoteName(request.DatabaseName)} on {target} with {source} from the restore point of {point.CreatedUtc.ToLocalTime():g}: " +
+            $"{targets.Count} file(s), {VmBackupTask.Format(bytes)}; the previous files were {(request.KeepReplacedFiles ? $"kept as *{SqlReplaceNames.ReplacedSuffix}" : "deleted")}.";
+        log.Info(summary);
+        await FinishTaskAsync(taskId, SessionState.Succeeded, null, bytes).ConfigureAwait(false);
+        return (SessionState.Succeeded, summary);
+    }
+
+    /// <summary>
     /// What speaks against the restore, all at once: no connection, missing rights, the name taken, an older target
-    /// version, the Express size limit, not enough free space on a target volume.
+    /// version, the Express size limit, not enough free space on a target volume. For an overwrite: the database must
+    /// exist with exactly the backup's files, and the account must be sysadmin.
     /// </summary>
     private static void Check(
         SqlMountDto described, SqlDatabaseDto database, SqlRestoreRequestDto request, SqlInstanceInfo instance, IReadOnlyList<SqlVolumeInfo> volumes,
@@ -238,14 +300,38 @@ public sealed class SqlRestoreSessionRunner(
         }
 
         var problems = new List<string>();
-        if (instance.IsSysadmin != true && instance.IsDbCreator != true)
+        var existing = instance.Databases.FirstOrDefault(d => string.Equals(d.Name, request.DatabaseName, StringComparison.OrdinalIgnoreCase));
+        if (request.Overwrite)
         {
-            problems.Add($"{instance.LoginName ?? account.UserName} may not create databases there; it needs the server role dbcreator or sysadmin");
-        }
+            if (instance.IsSysadmin != true)
+            {
+                problems.Add($"{instance.LoginName ?? account.UserName} is not sysadmin there; overwriting a database (offline, files, online) needs the server role sysadmin");
+            }
 
-        if (instance.Databases.Any(d => string.Equals(d.Name, request.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+            if (existing is null)
+            {
+                problems.Add($"the instance has no database {SqlCatalog.QuoteName(request.DatabaseName)} to overwrite; restore it as a new database instead");
+            }
+            else if (existing.Files.Count > 0)
+            {
+                var now = existing.Files.Select(f => f.PhysicalName).ToList();
+                if (now.Count != targets.Count || now.Except(targets, StringComparer.OrdinalIgnoreCase).Any())
+                {
+                    problems.Add($"the database's files are not the ones in the backup (now: {string.Join(", ", now)}; backup: {string.Join(", ", targets)}); restore it as a new database instead");
+                }
+            }
+        }
+        else
         {
-            problems.Add($"the instance has a database {SqlCatalog.QuoteName(request.DatabaseName)} already; choose another name");
+            if (instance.IsSysadmin != true && instance.IsDbCreator != true)
+            {
+                problems.Add($"{instance.LoginName ?? account.UserName} may not create databases there; it needs the server role dbcreator or sysadmin");
+            }
+
+            if (existing is not null)
+            {
+                problems.Add($"the instance has a database {SqlCatalog.QuoteName(request.DatabaseName)} already; choose another name");
+            }
         }
 
         var origin = described.Instances.FirstOrDefault(i => string.Equals(i.Name, database.Instance, StringComparison.OrdinalIgnoreCase));
@@ -286,7 +372,7 @@ public sealed class SqlRestoreSessionRunner(
 
         if (problems.Count > 0)
         {
-            throw new InvalidOperationException($"Cannot restore to {target}: {string.Join("; ", problems)}.");
+            throw new InvalidOperationException($"Cannot {(request.Overwrite ? "overwrite the database on" : "restore to")} {target}: {string.Join("; ", problems)}.");
         }
     }
 

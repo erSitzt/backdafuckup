@@ -4,6 +4,7 @@
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
 @inject NavigationManager Navigation
+@inject IDialogService Dialogs
 
 <PageTitle>Restore SQL databases – backdafuckup</PageTitle>
 
@@ -160,7 +161,7 @@ else
 
 <MudDialog @bind-Visible="_publishOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true, CloseOnEscapeKey = true })">
     <TitleContent>
-        <MudText Typo="Typo.h6">@(_restoreMode ? $"Restore {_publishDb?.Name} as a new database" : $"Publish {_publishDb?.Name}")</MudText>
+        <MudText Typo="Typo.h6">@(_restoreMode ? (_overwrite ? $"Overwrite {_publishDb?.Name} with the restore point" : $"Restore {_publishDb?.Name} as a new database") : $"Publish {_publishDb?.Name}")</MudText>
         <MudText Typo="Typo.body2">
             @_publishDb?.Instance on @_mount?.VmName, restore point of @_mount?.RestorePointCreatedUtc.ToLocalTime().ToString("g") ·
             @(_publishDb is null ? "" : Fmt.Bytes(_publishDb.TotalBytes))
@@ -170,10 +171,25 @@ else
         <MudStack Spacing="3">
             @if (_restoreMode)
             {
-                <MudText Typo="Typo.body2">
-                    The agent in the target VM writes the database files under new names (never over existing files), checks them
-                    against the backup and attaches them to an instance there. The database in the backup and existing databases stay as they are.
-                </MudText>
+                <MudRadioGroup T="bool" Value="_overwrite" ValueChanged="OnOverwriteChanged">
+                    <MudRadio T="bool" Value="false" Color="Color.Primary">As a new database (the original stays as it is)</MudRadio>
+                    <MudRadio T="bool" Value="true" Color="Color.Error">Overwrite the original database in @_mount?.VmName</MudRadio>
+                </MudRadioGroup>
+                @if (_overwrite)
+                {
+                    <MudAlert Severity="Severity.Warning" Dense="true">
+                        The database goes offline for the swap: open connections are dropped and their transactions rolled back. Everything
+                        written since the restore point is lost. The restored files are written beside the database's own first; if the
+                        database does not come online with them, it gets its own files back. Owner, users and settings stay.
+                    </MudAlert>
+                }
+                else
+                {
+                    <MudText Typo="Typo.body2">
+                        The agent in the target VM writes the database files under new names (never over existing files), checks them
+                        against the backup and attaches them to an instance there. The database in the backup and existing databases stay as they are.
+                    </MudText>
+                }
             }
             else
             {
@@ -184,7 +200,7 @@ else
             }
             <MudGrid Spacing="2">
                 <MudItem xs="12" md="6">
-                    <MudSelect T="string" Value="_targetVm" ValueChanged="OnTargetVmChanged" Label="Target VM" Variant="Variant.Outlined" Dense="true"
+                    <MudSelect T="string" Value="_targetVm" ValueChanged="OnTargetVmChanged" Label="Target VM" Variant="Variant.Outlined" Dense="true" Disabled="_overwrite"
                                HelperText="@(_restoreMode ? "VMs whose agent can restore SQL Server databases." : "VMs whose agent can publish SQL Server databases.")">
                         @foreach (var a in _publishAgents)
                         {
@@ -226,7 +242,7 @@ else
             {
                 <MudGrid Spacing="2">
                     <MudItem xs="12" md="6">
-                        <MudSelect T="string" Value="_targetInstance" ValueChanged="OnInstanceChanged" Label="Instance" Variant="Variant.Outlined" Dense="true"
+                        <MudSelect T="string" Value="_targetInstance" ValueChanged="OnInstanceChanged" Label="Instance" Variant="Variant.Outlined" Dense="true" Disabled="_overwrite"
                                    HelperText="@($"{target.Host} ({target.Address ?? "address unknown"}), as {target.Account}")">
                             @foreach (var i in target.Instances)
                             {
@@ -236,7 +252,7 @@ else
                     </MudItem>
                     <MudItem xs="12" md="6">
                         <MudTextField T="string" @bind-Value="_publishName" Label="Database name" Variant="Variant.Outlined" Immediate="true" Margin="Margin.Dense"
-                                      HelperText="Must not exist on the instance." />
+                                      Disabled="_overwrite" HelperText="@(_overwrite ? "The database that is overwritten." : "Must not exist on the instance.")" />
                     </MudItem>
                     @if (!_restoreMode)
                     {
@@ -251,7 +267,21 @@ else
                         </MudItem>
                     }
                 </MudGrid>
-                @if (_restoreMode)
+                @if (_restoreMode && _overwrite)
+                {
+                    <MudSimpleTable Dense="true" Elevation="0">
+                        <thead><tr><th>File of the database (replaced)</th><th style="text-align:right">Now</th><th style="text-align:right">In the backup</th></tr></thead>
+                        <tbody>
+                            @foreach (var file in RestoreFilesOrdered())
+                            {
+                                var now = LiveDatabase?.Files.FirstOrDefault(f => string.Equals(f.PhysicalName, file.Path, StringComparison.OrdinalIgnoreCase));
+                                <tr><td class="mono">@file.Path</td><td style="text-align:right">@(now is null ? "missing" : Fmt.Bytes(now.SizeBytes))</td><td style="text-align:right">@(file.SizeBytes is { } size ? Fmt.Bytes(size) : "")</td></tr>
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                    <MudCheckBox T="bool" @bind-Value="_keepReplaced" Color="Color.Primary" Label="Keep the previous files (as *.bdfu-replaced beside the database's files)" />
+                }
+                else if (_restoreMode)
                 {
                     <MudRadioGroup T="string" @bind-Value="_fileLocation">
                         <MudRadio T="string" Value="@SqlRestoreFiles.Original" Color="Color.Primary">The folders of the files in the backup</MudRadio>
@@ -294,7 +324,7 @@ else
     <DialogActions>
         <MudButton OnClick="@(() => _publishOpen = false)">Cancel</MudButton>
         <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@(_restoreMode ? Icons.Material.Filled.SettingsBackupRestore : Icons.Material.Filled.Link)"
-                   Disabled="@(!CanPublish || _starting)" OnClick="PublishAsync">@(_restoreMode ? "Restore" : "Publish")</MudButton>
+                   Disabled="@(!CanPublish || _starting)" OnClick="PublishAsync">@(_restoreMode ? (_overwrite ? "Overwrite" : "Restore") : "Publish")</MudButton>
     </DialogActions>
 </MudDialog>
 
@@ -314,6 +344,8 @@ else
 
     private bool _publishOpen;
     private bool _restoreMode;
+    private bool _overwrite;
+    private bool _keepReplaced;
     private string _fileLocation = SqlRestoreFiles.Original;
     private string? _dataFolder;
     private string? _logFolder;
@@ -333,9 +365,41 @@ else
     private SqlTargetInstanceDto? TargetInstance =>
         _targetSql?.Instances.FirstOrDefault(i => string.Equals(i.Name, _targetInstance, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>Overwrite: the database as it is now on the original instance.</summary>
+    private SqlTargetDatabaseDto? LiveDatabase =>
+        TargetInstance?.Databases.FirstOrDefault(d => string.Equals(d.Name, _publishDb?.Name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Overwrite works only on the original database: the target is fixed to its VM, instance and name.</summary>
+    private void OnOverwriteChanged(bool overwrite)
+    {
+        _overwrite = overwrite;
+        _checkError = null;
+        if (overwrite && _publishDb is not null)
+        {
+            if (_targetVm != _mount?.VmNativeId)
+            {
+                _targetVm = _publishAgents.FirstOrDefault(a => a.VmNativeId == _mount?.VmNativeId)?.VmNativeId;
+                _targetSql = null;
+            }
+
+            if (_targetSql is not null)
+            {
+                _targetInstance = _publishDb.Instance;
+            }
+
+            _publishName = _publishDb.Name;
+        }
+        else
+        {
+            OnInstanceChanged(_targetInstance);
+        }
+    }
+
     private async Task OpenPublishAsync(SqlDatabaseDto db, bool restore)
     {
         _restoreMode = restore;
+        _overwrite = false;
+        _keepReplaced = false;
         _publishDb = db;
         _targetSql = null;
         _checkError = null;
@@ -410,9 +474,15 @@ else
     /// <summary>Proposes the original name, or name_published (name_published2, …) if the instance has it already.</summary>
     private void OnInstanceChanged(string? instance)
     {
-        _targetInstance = instance;
+        _targetInstance = _overwrite && _publishDb is not null ? _publishDb.Instance : instance;
         if (_publishDb is null)
         {
+            return;
+        }
+
+        if (_overwrite)
+        {
+            _publishName = _publishDb.Name;
             return;
         }
 
@@ -445,19 +515,48 @@ else
             return checks;
         }
 
-        if (target.IsSysadmin != true && target.IsDbCreator != true)
-        {
-            checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} may not create databases on instance {target.Name}; it needs the server role dbcreator or sysadmin."));
-        }
-
         var name = _publishName.Trim();
-        if (name.Length is 0 or > 128)
+        if (_restoreMode && _overwrite)
         {
-            checks.Add((Severity.Error, "Enter a database name (at most 128 characters)."));
+            if (_targetVm != _mount?.VmNativeId)
+            {
+                checks.Add((Severity.Error, $"Only the original database in {_mount?.VmName} can be overwritten; its agent cannot restore SQL Server databases (yet)."));
+            }
+
+            if (target.IsSysadmin != true)
+            {
+                checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} is not sysadmin on instance {target.Name}; overwriting a database needs sysadmin."));
+            }
+
+            if (LiveDatabase is not { } live)
+            {
+                checks.Add((Severity.Error, $"Instance {target.Name} has no database {name} to overwrite; restore it as a new database."));
+            }
+            else
+            {
+                var now = live.Files.Select(f => f.PhysicalName).ToList();
+                var backup = db.Files.Select(f => f.Path).ToList();
+                if (now.Count != backup.Count || now.Except(backup, StringComparer.OrdinalIgnoreCase).Any())
+                {
+                    checks.Add((Severity.Error, $"The database's files are not the ones in the backup (now: {string.Join(", ", now)}); restore it as a new database instead."));
+                }
+            }
         }
-        else if (target.Databases.Any(d => string.Equals(d.Name, name, StringComparison.OrdinalIgnoreCase)))
+        else
         {
-            checks.Add((Severity.Error, $"Instance {target.Name} has a database {name} already; choose another name."));
+            if (target.IsSysadmin != true && target.IsDbCreator != true)
+            {
+                checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} may not create databases on instance {target.Name}; it needs the server role dbcreator or sysadmin."));
+            }
+
+            if (name.Length is 0 or > 128)
+            {
+                checks.Add((Severity.Error, "Enter a database name (at most 128 characters)."));
+            }
+            else if (target.Databases.Any(d => string.Equals(d.Name, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                checks.Add((Severity.Error, $"Instance {target.Name} has a database {name} already; choose another name."));
+            }
         }
 
         var source = InstanceOf(db.Instance);
@@ -493,7 +592,7 @@ else
         var host = _publishAgents.FirstOrDefault(a => a.VmNativeId == _targetVm)?.HostName ?? "the VM";
         if (_restoreMode)
         {
-            var (paths, error) = RestoreTargets();
+            var (paths, error) = _overwrite ? ((IReadOnlyList<string>?)RestoreFilesOrdered().Select(f => f.Path).ToList(), (string?)null) : RestoreTargets();
             if (error is not null)
             {
                 checks.Add((Severity.Error, error));
@@ -515,7 +614,9 @@ else
                 }
             }
 
-            checks.Add((Severity.Normal, "Existing files are never replaced: if a file of that name exists, the restore stops and deletes what it has written."));
+            checks.Add((Severity.Normal, _overwrite
+                ? "The restored files need the space of the database once more until the previous files are deleted."
+                : "Existing files are never replaced: if a file of that name exists, the restore stops and deletes what it has written."));
         }
         else
         {
@@ -559,13 +660,21 @@ else
             return;
         }
 
+        if (_restoreMode && _overwrite && await Dialogs.ShowMessageBoxAsync(
+                "Overwrite database",
+                $"Overwrite {_publishDb.Name} on {_mount.VmName} with the restore point of {_mount.RestorePointCreatedUtc.ToLocalTime():g}? Everything written to it since then is lost.",
+                yesText: "Overwrite", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
         _starting = true;
         try
         {
             var started = _restoreMode
                 ? await Api.PostAsync<StartedDto>("api/sql/restores", new SqlRestoreRequestDto(
                     _mount.RestorePointId, _publishDb.Instance, _publishDb.Name, _targetVm!, _targetInstance!, _accountId!.Value, _publishName.Trim(),
-                    _fileLocation, _dataFolder, _logFolder))
+                    _fileLocation, _dataFolder, _logFolder, _overwrite, _overwrite && _keepReplaced))
                 : await Api.PostAsync<StartedDto>("api/sql/publishes", new SqlPublishRequestDto(
                     _mount.RestorePointId, _publishDb.Instance, _publishDb.Name, _targetVm!, _targetInstance!, _accountId!.Value, _publishName.Trim(), _publishHours * 60));
             _publishOpen = false;

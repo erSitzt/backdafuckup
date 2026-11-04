@@ -117,6 +117,11 @@ public sealed record SqlPublishRequestDto(
 /// <param name="FileLocation"><see cref="SqlRestoreFiles.Original"/>, <see cref="SqlRestoreFiles.Default"/> or <see cref="SqlRestoreFiles.Folder"/>.</param>
 /// <param name="DataFolder">For <see cref="SqlRestoreFiles.Folder"/>: the folder of the data files.</param>
 /// <param name="LogFolder">For <see cref="SqlRestoreFiles.Folder"/>: the folder of the log files (default: the data folder).</param>
+/// <summary>
+/// Restore a database of a restore point: as a new database (<see cref="DatabaseName"/> must be free), or with
+/// <see cref="Overwrite"/> over the original database (same VM, instance and name; its files go back where they are,
+/// the previous ones are deleted unless <see cref="KeepReplacedFiles"/>).
+/// </summary>
 public sealed record SqlRestoreRequestDto(
     Guid RestorePointId,
     string Instance,
@@ -127,7 +132,9 @@ public sealed record SqlRestoreRequestDto(
     string DatabaseName,
     string FileLocation,
     string? DataFolder,
-    string? LogFolder);
+    string? LogFolder,
+    bool Overwrite = false,
+    bool KeepReplacedFiles = false);
 
 /// <summary>Where the files of a restored database go and how they are named (shared by the console and the server).</summary>
 public static class SqlRestoreFiles

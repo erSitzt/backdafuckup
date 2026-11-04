@@ -1049,6 +1049,106 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task The_original_sql_database_is_overwritten_and_gets_its_own_files_back_when_it_does_not_come_online()
+    {
+        var client = await SignedInClientAsync();
+        var mdf = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11);
+        var ndf = WindowsTestDisk.SqlFile(3, 256 << 10, 0x33);
+        var ldf = WindowsTestDisk.SqlFile(2, 512 << 10, 0x22);
+        var image = WindowsTestDisk.Create(
+            [
+                new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+                new WindowsTestDisk.Volume('D', 8, new Dictionary<string, byte[]> { ["SQL/shop.mdf"] = mdf, ["SQL/shop_2.ndf"] = ndf }),
+                new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]> { ["Log/shop_log.ldf"] = ldf }),
+            ],
+            software: root =>
+            {
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\Instance Names\SQL").SetValue("SQLEXPRESS", "MSSQL16.SQLEXPRESS");
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\MSSQL16.SQLEXPRESS\Setup").SetValue("Version", "16.0.1000.6");
+            });
+        var sandbox = Path.Combine(_root, "sql-overwrite-guest");
+        var fs = new SandboxRestoreFileSystem(sandbox);
+        var sql = new ScriptedSqlEnvironment(path => File.ReadAllBytes(fs.Local(path))) { Sysadmin = true };
+        string[] files = [@"D:\SQL\shop.mdf", @"D:\SQL\shop_2.ndf", @"L:\Log\shop_log.ldf"];
+        sql.AddDatabase("shop", files);
+        static GuestSqlFile F(string path, string spec) => new() { Path = path, Spec = spec };
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+        var point = await BackUpImageAsync(client, "sql07", image, async vm => started = await StartAgentAsync(
+            vm, fs, sql, null,
+            [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", DataFiles = [F(@"D:\SQL\", "shop.mdf"), F(@"D:\SQL\", "shop_2.ndf")], LogFiles = [F(@"L:\Log\", "shop_log.ldf")], InBackup = true }]));
+        var (_, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
+        string Local(string windowsPath) => fs.Local(windowsPath);
+
+        // The database as it is now in the VM: other content than in the backup.
+        static byte[] Now(byte fill) => Enumerable.Repeat(fill, 4096).ToArray();
+        void Live(byte fill)
+        {
+            foreach (var (file, i) in files.Select((f, i) => (f, i)))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(Local(file))!);
+                File.WriteAllBytes(Local(file), Now((byte)(fill + i)));
+            }
+        }
+
+        Live(0xA0);
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_admin", "Admin-1", null), Ct));
+        SqlRestoreRequestDto Request(bool keep = false) =>
+            new(point.Id, "SQLEXPRESS", "shop", point.VmNativeId, "SQLEXPRESS", login.Id, "shop", SqlRestoreFiles.Original, null, null, Overwrite: true, KeepReplacedFiles: keep);
+        async Task<SessionDetailDto> RestoreAsync(SqlRestoreRequestDto request) =>
+            await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/restores", request, Ct))).SessionId);
+        async Task<string> LogAsync(Guid session) => string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{session}/log", Ct))!.Select(l => l.Message));
+        List<string> Leftovers() => [.. Directory.GetFiles(sandbox, "*", SearchOption.AllDirectories).Where(f => f.EndsWith(".bdfu-new", StringComparison.Ordinal) || f.EndsWith(".bdfu-replaced", StringComparison.Ordinal))];
+        try
+        {
+            // Only the original database: another name (or VM, or instance) is refused before anything happens.
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/sql/restores", Request() with { DatabaseName = "other" }, Ct)).StatusCode);
+
+            // It does not come online with the restored files: its own files go back, it is online again, the copies are deleted.
+            sql.FailOnlineWith = 5173;
+            var failed = await RestoreAsync(Request());
+            var failedLog = await LogAsync(failed.Session.Id);
+            Assert.True(failed.Session.State == "Failed", failed.Session.Summary + "\n" + failedLog);
+            Assert.Contains("The database has its own files again and is online; nothing was changed.", failed.Session.Summary, StringComparison.Ordinal);
+            Assert.Equal(files.Select((_, i) => Now((byte)(0xA0 + i))), files.Select(f => File.ReadAllBytes(Local(f))));
+            Assert.Empty(Leftovers());
+            Assert.Empty(sql.Offline);
+            Assert.Contains("put the database's own 3 file(s) back", failedLog, StringComparison.Ordinal);
+
+            // Overwritten: the backup's files in place when SQL Server brought it online, the previous files deleted, nothing dropped.
+            var done = await RestoreAsync(Request());
+            var doneLog = await LogAsync(done.Session.Id);
+            Assert.True(done.Session.State == "Succeeded", done.Session.Summary + "\n" + doneLog);
+            Assert.Equal([mdf, ndf, ldf], files.Select(f => File.ReadAllBytes(Local(f))));
+            Assert.Equal([mdf, ndf, ldf], files.Select(f => sql.OnlineFiles[f]));
+            Assert.Empty(Leftovers());
+            Assert.Empty(sql.Offline);
+            Assert.Contains("ALTER DATABASE [shop] SET OFFLINE WITH ROLLBACK IMMEDIATE", sql.Statements);
+            Assert.DoesNotContain(sql.Statements, t => t.StartsWith("DROP DATABASE", StringComparison.Ordinal) || t.StartsWith("CREATE DATABASE", StringComparison.Ordinal));
+            Assert.Contains("Overwrote [shop] on", done.Session.Summary, StringComparison.Ordinal);
+            Assert.Contains("the previous files were deleted", done.Session.Summary, StringComparison.Ordinal);
+            Assert.Equal(files.Select(f => $@"{f} NT SERVICE\MSSQL$SQLEXPRESS"), fs.Grants.Skip(fs.Grants.Count - 3));
+
+            // Keep the previous files: they stay beside the database's files.
+            Live(0xB0);
+            var kept = await RestoreAsync(Request(keep: true));
+            Assert.True(kept.Session.State == "Succeeded", kept.Session.Summary);
+            Assert.Equal(files.Select((_, i) => Now((byte)(0xB0 + i))), files.Select(f => File.ReadAllBytes(Local(f + ".bdfu-replaced"))));
+
+            // A kept file from before stops the next overwrite before anything changes.
+            var refused = await RestoreAsync(Request());
+            Assert.True(refused.Session.State == "Failed", refused.Session.Summary);
+            Assert.Contains(@"D:\SQL\shop.mdf.bdfu-replaced exists (kept by an earlier overwrite); move or delete it first. Nothing was changed.", refused.Session.Summary, StringComparison.Ordinal);
+            Assert.Equal([mdf, ndf, ldf], files.Select(f => File.ReadAllBytes(Local(f))));
+            Assert.Empty(Directory.GetFiles(_root, "sql-replace.json", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
+    }
+
+    [Fact]
     public async Task A_sql_database_is_restored_as_a_new_database_through_the_agent_and_attached()
     {
         var client = await SignedInClientAsync();

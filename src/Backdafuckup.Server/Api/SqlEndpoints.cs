@@ -168,13 +168,24 @@ public static class SqlEndpoints
             return Results.Problem("The account no longer exists. Choose another one under Credentials.", statusCode: StatusCodes.Status400BadRequest);
         }
 
+        // Overwrite only the database the backup was taken of: SQL Server would take any database's files.
+        if (request.Overwrite && (request.TargetVmNativeId != point.VmNativeId
+                                  || !string.Equals(request.TargetInstance, request.Instance, StringComparison.OrdinalIgnoreCase)
+                                  || !string.Equals(name, request.Database, StringComparison.OrdinalIgnoreCase)))
+        {
+            return Results.Problem(
+                $"Only the original database can be overwritten: {request.Instance}\\{request.Database} in {point.VmName}. Restore it as a new database to put it anywhere else.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
         try
         {
             var agent = await SqlAgentAsync(request.TargetVmNativeId, agents, registry, ct);
-            if (!registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlAttachFiles))
+            var capability = request.Overwrite ? AgentProtocol.CapabilitySqlReplaceFiles : AgentProtocol.CapabilitySqlAttachFiles;
+            if (!registry.HasCapability(agent.Id, capability))
             {
                 return Results.Problem(
-                    $"The agent in {agent.HostName} (version {agent.AgentVersion}) cannot restore SQL Server databases yet. It updates itself within a few minutes after a server update.",
+                    $"The agent in {agent.HostName} (version {agent.AgentVersion}) cannot {(request.Overwrite ? "overwrite" : "restore")} SQL Server databases yet. It updates itself within a few minutes after a server update.",
                     statusCode: StatusCodes.Status409Conflict);
             }
         }

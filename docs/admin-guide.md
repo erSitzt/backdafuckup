@@ -280,6 +280,37 @@ Restore points show their consistency ("application", or "crash" plus the reason
 - **Repositories:** a repository cannot be removed while a browser on it is open.
 - **Memory:** the browsers share a cache of 512 MiB (`FileRestore:CacheBytes`).
 
+## SQL Server databases
+
+*Backups & Restore → SQL databases* opens the SQL browser for a restore point of a Windows VM backed up with guest processing. It lists the instances (from the backup's registry), their databases with files, sizes and consistency, and the reasons a database cannot be restored. The databases come from the SQL Server writer's metadata. Its plain file lists are told apart by the first page of each file: file id 1 is the primary data file, 2 the log file, higher ids go by the extension.
+
+**Four ways to get a database back**
+- **Export files:** a ZIP with the database's files straight from the backup (primary data file first) and an attach script. No agent is involved.
+- **Publish:** the agent in a target VM mounts the backup's volumes over a local iSCSI connection (nothing is copied) and attaches the database. Writes go to a temporary overlay in the VM. *Unpublish* (stopping the session), or the chosen time running out, removes the database, the mounts and the overlay. The agent does no other restore work while it publishes.
+- **Restore as a new database:** the agent writes the files under the new database's name into the chosen folders, checks each one against the backup (SHA-256) and attaches them. Existing files are never replaced: if a file exists, the restore stops and deletes what it wrote.
+- **Overwrite the original database:**
+  1. The files are written beside the database's own (`*.bdfu-new`) and checked.
+  2. The database goes offline (`SET OFFLINE WITH ROLLBACK IMMEDIATE`: open connections are dropped and their transactions rolled back).
+  3. Its files are moved aside (`*.bdfu-replaced`), the restored ones are put in their place, and it goes online again.
+  4. The previous files are deleted afterwards, unless *Keep the previous files* is chosen.
+
+  The database itself is never dropped: owner, users, TRUSTWORTHY and Service Broker stay as they are. If it does not come online with the restored files, it gets its own files back and goes online again. Everything written since the restore point is lost.
+
+**Rules and limits of overwrite**
+- Only the original database: the same VM, instance and name the backup was taken of. SQL Server takes any database's files when it goes online, so nothing else is offered.
+- The database must have exactly the files the backup has. If files were added, removed or moved since, restore it as a new database instead.
+- The account must be `sysadmin`. The restored files need the database's space once more until the previous ones are deleted.
+- Not possible for system databases, database snapshots (or databases that have snapshots), mirrored or replicated databases, availability groups, and databases with FILESTREAM or full-text files.
+- If the agent is interrupted during the swap (crash, VM restart), it puts the database's own files back when it starts again. The database then stays offline; the agent log names the `ALTER DATABASE … SET ONLINE` to run.
+
+**Accounts**
+- A Windows account (the agent logs on with it in the guest; `.\name` for local accounts works) or a SQL Server login, stored under *Credentials*. The agent never stores the account.
+- Publish and restore as a new database need `dbcreator` or `sysadmin`; overwrite needs `sysadmin`.
+
+**What an attach changes** (publish, restore as a new database): the attaching account becomes the owner, TRUSTWORTHY is off, Service Broker is off. Database users whose login does not exist on the target instance are listed in the session log, with the `ALTER USER … WITH LOGIN` to fix them. SQL Server sets the files' permissions itself (its service, Administrators).
+
+**Not yet:** system databases (restore them with the VM), In-Memory OLTP and FILESTREAM databases, point-in-time restore with log backups, export as `.bak`.
+
 ## Data and backups of the server itself
 
 | Path (Linux / Windows) | Content |

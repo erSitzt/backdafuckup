@@ -84,6 +84,19 @@ public sealed class AgentRunner
             }
         }
 
+        if (_restoreFiles is not null)
+        {
+            try
+            {
+                // A database overwrite interrupted by a crash or restart: its own files go back in place.
+                SqlReplace.RecoverFiles(_restoreFiles, _paths.BaseDirectory, _log.Write);
+            }
+            catch (Exception ex) when (!(ex is OutOfMemoryException))
+            {
+                _log.Write($"Recovering an interrupted SQL Server overwrite failed: {ex.Message}");
+            }
+        }
+
         try
         {
             return await LoopAsync(stop).ConfigureAwait(false);
@@ -360,7 +373,7 @@ public sealed class AgentRunner
 
         var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
         client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
-        var job = new SqlJobRunner(client, command.JobId, _sql, _log, _restoreFiles);
+        var job = new SqlJobRunner(client, command.JobId, _sql, _log, _restoreFiles, _paths.BaseDirectory);
         _ = Task.Run(async () =>
         {
             using (client)
@@ -510,6 +523,11 @@ public sealed class AgentRunner
             if (_sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlSnapshot))
             {
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlSnapshot);
+            }
+
+            if (_restoreFiles is not null && _sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlReplaceFiles))
+            {
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlReplaceFiles);
             }
 
             if (_restoreFiles is not null)

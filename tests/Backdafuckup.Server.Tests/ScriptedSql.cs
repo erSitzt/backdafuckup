@@ -38,6 +38,18 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
     /// <summary>The instance's backup folder (registry BackupDirectory): where BACKUP … METADATA_ONLY writes the .bkm.</summary>
     public string? BackupFolder { get; set; }
 
+    /// <summary>The account is sysadmin on the instance (inventory).</summary>
+    public bool Sysadmin { get; set; }
+
+    /// <summary>Makes the next ALTER DATABASE … SET ONLINE fail with this SQL Server error number.</summary>
+    public int? FailOnlineWith { get; set; }
+
+    /// <summary>The databases that are offline.</summary>
+    public HashSet<string> Offline { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The content of each file of a database as SQL Server read it when the database came online.</summary>
+    public Dictionary<string, byte[]> OnlineFiles { get; } = [];
+
     /// <summary>The databases whose writes are suspended for a snapshot right now.</summary>
     public HashSet<string> Suspended { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -103,7 +115,7 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 case "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)), CAST(SERVERPROPERTY('Edition') AS nvarchar(128)), CAST(SERVERPROPERTY('EngineEdition') AS int), SUSER_SNAME(), IS_SRVROLEMEMBER('sysadmin'), IS_SRVROLEMEMBER('dbcreator')":
                 {
                     var table = Table(("version", typeof(string)), ("edition", typeof(string)), ("engine", typeof(int)), ("login", typeof(string)), ("sysadmin", typeof(int)), ("dbcreator", typeof(int)));
-                    table.Rows.Add(ProductVersion, "Express Edition (64-bit)", 4, Accounts[^1].UserName, 0, 1);
+                    table.Rows.Add(ProductVersion, "Express Edition (64-bit)", 4, Accounts[^1].UserName, Sysadmin ? 1 : 0, 1);
                     return (null, table);
                 }
 
@@ -157,6 +169,38 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                     return (null, table);
                 }
 
+                case "SELECT database_id, state_desc, CAST(CASE WHEN source_database_id IS NULL THEN 0 ELSE 1 END AS bit), CAST(CASE WHEN replica_id IS NULL THEN 0 ELSE 1 END AS bit), " +
+                     "CAST(CASE WHEN is_published = 1 OR is_subscribed = 1 OR is_merge_published = 1 OR is_distributor = 1 THEN 1 ELSE 0 END AS bit) FROM sys.databases WHERE name = @name":
+                {
+                    var table = Table(("id", typeof(int)), ("state", typeof(string)), ("snapshot", typeof(bool)), ("group", typeof(bool)), ("replicated", typeof(bool)));
+                    if (_databases.TryGetValue(Name(), out var database))
+                    {
+                        table.Rows.Add(database.Id, Offline.Contains(Name()) ? "OFFLINE" : "ONLINE", false, false, false);
+                    }
+
+                    return (null, table);
+                }
+
+                case "SELECT (SELECT COUNT(*) FROM sys.databases WHERE source_database_id = @id) + (SELECT COUNT(*) FROM sys.database_mirroring WHERE database_id = @id AND mirroring_guid IS NOT NULL)":
+                    return (0, null);
+                case "SELECT physical_name, type_desc FROM sys.master_files WHERE database_id = @id ORDER BY file_id":
+                {
+                    var table = Table(("path", typeof(string)), ("type", typeof(string)));
+                    foreach (var file in _databases.Values.Where(d => d.Id == (int)parameters["@id"]!).SelectMany(d => d.Files))
+                    {
+                        table.Rows.Add(file, file.EndsWith(".ldf", StringComparison.OrdinalIgnoreCase) ? "LOG" : "ROWS");
+                    }
+
+                    return (null, table);
+                }
+
+                case "SELECT state_desc, user_access_desc FROM sys.databases WHERE name = @name":
+                {
+                    var table = Table(("state", typeof(string)), ("access", typeof(string)));
+                    table.Rows.Add(Offline.Contains(Name()) ? "OFFLINE" : "ONLINE", "MULTI_USER");
+                    return (null, table);
+                }
+
                 case "SELECT physical_name FROM sys.master_files WHERE database_id = @id":
                 {
                     var table = new DataTable();
@@ -200,8 +244,27 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 return (null, null);
             }
 
-            if (OfflineStatement().Match(text) is { Success: true })
+            if (OfflineStatement().Match(text) is { Success: true } offline)
             {
+                Offline.Add(offline.Groups["name"].Value.Replace("]]", "]", StringComparison.Ordinal));
+                return (null, null);
+            }
+
+            if (OnlineStatement().Match(text) is { Success: true } online)
+            {
+                var name = online.Groups["name"].Value.Replace("]]", "]", StringComparison.Ordinal);
+                if (FailOnlineWith is { } number)
+                {
+                    FailOnlineWith = null;
+                    throw new ScriptedSqlException(number, $"Simulated error {number} bringing {name} online.");
+                }
+
+                foreach (var file in _databases[name].Files)
+                {
+                    OnlineFiles[file] = readFile(file);
+                }
+
+                Offline.Remove(name);
                 return (null, null);
             }
 
@@ -266,6 +329,9 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
 
     [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET OFFLINE WITH ROLLBACK IMMEDIATE$")]
     private static partial Regex OfflineStatement();
+
+    [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET ONLINE$")]
+    private static partial Regex OnlineStatement();
 
     [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET SUSPEND_FOR_SNAPSHOT_BACKUP = (?<on>ON \(MODE = COPY_ONLY\)|OFF)$")]
     private static partial Regex SuspendStatement();
