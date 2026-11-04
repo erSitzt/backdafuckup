@@ -184,7 +184,7 @@ internal sealed class WindowsPublishHost : IPublishHost
             {
                 sid = account.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
                     ? new System.Security.Principal.SecurityIdentifier(account)
-                    : (System.Security.Principal.SecurityIdentifier)new System.Security.Principal.NTAccount(account).Translate(typeof(System.Security.Principal.SecurityIdentifier));
+                    : (System.Security.Principal.SecurityIdentifier)new System.Security.Principal.NTAccount(AccountNames.Qualify(account, Environment.MachineName)).Translate(typeof(System.Security.Principal.SecurityIdentifier));
             }
             catch (System.Security.Principal.IdentityNotMappedException)
             {

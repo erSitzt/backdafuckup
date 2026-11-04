@@ -87,7 +87,7 @@ internal sealed class WindowsRestoreFileSystem : PortableRestoreFileSystem
         Guard(path);
         var identity = account.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
             ? new System.Security.Principal.SecurityIdentifier(account)
-            : (System.Security.Principal.SecurityIdentifier)new System.Security.Principal.NTAccount(account).Translate(typeof(System.Security.Principal.SecurityIdentifier));
+            : (System.Security.Principal.SecurityIdentifier)new System.Security.Principal.NTAccount(AccountNames.Qualify(account, Environment.MachineName)).Translate(typeof(System.Security.Principal.SecurityIdentifier));
         var rule = new FileSystemAccessRule(identity, FileSystemRights.FullControl, AccessControlType.Allow);
         var mapped = Map(path);
 #if NET48
