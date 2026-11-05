@@ -16,9 +16,10 @@ public static class SqlBackupFile
 {
     /// <param name="exists">Whether a file exists (tests map the container's paths).</param>
     /// <param name="size">The size of the written file.</param>
+    /// <param name="backupName">The backup set's name (default: "<paramref name="database"/> (backdafuckup export)").</param>
     public static (string Path, long Bytes) Backup(
         ISqlEnvironment sql, string instanceName, SqlAccount account, string database, string? folder, string fileName, string description, Action<string> log,
-        Func<string, bool>? exists = null, Func<string, long>? size = null)
+        Func<string, bool>? exists = null, Func<string, long>? size = null, string? backupName = null)
     {
         SqlAttach.CheckName(database);
         exists ??= File.Exists;
@@ -57,7 +58,7 @@ public static class SqlBackupFile
             {
                 using (var command = SqlAttach.Command(connection,
                     "BACKUP DATABASE @database TO DISK = @path WITH COPY_ONLY, CHECKSUM, INIT, FORMAT, NAME = @name, DESCRIPTION = @description" + (compression ? ", COMPRESSION" : string.Empty),
-                    ("@database", database), ("@path", path), ("@name", $"{database} (backdafuckup export)"), ("@description", Truncate(description, 255))))
+                    ("@database", database), ("@path", path), ("@name", Truncate(backupName ?? $"{database} (backdafuckup export)", 128)), ("@description", Truncate(description, 255))))
                 {
                     command.CommandTimeout = 0;
                     command.ExecuteNonQuery();

@@ -98,7 +98,7 @@ public sealed class GuestProcessingService(
 
         var account = await Api.SqlEndpoints.AccountAsync(credentialId, dbFactory, protector, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("the job's SQL Server account no longer exists.");
-        return new SqlSnapshotSettings(sqlJobs, account, backupName);
+        return new SqlSnapshotSettings(sqlJobs, account, backupName, job.SqlSnapshotCopyOnly);
     }
 
     private static string Capitalize(string text) => text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text[1..];

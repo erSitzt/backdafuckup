@@ -372,6 +372,11 @@ internal sealed class XenBackupSession : IVmBackupSession
                 log.Warning(text);
             }
 
+            foreach (var warning in sql.Warnings ?? [])
+            {
+                log.Warning($"Guest processing (SQL Server snapshot): {warning}");
+            }
+
             return;
         }
 

@@ -409,7 +409,8 @@ internal sealed class VmBackupTask(
 
             return ("crash", sql.AllDatabasesConsistent
                 ? "SQL Server snapshot: the SQL Server databases are application-consistent; files outside SQL Server are crash-consistent."
-                : $"SQL Server snapshot: {freeze.Reason ?? sql.Summary} Files outside SQL Server are crash-consistent.", !sql.AllDatabasesConsistent);
+                : $"SQL Server snapshot: {freeze.Reason ?? sql.Summary} Files outside SQL Server are crash-consistent.",
+                !sql.AllDatabasesConsistent || sql.Warnings is { Count: > 0 });
         }
 
         var reason = freeze?.Reason ?? guest.Reason ?? "the guest could not be frozen";

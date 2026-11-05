@@ -658,6 +658,36 @@ public sealed class SqlSnapshotDatabase
 
     /// <summary>Why the database was skipped or failed.</summary>
     public string? Reason { get; set; }
+
+    /// <summary>FULL, BULK_LOGGED or SIMPLE (null: an agent before this field).</summary>
+    public string? RecoveryModel { get; set; }
+
+    /// <summary>
+    /// Before the backup: the database had a log chain (FULL or BULK_LOGGED with a regular full backup). Without one SQL
+    /// Server frees its log at checkpoints as in SIMPLE recovery, and BACKUP LOG is refused.
+    /// </summary>
+    public bool HadLogChain { get; set; }
+
+    /// <summary>Minutes since the last log backup in msdb (from any tool); null if there is none.</summary>
+    public int? LogBackupAgeMinutes { get; set; }
+
+    /// <summary>Result: as recorded in msdb (null: an agent before this field, which records copy-only).</summary>
+    public bool? CopyOnly { get; set; }
+
+    /// <summary>Result: this regular full backup started the database's log chain.</summary>
+    public bool StartedLogChain { get; set; }
+
+    /// <summary>Result: the backup set's position in the instance's <c>.bkm</c> (<c>RESTORE … WITH FILE = n</c>).</summary>
+    public int? Position { get; set; }
+
+    /// <summary>Result: the backup set's LSNs from msdb (numeric(25) as text), for restore planning with log backups.</summary>
+    public string? FirstLsn { get; set; }
+
+    public string? LastLsn { get; set; }
+
+    public string? CheckpointLsn { get; set; }
+
+    public string? DatabaseBackupLsn { get; set; }
 }
 
 public static class SqlSnapshotStates
@@ -665,7 +695,7 @@ public static class SqlSnapshotStates
     /// <summary>Progress: the database's writes are suspended.</summary>
     public const string Suspended = "suspended";
 
-    /// <summary>Result: recorded with <c>BACKUP … METADATA_ONLY</c> (copy-only, in <c>msdb</c> and the <c>.bkm</c>).</summary>
+    /// <summary>Result: recorded with <c>BACKUP … METADATA_ONLY</c> (in <c>msdb</c> and the <c>.bkm</c>).</summary>
     public const string Recorded = "recorded";
 
     /// <summary>Not suspended (offline, read-only, a database snapshot); no writes could go into the VM snapshot from SQL Server.</summary>
@@ -724,8 +754,17 @@ public sealed class SqlJobRequest
     /// </summary>
     public int HoldLimitMs { get; set; }
 
-    /// <summary>SnapshotSuspend: the backup's name in <c>msdb</c> and in the <c>.bkm</c> (e.g. "backdafuckup restore point …").</summary>
+    /// <summary>
+    /// SnapshotSuspend: the backup's name in <c>msdb</c> and in the <c>.bkm</c> (e.g. "backdafuckup restore point …").
+    /// BackupDatabase: the backup set's name in the .bak (the original database's name, also when it is published under another).
+    /// </summary>
     public string? BackupName { get; set; }
+
+    /// <summary>
+    /// SnapshotSuspend: false records regular full backups (they start or continue the log chain and become the base for
+    /// differential backups); true or null (a server before this setting) copy-only ones (<c>MODE = COPY_ONLY</c>).
+    /// </summary>
+    public bool? CopyOnly { get; set; }
 
     /// <summary>ReplaceFiles: keep the database's previous files as <c>*.bdfu-replaced</c> instead of deleting them.</summary>
     public bool KeepReplaced { get; set; }

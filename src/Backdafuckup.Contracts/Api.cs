@@ -133,7 +133,8 @@ public sealed record JobDto(
     string GuestFailurePolicy,
     Guid? GuestCredentialId,
     string GuestProcessingMode = GuestProcessingModes.Vss,
-    Guid? SqlCredentialId = null);
+    Guid? SqlCredentialId = null,
+    bool SqlSnapshotCopyOnly = false);
 
 public sealed record SaveJobDto
 {
@@ -174,6 +175,9 @@ public sealed record SaveJobDto
 
     /// <summary>SQL Server snapshot: the Windows account or SQL Server login the agent uses (sysadmin).</summary>
     public Guid? SqlCredentialId { get; init; }
+
+    /// <summary>SQL Server snapshot: copy-only backups instead of regular full backups (default: regular full backups).</summary>
+    public bool SqlSnapshotCopyOnly { get; init; }
 
     public int RetryCount { get; init; } = 2;
 

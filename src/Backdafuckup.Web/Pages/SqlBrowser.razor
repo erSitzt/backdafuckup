@@ -585,6 +585,19 @@ else
             {
                 checks.Add((Severity.Error, $"'{exportFolder}' is not a local folder in the VM; enter it as D:\\Backup."));
             }
+
+            // The server picks the staging name the same way.
+            var staging = db.Name;
+            for (var n = 1; target.Databases.Any(d => string.Equals(d.Name, staging, StringComparison.OrdinalIgnoreCase)); n++)
+            {
+                staging = n == 1 ? db.Name + "_bdfu_export" : $"{db.Name}_bdfu_export{n}";
+            }
+
+            if (staging != db.Name)
+            {
+                checks.Add((Severity.Info, $"Instance {target.Name} has a database {db.Name} already: the database is published there as {staging}, " +
+                    $"and the .bak contains it under that name. Choose an instance without {db.Name} to keep its name in the .bak."));
+            }
         }
         else
         {
@@ -667,7 +680,8 @@ else
         else if (_exportMode)
         {
             checks.Add((Severity.Normal, $"The .bak is a copy-only full backup. The export leaves backup history rows in msdb of instance {target.Name}; " +
-                "TRUSTWORTHY is off in the backup and the attaching account is its owner."));
+                "TRUSTWORTHY is off in the backup and the attaching account is its owner. Its files have the paths of the temporary publish: " +
+                "give new paths when you restore it (WITH MOVE, or \"Relocate all files to folder\" in SSMS)."));
         }
         else
         {

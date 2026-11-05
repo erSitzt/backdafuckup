@@ -53,6 +53,20 @@ public sealed class SqlServerFixture : IAsyncLifetime
     public async Task DeleteFileAsync(string path) =>
         await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["rm", "-f", path]);
 
+    /// <summary>Copies a file inside the container as SQL Server's user (e.g. the "snapshot" of a database file).</summary>
+    public async Task CopyFileAsync(string from, string to)
+    {
+        var result = await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["cp", from, to]);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"cp {from} {to} failed in the container: {result.Stderr}");
+        }
+    }
+
+    /// <summary>Writes a file inside the container, readable for SQL Server's user.</summary>
+    public async Task WriteFileAsync(string path, byte[] content) =>
+        await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).CopyAsync(content, path);
+
     /// <summary>A connection string for another login on the same server.</summary>
     public string ConnectionStringFor(string login, string password) =>
         new SqlConnectionStringBuilder(AdminConnectionString) { UserID = login, Password = password, InitialCatalog = "master" }.ConnectionString;

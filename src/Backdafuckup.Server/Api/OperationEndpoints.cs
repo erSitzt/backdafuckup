@@ -341,6 +341,7 @@ public static class OperationEndpoints
         job.GuestCredentialId = request.GuestCredentialId;
         job.GuestProcessingMode = Enum.TryParse<GuestProcessingMode>(request.GuestProcessingMode, true, out var mode) && !int.TryParse(request.GuestProcessingMode, out _) ? mode : GuestProcessingMode.Vss;
         job.SqlCredentialId = job.GuestProcessingMode == GuestProcessingMode.SqlSnapshot ? request.SqlCredentialId : null;
+        job.SqlSnapshotCopyOnly = request.SqlSnapshotCopyOnly;
         job.RetryCount = Math.Clamp(request.RetryCount, 0, 10);
         job.TransportMode = Enum.TryParse<Backdafuckup.Core.DataMover.DiskTransportMode>(request.TransportMode, true, out var transport) ? transport : Backdafuckup.Core.DataMover.DiskTransportMode.Automatic;
         job.Objects = request.Objects.Select((o, i) => new BackupJobObject { JobId = job.Id, NativeId = o.NativeId, CachedName = o.Name, Order = i }).ToList();

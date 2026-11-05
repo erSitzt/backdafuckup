@@ -34,9 +34,12 @@ public sealed class SqlBackupFileTests(SqlServerFixture sql) : IClassFixture<Sql
             $"FROM msdb.dbo.backupset s JOIN msdb.dbo.backupmediafamily m ON m.media_set_id = s.media_set_id WHERE m.physical_device_name = N'{path}' ORDER BY s.backup_set_id DESC"));
 
         // The same name again: a new file beside it, the first one stays.
-        var (second, _) = SqlBackupFile.Backup(environment, "MSSQLSERVER", Sa, "bak_src", Folder, "bak_src_20261104_2158.bak", "test export", log.Add, Exists, Size);
+        var (second, _) = SqlBackupFile.Backup(environment, "MSSQLSERVER", Sa, "bak_src", Folder, "bak_src_20261104_2158.bak", "test export", log.Add, Exists, Size, "shop (backdafuckup export)");
         Assert.Equal($"{Folder}/bak_src_20261104_2158_2.bak", second);
         Assert.Equal(bytes, Size(path));
+        Assert.Equal("bak_src (backdafuckup export)|shop (backdafuckup export)", await ScalarAsync(
+            "SELECT STRING_AGG(s.name, '|') WITHIN GROUP (ORDER BY s.backup_set_id) FROM msdb.dbo.backupset s JOIN msdb.dbo.backupmediafamily m ON m.media_set_id = s.media_set_id " +
+            $"WHERE m.physical_device_name IN (N'{path}', N'{second}')"));
 
         // The backup restores: as a new database, with the rows.
         await sql.ExecuteAsync(

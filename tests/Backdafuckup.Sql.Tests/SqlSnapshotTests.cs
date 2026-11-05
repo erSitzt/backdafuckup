@@ -99,6 +99,108 @@ public sealed class SqlSnapshotTests(SqlServerFixture sql) : IClassFixture<SqlSe
         Assert.Equal(4, await ScalarAsync("INSERT res_a.dbo.t VALUES (4); SELECT COUNT(*) FROM res_a.dbo.t", 30));
     }
 
+    [Fact]
+    public async Task A_full_snapshot_backup_starts_the_log_chain_and_log_backups_restore_on_top_of_it_up_to_a_point_in_time()
+    {
+        Assert.SkipUnless(SqlServerFixture.Enabled, "Tests against a SQL Server container need about 2 GB of memory. Set BDFU_SQL_TESTS=1 for the run to enable them.");
+        await sql.ExecuteAsync("CREATE DATABASE pit_src; ALTER DATABASE pit_src SET RECOVERY FULL;");
+        await sql.ExecuteAsync("USE pit_src; CREATE TABLE dbo.t (id int); INSERT dbo.t VALUES (1), (2), (3);");
+        var environment = new ContainerSql(sql);
+        var log = new List<string>();
+
+        var (database, bkm) = await SnapshotAsync(environment, log, "pit_src", "pit_snap", copyOnly: false);
+
+        // A regular full backup in FULL recovery without a chain before: it starts one.
+        Assert.Equal((false, "FULL", false, true), (database.CopyOnly, database.RecoveryModel, database.HadLogChain, database.StartedLogChain));
+        Assert.NotNull(database.Position);
+        Assert.All(new[] { database.FirstLsn, database.LastLsn, database.CheckpointLsn }, lsn => Assert.Matches("^[0-9]{10,25}$", lsn!));
+        Assert.Contains(log, l => l.Contains(" in msdb (full backups, ", StringComparison.Ordinal));
+
+        // Log backups build on it; the point in time lies between two transactions of the second one.
+        await sql.ExecuteAsync("INSERT pit_src.dbo.t VALUES (4);");
+        await sql.ExecuteAsync($"BACKUP LOG pit_src TO DISK = N'{Folder}/pit_1.trn' WITH INIT, CHECKSUM;");
+        await sql.ExecuteAsync("INSERT pit_src.dbo.t VALUES (5);");
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        var point = await TextAsync("SELECT CONVERT(varchar(23), SYSDATETIME(), 126)");
+        await Task.Delay(1000, TestContext.Current.CancellationToken);
+        await sql.ExecuteAsync("INSERT pit_src.dbo.t VALUES (6);");
+        await sql.ExecuteAsync($"BACKUP LOG pit_src TO DISK = N'{Folder}/pit_2.trn' WITH INIT, CHECKSUM;");
+
+        // The snapshot's files in place, the .bkm with NORECOVERY, then the log backups up to the point in time.
+        await RestoreSnapshotAsync("pit_restored", bkm, database, "pit_snap");
+        Assert.Equal("RESTORING", await TextAsync("SELECT state_desc FROM sys.databases WHERE name = N'pit_restored'"));
+        await sql.ExecuteAsync($"RESTORE LOG pit_restored FROM DISK = N'{Folder}/pit_1.trn' WITH NORECOVERY, CHECKSUM;");
+        await sql.ExecuteAsync($"RESTORE LOG pit_restored FROM DISK = N'{Folder}/pit_2.trn' WITH STOPAT = '{point}', RECOVERY, CHECKSUM;");
+
+        Assert.Equal(5, await ScalarAsync("SELECT COUNT(*) FROM pit_restored.dbo.t", 30));
+        Assert.Equal(6, await ScalarAsync("SELECT COUNT(*) FROM pit_src.dbo.t", 30));
+    }
+
+    [Fact]
+    public async Task A_copy_only_snapshot_backup_starts_no_log_chain_but_log_backups_of_an_existing_chain_restore_on_top_of_it()
+    {
+        Assert.SkipUnless(SqlServerFixture.Enabled, "Tests against a SQL Server container need about 2 GB of memory. Set BDFU_SQL_TESTS=1 for the run to enable them.");
+        await sql.ExecuteAsync("CREATE DATABASE pco_src; ALTER DATABASE pco_src SET RECOVERY FULL;");
+        await sql.ExecuteAsync("USE pco_src; CREATE TABLE dbo.t (id int); INSERT dbo.t VALUES (1), (2), (3);");
+        var environment = new ContainerSql(sql);
+        var log = new List<string>();
+
+        var (first, _) = await SnapshotAsync(environment, log, "pco_src", "pco_snap1", copyOnly: true);
+
+        // Still no chain (as for shop in bdfu-lab-sql1): SQL Server refuses log backups.
+        Assert.Equal((true, "FULL", false, false), (first.CopyOnly, first.RecoveryModel, first.HadLogChain, first.StartedLogChain));
+        var refused = await Assert.ThrowsAsync<SqlException>(() => sql.ExecuteAsync($"BACKUP LOG pco_src TO DISK = N'{Folder}/pco_0.trn' WITH INIT;"));
+        Assert.Equal(4214, refused.Number);
+
+        // Another tool's regular full backup starts the chain; a copy-only snapshot afterwards is a base for its log backups.
+        await sql.ExecuteAsync($"BACKUP DATABASE pco_src TO DISK = N'{Folder}/pco_full.bak' WITH INIT;");
+        await sql.ExecuteAsync("INSERT pco_src.dbo.t VALUES (4);");
+        var (second, bkm) = await SnapshotAsync(environment, log, "pco_src", "pco_snap2", copyOnly: true);
+        Assert.Equal((true, true, false), (second.CopyOnly, second.HadLogChain, second.StartedLogChain));
+        await sql.ExecuteAsync("INSERT pco_src.dbo.t VALUES (5);");
+        await sql.ExecuteAsync($"BACKUP LOG pco_src TO DISK = N'{Folder}/pco_1.trn' WITH INIT;");
+
+        await RestoreSnapshotAsync("pco_restored", bkm, second, "pco_snap2");
+        await sql.ExecuteAsync($"RESTORE LOG pco_restored FROM DISK = N'{Folder}/pco_1.trn' WITH RECOVERY;");
+
+        Assert.Equal(5, await ScalarAsync("SELECT COUNT(*) FROM pco_restored.dbo.t", 30));
+    }
+
+    /// <summary>
+    /// A snapshot backup of every user database, with <paramref name="database"/>'s files copied while the writes are
+    /// suspended (the "VM snapshot"). The .bkm, which a restore point keeps, is written back into the container.
+    /// </summary>
+    private async Task<(SqlSnapshotDatabase Database, string Bkm)> SnapshotAsync(ContainerSql environment, List<string> log, string database, string copy, bool copyOnly)
+    {
+        using var suspend = new SqlSnapshotSuspend(
+            environment, Sa, log.Add, path => sql.ReadFileAsync(path).GetAwaiter().GetResult(), path => sql.DeleteFileAsync(path).GetAwaiter().GetResult(), copyOnly);
+        suspend.Suspend(environment.Instances());
+        Assert.Contains(database, await SuspendedAsync(database));
+        await sql.CopyFileAsync($"{Folder}/{database}.mdf", $"{Folder}/{copy}.mdf");
+        await sql.CopyFileAsync($"{Folder}/{database}_log.ldf", $"{Folder}/{copy}_log.ldf");
+        var instance = Assert.Single(suspend.Record($"backdafuckup {copy}", Guid.NewGuid()));
+        var recorded = instance.Databases.Single(d => d.Name == database);
+        Assert.Equal(SqlSnapshotStates.Recorded, recorded.State);
+        var bkm = $"{Folder}/{copy}.bkm";
+        await sql.WriteFileAsync(bkm, instance.Metadata!);
+        return (recorded, bkm);
+    }
+
+    /// <summary>RESTORE … WITH METADATA_ONLY onto the snapshot's files, left RESTORING for log backups.</summary>
+    private Task RestoreSnapshotAsync(string name, string bkm, SqlSnapshotDatabase database, string copy) =>
+        sql.ExecuteAsync(
+            $"RESTORE DATABASE {name} FROM DISK = N'{bkm}' WITH METADATA_ONLY, FILE = {database.Position}, " +
+            $"MOVE N'{database.Name}' TO N'{Folder}/{copy}.mdf', MOVE N'{database.Name}_log' TO N'{Folder}/{copy}_log.ldf', NORECOVERY;");
+
+    private async Task<string?> TextAsync(string text)
+    {
+        await using var connection = new SqlConnection(sql.AdminConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = text;
+        return (await command.ExecuteScalarAsync()) as string;
+    }
+
     private static SqlSnapshotInstance Single(List<SqlSnapshotInstance> instances) => Assert.Single(instances);
 
     private static string State(SqlSnapshotInstance instance, string database) => instance.Databases.Single(d => d.Name == database).State;

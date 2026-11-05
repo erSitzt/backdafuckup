@@ -324,6 +324,13 @@ public sealed class BackupJob
     /// </summary>
     public Guid? SqlCredentialId { get; set; }
 
+    /// <summary>
+    /// <see cref="GuestProcessingMode.SqlSnapshot"/>: record copy-only backups (outside the backup chain) instead of
+    /// regular full backups (the default for new jobs). A regular full backup starts or continues the log chain and is the
+    /// base for log and differential backups, also those of other tools. VSS backups are always copy-only.
+    /// </summary>
+    public bool SqlSnapshotCopyOnly { get; set; }
+
     public DateTimeOffset? NextRunUtc { get; set; }
 
     public DateTimeOffset? LastRunUtc { get; set; }

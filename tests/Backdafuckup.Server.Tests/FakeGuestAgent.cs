@@ -53,6 +53,12 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
     /// <summary>The guest's SQL Server is older than 2022: the snapshot job suspends nothing.</summary>
     public bool SqlOlderThan2022 { get; set; }
 
+    /// <summary>The CopyOnly the server sent with the last snapshot-suspend job.</summary>
+    public bool? LastSqlCopyOnly { get; private set; }
+
+    /// <summary>The simulated databases' recovery model, whether they had a log chain, and the age of their last log backup.</summary>
+    public (string Model, bool HadChain, int? LogAgeMinutes) SqlLogFacts { get; set; } = ("SIMPLE", false, null);
+
     /// <summary>The databases the SQL snapshot fails to suspend (reported as failed).</summary>
     public HashSet<string> SqlDatabasesFailingSuspend { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -183,6 +189,8 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
             return;
         }
 
+        LastSqlCopyOnly = request.CopyOnly;
+        var copyOnly = request.CopyOnly ?? true;
         var instance = new SqlSnapshotInstance { Name = "MSSQLSERVER", ProductVersion = SqlOlderThan2022 ? "15.0.4382.1" : "16.0.4135.4" };
         if (SqlOlderThan2022)
         {
@@ -194,6 +202,8 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
             instance.Databases.Add(SqlDatabasesFailingSuspend.Contains(name)
                 ? new SqlSnapshotDatabase { Name = name, State = SqlSnapshotStates.Failed, Reason = "suspending failed: permission denied" }
                 : new SqlSnapshotDatabase { Name = name, State = SqlSnapshotStates.Suspended });
+            var database = instance.Databases[^1];
+            (database.RecoveryModel, database.HadLogChain, database.LogBackupAgeMinutes) = SqlLogFacts;
         }
 
         SqlSuspended = true;
@@ -209,6 +219,11 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
         {
             database.State = signal == SqlJobSignals.SnapshotTaken ? SqlSnapshotStates.Recorded : SqlSnapshotStates.Failed;
             database.Reason = signal == SqlJobSignals.SnapshotTaken ? null : "the server took no VM snapshot";
+            if (signal == SqlJobSignals.SnapshotTaken)
+            {
+                database.CopyOnly = copyOnly;
+                database.StartedLogChain = !copyOnly && database.RecoveryModel != "SIMPLE" && !database.HadLogChain;
+            }
         }
 
         if (signal == SqlJobSignals.SnapshotTaken)

@@ -125,6 +125,13 @@ The report's layer 1, which is phase 2 of the roadmap:
 
 The base is the `.bkm` from step 2 or a streamed FULL. Shape it with `/shape-spec` once step 2 works.
 
+**Known before shaping (2026-11-05):**
+- The restore path is public: mount or copy the snapshot's files, then `RESTORE DATABASE … FROM DISK = '<.bkm>' WITH METADATA_ONLY, DBNAME, MOVE, NORECOVERY`, then streamed log backups up to `STOPAT` ([Microsoft Learn: T-SQL snapshot backup](https://learn.microsoft.com/en-us/sql/relational-databases/backup-restore/create-a-transact-sql-snapshot-backup), examples F, L–N; "point-in-time recovery using log backups taken … after the snapshot FULL backup"). A publish already mounts the files, so a point-in-time publish needs no copy (writes, including the log restores, go to the overlay).
+- **Copy-only snapshots do not start a log chain.** Lab, bdfu-lab-sql1: `shop` (FULL recovery) after two snapshot backups (`is_copy_only=1`, `database_backup_lsn=0`) still has `last_log_backup_lsn` NULL and `log_reuse_wait_desc` NOTHING, so SQL Server truncates its log as in SIMPLE recovery and refuses `BACKUP LOG`.
+- **Done (2026-11-05): job setting *SQL Server backup type*.** Regular full backups are the default for new jobs (snapshot without `COPY_ONLY`; it starts the chain and becomes the differential base, also for other tools); copy-only stays selectable, and jobs from before keep it. The agent reports per database the recovery model, whether a chain existed, the age of the last log backup, the type recorded in msdb, the position in the `.bkm` and the LSNs (kept in the restore point). The session warns when a full backup started a log chain, and about chains without a log backup for a day.
+- **Checked in container tests (SQL Server 2022):** a full snapshot backup starts the chain; its `.bkm` restored with `METADATA_ONLY, FILE = <position>, MOVE, NORECOVERY` onto the snapshot's files, then two log backups up to `STOPAT`, gives exactly the rows of that second. A copy-only snapshot starts no chain (`BACKUP LOG` fails with error 4214); after another tool's regular full backup, log backups restore on top of a copy-only snapshot too.
+- The `.bkm` is already kept in every SQL snapshot restore point (blob `sql-snapshot`); VSS restore points keep the writer documents (`vss-documents`), but restoring those with log backups needs the VDI and stays out.
+
 ## Risks
 
 1. **The edition support of the T-SQL snapshot backup** (Express) is undocumented. Spike 2a decides. Without Express support, approach A covers Standard and Enterprise only.

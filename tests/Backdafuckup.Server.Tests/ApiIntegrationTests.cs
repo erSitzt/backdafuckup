@@ -336,7 +336,8 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         await BackUpImageAsync(client, vmName, await File.ReadAllBytesAsync(FsFixtures.Image(fixture), Ct));
 
     /// <summary>A VM whose disk holds <paramref name="image"/>, backed up once (with guest processing if an agent is set up).</summary>
-    private async Task<RestorePointDto> BackUpImageAsync(HttpClient client, string vmName, byte[] image, Func<string, Task>? beforeBackup = null, Func<SaveJobDto, SaveJobDto>? configureJob = null)
+    private async Task<RestorePointDto> BackUpImageAsync(
+        HttpClient client, string vmName, byte[] image, Func<string, Task>? beforeBackup = null, Func<SaveJobDto, SaveJobDto>? configureJob = null, string expectedState = "Succeeded")
     {
         var (vmUuid, disks) = _pool.AddVm(vmName, image.LongLength);
         _pool.WriteDisk(disks[0], 0, image);
@@ -359,7 +360,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         };
         var job = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", configureJob?.Invoke(save) ?? save, Ct));
         var backup = await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{job.Id}/run", new RunJobDto(), Ct));
-        Assert.Equal("Succeeded", (await WaitForSessionAsync(client, backup.SessionId)).Session.State);
+        Assert.Equal(expectedState, (await WaitForSessionAsync(client, backup.SessionId)).Session.State);
         return Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!);
     }
 
@@ -1017,7 +1018,9 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             "sql06",
             image,
             async vm => started = await StartAgentAsync(vm, null, sql, null, [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", InBackup = true }]),
-            job => job with { GuestProcessingMode = GuestProcessingModes.SqlSnapshot, SqlCredentialId = login.Id });
+            job => job with { GuestProcessingMode = GuestProcessingModes.SqlSnapshot, SqlCredentialId = login.Id },
+            // A regular full backup (the default) starts the log chain of the two FULL-recovery databases: a warning.
+            expectedState: "Warning");
 
         var (_, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
         try
@@ -1025,7 +1028,9 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             // Both databases were suspended, each on its own connection, while XAPI took the snapshot; recorded afterwards.
             Assert.Equal(["shop", "small"], suspendedAtSnapshot);
             Assert.Empty(sql.Suspended);
-            Assert.Contains("ALTER DATABASE [shop] SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON (MODE = COPY_ONLY)", sql.Statements);
+            Assert.Contains("ALTER DATABASE [shop] SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON", sql.Statements);
+            Assert.DoesNotContain(sql.Statements, t => t.Contains("COPY_ONLY", StringComparison.Ordinal));
+            Assert.Equal(["shop", "small"], sql.LogChains.Order(StringComparer.Ordinal));
             Assert.Equal(2, sql.Statements.Count(t => t.StartsWith("BACKUP DATABASE @database TO DISK = @path WITH METADATA_ONLY, ", StringComparison.Ordinal)));
             Assert.All(sql.Accounts, a => Assert.Equal(("bdfu_backup", "Backup-1"), (a.UserName, a.Password)));
 
@@ -1038,6 +1043,11 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             var instance = Assert.Single(snapshot!.Instances);
             Assert.Equal("TAPE shop;TAPE small;", System.Text.Encoding.ASCII.GetString(instance.Metadata!));
             Assert.All(instance.Databases, d => Assert.Equal(SqlSnapshotStates.Recorded, d.State));
+            // What a later restore with log backups needs: type, position in the .bkm and the LSNs.
+            Assert.Equal(
+                [("shop", false, true, 1, "FULL"), ("small", false, true, 2, "FULL")],
+                instance.Databases.Select(d => (d.Name, d.CopyOnly!.Value, d.StartedLogChain, d.Position!.Value, d.RecoveryModel!)).ToList());
+            Assert.All(instance.Databases, d => Assert.Equal(("41000000012300001", "41000000012600001"), (d.FirstLsn, d.LastLsn)));
             var stored = await StoredGuestMetadata.ReadAsync(reader, Ct);
             Assert.Equal("application", stored!.SqlDatabases.Single(d => d.Database == "shop").Consistency);
         }
@@ -1185,6 +1195,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             // Published under another name (shop exists on the instance), backed up from there, unpublished again.
             var bak = Path.Combine(backupFolder, $"shop_{point.CreatedUtc.ToLocalTime():yyyyMMdd_HHmm}.bak");
             Assert.Equal("shop_bdfu_export", sql.Backups[bak]);
+            Assert.Equal("shop (backdafuckup export)", sql.BackupSetNames[bak]);
             Assert.Equal([.. "TAPE shop_bdfu_export;"u8.ToArray(), .. mdf, .. ldf], File.ReadAllBytes(bak));
             Assert.Contains("DROP DATABASE [shop_bdfu_export]", sql.Statements);
             Assert.Empty(new PublishJournal(guest!.WorkFolder).Read());
@@ -1194,6 +1205,9 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Assert.Contains("RESTORE VERIFYONLY with checksums passed", log, StringComparison.Ordinal);
             Assert.Contains($"Exported SQLEXPRESS\\shop from the restore point of", detail.Session.Summary, StringComparison.Ordinal);
             Assert.Contains("it can be downloaded here for 24 hours", detail.Session.Summary, StringComparison.Ordinal);
+            Assert.Contains("verified; the database in it is named [shop_bdfu_export])", detail.Session.Summary, StringComparison.Ordinal);
+            Assert.Contains("the .bak has the paths of the temporary publish", log, StringComparison.Ordinal);
+            Assert.Contains("because instance SQLEXPRESS has a database shop already.", log, StringComparison.Ordinal);
             Assert.All(sql.Accounts, a => Assert.Equal("bdfu_export", a.UserName));
 
             // The download: the file's name and size, a one-time link, the same bytes as in the VM.

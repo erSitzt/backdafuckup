@@ -11,10 +11,12 @@ namespace Backdafuckup.Agent.Core;
 
 /// <summary>
 /// The T-SQL snapshot backup of SQL Server 2022 and later around a VM snapshot: suspends the writes of every user
-/// database (<c>ALTER DATABASE … SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON (MODE = COPY_ONLY)</c>), each on its own unpooled
-/// connection, and after the snapshot records it with <c>BACKUP DATABASE … WITH METADATA_ONLY</c> on that connection,
-/// which resumes the writes and appends to the instance's <c>.bkm</c>.
+/// database (<c>ALTER DATABASE … SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON</c>, with <c>(MODE = COPY_ONLY)</c> for copy-only
+/// backups), each on its own unpooled connection, and after the snapshot records it with <c>BACKUP DATABASE … WITH
+/// METADATA_ONLY</c> on that connection, which resumes the writes and appends to the instance's <c>.bkm</c>.
 /// <list type="bullet">
+/// <item>A regular (not copy-only) full backup starts the log chain of a database in FULL or BULK_LOGGED recovery that
+/// had none, and becomes the base for differential backups, also those of other tools. A copy-only one changes neither.</item>
 /// <item>Database by database, because a server-wide suspend skips databases closed by AUTO_CLOSE.</item>
 /// <item>One connection each, because a session that has suspended a database cannot suspend another one ("Atleast one
 /// database was previously suspended", also the error of GROUP).</item>
@@ -33,15 +35,19 @@ public sealed class SqlSnapshotSuspend : IDisposable
     private readonly Action<string> _deleteMetadata;
     private readonly List<Held> _held = new List<Held>();
     private readonly Stopwatch _suspended = new Stopwatch();
+    private readonly bool _copyOnly;
     private long _suspendedMs;
 
     /// <param name="readMetadata">Reads the <c>.bkm</c> SQL Server wrote (tests map the container's path).</param>
     /// <param name="deleteMetadata">Deletes it after reading.</param>
-    public SqlSnapshotSuspend(ISqlEnvironment sql, SqlAccount account, Action<string> log, Func<string, byte[]>? readMetadata = null, Action<string>? deleteMetadata = null)
+    /// <param name="copyOnly">Copy-only backups (outside the backup chain) instead of regular full backups.</param>
+    public SqlSnapshotSuspend(
+        ISqlEnvironment sql, SqlAccount account, Action<string> log, Func<string, byte[]>? readMetadata = null, Action<string>? deleteMetadata = null, bool copyOnly = true)
     {
         _sql = sql;
         _account = account;
         _log = log;
+        _copyOnly = copyOnly;
         _readMetadata = readMetadata ?? File.ReadAllBytes;
         _deleteMetadata = deleteMetadata ?? File.Delete;
     }
@@ -127,6 +133,7 @@ public sealed class SqlSnapshotSuspend : IDisposable
 
                     database.State = SqlSnapshotStates.Recorded;
                     first = false;
+                    ReadBackupSet(held, connection, database, backupName);
                 }
                 catch (DbException ex)
                 {
@@ -152,7 +159,8 @@ public sealed class SqlSnapshotSuspend : IDisposable
                 }
             }
 
-            _log($"{held.Info.Name}: recorded {suspended.Count(d => d.State == SqlSnapshotStates.Recorded)} of {suspended.Count} database(s) in msdb (copy-only, {path}).");
+            _log($"{held.Info.Name}: recorded {suspended.Count(d => d.State == SqlSnapshotStates.Recorded)} of {suspended.Count} database(s) in msdb " +
+                $"({(_copyOnly ? "copy-only" : "full backups")}, {path}).");
         }
 
         Stop();
@@ -225,19 +233,22 @@ public sealed class SqlSnapshotSuspend : IDisposable
             return;
         }
 
-        var databases = new List<(string Name, string State, bool ReadOnly, bool IsSnapshot)>();
-        using (var command = Command(held.Connection, "SELECT name, state_desc, is_read_only, CAST(CASE WHEN source_database_id IS NULL THEN 0 ELSE 1 END AS bit) FROM sys.databases WHERE database_id > 4 ORDER BY name"))
+        // last_log_backup_lsn is NULL while a database has no log chain (also in FULL recovery before its first regular full backup).
+        var databases = new List<(string Name, string State, bool ReadOnly, bool IsSnapshot, string? Model, bool Chain, int? LogAge)>();
+        using (var command = Command(held.Connection, DatabasesQuery))
         using (var reader = command.ExecuteReader())
         {
             while (reader.Read())
             {
-                databases.Add((reader.GetString(0), reader.IsDBNull(1) ? string.Empty : reader.GetString(1), !reader.IsDBNull(2) && reader.GetBoolean(2), reader.GetBoolean(3)));
+                databases.Add((
+                    reader.GetString(0), reader.IsDBNull(1) ? string.Empty : reader.GetString(1), !reader.IsDBNull(2) && reader.GetBoolean(2), reader.GetBoolean(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4), !reader.IsDBNull(5) && reader.GetBoolean(5), reader.IsDBNull(6) ? null : reader.GetInt32(6)));
             }
         }
 
-        foreach (var (name, state, readOnly, isSnapshot) in databases)
+        foreach (var (name, state, readOnly, isSnapshot, model, chain, logAge) in databases)
         {
-            var database = new SqlSnapshotDatabase { Name = name };
+            var database = new SqlSnapshotDatabase { Name = name, RecoveryModel = model, HadLogChain = chain, LogBackupAgeMinutes = logAge };
             held.Instance.Databases.Add(database);
             if (isSnapshot)
             {
@@ -261,7 +272,7 @@ public sealed class SqlSnapshotSuspend : IDisposable
             try
             {
                 connection = _sql.Open(held.Info.Name, _account);
-                using (var command = Command(connection, $"ALTER DATABASE {Quote(name)} SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON (MODE = COPY_ONLY)"))
+                using (var command = Command(connection, $"ALTER DATABASE {Quote(name)} SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON" + (_copyOnly ? " (MODE = COPY_ONLY)" : string.Empty)))
                 {
                     command.ExecuteNonQuery();
                 }
@@ -287,6 +298,49 @@ public sealed class SqlSnapshotSuspend : IDisposable
         }
 
         _log($"{held.Info.Name} (SQL Server {held.Instance.ProductVersion}): suspended {held.Instance.Databases.Count(d => d.State == SqlSnapshotStates.Suspended)} of {databases.Count} user database(s).");
+    }
+
+    /// <summary>The user databases with their state, recovery model, log chain and the age of their last log backup.</summary>
+    internal const string DatabasesQuery =
+        "SELECT d.name, d.state_desc, d.is_read_only, CAST(CASE WHEN d.source_database_id IS NULL THEN 0 ELSE 1 END AS bit), d.recovery_model_desc, " +
+        "CAST(CASE WHEN r.last_log_backup_lsn IS NULL THEN 0 ELSE 1 END AS bit), " +
+        "(SELECT DATEDIFF(minute, MAX(b.backup_finish_date), GETDATE()) FROM msdb.dbo.backupset b WHERE b.database_name = d.name AND b.type = 'L') " +
+        "FROM sys.databases d LEFT JOIN sys.database_recovery_status r ON r.database_id = d.database_id WHERE d.database_id > 4 ORDER BY d.name";
+
+    /// <summary>The recorded backup set in msdb, and whether the database has a log chain now.</summary>
+    internal const string BackupSetQuery =
+        "SELECT TOP (1) b.position, b.is_copy_only, CONVERT(varchar(30), b.first_lsn), CONVERT(varchar(30), b.last_lsn), CONVERT(varchar(30), b.checkpoint_lsn), " +
+        "CONVERT(varchar(30), b.database_backup_lsn), " +
+        "(SELECT CAST(CASE WHEN r.last_log_backup_lsn IS NULL THEN 0 ELSE 1 END AS bit) FROM sys.database_recovery_status r WHERE r.database_id = DB_ID(@database)) " +
+        "FROM msdb.dbo.backupset b WHERE b.database_name = @database AND b.name = @name AND b.is_snapshot = 1 ORDER BY b.backup_set_id DESC";
+
+    /// <summary>Position, type and LSNs of the backup set just recorded (for restores with log backups); failures are only logged.</summary>
+    private void ReadBackupSet(Held held, DbConnection connection, SqlSnapshotDatabase database, string backupName)
+    {
+        try
+        {
+            using (var command = Command(connection, BackupSetQuery, ("@database", database.Name), ("@name", backupName)))
+            using (var reader = command.ExecuteReader())
+            {
+                if (!reader.Read())
+                {
+                    _log($"{held.Info.Name}\\{database.Name}: the backup set is missing in msdb.");
+                    return;
+                }
+
+                database.Position = reader.IsDBNull(0) ? (int?)null : Convert.ToInt32(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture);
+                database.CopyOnly = !reader.IsDBNull(1) && reader.GetBoolean(1);
+                database.FirstLsn = reader.IsDBNull(2) ? null : reader.GetString(2);
+                database.LastLsn = reader.IsDBNull(3) ? null : reader.GetString(3);
+                database.CheckpointLsn = reader.IsDBNull(4) ? null : reader.GetString(4);
+                database.DatabaseBackupLsn = reader.IsDBNull(5) ? null : reader.GetString(5);
+                database.StartedLogChain = !database.HadLogChain && !reader.IsDBNull(6) && reader.GetBoolean(6);
+            }
+        }
+        catch (DbException ex)
+        {
+            _log($"{held.Info.Name}\\{database.Name}: reading the backup set from msdb failed: {ex.Message}");
+        }
     }
 
     private string MetadataPath(Held held, Guid jobId)

@@ -302,6 +302,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("sql_credential_id");
 
+                    b.Property<bool>("SqlSnapshotCopyOnly")
+                        .HasColumnType("boolean")
+                        .HasColumnName("sql_snapshot_copy_only");
+
                     b.Property<string>("TransportMode")
                         .IsRequired()
                         .HasMaxLength(16)

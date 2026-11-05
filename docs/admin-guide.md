@@ -139,14 +139,23 @@ XCP-ng / XenServer removed the quiesced snapshot in 8.1, so a VM snapshot is cra
 
 When the VM snapshot takes longer than VSS allows (see the 10 s limit above), choose this method in the job (Advanced → Guest processing) and a SQL Server account. For VMs with SQL Server 2022 or later it uses SQL Server's T-SQL snapshot backup instead of the VSS freeze:
 1. VSS only gathers the metadata (databases, files, volumes), as above, and ends right away.
-2. The agent suspends the writes of every user database with `ALTER DATABASE … SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON (MODE = COPY_ONLY)`.
+2. The agent suspends the writes of every user database with `ALTER DATABASE … SET SUSPEND_FOR_SNAPSHOT_BACKUP = ON` (with `(MODE = COPY_ONLY)` for copy-only backups, see *Backup type* below).
    - It does this database by database, each on its own connection. This also covers databases that `AUTO_CLOSE` has closed, the default in SQL Server Express.
    - Reads go on. Writes wait; the session log shows how many databases were suspended.
 3. The server takes the VM snapshot, which may take as long as it needs.
 4. The agent records the snapshot with `BACKUP DATABASE … WITH METADATA_ONLY`, which resumes the writes.
-   - Each database gets a copy-only full backup in `msdb` (`is_snapshot = 1`, named "backdafuckup restore point …"). The backup chain of other products stays untouched.
-   - The snapshot backup metadata (`.bkm`) goes into the restore point, and the agent deletes it in the guest.
+   - Each database gets a full backup of the chosen type in `msdb` (`is_snapshot = 1`, named "backdafuckup restore point …").
+   - The snapshot backup metadata (`.bkm`) goes into the restore point with each database's position in it and its LSNs, and the agent deletes it in the guest.
 5. If the snapshot fails, the agent resumes the writes without recording anything. It also resumes them if the server does not report the snapshot within 2 minutes (`Agent:SqlSnapshotHoldLimit`). If the agent stops or loses its connection to SQL Server, SQL Server resumes by itself.
+
+**Backup type** (job setting *SQL Server backup type*):
+- **Full backup (in the backup chain)**, the default for new jobs: a regular full backup.
+  - Log backups and differential backups build on it, also those of other tools: the next differential backup of another tool is based on this snapshot.
+  - For a database in FULL or BULK_LOGGED recovery that never had a regular full backup, it starts the log chain. Until then SQL Server frees the log at checkpoints as in SIMPLE recovery and refuses `BACKUP LOG` (error 4214). From then on only log backups free it, so the log grows until log backups run. The session ends with a warning naming these databases.
+- **Copy-only backup (outside the backup chain):** changes nothing in the backup chains. Choose it for VMs whose SQL Server backups another tool takes with differential backups, or for backups kept apart from the chain. Log backups of an existing chain can still be restored on top of it, but it does not start a chain.
+- With either type, the session warns about databases in FULL or BULK_LOGGED recovery that have a log chain but no log backup for more than a day (by any tool): their log grows.
+- VSS backups are always copy-only, also for the VMs of this method that fall back to VSS.
+- Jobs that used the SQL Server snapshot before this setting existed keep copy-only backups.
 
 **VSS for all other VMs:** if the agent cannot suspend a single database, the same backup uses the VSS freeze, as with the method "VSS for every VM". The session log says why:
 - the VM has no SQL Server, or only one older than 2022 (a note);
@@ -294,6 +303,7 @@ Restore points show their consistency ("application", or "crash" plus the reason
   The file is named `<database>_<restore point time>.bak` and never replaces an existing file (`_2`, `_3`, …). SQL Server's service writes it, so a chosen folder must be writable for the service (the backup folder is).
   - *Also keep it on the backup server for download:* the agent then sends the file to the backup server. The session page offers it for 24 hours (`<data directory>\sql-exports`).
   - What the .bak shows: a copy-only full backup taken on the staging instance (its version: a newer instance upgrades the database, and the .bak then restores only there or on newer versions). TRUSTWORTHY is off, and the attaching account is the owner. The staging instance's `msdb` keeps a backup history row.
+  - SQL Server stores the name and the file paths the database has at backup time. Inside the .bak the database has the staging name (`<name>_bdfu_export` if its name was taken), and its files have the paths of the temporary publish (`C:\Program Files\backdafuckup Agent\publish\…`). Give the name and new paths when you restore it: `RESTORE DATABASE [shop] FROM DISK = N'…' WITH MOVE N'shop' TO N'D:\SQL\shop.mdf', MOVE N'shop_log' TO N'L:\Log\shop_log.ldf'` (`RESTORE FILELISTONLY` lists the logical names), or in SSMS on the *Files* page with *Relocate all files to folder*. The backup set is named after the original database.
 - **Publish:** the agent in a target VM mounts the backup's volumes over a local iSCSI connection (nothing is copied) and attaches the database. Writes go to a temporary overlay in the VM. *Unpublish* (stopping the session), or the chosen time running out, removes the database, the mounts and the overlay. The agent does no other restore work while it publishes.
 - **Restore as a new database:** the agent writes the files under the new database's name into the chosen folders, checks each one against the backup (SHA-256) and attaches them. Existing files are never replaced: if a file exists, the restore stops and deletes what it wrote.
 - **Overwrite the original database:**

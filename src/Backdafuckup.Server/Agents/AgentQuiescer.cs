@@ -8,7 +8,8 @@ using Backdafuckup.Server.Sql;
 namespace Backdafuckup.Server.Agents;
 
 /// <summary>The SQL Server snapshot instead of the VSS freeze: the job channel, the account and the backup's name in msdb.</summary>
-public sealed record SqlSnapshotSettings(Sql.SqlJobs Jobs, SqlAccount Account, string BackupName);
+/// <param name="CopyOnly">Copy-only backups (outside the backup chain) instead of regular full backups.</param>
+public sealed record SqlSnapshotSettings(Sql.SqlJobs Jobs, SqlAccount Account, string BackupName, bool CopyOnly = false);
 
 /// <summary>
 /// Guest freeze through the backdafuckup agent for one VM backup: prepare (VSS writer metadata), freeze (our VSS
@@ -123,6 +124,7 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
                     Account = settings.Account,
                     HoldLimitMs = (int)options.SqlSnapshotHoldLimit.TotalMilliseconds,
                     BackupName = settings.BackupName,
+                    CopyOnly = settings.CopyOnly,
                 },
                 cancellationToken).ConfigureAwait(false);
             var (progress, failed) = await job.WaitForProgressAsync(options.PrepareTimeout, cancellationToken).ConfigureAwait(false);
@@ -201,6 +203,53 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
             .Concat(i.Databases.Where(d => d.State is SqlSnapshotStates.Failed or SqlSnapshotStates.Skipped).Select(d => $"{i.Name}\\{d.Name}: {d.Reason ?? d.State}"))));
 
     private static string Seconds1(TimeSpan time) => time.TotalSeconds.ToString("0.0 s", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Warnings about the transaction logs of databases in FULL or BULK_LOGGED recovery, where only log backups free the
+    /// log: a regular full backup that started a log chain, and log chains without a log backup for longer than
+    /// <paramref name="maxLogBackupAge"/> (taken by any tool). Copy-only backups start no chain; without one SQL Server
+    /// frees the log at checkpoints, so those databases need no warning.
+    /// </summary>
+    internal static List<string> LogChainWarnings(IEnumerable<SqlSnapshotInstance> instances, TimeSpan maxLogBackupAge)
+    {
+        var started = new List<string>();
+        var stale = new List<string>();
+        foreach (var instance in instances)
+        {
+            foreach (var database in instance.Databases.Where(d => d.RecoveryModel is "FULL" or "BULK_LOGGED"))
+            {
+                var name = $"{instance.Name}\\{database.Name}";
+                if (database.StartedLogChain)
+                {
+                    started.Add(name);
+                }
+                else if (database.HadLogChain && (database.LogBackupAgeMinutes is not { } age || age > maxLogBackupAge.TotalMinutes))
+                {
+                    stale.Add(database.LogBackupAgeMinutes is { } minutes ? $"{name} (last one {Age(TimeSpan.FromMinutes(minutes))} ago)" : $"{name} (none yet)");
+                }
+            }
+        }
+
+        var warnings = new List<string>();
+        if (started.Count > 0)
+        {
+            warnings.Add($"This full backup started the log chain of {string.Join(", ", started)} (FULL recovery, no full backup before). From now on SQL Server frees " +
+                "their transaction log only after log backups, so it grows until log backups run. Take log backups, set the recovery model to SIMPLE, " +
+                "or choose copy-only backups in the job.");
+        }
+
+        if (stale.Count > 0)
+        {
+            warnings.Add($"No log backup for more than {Age(maxLogBackupAge)}: {string.Join(", ", stale)}. In FULL recovery SQL Server frees the transaction log " +
+                "only after log backups, so it grows until they run.");
+        }
+
+        return warnings;
+    }
+
+    private static string Age(TimeSpan age) => age.TotalHours < 48
+        ? $"{Math.Max(1, (int)Math.Round(age.TotalHours)).ToString(CultureInfo.InvariantCulture)} hours"
+        : $"{((int)age.TotalDays).ToString(CultureInfo.InvariantCulture)} days";
 
     private async Task<AgentCommandResult> SendAsync(string kind, TimeSpan timeout, string what, CancellationToken cancellationToken)
     {
@@ -341,17 +390,21 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
                     with { HeldTime = held, Sql = new SqlSnapshotOutcome(false, $"failed: {result.Error ?? "no details"}") };
             }
 
-            var recorded = instances.Sum(i => i.Databases.Count(d => d.State == SqlSnapshotStates.Recorded));
+            var recorded = instances.SelectMany(i => i.Databases).Where(d => d.State == SqlSnapshotStates.Recorded).ToList();
             var problems = DescribeProblems(instances);
-            var all = recorded > 0 && problems.Length == 0;
-            var summary = recorded == 0
+            var all = recorded.Count > 0 && problems.Length == 0;
+            // An agent before the setting reports no type and records copy-only.
+            var kind = recorded.All(d => d.CopyOnly == false) ? "full snapshot backups (in the backup chain)"
+                : recorded.All(d => d.CopyOnly != false) ? "copy-only snapshot backups"
+                : "snapshot backups (" + string.Join("; ", recorded.Select(d => $"{d.Name}: {(d.CopyOnly == false ? "full" : "copy-only")}")) + ")";
+            var summary = recorded.Count == 0
                 ? $"no database was recorded{(problems.Length > 0 ? $" ({problems})" : string.Empty)}; writes were suspended for {Seconds1(held)}."
-                : $"{recorded} database(s) recorded in msdb as copy-only snapshot backups (application-consistent): {DescribeSuspended(instances)}. " +
+                : $"{recorded.Count} database(s) recorded in msdb as {kind} (application-consistent): {DescribeSuspended(instances)}. " +
                   $"Writes were suspended for {Seconds1(held)}; files outside SQL Server are crash-consistent." +
                   (problems.Length > 0 ? $" Not consistent: {problems}." : string.Empty);
             return new GuestFreezeResult(false, all ? null : $"SQL Server snapshot: {problems}", freezeTime, held, [])
             {
-                Sql = new SqlSnapshotOutcome(all, summary),
+                Sql = new SqlSnapshotOutcome(all, summary, LogChainWarnings(instances, TimeSpan.FromDays(1))),
             };
         }
 

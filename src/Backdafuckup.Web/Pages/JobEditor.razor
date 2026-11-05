@@ -86,8 +86,8 @@ else
                         <MudSwitch T="bool" @bind-Value="_guest" Color="Color.Primary" Label="Application-consistent backups through the backdafuckup agent" />
                         <MudText Typo="Typo.caption" Class="d-block mb-3">
                             The agent freezes SQL Server, Active Directory, Exchange and other VSS-aware applications in Windows VMs while
-                            the snapshot is taken (copy-only: other backup products are not disturbed). Without it, backups are
-                            crash-consistent, like after a power failure.
+                            the snapshot is taken (VSS backups are copy-only: other backup products are not disturbed). Without it,
+                            backups are crash-consistent, like after a power failure.
                         </MudText>
                         <MudSelect T="string" @bind-Value="_guestMode" Label="Method" Variant="Variant.Outlined" Disabled="!_guest" Class="mb-1">
                             <MudSelectItem T="string" Value="@GuestProcessingModes.Vss">VSS for every VM</MudSelectItem>
@@ -98,9 +98,9 @@ else
                             {
                                 <text>
                                     VMs with SQL Server 2022 or later: the agent suspends the writes of the SQL Server databases (reads go
-                                    on) until the VM snapshot is taken, however long it takes, and records it in msdb as a copy-only
-                                    backup. The databases are application-consistent, other files crash-consistent. Writes wait during the
-                                    snapshot; applications with short timeouts may see errors meanwhile.
+                                    on) until the VM snapshot is taken, however long it takes, and records it in msdb as a backup of the
+                                    chosen type. The databases are application-consistent, other files crash-consistent. Writes wait during
+                                    the snapshot; applications with short timeouts may see errors meanwhile.
                                     All other VMs (no SQL Server, an older one, or no database could be suspended) use VSS, as with the
                                     first method.
                                 </text>
@@ -123,6 +123,29 @@ else
                                     <MudSelectItem T="Guid?" Value="id">@label</MudSelectItem>
                                 }
                             </MudSelect>
+                            <MudSelect T="bool" @bind-Value="_sqlCopyOnly" Label="SQL Server backup type" Variant="Variant.Outlined" Disabled="!_guest" Class="mb-1">
+                                <MudSelectItem T="bool" Value="false">Full backup (in the backup chain)</MudSelectItem>
+                                <MudSelectItem T="bool" Value="true">Copy-only backup (outside the backup chain)</MudSelectItem>
+                            </MudSelect>
+                            <MudText Typo="Typo.caption" Class="d-block mb-3">
+                                @if (_sqlCopyOnly)
+                                {
+                                    <text>
+                                        Changes nothing in the databases' backup chains: for VMs whose SQL Server backups another tool takes
+                                        (e.g. with differential backups), or for backups kept apart. Log backups cannot build on it while a
+                                        database has no regular full backup.
+                                    </text>
+                                }
+                                else
+                                {
+                                    <text>
+                                        A regular full backup: log backups and differential backups (also those of other tools) build on it.
+                                        For a database in FULL recovery without a full backup it starts the log chain: from then on only log
+                                        backups free its transaction log, otherwise it grows. The session log warns about such databases and
+                                        about log chains without a log backup for a day. VMs that fall back to VSS get copy-only backups.
+                                    </text>
+                                }
+                            </MudText>
                         }
                         <MudSelect T="string" @bind-Value="_guestPolicy" Label="If the guest cannot be frozen" Variant="Variant.Outlined" Disabled="!_guest" Class="mb-3">
                             <MudSelectItem T="string" Value="@GuestFailurePolicies.CrashConsistentWithWarning">Back up crash-consistently and warn</MudSelectItem>
@@ -172,7 +195,7 @@ else
                         <tr><td>Schedule</td><td>@Jobs.Describe(Schedule())</td></tr>
                         <tr><td>Disk transport</td><td>@TransportText(_transport)</td></tr>
                         <tr><td>Parallel processing</td><td>@_parallelVms VM(s), @_parallelDisks disk(s) per VM</td></tr>
-                        <tr><td>Guest processing</td><td>@(_guest ? $"application-consistent ({(_guestMode == GuestProcessingModes.SqlSnapshot ? "SQL Server snapshot, otherwise VSS" : "VSS")}); on failure: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with warning")}" + (_guestCredentialId is null ? "" : "; installs missing agents") : "off (crash-consistent)")</td></tr>
+                        <tr><td>Guest processing</td><td>@(_guest ? $"application-consistent ({(_guestMode == GuestProcessingModes.SqlSnapshot ? $"SQL Server snapshot ({(_sqlCopyOnly ? "copy-only" : "full backups")}), otherwise VSS" : "VSS")}); on failure: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with warning")}" + (_guestCredentialId is null ? "" : "; installs missing agents") : "off (crash-consistent)")</td></tr>
                     </tbody>
                 </MudSimpleTable>
                 <MudCheckBox @bind-Value="_enabled" Label="Job enabled" Class="mt-2" />
@@ -236,6 +259,7 @@ else
     private List<WindowsCredentialDto> _credentials = [];
     private string _guestMode = GuestProcessingModes.Vss;
     private Guid? _sqlCredentialId;
+    private bool _sqlCopyOnly;
     private List<(Guid Id, string Label)> _sqlAccounts = [];
     private string _transport = TransportModes.Automatic;
     private int _retries = 2;
@@ -270,6 +294,7 @@ else
             _guestCredentialId = job.GuestCredentialId;
             _guestMode = job.GuestProcessingMode;
             _sqlCredentialId = job.SqlCredentialId;
+            _sqlCopyOnly = job.SqlSnapshotCopyOnly;
             _transport = job.TransportMode;
             _retries = job.RetryCount;
             _enabled = job.Enabled;
@@ -382,6 +407,7 @@ else
             GuestCredentialId = _guest ? _guestCredentialId : null,
             GuestProcessingMode = _guestMode,
             SqlCredentialId = _guest && _guestMode == GuestProcessingModes.SqlSnapshot ? _sqlCredentialId : null,
+            SqlSnapshotCopyOnly = _sqlCopyOnly,
             RetryCount = _retries,
             TransportMode = _transport,
         };

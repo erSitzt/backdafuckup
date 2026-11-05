@@ -191,7 +191,7 @@ public sealed class SqlJobRunner
                         throw new InvalidOperationException("The job names no instance, account, database or file name.");
                     }
 
-                    var (path, bytes) = SqlBackupFile.Backup(_sql, request.Instance!, request.Account, request.Database!, request.Folder, request.FileName!, request.Description ?? string.Empty, Log);
+                    var (path, bytes) = SqlBackupFile.Backup(_sql, request.Instance!, request.Account, request.Database!, request.Folder, request.FileName!, request.Description ?? string.Empty, Log, backupName: request.BackupName);
                     result.BackupPath = path;
                     result.BackupBytes = bytes;
                     if (request.Upload)
@@ -264,7 +264,7 @@ public sealed class SqlJobRunner
     private async Task SnapshotAsync(SqlJobRequest request, SqlJobResult result, Action<string> log, CancellationToken stop)
     {
         var limit = TimeSpan.FromMilliseconds(request.HoldLimitMs > 0 ? request.HoldLimitMs : 120000);
-        using (var suspend = new SqlSnapshotSuspend(_sql, request.Account!, log))
+        using (var suspend = new SqlSnapshotSuspend(_sql, request.Account!, log, copyOnly: request.CopyOnly ?? true))
         {
             var progress = suspend.Suspend(_sql.Instances(), request.Instance);
             var watch = System.Diagnostics.Stopwatch.StartNew();

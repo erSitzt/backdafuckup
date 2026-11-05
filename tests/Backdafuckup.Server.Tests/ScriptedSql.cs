@@ -47,6 +47,9 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
     /// <summary>The .bak files written by BACKUP DATABASE … COPY_ONLY: path → database.</summary>
     public Dictionary<string, string> Backups { get; } = [];
 
+    /// <summary>The backup set name (NAME) of each .bak: path → name.</summary>
+    public Dictionary<string, string> BackupSetNames { get; } = [];
+
     /// <summary>The databases that are offline.</summary>
     public HashSet<string> Offline { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -55,6 +58,15 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
 
     /// <summary>The databases whose writes are suspended for a snapshot right now.</summary>
     public HashSet<string> Suspended { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Per suspended database: suspended for a copy-only backup (MODE = COPY_ONLY).</summary>
+    public Dictionary<string, bool> SuspendedCopyOnly { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The databases with a log chain (FULL recovery and a regular full backup); all databases are in FULL recovery.</summary>
+    public HashSet<string> LogChains { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The snapshot backup sets recorded with BACKUP … METADATA_ONLY: database, name, copy-only, position.</summary>
+    public List<(string Database, string Name, bool CopyOnly, int Position)> SnapshotBackups { get; } = [];
 
     /// <summary>Database users of attached databases that have no login on the instance (name, type_desc).</summary>
     public List<(string Name, string Type)> OrphanedUsers { get; } = [];
@@ -161,14 +173,29 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                     return (null, table);
                 }
 
-                case "SELECT name, state_desc, is_read_only, CAST(CASE WHEN source_database_id IS NULL THEN 0 ELSE 1 END AS bit) FROM sys.databases WHERE database_id > 4 ORDER BY name":
+                case "SELECT d.name, d.state_desc, d.is_read_only, CAST(CASE WHEN d.source_database_id IS NULL THEN 0 ELSE 1 END AS bit), d.recovery_model_desc, " +
+                     "CAST(CASE WHEN r.last_log_backup_lsn IS NULL THEN 0 ELSE 1 END AS bit), " +
+                     "(SELECT DATEDIFF(minute, MAX(b.backup_finish_date), GETDATE()) FROM msdb.dbo.backupset b WHERE b.database_name = d.name AND b.type = 'L') " +
+                     "FROM sys.databases d LEFT JOIN sys.database_recovery_status r ON r.database_id = d.database_id WHERE d.database_id > 4 ORDER BY d.name":
                 {
-                    var table = Table(("name", typeof(string)), ("state", typeof(string)), ("ro", typeof(bool)), ("snapshot", typeof(bool)));
+                    var table = Table(("name", typeof(string)), ("state", typeof(string)), ("ro", typeof(bool)), ("snapshot", typeof(bool)), ("model", typeof(string)), ("chain", typeof(bool)), ("logAge", typeof(int)));
                     foreach (var name in _databases.Keys.Order(StringComparer.OrdinalIgnoreCase))
                     {
-                        table.Rows.Add(name, "ONLINE", false, false);
+                        table.Rows.Add(name, "ONLINE", false, false, "FULL", LogChains.Contains(name), DBNull.Value);
                     }
 
+                    return (null, table);
+                }
+
+                case "SELECT TOP (1) b.position, b.is_copy_only, CONVERT(varchar(30), b.first_lsn), CONVERT(varchar(30), b.last_lsn), CONVERT(varchar(30), b.checkpoint_lsn), " +
+                     "CONVERT(varchar(30), b.database_backup_lsn), " +
+                     "(SELECT CAST(CASE WHEN r.last_log_backup_lsn IS NULL THEN 0 ELSE 1 END AS bit) FROM sys.database_recovery_status r WHERE r.database_id = DB_ID(@database)) " +
+                     "FROM msdb.dbo.backupset b WHERE b.database_name = @database AND b.name = @name AND b.is_snapshot = 1 ORDER BY b.backup_set_id DESC":
+                {
+                    var table = Table(("position", typeof(int)), ("copyOnly", typeof(bool)), ("first", typeof(string)), ("last", typeof(string)), ("checkpoint", typeof(string)), ("base", typeof(string)), ("chain", typeof(bool)));
+                    var database = (string)parameters["@database"]!;
+                    var set = SnapshotBackups.Last(b => b.Database == database && b.Name == (string)parameters["@name"]!);
+                    table.Rows.Add(set.Position, set.CopyOnly, "41000000012300001", "41000000012600001", "41000000012300001", set.CopyOnly ? "0" : "41000000004500001", LogChains.Contains(database));
                     return (null, table);
                 }
 
@@ -291,6 +318,7 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 else
                 {
                     Assert.True(Suspended.Add(name), $"{name} is suspended twice");
+                    SuspendedCopyOnly[name] = suspend.Groups["on"].Value.Contains("COPY_ONLY", StringComparison.Ordinal);
                 }
 
                 return (null, null);
@@ -302,6 +330,7 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 var database = (string)parameters["@database"]!;
                 var path = (string)parameters["@path"]!;
                 Assert.False(File.Exists(path), "a backup file was overwritten");
+                BackupSetNames[path] = (string)parameters["@name"]!;
                 using (var file = File.Create(path))
                 {
                     file.Write(System.Text.Encoding.ASCII.GetBytes($"TAPE {database};"));
@@ -319,7 +348,15 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
             {
                 var database = (string)parameters["@database"]!;
                 Assert.True(Suspended.Remove(database), $"{database} was not suspended when it was recorded");
-                File.AppendAllText((string)parameters["@path"]!, $"TAPE {database};");
+                var path = (string)parameters["@path"]!;
+                var position = text.Contains("FORMAT, INIT", StringComparison.Ordinal) ? 1 : SnapshotBackups.Count(b => b.Name == (string)parameters["@name"]!) + 1;
+                SnapshotBackups.Add((database, (string)parameters["@name"]!, SuspendedCopyOnly[database], position));
+                if (!SuspendedCopyOnly[database])
+                {
+                    LogChains.Add(database);
+                }
+
+                File.AppendAllText(path, $"TAPE {database};");
                 return (null, null);
             }
 
@@ -365,7 +402,7 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
     [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET ONLINE$")]
     private static partial Regex OnlineStatement();
 
-    [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET SUSPEND_FOR_SNAPSHOT_BACKUP = (?<on>ON \(MODE = COPY_ONLY\)|OFF)$")]
+    [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET SUSPEND_FOR_SNAPSHOT_BACKUP = (?<on>ON \(MODE = COPY_ONLY\)|ON|OFF)$")]
     private static partial Regex SuspendStatement();
 
     [GeneratedRegex(@"^DROP DATABASE \[(?<name>(?:[^\]]|\]\])+)\]$")]

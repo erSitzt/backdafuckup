@@ -420,6 +420,7 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         Assert.False(agent.SqlSuspended);
         Assert.Equal(SqlJobSignals.SnapshotTaken, agent.LastSignal);
         Assert.Equal(("bdfu_backup", SqlAccountKinds.Sql), (agent.LastSqlAccount!.UserName, agent.LastSqlAccount.Kind));
+        Assert.False(agent.LastSqlCopyOnly);
         lock (agent.Commands)
         {
             // VSS gathers the metadata only: no VSS freeze, the VSS backup is ended right away.
@@ -444,8 +445,48 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         await using var db = await DbAsync();
         var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
         Assert.Contains(log, m => m.Contains("suspended the writes of 2 SQL Server database(s)", StringComparison.Ordinal) && m.Contains("MSSQLSERVER (16.0.4135.4): shop, notselected", StringComparison.Ordinal));
-        Assert.Contains(log, m => m.Contains("Guest processing (SQL Server snapshot): 2 database(s) recorded in msdb", StringComparison.Ordinal) && m.Contains("Writes were suspended for 2.5 s", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains("Guest processing (SQL Server snapshot): 2 database(s) recorded in msdb as full snapshot backups (in the backup chain)", StringComparison.Ordinal) && m.Contains("Writes were suspended for 2.5 s", StringComparison.Ordinal));
         Assert.DoesNotContain(log, m => m.Contains("Sql-Secret-1", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false, "FULL", false, null, "This full backup started the log chain of MSSQLSERVER\\shop, MSSQLSERVER\\notselected (FULL recovery, no full backup before)")]
+    [InlineData(false, "FULL", true, 3000, "No log backup for more than 24 hours: MSSQLSERVER\\shop (last one 2 days ago), MSSQLSERVER\\notselected (last one 2 days ago).")]
+    [InlineData(true, "FULL", true, null, "No log backup for more than 24 hours: MSSQLSERVER\\shop (none yet), MSSQLSERVER\\notselected (none yet).")]
+    [InlineData(true, "FULL", false, null, null)]
+    [InlineData(false, "FULL", true, 30, null)]
+    [InlineData(false, "SIMPLE", false, null, null)]
+    public async Task Sql_snapshot_records_full_or_copy_only_backups_and_warns_about_logs_that_only_log_backups_free(
+        bool copyOnly, string model, bool hadChain, int? logAgeMinutes, string? warning)
+    {
+        var (vmUuid, _) = _pool.AddVm("sql05", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await EnableSqlSnapshotAsync(jobId, "bdfu_backup", "Sql-Secret-5");
+        await using (var db = await DbAsync())
+        {
+            await db.Jobs.Where(j => j.Id == jobId).ExecuteUpdateAsync(s => s.SetProperty(j => j.SqlSnapshotCopyOnly, copyOnly), Ct);
+        }
+
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { IncludeUnselectedDatabase = true, SqlSnapshotCapable = true, SqlLogFacts = (model, hadChain, logAgeMinutes) };
+        await agent.StartAsync(Ct);
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(copyOnly, agent.LastSqlCopyOnly);
+        Assert.Equal(warning is null ? SessionState.Succeeded : SessionState.Warning, session.State);
+        await using var context = await DbAsync();
+        var log = await context.SessionLog.Where(l => l.SessionId == session.Id).Select(l => new { l.Severity, l.Message }).ToListAsync(Ct);
+        Assert.Contains(log, l => l.Message.Contains($"recorded in msdb as {(copyOnly ? "copy-only snapshot backups" : "full snapshot backups (in the backup chain)")}", StringComparison.Ordinal));
+        var warnings = log.Where(l => l.Severity == LogSeverity.Warning && l.Message.Contains("Guest processing (SQL Server snapshot): ", StringComparison.Ordinal)).Select(l => l.Message).ToList();
+        if (warning is null)
+        {
+            Assert.Empty(warnings);
+        }
+        else
+        {
+            Assert.Contains(warnings, m => m.Contains(warning, StringComparison.Ordinal));
+        }
     }
 
     [Fact]

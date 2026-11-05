@@ -312,6 +312,7 @@ public sealed class SqlPublishSessionRunner(
                     new SqlJobRequest
                     {
                         Kind = SqlJobKinds.BackupDatabase, Instance = export.TargetInstance, Account = account, Database = name, Folder = export.Folder, FileName = fileName,
+                        BackupName = $"{export.Database} (backdafuckup export)",
                         Description = $"{source} of {point.VmName} from the restore point of {point.CreatedUtc.ToLocalTime():g} (backdafuckup export)",
                         Upload = export.Download, UploadId = export.Download ? session.Id : null,
                     },
@@ -336,6 +337,14 @@ public sealed class SqlPublishSessionRunner(
                 throw new InvalidOperationException($"{target}: {backup.Error ?? "the agent did not report the backup."}{(leftover is null ? " The database was unpublished again." : " " + leftover)}");
             }
 
+            // SQL Server records the name and the file paths the database has at backup time: those of the staging publish.
+            var renamed = !string.Equals(name, export.Database, StringComparison.Ordinal);
+            log.Info(
+                $"To restore {backup.BackupPath}, give the database's name and new paths for its files: the .bak has the paths of the temporary publish " +
+                $"(RESTORE DATABASE {SqlCatalog.QuoteName(export.Database)} FROM DISK = N'{backup.BackupPath}' WITH MOVE N'<logical name>' TO N'<path>', …; " +
+                "RESTORE FILELISTONLY lists the files; in SSMS: Restore Database, page Files, \"Relocate all files to folder\")" +
+                (renamed ? $"; the database in it is named {SqlCatalog.QuoteName(name)}, because instance {export.TargetInstance} has a database {export.Database} already." : "."));
+
             var notes = new List<string>();
             if (DiskPublishes.HasEnded(publish) && publish.Status?.CleanedUp != true)
             {
@@ -348,7 +357,8 @@ public sealed class SqlPublishSessionRunner(
             }
 
             var summary = $"Exported {source} from the restore point of {point.CreatedUtc.ToLocalTime():g} to {backup.BackupPath} on {host} " +
-                $"({VmBackupTask.Format(backup.BackupBytes)}, copy-only, verified){(backup.Uploaded ? "; it can be downloaded here for 24 hours" : string.Empty)}" +
+                $"({VmBackupTask.Format(backup.BackupBytes)}, copy-only, verified{(renamed ? $"; the database in it is named {SqlCatalog.QuoteName(name)}" : string.Empty)})" +
+                (backup.Uploaded ? "; it can be downloaded here for 24 hours" : string.Empty) +
                 (notes.Count == 0 ? "." : $"; but {string.Join("; ", notes)}.");
             var state = leftover is not null ? SessionState.Failed : notes.Count > 0 ? SessionState.Warning : SessionState.Succeeded;
             log.Write(state == SessionState.Succeeded ? LogSeverity.Info : state == SessionState.Warning ? LogSeverity.Warning : LogSeverity.Error, summary);

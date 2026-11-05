@@ -52,6 +52,7 @@ public sealed record GuestFreezeResult(
 
 /// <param name="AllDatabasesConsistent">Every user database of the guest's SQL Server instances was recorded.</param>
 /// <param name="Summary">For the session log: instances, recorded, skipped and failed databases, the write pause.</param>
-public sealed record SqlSnapshotOutcome(bool AllDatabasesConsistent, string Summary);
+/// <param name="Warnings">Warnings for the session log that do not change the consistency (e.g. about the transaction logs).</param>
+public sealed record SqlSnapshotOutcome(bool AllDatabasesConsistent, string Summary, IReadOnlyList<string>? Warnings = null);
 
 public sealed record GuestWriterResult(string Name, string State, string? Failure);
