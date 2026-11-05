@@ -18,7 +18,10 @@
 - **Application awareness:** application-consistent backups of Windows guests (VSS). Needs our own in-guest agent (VSS requester), because XAPI's quiesced snapshots were removed in XenServer / XCP-ng 8.1
   - On storage where the XAPI snapshot takes longer than VSS's 10 s (shared LVM, several disks): T-SQL snapshot backup for SQL Server 2022+, then an in-guest shadow copy that is reverted when the backup is read (spec `2026-11-04-2026-consistent-snapshots-slow-storage`)
 - **Active Directory objects:** application-aware AD backup with object-level restore
-- **MS SQL Server:** application-aware backup and restore of SQL Server databases
+- **MS SQL Server:** application-aware backup and restore of SQL Server databases (spec `2026-11-03-0026-sql-server-restore`)
+  - Backup: VSS, or the T-SQL snapshot backup for SQL Server 2022+ as a full (default) or copy-only backup, with the `.bkm` and LSNs in the restore point
+  - SQL browser with export of the files (ZIP) and as `.bak`, publish without copying (loopback iSCSI with a write overlay), restore as a new database (same or another VM or instance), overwrite of the original with rollback
+  - Recovery from agent crashes, VM reboots and server restarts
 - **File-level restore:** restore single files and folders from guest disks without restoring the whole VM. It moved here from phase 2 as a knock-out criterion (2026-11-02).
   - Browser download, back into the VM (Windows through the guest agent, Linux over SSH/SFTP with sudo), or to an SMB share.
   - File systems: NTFS, ext2/3/4, XFS, LVM (linear).
@@ -28,6 +31,10 @@
 - **Tape out:** move or copy backups to tape on an HPE MSL tape library
 - **Offsite / immutable copy:** backup copies to a secondary site, S3 or immutable storage
 - **SQL transaction log backup & point-in-time recovery:** SQL Server log backups and point-in-time restore, run directly from the backup app
+  - Log backups every 15/30/60 minutes per job by the agent, uploaded to the repository, with a log-chain watch (foreign log backups, recovery model changes, RPO)
+  - Restore to a second: the full snapshot backup (`.bkm`, `RESTORE … WITH METADATA_ONLY, NORECOVERY`) plus the log backups up to `STOPAT`; as a publish without copying, as a new database, or overwriting the original with an optional tail-log backup. The path is checked in container tests (2026-11-05)
+  - Own spec; first SQL Server 2022+, later a streaming full as the base for older versions
+- **Publish for file-level restore:** mount a restore point's volumes into a VM over the same loopback iSCSI as the SQL publish
 - **VMware vSphere support:** back up and restore vSphere VMs using only public vSphere APIs, with no VDDK and no Broadcom partner program
   - Snapshots and CBT through the vim25 Web Services API
   - Disk data read and written through a HotAdd proxy VM (`ReconfigVM_Task`), with full, incremental and block-level restore

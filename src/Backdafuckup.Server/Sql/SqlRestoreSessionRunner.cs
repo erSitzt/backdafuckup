@@ -57,7 +57,7 @@ public sealed class SqlRestoreSessionRunner(
 
         var source = $"{request.Instance}\\{request.Database}";
         var task = await tracker.AddTaskAsync(session.Id, point.VmNativeId, source, cancellationToken).ConfigureAwait(false);
-        var log = events.CreateLog(session.Id, task.Id, point.VmName);
+        var log = events.CreateLog(session.Id, task.Id, await SqlRestoreRecovery.LogPrefixAsync(agents, point.VmName, point.VmNativeId, request.TargetVmNativeId, cancellationToken).ConfigureAwait(false));
         await tracker.UpdateTaskAsync(task.Id, t => { t.State = SessionState.Running; t.StartedUtc = time.GetUtcNow(); }, CancellationToken.None).ConfigureAwait(false);
         try
         {
@@ -496,7 +496,7 @@ public sealed class SqlRestoreSessionRunner(
     /// </summary>
     private async Task<string> CleanUpLostTransferAsync(AgentEntity agent, SqlAccount account, IReadOnlyList<string> written, AgentTransfer transfer, IOperationLog log)
     {
-        const string temporary = "a partly written file may be left as .bdfu-restore-*.tmp in the target folder";
+        const string temporary = "the agent deletes a partly written .bdfu-restore-*.tmp file when it starts again";
         var writtenSoFar = new List<string>();
         var hashes = new List<string?>();
         for (var i = 0; i < written.Count; i++)

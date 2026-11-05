@@ -36,12 +36,16 @@ public sealed class FileRestoreTransfer
     private int _done;
     private bool _cancel;
 
-    public FileRestoreTransfer(HttpClient http, Guid id, IRestoreFileSystem fs, AgentLog log)
+    private readonly TemporaryFileJournal? _temporaries;
+
+    /// <param name="temporaries">Notes the folders of temporary files, so that a crash leaves none behind (null: not noted).</param>
+    public FileRestoreTransfer(HttpClient http, Guid id, IRestoreFileSystem fs, AgentLog log, TemporaryFileJournal? temporaries = null)
     {
         _http = http;
         _id = id;
         _fs = fs;
         _log = log;
+        _temporaries = temporaries;
     }
 
     private string Base => AgentProtocol.TransfersPath + "/" + _id.ToString("D");
@@ -122,6 +126,9 @@ public sealed class FileRestoreTransfer
         }
 
         _log.Write($"File restore {_id}: " + (error is null ? $"finished, {_done} item(s), {_bytes} bytes." : $"ended after {_done} item(s): {error}"));
+
+        // Every temporary file was committed or deleted on the way.
+        _temporaries?.Clear();
         for (var attempt = 1; attempt <= 5; attempt++)
         {
             if (await ReportAsync(final: true, error, CancellationToken.None).ConfigureAwait(false))
@@ -249,6 +256,7 @@ public sealed class FileRestoreTransfer
             using (var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
             {
                 long written = 0;
+                _temporaries?.Record(WindowsPath.Parent(target));
                 using (var output = _fs.CreateTemporary(target, out temporary))
                 {
                     try

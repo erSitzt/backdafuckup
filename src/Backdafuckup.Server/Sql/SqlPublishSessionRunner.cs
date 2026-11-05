@@ -53,7 +53,7 @@ public sealed class SqlPublishSessionRunner(
 
         var source = $"{request.Instance}\\{request.Database}";
         var task = await tracker.AddTaskAsync(session.Id, point.VmNativeId, source, cancellationToken).ConfigureAwait(false);
-        var log = events.CreateLog(session.Id, task.Id, point.VmName);
+        var log = events.CreateLog(session.Id, task.Id, await SqlRestoreRecovery.LogPrefixAsync(agents, point.VmName, point.VmNativeId, request.TargetVmNativeId, cancellationToken).ConfigureAwait(false));
         await tracker.UpdateTaskAsync(task.Id, t => { t.State = SessionState.Running; t.StartedUtc = time.GetUtcNow(); }, CancellationToken.None).ConfigureAwait(false);
         var target = $"instance {request.TargetInstance}";
         try
@@ -258,7 +258,7 @@ public sealed class SqlPublishSessionRunner(
 
         var source = $"{export.Instance}\\{export.Database}";
         var task = await tracker.AddTaskAsync(session.Id, point.VmNativeId, source, cancellationToken).ConfigureAwait(false);
-        var log = events.CreateLog(session.Id, task.Id, point.VmName);
+        var log = events.CreateLog(session.Id, task.Id, await SqlRestoreRecovery.LogPrefixAsync(agents, point.VmName, point.VmNativeId, export.TargetVmNativeId, cancellationToken).ConfigureAwait(false));
         await tracker.UpdateTaskAsync(task.Id, t => { t.State = SessionState.Running; t.StartedUtc = time.GetUtcNow(); }, CancellationToken.None).ConfigureAwait(false);
         try
         {

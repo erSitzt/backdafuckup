@@ -107,6 +107,27 @@ sudo mkdir -p /var/www/html/bdfu-lab && sudo sh -c 'echo page > /var/www/html/bd
 | E2 | Leave a file browser unused for 30 minutes. | It closes; its session log says "closed after 30 minutes without use". |
 | E3 | Keep a file browser open on the oldest restore point while the job runs and retention would remove it. | The restore point stays; the next job run removes it after the browser is closed. |
 
+### F. SQL Server
+
+Two Windows VMs with SQL Server and the agent (the lab's `bdfu-lab-sql1` and `bdfu-lab-sql2`: SQL Server 2025 Express, data on D:, log on L:, databases `shop` (FULL recovery), `small`, `imoltp`), a Windows account (`.\Administrator`, sysadmin) and a SQL login with `dbcreator` only (`bdfu_restore`), both under *Credentials*. A job with guest processing, method *SQL Server snapshot*, over both VMs. Check in the guest with SSMS or PowerShell (`System.Data.SqlClient`); list leftovers with `Get-IscsiSession`, `Get-Disk | ? SerialNumber -like 'BDFU*'`, `Get-Partition | ? AccessPaths -match publish`, `Get-Service MSiSCSI` and `*.bdfu-*` files in the database folders.
+
+| # | Steps | Expected |
+|---|---|---|
+| F1 | Run the job with *SQL Server backup type* = full backup. | Session log: databases suspended, "recorded in msdb as full snapshot backups (in the backup chain)", the write pause. A warning names FULL-recovery databases whose log chain started. In the guest `msdb.dbo.backupset` has `is_snapshot = 1, is_copy_only = 0`; `sys.database_recovery_status.last_log_backup_lsn` of `shop` is set. |
+| F2 | Run it once more with copy-only. | `is_copy_only = 1`; no log-chain warning for databases without a chain. |
+| F3 | Open the restore point in the SQL browser. | Instances and databases with their files (data, log); `imoltp` is not restorable (In-Memory OLTP container), with the reason. |
+| F4 | *Export files* of `shop`. | A ZIP with the three files and an attach script; hashes equal to the files in the backup. |
+| F5 | *Publish* `shop` into the original VM with the Windows account. | Attached as `[shop_published]`, ONLINE, readable (row counts as in the backup); two disks over one loopback iSCSI session, partitions mounted under the agent's `publish` folder, no drive letters. |
+| F6 | *Unpublish*. | Session Succeeded; no database, BDFU disk, access path, iSCSI session or portal left; MSiSCSI in its previous state. |
+| F7 | *Publish* into the other VM with the SQL login. | As F5 on the other VM; the log says the login cannot open the database itself (dbcreator) and names the `ALTER AUTHORIZATION`. |
+| F8 | While published: kill the agent process (`Stop-Process -Force`), then start the service. | The agent removes mounts and iSCSI from its journal at start; the server notices the restart and removes the database with the session's account; session Warning "… restarted meanwhile"; nothing left (F6). |
+| F9 | While published: reboot the VM. | As F8, after the boot (the server waits until SQL Server accepts connections). |
+| F10 | *Restore* `shop` as a new database into the other VM (original folders, instance defaults, own folders). | Files under the new name, checked with SHA-256, attached ONLINE; `DBCC CHECKDB` clean; row counts and checksums as in the backup. A file that exists already stops the restore, and the files written are deleted. |
+| F11 | *Restore → Overwrite* `shop` in the original VM (sysadmin). | Offline, swap, online in seconds; same owner, users, Service Broker; `CHECKDB` clean; no `*.bdfu-*` files left (unless kept). |
+| F12 | Overwrite again and kill the agent while it runs (e.g. right after "overwriting the database"). | The session fails with "has its own files again … nothing was overwritten", the database is online with its own files, the `*.bdfu-new` copies are deleted. |
+| F13 | *Export .bak* of `shop` into the other VM with the download option (sysadmin). | A copy-only `.bak` with checksums (compressed except on Express) in the instance's backup folder, `RESTORE VERIFYONLY` passed; the session page offers the download for 24 hours, and its SHA-256 equals the file in the VM. With the dbcreator login the export is refused before anything happens. |
+| F14 | Repeat F5, F10 and F11 with the .NET Framework 4.8 agent on Windows Server 2012 R2. | As there. |
+
 ## Results
 
 | Check | Date | Server / agent version | Result | Notes |
@@ -114,3 +135,8 @@ sudo mkdir -p /var/www/html/bdfu-lab && sudo sh -c 'echo page > /var/www/html/bd
 | B4 | 2026-11-02 | 0.2.0 | passed | `\\corp.example\dfs\Shared`: DC → DFS01/-2 → `\\fs01.corp.example\Shared`. The short name `\\corp\dfs` does not resolve on Linux (expected). |
 | B1 (part) | 2026-11-02 | 0.2.0 | passed | One file to fs01, original time kept. |
 | C1 (part) | 2026-11-02 | 0.2.0 (net10) | passed | One file into `C:\TEMP` on app01 with owner and permissions; SHA-256 equal. |
+| F3–F6, F10 (same VM), F11 | 2026-11-04 | 0.3.0 (`ecec970`, net10) | passed | bdfu-lab-sql1; found and fixed: writer files all "other" (`08745ec`), `.\name` accounts (`9b0f875`), an explicit ACE after overwrite (`ecec970`). |
+| F13 (without download) | 2026-11-05 | 0.3.0 (`98708b8`) | passed | 5.6 MB `.bak` on bdfu-lab-sql1, copy-only, checksums, not compressed (Express). Name and file paths inside the `.bak` are the staging ones; dialog and log say so since `5de3e8e`. |
+| F1 | 2026-11-05 | 0.3.0 (`5de3e8e`) | passed | Both VMs; warning for `shop`, `shop_restored`; `last_log_backup_lsn` set. |
+| F5/F7 (other VM, SQL login), F8, F9 | 2026-11-05 | 0.3.0 (`df1b4cb`) | passed | Agent crash: logout from the dead target 68 s, then the server removed the database. VM reboot: SQL Server Express refused connections for about 2 minutes after the boot. |
+| F10 (other VM, SQL login) | 2026-11-05 | 0.3.0 (`df1b4cb`) | passed, fixed | The dbcreator login could not open the database it attached (dbo kept `sa`); since `a6c453b` the log says why, and export needs sysadmin. |

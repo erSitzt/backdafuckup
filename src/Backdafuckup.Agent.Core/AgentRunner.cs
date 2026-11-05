@@ -107,6 +107,16 @@ public sealed class AgentRunner
             {
                 _log.Write($"Recovering an interrupted SQL Server overwrite failed: {ex.Message}");
             }
+
+            try
+            {
+                // A restore interrupted while it wrote a file: its temporary file is still there.
+                TemporaryFileJournal.Sweep(_restoreFiles, _paths.BaseDirectory, _log.Write);
+            }
+            catch (Exception ex) when (!(ex is OutOfMemoryException))
+            {
+                _log.Write($"Deleting the temporary files of an interrupted restore failed: {ex.Message}");
+            }
         }
 
         try
@@ -317,7 +327,7 @@ public sealed class AgentRunner
 
         var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
         client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
-        var transfer = new FileRestoreTransfer(client, command.TransferId, _restoreFiles, _log);
+        var transfer = new FileRestoreTransfer(client, command.TransferId, _restoreFiles, _log, new TemporaryFileJournal(_paths.BaseDirectory));
         var busy = await StartWorkAsync($"file restore {command.TransferId}", async () =>
         {
             using (client)

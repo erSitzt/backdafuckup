@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace Backdafuckup.Agent.Core;
 
@@ -51,6 +53,9 @@ public interface IRestoreFileSystem
     /// <summary>Opens a regular file for reading (e.g. to check its content before deleting it).</summary>
     Stream OpenRead(string path);
 
+    /// <summary>The temporary files of restores (<see cref="CreateTemporary"/>) in <paramref name="folder"/>, as full paths.</summary>
+    IReadOnlyList<string> Temporaries(string folder);
+
     /// <summary>
     /// Adds an "allow full control" entry for <paramref name="account"/> (a name such as <c>NT SERVICE\MSSQL$SQLEXPRESS</c>
     /// or a SID) to the file's DACL; the other entries stay.
@@ -88,6 +93,20 @@ public abstract class PortableRestoreFileSystem : IRestoreFileSystem
     }
 
     public void CreateDirectory(string path) => Directory.CreateDirectory(Map(path));
+
+    /// <summary>The name pattern of <see cref="CreateTemporary"/>'s files.</summary>
+    public const string TemporaryPattern = ".bdfu-restore-*.tmp";
+
+    public IReadOnlyList<string> Temporaries(string folder)
+    {
+        Guard(folder);
+        if (Probe(folder) != RestorePathKind.Directory)
+        {
+            return Array.Empty<string>();
+        }
+
+        return Directory.EnumerateFiles(Map(folder), TemporaryPattern).Select(f => WindowsPath.Join(folder, Path.GetFileName(f))).ToList();
+    }
 
     public Stream CreateTemporary(string path, out string temporaryPath)
     {
