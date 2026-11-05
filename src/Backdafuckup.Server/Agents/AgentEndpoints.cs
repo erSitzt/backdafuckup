@@ -47,7 +47,7 @@ public static class AgentEndpoints
             // A different set of files on the server (after a server update): offer the update, but never during a backup
             // operation or while commands wait (a restart between freeze and thaw would break the freeze).
             if (request.Host is { FilesHash.Length: > 0 } host && packages.Get(host.Build) is { } build && build.FilesHash != host.FilesHash
-                && !registry.IsBusy(agentId) && request.Busy is null)
+                && !registry.IsBusy(agentId) && request.Busy is null && !sqlJobs.BackupRunning(agentId))
             {
                 return Results.Json(new AgentPollResponse { Update = build.ToOffer() }, AgentJson.Options);
             }
@@ -352,6 +352,71 @@ public static class AgentEndpoints
                 return Results.Problem($"The backup server could not store the file: {ex.Message}", statusCode: StatusCodes.Status500InternalServerError);
             }
         }).WithMetadata(new Microsoft.AspNetCore.Mvc.DisableRequestSizeLimitAttribute());
+
+        // A log or full backup job sends each backup file here, streamed into the repository (checked by length and SHA-256).
+        agent.MapPut("/sql-jobs/{id:guid}/backups/{fileId}", async (Guid id, string fileId, AgentService agents, Sql.SqlJobs jobs, HttpContext http, CancellationToken ct) =>
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return Results.Unauthorized();
+            }
+
+            if (jobs.Receiver(id, agentId) is not { } receiver)
+            {
+                return Results.Problem("The SQL backup job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
+            }
+
+            SqlBackupUpload? upload;
+            try
+            {
+                upload = System.Text.Json.JsonSerializer.Deserialize<SqlBackupUpload>(
+                    Convert.FromBase64String(http.Request.Headers[AgentProtocol.BackupUploadHeader].ToString()), AgentJson.Options);
+            }
+            catch (Exception ex) when (ex is FormatException or System.Text.Json.JsonException)
+            {
+                return Results.Problem($"The upload's description is unreadable: {ex.Message}", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            if (upload is null || upload.FileId != fileId)
+            {
+                return Results.Problem("The upload's description does not match the file.", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                return Results.Json(await receiver.ReceiveAsync(upload, http.Request.Body, ct), AgentJson.Options);
+            }
+            catch (InvalidDataException ex)
+            {
+                return Results.Problem(ex.Message, statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException or FormatException)
+            {
+                return Results.Problem($"The backup server could not store {upload.FileName}: {ex.Message}", statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }).WithMetadata(new Microsoft.AspNetCore.Mvc.DisableRequestSizeLimitAttribute());
+
+        agent.MapPost("/sql-jobs/{id:guid}/backups/commit", async (Guid id, AgentService agents, Sql.SqlJobs jobs, HttpContext http, CancellationToken ct) =>
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return Results.Unauthorized();
+            }
+
+            if (jobs.Receiver(id, agentId) is not { } receiver)
+            {
+                return Results.Problem("The SQL backup job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
+            }
+
+            try
+            {
+                return Results.Json(await receiver.CommitAsync(ct), AgentJson.Options);
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException or DbUpdateException)
+            {
+                return Results.Problem($"The backup server could not commit the backup files: {ex.Message}", statusCode: StatusCodes.Status500InternalServerError);
+            }
+        });
 
         agent.MapPost("/sql-jobs/{id:guid}/result", async (Guid id, SqlJobResult result, AgentService agents, Sql.SqlJobs jobs, HttpContext http, CancellationToken ct) =>
         {

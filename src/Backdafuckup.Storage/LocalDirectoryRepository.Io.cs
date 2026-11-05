@@ -131,16 +131,24 @@ public sealed partial class LocalDirectoryRepository
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class Writer(LocalDirectoryRepository repository, Guid restorePointId, string vmDirectory, string directory) : IRepositoryWriter
+    /// <summary>
+    /// Stores chunks for one object (restore point or SQL backup) and protects them from GC until the object is committed
+    /// or discarded.
+    /// </summary>
+    private abstract class ChunkWriterBase(LocalDirectoryRepository repository, Guid id)
     {
         private readonly Lock _protectedLock = new();
         private readonly HashSet<ChunkId> _protected = [];
         private int _committed;
         private int _closed;
 
-        public Guid RestorePointId { get; } = restorePointId;
+        public Guid Id { get; } = id;
 
         public bool IsCommitted => Volatile.Read(ref _committed) != 0;
+
+        protected LocalDirectoryRepository Repository { get; } = repository;
+
+        protected bool IsClosed => Volatile.Read(ref _closed) != 0;
 
         public bool Protects(ChunkId id)
         {
@@ -163,7 +171,22 @@ public sealed partial class LocalDirectoryRepository
             }
         }
 
-        public async ValueTask<ChunkPutResult> PutChunkAsync(ChunkId id, ReadOnlyMemory<byte> plaintext, CancellationToken cancellationToken)
+        public abstract ValueTask DisposeAsync();
+
+        protected void MarkCommitted() => Volatile.Write(ref _committed, 1);
+
+        /// <summary>Marks the writer closed; false when it already was.</summary>
+        protected bool Close() => Interlocked.Exchange(ref _closed, 1) == 0;
+
+        protected void ThrowIfClosed()
+        {
+            if (IsClosed || IsCommitted)
+            {
+                throw new InvalidOperationException("The writer is already committed or closed.");
+            }
+        }
+
+        protected async ValueTask<ChunkPutResult> StoreChunkAsync(ChunkId id, ReadOnlyMemory<byte> plaintext, CancellationToken cancellationToken)
         {
             ThrowIfClosed();
             if (id.IsZero)
@@ -171,6 +194,7 @@ public sealed partial class LocalDirectoryRepository
                 throw new ArgumentException("Zero chunks are not stored.", nameof(id));
             }
 
+            var repository = Repository;
             var hex = id.ToHex();
             var path = repository.ChunkPath(hex);
             var stripe = repository._stripes[id.Stripe(StripeCount)];
@@ -231,18 +255,27 @@ public sealed partial class LocalDirectoryRepository
                 }
             }
         }
+    }
+
+    private sealed class Writer(LocalDirectoryRepository repository, Guid restorePointId, string vmDirectory, string directory)
+        : ChunkWriterBase(repository, restorePointId), IRepositoryWriter
+    {
+        public Guid RestorePointId => Id;
+
+        public ValueTask<ChunkPutResult> PutChunkAsync(ChunkId id, ReadOnlyMemory<byte> plaintext, CancellationToken cancellationToken) =>
+            StoreChunkAsync(id, plaintext, cancellationToken);
 
         public async Task<ManifestIndexRef> WriteDiskIndexAsync(string diskKey, ChunkIndex index, CancellationToken cancellationToken)
         {
             ThrowIfClosed();
-            if (index.ChunkSize != repository._descriptor.ChunkSize)
+            if (index.ChunkSize != Repository._descriptor.ChunkSize)
             {
-                throw new ArgumentException("Index chunk size does not match the repository.", nameof(index));
+                throw new ArgumentException("Index chunk size does not match the Repository.", nameof(index));
             }
 
             var raw = ChunkIndexFormat.Serialize(index);
             var file = $"disk-{SafeName(diskKey)}.idx";
-            await AtomicFile.WriteAsync(repository._tempDirectory, Path.Combine(directory, file), ChunkIndexFormat.Compress(raw), overwrite: true, cancellationToken).ConfigureAwait(false);
+            await AtomicFile.WriteAsync(Repository._tempDirectory, Path.Combine(directory, file), ChunkIndexFormat.Compress(raw), overwrite: true, cancellationToken).ConfigureAwait(false);
             return new ManifestIndexRef(file, ChunkIndexFormat.Sha256Hex(raw), index.Entries.LongLength);
         }
 
@@ -253,7 +286,7 @@ public sealed partial class LocalDirectoryRepository
             await content.CopyToAsync(memory, cancellationToken).ConfigureAwait(false);
             var raw = memory.ToArray();
             var file = $"{SafeName(name)}.zst";
-            await AtomicFile.WriteAsync(repository._tempDirectory, Path.Combine(directory, file), ChunkIndexFormat.Compress(raw), overwrite: true, cancellationToken).ConfigureAwait(false);
+            await AtomicFile.WriteAsync(Repository._tempDirectory, Path.Combine(directory, file), ChunkIndexFormat.Compress(raw), overwrite: true, cancellationToken).ConfigureAwait(false);
             return new ManifestBlob(file, ChunkIndexFormat.Sha256Hex(raw), raw.LongLength, format);
         }
 
@@ -261,30 +294,30 @@ public sealed partial class LocalDirectoryRepository
         {
             ThrowIfClosed();
             ArgumentNullException.ThrowIfNull(manifest);
-            if (manifest.RestorePointId != RestorePointId || manifest.RepositoryId != repository.Info.RepositoryId)
+            if (manifest.RestorePointId != RestorePointId || manifest.RepositoryId != Repository.Info.RepositoryId)
             {
-                throw new ArgumentException("Manifest does not belong to this writer/repository.", nameof(manifest));
+                throw new ArgumentException("Manifest does not belong to this writer/Repository.", nameof(manifest));
             }
 
-            if (manifest.Chunking.ChunkSize != repository._descriptor.ChunkSize)
+            if (manifest.Chunking.ChunkSize != Repository._descriptor.ChunkSize)
             {
-                throw new ArgumentException("Manifest chunk size does not match the repository.", nameof(manifest));
+                throw new ArgumentException("Manifest chunk size does not match the Repository.", nameof(manifest));
             }
 
             // Make all chunk/index/blob data durable before the manifest (the commit point) appears.
-            FileSystemSync.SyncFileSystem(repository.Root);
+            FileSystemSync.SyncFileSystem(Repository.Root);
             var json = JsonSerializer.SerializeToUtf8Bytes(manifest, CoreJsonContext.Default.RestorePointManifest);
-            await AtomicFile.WriteAsync(repository._tempDirectory, Path.Combine(directory, ManifestFileName), json, overwrite: false, cancellationToken).ConfigureAwait(false);
+            await AtomicFile.WriteAsync(Repository._tempDirectory, Path.Combine(directory, ManifestFileName), json, overwrite: false, cancellationToken).ConfigureAwait(false);
             AtomicFile.SyncDirectory(directory);
             AtomicFile.SyncDirectory(vmDirectory);
-            repository._restorePoints[RestorePointId] = directory;
-            Volatile.Write(ref _committed, 1);
+            Repository._restorePoints[RestorePointId] = directory;
+            MarkCommitted();
             return new ManifestInfo(RestorePointId, directory, manifest);
         }
 
-        public ValueTask DisposeAsync()
+        public override ValueTask DisposeAsync()
         {
-            if (Interlocked.Exchange(ref _closed, 1) != 0)
+            if (!Close())
             {
                 return ValueTask.CompletedTask;
             }
@@ -306,16 +339,8 @@ public sealed partial class LocalDirectoryRepository
                 }
             }
 
-            repository.OnWriterClosed(this);
+            Repository.OnWriterClosed(this);
             return ValueTask.CompletedTask;
-        }
-
-        private void ThrowIfClosed()
-        {
-            if (Volatile.Read(ref _closed) != 0 || IsCommitted)
-            {
-                throw new InvalidOperationException("The restore point writer is already committed or closed.");
-            }
         }
     }
 }

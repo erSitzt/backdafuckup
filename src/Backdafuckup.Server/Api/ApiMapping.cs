@@ -39,7 +39,41 @@ internal static class ApiMapping
         j.Repository?.Name ?? string.Empty, j.RetentionPoints, j.Schedule.ToDto(),
         j.Objects.OrderBy(o => o.Order).Select(o => new JobObjectDto(o.NativeId, o.CachedName)).ToList(),
         j.NextRunUtc, j.LastRunUtc, j.LastResult?.ToString(), running, j.MaxParallelVms, j.NbdConnectionsPerDisk, j.RetryCount, j.TransportMode.ToString(), j.MaxParallelDisks,
-        j.GuestProcessing, j.GuestFailurePolicy.ToString(), j.GuestCredentialId, j.GuestProcessingMode.ToString(), j.SqlCredentialId, j.SqlSnapshotCopyOnly);
+        j.GuestProcessing, j.GuestFailurePolicy.ToString(), j.GuestCredentialId, j.GuestProcessingMode.ToString(), j.SqlCredentialId, j.SqlSnapshotCopyOnly,
+        j.SqlBackup.ToDto());
+
+    public static SqlBackupSettingsDto ToDto(this SqlBackupSettings s) => new(
+        s.Enabled, s.LogIntervalMinutes, s.FullSchedule.ToDto(), s.SystemSchedule.ToDto(), s.FullForAllDatabases, s.FullOnChainBreak, [.. s.ExcludedDatabases], s.StagingFolder);
+
+    /// <summary>The settings of a request; the schedules run in the job's time zone.</summary>
+    public static SqlBackupSettings FromDto(this SqlBackupSettingsDto? s, string timeZoneId)
+    {
+        var settings = new SqlBackupSettings();
+        if (s is null)
+        {
+            return settings;
+        }
+
+        settings.Enabled = s.Enabled;
+        settings.LogIntervalMinutes = s.LogIntervalMinutes;
+        if (s.FullSchedule is { } full)
+        {
+            settings.FullSchedule = full.FromDto();
+        }
+
+        if (s.SystemSchedule is { } system)
+        {
+            settings.SystemSchedule = system.FromDto();
+        }
+
+        settings.FullSchedule.TimeZoneId = timeZoneId;
+        settings.SystemSchedule.TimeZoneId = timeZoneId;
+        settings.FullForAllDatabases = s.FullForAllDatabases;
+        settings.FullOnChainBreak = s.FullOnChainBreak;
+        settings.ExcludedDatabases = [.. (s.ExcludedDatabases ?? []).Select(d => d.Trim()).Where(d => d.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase)];
+        settings.StagingFolder = string.IsNullOrWhiteSpace(s.StagingFolder) ? null : s.StagingFolder.Trim();
+        return settings;
+    }
 
     public static RestorePointDto ToDto(this RestorePointEntity r) => new(
         r.Id, r.RepositoryId, r.JobId, r.JobName, r.ConnectionId, r.VmNativeId, r.VmName, r.CreatedUtc, r.Kind.ToString(), r.State.ToString(),

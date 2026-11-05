@@ -53,6 +53,9 @@ public static class AgentProtocol
     /// </summary>
     public const string SqlJobsPath = "api/agent/sql-jobs";
 
+    /// <summary>Header of a SQL backup file upload: the <see cref="SqlBackupUpload"/> as base64 JSON.</summary>
+    public const string BackupUploadHeader = "X-Bdfu-Backup";
+
     /// <summary>The agent publishes restore point disks into its guest (<see cref="AgentCommandKinds.Publish"/>).</summary>
     public const string CapabilityPublish = "publish-v1";
 
@@ -88,6 +91,13 @@ public static class AgentProtocol
     /// uploads it on request (<c>PUT {SqlJobsPath}/{id}/file?name=</c>).
     /// </summary>
     public const string CapabilitySqlBackup = "sql-backup-v1";
+
+    /// <summary>
+    /// The agent runs the SQL Server backups of the log chain (<see cref="SqlJobKinds.LogBackup"/>,
+    /// <see cref="SqlJobKinds.FullBackup"/>): backup files are queued durably in the agent's folder, uploaded to
+    /// <c>PUT {SqlJobsPath}/{id}/backups/{fileId}</c> and deleted after <c>POST {SqlJobsPath}/{id}/backups/commit</c>.
+    /// </summary>
+    public const string CapabilitySqlBackupChain = "sql-backup-chain-v1";
 
     /// <summary>
     /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
@@ -611,6 +621,21 @@ public static class SqlJobKinds
     /// if the database got its own files back and was taken offline by the overwrite, brings it online again.
     /// </summary>
     public const string ReplaceRecovery = "replace-recovery";
+
+    /// <summary>
+    /// Transaction log backups of every user database with a log chain on <see cref="SqlJobRequest.Instance"/> (all running
+    /// instances if null); a database in FULL or BULK_LOGGED recovery without a chain gets a native full backup instead if
+    /// <see cref="SqlJobRequest.FullWithoutChain"/>. Backup files left from earlier runs are uploaded first. The result
+    /// lists the databases, what was backed up and the backup sets of other tools since
+    /// <see cref="SqlJobRequest.ForeignSinceUtc"/>.
+    /// </summary>
+    public const string LogBackup = "log-backup";
+
+    /// <summary>
+    /// Native full backups (<c>BACKUP DATABASE … WITH CHECKSUM</c>, verified): of <see cref="SqlJobRequest.Databases"/>,
+    /// or with <see cref="SqlJobRequest.SystemDatabases"/> of <c>master</c>, <c>msdb</c> and <c>model</c>.
+    /// </summary>
+    public const string FullBackup = "full-backup";
 }
 
 /// <summary>How an overwrite that an agent restart interrupted ended (<see cref="SqlJobKinds.ReplaceRecovery"/>).</summary>
@@ -720,6 +745,84 @@ public sealed class SqlSnapshotDatabase
     public string? CheckpointLsn { get; set; }
 
     public string? DatabaseBackupLsn { get; set; }
+
+    /// <summary>Result: the whole backup set as msdb recorded it (null: an agent before this field).</summary>
+    public SqlBackupSetFacts? BackupSet { get; set; }
+}
+
+/// <summary>
+/// A backup set from <c>msdb.dbo.backupset</c>: what the server's catalog and restore planner need. Numbers and GUIDs
+/// travel as text (numeric(25) LSNs do not fit a long), times as SQL Server's local time with its UTC offset.
+/// </summary>
+public sealed class SqlBackupSetFacts
+{
+    public string BackupSetUuid { get; set; } = string.Empty;
+
+    /// <summary><c>D</c> (full), <c>I</c> (differential) or <c>L</c> (log).</summary>
+    public string Type { get; set; } = string.Empty;
+
+    public int Position { get; set; } = 1;
+
+    public bool IsCopyOnly { get; set; }
+
+    public bool IsSnapshot { get; set; }
+
+    public string FirstLsn { get; set; } = string.Empty;
+
+    public string LastLsn { get; set; } = string.Empty;
+
+    public string CheckpointLsn { get; set; } = string.Empty;
+
+    public string? DatabaseBackupLsn { get; set; }
+
+    public string FamilyGuid { get; set; } = string.Empty;
+
+    public string DatabaseGuid { get; set; } = string.Empty;
+
+    public string? FirstRecoveryForkGuid { get; set; }
+
+    public string? LastRecoveryForkGuid { get; set; }
+
+    public string? ForkPointLsn { get; set; }
+
+    /// <summary>Start in SQL Server's local time (ISO 8601 without offset).</summary>
+    public string Start { get; set; } = string.Empty;
+
+    /// <summary>Finish in SQL Server's local time (ISO 8601 without offset).</summary>
+    public string Finish { get; set; } = string.Empty;
+
+    /// <summary>The server's offset from UTC in 15-minute steps (<c>backupset.time_zone</c>); null when unknown (127).</summary>
+    public int? TimeZone { get; set; }
+
+    public string? RecoveryModel { get; set; }
+
+    public long BackupSize { get; set; }
+
+    public long? CompressedBackupSize { get; set; }
+
+    /// <summary>NAME of the backup set (ours: <c>backdafuckup …</c>).</summary>
+    public string? Name { get; set; }
+
+    /// <summary>The device the backup was written to (<c>backupmediafamily.physical_device_name</c>), where known.</summary>
+    public string? Device { get; set; }
+
+    /// <summary>Full backups by the agent: the database's files when it was backed up (where a restore puts them).</summary>
+    public List<SqlBackupFileFacts>? Files { get; set; }
+}
+
+/// <summary>A file of a backed-up database (<c>sys.master_files</c>).</summary>
+public sealed class SqlBackupFileFacts
+{
+    public int FileId { get; set; }
+
+    public string LogicalName { get; set; } = string.Empty;
+
+    public string PhysicalName { get; set; } = string.Empty;
+
+    /// <summary><c>ROWS</c>, <c>LOG</c>, <c>FILESTREAM</c> or <c>FULLTEXT</c>.</summary>
+    public string Type { get; set; } = string.Empty;
+
+    public long SizeBytes { get; set; }
 }
 
 public static class SqlSnapshotStates
@@ -822,6 +925,30 @@ public sealed class SqlJobRequest
 
     /// <summary>BackupDatabase with upload: where the server files it (the export session); set by the server.</summary>
     public Guid? UploadId { get; set; }
+
+    /// <summary>LogBackup/FullBackup: the backup job (written into the backup sets' DESCRIPTION).</summary>
+    public Guid? BackupJobId { get; set; }
+
+    /// <summary>LogBackup/FullBackup: the session (written into the backup sets' DESCRIPTION).</summary>
+    public Guid? SessionId { get; set; }
+
+    /// <summary>FullBackup: the user databases to back up.</summary>
+    public List<string>? Databases { get; set; }
+
+    /// <summary>FullBackup: back up <c>master</c>, <c>msdb</c> and <c>model</c>.</summary>
+    public bool SystemDatabases { get; set; }
+
+    /// <summary>LogBackup: user databases to leave out.</summary>
+    public List<string>? ExcludedDatabases { get; set; }
+
+    /// <summary>LogBackup: a database in FULL or BULK_LOGGED recovery without a log chain gets a native full backup.</summary>
+    public bool FullWithoutChain { get; set; }
+
+    /// <summary>LogBackup: report backup sets of other tools that finished since then (UTC).</summary>
+    public DateTime? ForeignSinceUtc { get; set; }
+
+    /// <summary>LogBackup/FullBackup/SnapshotSuspend: how long to wait for another backup of the instance in the agent (ms).</summary>
+    public int LockWaitMs { get; set; }
 }
 
 public sealed class SqlJobResult
@@ -850,6 +977,18 @@ public sealed class SqlJobResult
 
     /// <summary>ReplaceRecovery: one of <see cref="SqlReplaceOutcomes"/>.</summary>
     public string? Outcome { get; set; }
+
+    /// <summary>LogBackup/FullBackup: the databases of the instances and what happened to each.</summary>
+    public List<SqlBackupDatabaseOutcome>? BackupDatabases { get; set; }
+
+    /// <summary>LogBackup: backup sets of other tools since <see cref="SqlJobRequest.ForeignSinceUtc"/>.</summary>
+    public List<SqlForeignBackup>? ForeignBackups { get; set; }
+
+    /// <summary>LogBackup/FullBackup: backup files committed on the server in this job (uploaded now or earlier).</summary>
+    public int CommittedFiles { get; set; }
+
+    /// <summary>LogBackup/FullBackup: backup files still waiting in the agent's queue (upload failed, retried next run).</summary>
+    public int QueuedFiles { get; set; }
 
     /// <summary>What the job did, for the session log (e.g. "removed database [shop_published]").</summary>
     public List<string> Log { get; set; } = new List<string>();
@@ -1085,4 +1224,91 @@ public sealed class PublishStatusResponse
 {
     /// <summary>True: unpublish now.</summary>
     public bool Stop { get; set; }
+}
+
+/// <summary>What a backup job did with one database.</summary>
+public sealed class SqlBackupDatabaseOutcome
+{
+    public string Instance { get; set; } = string.Empty;
+
+    public string Database { get; set; } = string.Empty;
+
+    public string? RecoveryModel { get; set; }
+
+    /// <summary>The database has a log chain (<c>last_log_backup_lsn</c> is set).</summary>
+    public bool HasLogChain { get; set; }
+
+    public string? FamilyGuid { get; set; }
+
+    public string? DatabaseGuid { get; set; }
+
+    public string? RecoveryForkGuid { get; set; }
+
+    /// <summary>One of <see cref="SqlBackupActions"/>.</summary>
+    public string Action { get; set; } = SqlBackupActions.Skipped;
+
+    /// <summary>Why it was skipped or failed.</summary>
+    public string? Reason { get; set; }
+
+    /// <summary>The backup file in the guest (when backed up).</summary>
+    public string? Path { get; set; }
+
+    public long Bytes { get; set; }
+}
+
+public static class SqlBackupActions
+{
+    public const string Log = "log";
+    public const string Full = "full";
+    public const string Skipped = "skipped";
+    public const string Failed = "failed";
+}
+
+/// <summary>A backup set another tool wrote (or one whose NAME is not ours), as seen in msdb.</summary>
+public sealed class SqlForeignBackup
+{
+    public string Instance { get; set; } = string.Empty;
+
+    public string Database { get; set; } = string.Empty;
+
+    public SqlBackupSetFacts BackupSet { get; set; } = new SqlBackupSetFacts();
+}
+
+/// <summary>Sent with each backup file upload (header <c>X-Bdfu-Backup</c>, base64 JSON).</summary>
+public sealed class SqlBackupUpload
+{
+    /// <summary>The queue entry's id (stable across retries).</summary>
+    public string FileId { get; set; } = string.Empty;
+
+    public string Instance { get; set; } = string.Empty;
+
+    public string? ProductVersion { get; set; }
+
+    public string Database { get; set; } = string.Empty;
+
+    /// <summary>One of <see cref="SqlBackupActions.Log"/>, <see cref="SqlBackupActions.Full"/>, or <c>system</c>.</summary>
+    public string Kind { get; set; } = string.Empty;
+
+    public string FileName { get; set; } = string.Empty;
+
+    public long Length { get; set; }
+
+    public string Sha256 { get; set; } = string.Empty;
+
+    public SqlBackupSetFacts BackupSet { get; set; } = new SqlBackupSetFacts();
+
+    /// <summary>The backup job and session the file was written for (may be an earlier run's).</summary>
+    public Guid? BackupJobId { get; set; }
+
+    public Guid? SessionId { get; set; }
+}
+
+/// <summary>The server's answer to an upload or a commit.</summary>
+public sealed class SqlBackupUploadReply
+{
+    /// <summary>Upload: the backup set is already in the catalog (an earlier upload committed it); the agent may delete it.</summary>
+    public bool Known { get; set; }
+
+    /// <summary>Commit: the file ids now stored for good (the agent deletes these files).</summary>
+    public List<string> Committed { get; set; } = new List<string>();
 }

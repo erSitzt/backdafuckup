@@ -128,11 +128,32 @@ public interface IBackupRepository : IAsyncDisposable
 
     Task<VerifyResult> VerifyAsync(Guid restorePointId, VerifyDepth depth, IProgress<string>? progress, CancellationToken cancellationToken);
 
+    /// <summary>Starts a new SQL backup object (log, full or system backups of one instance) for <paramref name="vmId"/>.</summary>
+    ISqlBackupWriter BeginSqlBackup(Guid sqlBackupId, string vmId);
+
+    IAsyncEnumerable<SqlBackupInfo> ListSqlBackupsAsync(CancellationToken cancellationToken);
+
+    Task<ISqlBackupReader> OpenSqlBackupAsync(Guid sqlBackupId, CancellationToken cancellationToken);
+
+    /// <summary>Prevents deletion of a SQL backup object while held (source of a restore).</summary>
+    IRestorePointPin PinSqlBackup(Guid sqlBackupId);
+
+    /// <summary>Deletes a SQL backup object (manifest, indexes). Chunks are reclaimed by GC. Fails while pinned.</summary>
+    Task DeleteSqlBackupAsync(Guid sqlBackupId, CancellationToken cancellationToken);
+
+    Task<VerifyResult> VerifySqlBackupAsync(Guid sqlBackupId, VerifyDepth depth, IProgress<string>? progress, CancellationToken cancellationToken);
+
     StorageStats GetStorageStats();
 }
 
 public sealed class RestorePointPinnedException(Guid restorePointId)
     : InvalidOperationException($"Restore point {restorePointId} is in use and cannot be deleted.");
+
+public sealed class SqlBackupPinnedException(Guid sqlBackupId)
+    : InvalidOperationException($"SQL backup {sqlBackupId} is in use by a restore and cannot be deleted.")
+{
+    public Guid SqlBackupId { get; } = sqlBackupId;
+}
 
 public sealed class ChunkCorruptException(ChunkId id, string reason)
     : IOException($"Chunk {id} is corrupt: {reason}")

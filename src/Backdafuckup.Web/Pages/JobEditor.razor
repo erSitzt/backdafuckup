@@ -159,6 +159,99 @@ else
                             }
                         </MudSelect>
                     </MudExpansionPanel>
+                    <MudExpansionPanel Text="@(_sqlBackup ? $"SQL Server backups (log backups every {LogInterval()} min)" : "SQL Server backups (log chain)")">
+                        <MudSwitch T="bool" @bind-Value="_sqlBackup" Color="Color.Primary" Label="Log, full and system database backups through the agent in the VMs" />
+                        <MudText Typo="Typo.caption" Class="d-block mb-3">
+                            The agent backs up the transaction logs of every database in FULL or BULK_LOGGED recovery, sends the files to
+                            the repository and deletes them in the VM afterwards; databases can then be restored to any second.
+                            backdafuckup owns the log chain: switch off log backups of other tools (maintenance plans, Ola Hallengren,
+                            other backup products), the session warns about them. If the backup server is unreachable, the log backups
+                            pause; files whose upload failed wait in the VM.
+                        </MudText>
+                        @if (_sqlBackup && !(_guest && _guestMode == GuestProcessingModes.SqlSnapshot))
+                        {
+                            <MudSelect T="Guid?" @bind-Value="_sqlCredentialId" Label="SQL Server account" Variant="Variant.Outlined" Clearable="true" Class="mb-3"
+                                       HelperText="A Windows account or SQL Server login that is sysadmin on the SQL Server instances (Credentials).">
+                                @foreach (var (id, label) in _sqlAccounts)
+                                {
+                                    <MudSelectItem T="Guid?" Value="id">@label</MudSelectItem>
+                                }
+                            </MudSelect>
+                        }
+                        <div class="d-flex gap-3 mb-1" style="flex-wrap:wrap">
+                            <MudSelect T="string" @bind-Value="_logPreset" Label="Log backups every" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:220px">
+                                @foreach (var minutes in SqlBackupSettingsDto.PresetIntervals)
+                                {
+                                    <MudSelectItem T="string" Value="@minutes.ToString(System.Globalization.CultureInfo.InvariantCulture)">@minutes minutes</MudSelectItem>
+                                }
+                                <MudSelectItem T="string" Value="@("custom")">Longer (minutes)</MudSelectItem>
+                            </MudSelect>
+                            @if (_logPreset == "custom")
+                            {
+                                <MudNumericField T="int" @bind-Value="_logCustom" Label="Minutes (60–1440)" Min="60" Max="1440" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:200px" />
+                            }
+                        </div>
+                        <MudText Typo="Typo.caption" Class="d-block mb-3">
+                            The interval is the most data a restore can lose (RPO). The runs start at fixed times from midnight in the
+                            job's time zone (e.g. :00, :15, :30, :45).
+                        </MudText>
+                        <MudText Typo="Typo.subtitle2">Full backups of the databases</MudText>
+                        <div class="d-flex gap-3 mb-1" style="flex-wrap:wrap">
+                            <MudSelect T="string" @bind-Value="_fullKind" Label="Schedule" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:220px">
+                                <MudSelectItem T="string" Value="@("None")">Never</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Daily")">Daily</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Weekly")">On selected weekdays</MudSelectItem>
+                            </MudSelect>
+                            @if (_fullKind != "None")
+                            {
+                                <MudTextField @bind-Value="_fullTime" Label="Time (HH:mm)" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:160px" />
+                            }
+                        </div>
+                        @if (_fullKind == "Weekly")
+                        {
+                            <div class="mb-1">
+                                @foreach (var day in WeekDays)
+                                {
+                                    <MudCheckBox T="bool" Value="@_fullDays.Contains(day)" ValueChanged="@(on => Toggle(_fullDays, day, on))" Label="@day.ToString()" Disabled="!_sqlBackup" />
+                                }
+                            </div>
+                        }
+                        <MudCheckBox T="bool" @bind-Value="_fullForAll" Label="Also for databases whose base is the SQL Server snapshot of the image backup" Disabled="!_sqlBackup" />
+                        <MudText Typo="Typo.caption" Class="d-block mb-3">
+                            A native full backup (BACKUP DATABASE, verified) is the base of the log chain where there is no SQL Server
+                            snapshot: SQL Server before 2022, or VSS as method. Restores need the newest full before the point in time
+                            and every log backup after it.
+                        </MudText>
+                        <MudCheckBox T="bool" @bind-Value="_fullOnBreak" Label="Start a missing or broken log chain with a full backup at once" Disabled="!_sqlBackup" />
+                        <MudText Typo="Typo.caption" Class="d-block mb-3">
+                            For new databases, after a switch to SIMPLE and back, or after another tool's log backup. Without it the chain
+                            restarts only with the next scheduled full or image backup.
+                        </MudText>
+                        <MudText Typo="Typo.subtitle2">System databases (master, msdb, model)</MudText>
+                        <div class="d-flex gap-3 mb-1" style="flex-wrap:wrap">
+                            <MudSelect T="string" @bind-Value="_systemKind" Label="Full backups" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:220px">
+                                <MudSelectItem T="string" Value="@("None")">Never</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Daily")">Daily</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Weekly")">On selected weekdays</MudSelectItem>
+                            </MudSelect>
+                            @if (_systemKind != "None")
+                            {
+                                <MudTextField @bind-Value="_systemTime" Label="Time (HH:mm)" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:160px" />
+                            }
+                        </div>
+                        @if (_systemKind == "Weekly")
+                        {
+                            <div class="mb-1">
+                                @foreach (var day in WeekDays)
+                                {
+                                    <MudCheckBox T="bool" Value="@_systemDays.Contains(day)" ValueChanged="@(on => Toggle(_systemDays, day, on))" Label="@day.ToString()" Disabled="!_sqlBackup" />
+                                }
+                            </div>
+                        }
+                        <MudTextField @bind-Value="_sqlExcluded" Label="Leave out databases (comma-separated)" Variant="Variant.Outlined" Disabled="!_sqlBackup" Class="mt-3 mb-3" />
+                        <MudTextField @bind-Value="_sqlStaging" Label="Folder in the VM for the backup files until they are sent" Variant="Variant.Outlined" Disabled="!_sqlBackup"
+                                      HelperText="Empty: the instance's backup folder (a subfolder backdafuckup). SQL Server's service must be able to write there." />
+                    </MudExpansionPanel>
                 </MudExpansionPanels>
                 break;
 
@@ -195,6 +288,7 @@ else
                         <tr><td>Schedule</td><td>@Jobs.Describe(Schedule())</td></tr>
                         <tr><td>Disk transport</td><td>@TransportText(_transport)</td></tr>
                         <tr><td>Parallel processing</td><td>@_parallelVms VM(s), @_parallelDisks disk(s) per VM</td></tr>
+                        <tr><td>SQL Server backups</td><td>@(_sqlBackup ? $"log backups every {LogInterval()} min; full backups: {Jobs.Describe(SqlSchedule(_fullKind, _fullTime, _fullDays))}; system databases: {Jobs.Describe(SqlSchedule(_systemKind, _systemTime, _systemDays))}" : "off")</td></tr>
                         <tr><td>Guest processing</td><td>@(_guest ? $"application-consistent ({(_guestMode == GuestProcessingModes.SqlSnapshot ? $"SQL Server snapshot ({(_sqlCopyOnly ? "copy-only" : "full backups")}), otherwise VSS" : "VSS")}); on failure: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with warning")}" + (_guestCredentialId is null ? "" : "; installs missing agents") : "off (crash-consistent)")</td></tr>
                     </tbody>
                 </MudSimpleTable>
@@ -260,6 +354,19 @@ else
     private string _guestMode = GuestProcessingModes.Vss;
     private Guid? _sqlCredentialId;
     private bool _sqlCopyOnly;
+    private bool _sqlBackup;
+    private string _logPreset = "60";
+    private int _logCustom = 120;
+    private string _fullKind = "Weekly";
+    private string _fullTime = "20:00";
+    private readonly HashSet<DayOfWeek> _fullDays = [DayOfWeek.Sunday];
+    private bool _fullForAll;
+    private bool _fullOnBreak = true;
+    private string _systemKind = "Daily";
+    private string _systemTime = "20:00";
+    private readonly HashSet<DayOfWeek> _systemDays = [DayOfWeek.Sunday];
+    private string? _sqlExcluded;
+    private string? _sqlStaging;
     private List<(Guid Id, string Label)> _sqlAccounts = [];
     private string _transport = TransportModes.Automatic;
     private int _retries = 2;
@@ -295,6 +402,24 @@ else
             _guestMode = job.GuestProcessingMode;
             _sqlCredentialId = job.SqlCredentialId;
             _sqlCopyOnly = job.SqlSnapshotCopyOnly;
+            if (job.SqlBackup is { } sqlBackup)
+            {
+                _sqlBackup = sqlBackup.Enabled;
+                _logPreset = SqlBackupSettingsDto.PresetIntervals.Contains(sqlBackup.LogIntervalMinutes)
+                    ? sqlBackup.LogIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture) : "custom";
+                _logCustom = sqlBackup.LogIntervalMinutes;
+                (_fullKind, _fullTime) = (sqlBackup.FullSchedule?.Kind ?? "Weekly", sqlBackup.FullSchedule?.TimeOfDay ?? "20:00");
+                _fullDays.Clear();
+                _fullDays.UnionWith(sqlBackup.FullSchedule?.Days ?? [DayOfWeek.Sunday]);
+                (_systemKind, _systemTime) = (sqlBackup.SystemSchedule?.Kind ?? "Daily", sqlBackup.SystemSchedule?.TimeOfDay ?? "20:00");
+                _systemDays.Clear();
+                _systemDays.UnionWith(sqlBackup.SystemSchedule?.Days ?? [DayOfWeek.Sunday]);
+                _fullForAll = sqlBackup.FullForAllDatabases;
+                _fullOnBreak = sqlBackup.FullOnChainBreak;
+                _sqlExcluded = sqlBackup.ExcludedDatabases is { Count: > 0 } excluded ? string.Join(", ", excluded) : null;
+                _sqlStaging = sqlBackup.StagingFolder;
+            }
+
             _transport = job.TransportMode;
             _retries = job.RetryCount;
             _enabled = job.Enabled;
@@ -385,6 +510,22 @@ else
 
     private ScheduleDto Schedule() => new(_scheduleKind, _time, _scheduleKind == "Weekly" ? _days.ToList() : [], _timeZone);
 
+    private ScheduleDto SqlSchedule(string kind, string time, HashSet<DayOfWeek> days) => new(kind, time, kind == "Weekly" ? days.ToList() : [], _timeZone);
+
+    private int LogInterval() => _logPreset == "custom" ? _logCustom : int.Parse(_logPreset, System.Globalization.CultureInfo.InvariantCulture);
+
+    private static void Toggle(HashSet<DayOfWeek> days, DayOfWeek day, bool on)
+    {
+        if (on)
+        {
+            days.Add(day);
+        }
+        else
+        {
+            days.Remove(day);
+        }
+    }
+
     private async Task SaveAsync()
     {
         _busy = true;
@@ -406,8 +547,17 @@ else
             GuestFailurePolicy = _guestPolicy,
             GuestCredentialId = _guest ? _guestCredentialId : null,
             GuestProcessingMode = _guestMode,
-            SqlCredentialId = _guest && _guestMode == GuestProcessingModes.SqlSnapshot ? _sqlCredentialId : null,
+            SqlCredentialId = (_guest && _guestMode == GuestProcessingModes.SqlSnapshot) || _sqlBackup ? _sqlCredentialId : null,
             SqlSnapshotCopyOnly = _sqlCopyOnly,
+            SqlBackup = new SqlBackupSettingsDto(
+                _sqlBackup,
+                LogInterval(),
+                SqlSchedule(_fullKind, _fullTime, _fullDays),
+                SqlSchedule(_systemKind, _systemTime, _systemDays),
+                _fullForAll,
+                _fullOnBreak,
+                (_sqlExcluded ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                string.IsNullOrWhiteSpace(_sqlStaging) ? null : _sqlStaging.Trim()),
             RetryCount = _retries,
             TransportMode = _transport,
         };

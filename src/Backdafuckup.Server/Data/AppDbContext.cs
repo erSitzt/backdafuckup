@@ -43,6 +43,14 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<SshHostKeyEntity> SshHostKeys => Set<SshHostKeyEntity>();
 
+    public DbSet<SqlDatabaseEntity> SqlDatabases => Set<SqlDatabaseEntity>();
+
+    public DbSet<SqlBackupEntity> SqlBackups => Set<SqlBackupEntity>();
+
+    public DbSet<SqlBackupSetEntity> SqlBackupSets => Set<SqlBackupSetEntity>();
+
+    public DbSet<SqlBackupScheduleEntity> SqlBackupSchedules => Set<SqlBackupScheduleEntity>();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
@@ -89,6 +97,11 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
         {
             e.HasIndex(x => x.Name).IsUnique();
             e.OwnsOne(x => x.Schedule, s => s.Property(p => p.Kind).HasConversion<string>().HasMaxLength(16));
+            e.OwnsOne(x => x.SqlBackup, b =>
+            {
+                b.OwnsOne(x => x.FullSchedule, s => s.Property(p => p.Kind).HasConversion<string>().HasMaxLength(16));
+                b.OwnsOne(x => x.SystemSchedule, s => s.Property(p => p.Kind).HasConversion<string>().HasMaxLength(16));
+            });
             e.Property(x => x.LastResult).HasConversion<string>().HasMaxLength(16);
             e.Property(x => x.TransportMode).HasConversion<string>().HasMaxLength(16);
             e.Property(x => x.GuestFailurePolicy).HasConversion<string>().HasMaxLength(32);
@@ -115,6 +128,53 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
         });
 
         builder.Entity<RestorePointDisk>(e => e.Property(x => x.Mode).HasConversion<string>().HasMaxLength(16));
+
+        builder.Entity<SqlDatabaseEntity>(e =>
+        {
+            e.ToTable("sql_databases");
+            e.Property(x => x.ChainState).HasConversion<string>().HasMaxLength(16);
+            e.HasIndex(x => new { x.PlatformId, x.VmNativeId, x.Instance, x.Name, x.FamilyGuid }).IsUnique();
+        });
+
+        builder.Entity<SqlBackupEntity>(e =>
+        {
+            e.ToTable("sql_backups");
+            e.Property(x => x.Id).ValueGeneratedNever();
+            e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.State).HasConversion<string>().HasMaxLength(16);
+            e.HasIndex(x => new { x.RepositoryId, x.VmNativeId, x.CreatedUtc });
+        });
+
+        builder.Entity<SqlBackupScheduleEntity>(e =>
+        {
+            e.ToTable("sql_backup_schedules");
+            e.Property(x => x.LastResult).HasConversion<string>().HasMaxLength(16);
+            e.HasIndex(x => new { x.JobId, x.VmNativeId }).IsUnique();
+            e.HasOne<BackupJob>().WithMany().HasForeignKey(x => x.JobId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<SqlBackupSetEntity>(e =>
+        {
+            e.ToTable("sql_backup_sets");
+            e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(16);
+            foreach (var lsn in new[] { nameof(SqlBackupSetEntity.FirstLsn), nameof(SqlBackupSetEntity.LastLsn), nameof(SqlBackupSetEntity.CheckpointLsn), nameof(SqlBackupSetEntity.DatabaseBackupLsn), nameof(SqlBackupSetEntity.ForkPointLsn) })
+            {
+                e.Property(lsn).HasPrecision(25, 0);
+            }
+
+            e.HasIndex(x => x.BackupSetUuid).IsUnique();
+            e.Property(x => x.Files).HasColumnType("jsonb").HasConversion(
+                v => v == null ? null : JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+                v => v == null ? null : JsonSerializer.Deserialize<List<Backdafuckup.Core.Repository.SqlBackupSetFile>>(v, JsonSerializerOptions.Default),
+                new ValueComparer<List<Backdafuckup.Core.Repository.SqlBackupSetFile>?>(
+                    (a, b) => JsonSerializer.Serialize(a, JsonSerializerOptions.Default) == JsonSerializer.Serialize(b, JsonSerializerOptions.Default),
+                    v => v == null ? 0 : JsonSerializer.Serialize(v, JsonSerializerOptions.Default).GetHashCode(StringComparison.Ordinal),
+                    v => v == null ? null : v.ToList()));
+            e.HasIndex(x => new { x.SqlDatabaseId, x.LastLsn });
+            e.HasOne<SqlDatabaseEntity>().WithMany().HasForeignKey(x => x.SqlDatabaseId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<SqlBackupEntity>().WithMany().HasForeignKey(x => x.SqlBackupId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<RestorePointEntity>().WithMany().HasForeignKey(x => x.RestorePointId).OnDelete(DeleteBehavior.Cascade);
+        });
 
         builder.Entity<SessionEntity>(e =>
         {

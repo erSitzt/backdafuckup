@@ -116,6 +116,15 @@ public sealed class SqlSnapshotTests(SqlServerFixture sql) : IClassFixture<SqlSe
         Assert.All(new[] { database.FirstLsn, database.LastLsn, database.CheckpointLsn }, lsn => Assert.Matches("^[0-9]{10,25}$", lsn!));
         Assert.Contains(log, l => l.Contains(" in msdb (full backups, ", StringComparison.Ordinal));
 
+        // The whole backup set for the SQL catalog: identity, fork, times with the server's offset (UTC container).
+        var set = Assert.IsType<SqlBackupSetFacts>(database.BackupSet);
+        Assert.Equal(("D", true, false, database.Position!.Value, database.LastLsn, "FULL", 0), (set.Type, set.IsSnapshot, set.IsCopyOnly, set.Position, set.LastLsn, set.RecoveryModel, set.TimeZone));
+        Assert.All(new[] { set.BackupSetUuid, set.FamilyGuid, set.DatabaseGuid, set.FirstRecoveryForkGuid, set.LastRecoveryForkGuid }, g => Assert.True(Guid.TryParse(g, out _), g));
+        Assert.Equal(set.FamilyGuid, set.LastRecoveryForkGuid);
+        Assert.Null(set.ForkPointLsn);
+        Assert.Matches(@"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", set.Finish);
+        Assert.Equal("backdafuckup pit_snap", set.Name);
+
         // Log backups build on it; the point in time lies between two transactions of the second one.
         await sql.ExecuteAsync("INSERT pit_src.dbo.t VALUES (4);");
         await sql.ExecuteAsync($"BACKUP LOG pit_src TO DISK = N'{Folder}/pit_1.trn' WITH INIT, CHECKSUM;");

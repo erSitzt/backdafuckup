@@ -309,8 +309,7 @@ public sealed class SqlSnapshotSuspend : IDisposable
 
     /// <summary>The recorded backup set in msdb, and whether the database has a log chain now.</summary>
     internal const string BackupSetQuery =
-        "SELECT TOP (1) b.position, b.is_copy_only, CONVERT(varchar(30), b.first_lsn), CONVERT(varchar(30), b.last_lsn), CONVERT(varchar(30), b.checkpoint_lsn), " +
-        "CONVERT(varchar(30), b.database_backup_lsn), " +
+        "SELECT TOP (1) " + SqlBackupSets.Columns + ", " +
         "(SELECT CAST(CASE WHEN r.last_log_backup_lsn IS NULL THEN 0 ELSE 1 END AS bit) FROM sys.database_recovery_status r WHERE r.database_id = DB_ID(@database)) " +
         "FROM msdb.dbo.backupset b WHERE b.database_name = @database AND b.name = @name AND b.is_snapshot = 1 ORDER BY b.backup_set_id DESC";
 
@@ -328,13 +327,15 @@ public sealed class SqlSnapshotSuspend : IDisposable
                     return;
                 }
 
-                database.Position = reader.IsDBNull(0) ? (int?)null : Convert.ToInt32(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture);
-                database.CopyOnly = !reader.IsDBNull(1) && reader.GetBoolean(1);
-                database.FirstLsn = reader.IsDBNull(2) ? null : reader.GetString(2);
-                database.LastLsn = reader.IsDBNull(3) ? null : reader.GetString(3);
-                database.CheckpointLsn = reader.IsDBNull(4) ? null : reader.GetString(4);
-                database.DatabaseBackupLsn = reader.IsDBNull(5) ? null : reader.GetString(5);
-                database.StartedLogChain = !database.HadLogChain && !reader.IsDBNull(6) && reader.GetBoolean(6);
+                var set = SqlBackupSets.Read(reader, 0);
+                database.BackupSet = set;
+                database.Position = set.Position;
+                database.CopyOnly = set.IsCopyOnly;
+                database.FirstLsn = set.FirstLsn;
+                database.LastLsn = set.LastLsn;
+                database.CheckpointLsn = set.CheckpointLsn;
+                database.DatabaseBackupLsn = set.DatabaseBackupLsn;
+                database.StartedLogChain = !database.HadLogChain && !reader.IsDBNull(SqlBackupSets.ColumnCount) && reader.GetBoolean(SqlBackupSets.ColumnCount);
             }
         }
         catch (DbException ex)

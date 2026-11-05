@@ -29,6 +29,7 @@ public sealed class AgentRunner
     private readonly IPublishHost? _publish;
     private readonly object _workLock = new object();
     private readonly ConcurrentDictionary<Guid, SqlJobRunner> _sqlJobs = new ConcurrentDictionary<Guid, SqlJobRunner>();
+    private readonly SqlInstanceLocks _sqlLocks = new SqlInstanceLocks();
     private Task? _work;
     private string? _workName;
     private string? _postponedUpdate;
@@ -71,11 +72,18 @@ public sealed class AgentRunner
                 }
             }
 
-            // SQL jobs run beside the work slot, but a restart in the middle of an attach, an overwrite or a backup would
-            // break it: they count too (only the inventory just reads).
-            return _sqlJobs.Values.Where(j => j.Kind != SqlJobKinds.Inventory).Select(j => $"SQL Server job {j.Kind ?? "(starting)"}").FirstOrDefault();
+            // SQL jobs run beside the work slot, but a restart in the middle of an attach, an overwrite or an export would
+            // break it: they count too (only the inventory just reads; the backup lane has its own queue and does not hold
+            // back restores, see BackupLane).
+            return _sqlJobs.Values.Where(j => j.Kind != SqlJobKinds.Inventory && !IsLane(j.Kind)).Select(j => $"SQL Server job {j.Kind ?? "(starting)"}").FirstOrDefault();
         }
     }
+
+    /// <summary>A running log or full backup, or null. It does not block other work, but a self-update waits for it.</summary>
+    public string? BackupLane =>
+        _sqlJobs.Values.Where(j => IsLane(j.Kind)).Select(j => $"SQL Server {(j.Kind == SqlJobKinds.LogBackup ? "log" : "full")} backup").FirstOrDefault();
+
+    private static bool IsLane(string? kind) => kind == SqlJobKinds.LogBackup || kind == SqlJobKinds.FullBackup;
 
     /// <summary>Random for this process: tells the server when the agent restarted (<see cref="AgentPollRequest.RunId"/>).</summary>
     public Guid RunId { get; } = Guid.NewGuid();
@@ -243,7 +251,7 @@ public sealed class AgentRunner
                 }
 
                 var poll = JsonSerializer.Deserialize<AgentPollResponse>(await response.Content.ReadAsStringAsync().ConfigureAwait(false), AgentJson.Options);
-                if (poll?.Update is { } update && Busy is { } busy)
+                if (poll?.Update is { } update && (Busy ?? BackupLane) is { } busy)
                 {
                     // A server that does not know about the work (e.g. restarted meanwhile) offered an update: it waits.
                     if (_postponedUpdate != update.FilesHash)
@@ -395,7 +403,7 @@ public sealed class AgentRunner
 
         var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
         client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
-        var job = new SqlJobRunner(client, command.JobId, _sql, _log, _restoreFiles, _paths.BaseDirectory);
+        var job = new SqlJobRunner(client, command.JobId, _sql, _log, _restoreFiles, _paths.BaseDirectory, _sqlLocks);
         _sqlJobs[command.JobId] = job;
         _ = Task.Run(async () =>
         {
@@ -548,6 +556,11 @@ public sealed class AgentRunner
             if (_restoreFiles is not null && _sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlAttachFiles))
             {
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlAttachFiles);
+            }
+
+            if (_sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlBackupChain))
+            {
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlBackupChain);
             }
 
             if (_sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlSnapshot))

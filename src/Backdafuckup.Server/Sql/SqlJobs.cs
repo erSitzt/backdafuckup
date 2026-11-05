@@ -13,12 +13,15 @@ public sealed class SqlJobs(AgentRegistry registry, IOptions<AgentOptions> optio
 {
     private readonly ConcurrentDictionary<Guid, Job> _jobs = new();
 
-    /// <summary>Sends the job to the agent and waits up to <paramref name="timeout"/> for its result.</summary>
-    public async Task<SqlJobResult> RunAsync(Guid agentId, SqlJobRequest request, TimeSpan timeout, CancellationToken cancellationToken)
+    /// <summary>
+    /// Sends the job to the agent and waits up to <paramref name="timeout"/> for its result. Backup jobs take their files
+    /// through <paramref name="receiver"/>.
+    /// </summary>
+    public async Task<SqlJobResult> RunAsync(Guid agentId, SqlJobRequest request, TimeSpan timeout, CancellationToken cancellationToken, SqlBackupReceiver? receiver = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         request.JobId = Guid.NewGuid();
-        var job = new Job(agentId, request, new TaskCompletionSource<SqlJobResult>(TaskCreationOptions.RunContinuationsAsynchronously));
+        var job = new Job(agentId, request, new TaskCompletionSource<SqlJobResult>(TaskCreationOptions.RunContinuationsAsynchronously)) { Receiver = receiver };
         _jobs[request.JobId] = job;
         try
         {
@@ -86,6 +89,14 @@ public sealed class SqlJobs(AgentRegistry registry, IOptions<AgentOptions> optio
     public string? Signal(Guid jobId, Guid agentId) =>
         _jobs.TryGetValue(jobId, out var job) && job.AgentId == agentId ? job.Signal : null;
 
+    /// <summary>Where a running backup job's files go, for the agent it was sent to (null otherwise).</summary>
+    public SqlBackupReceiver? Receiver(Guid jobId, Guid agentId) =>
+        _jobs.TryGetValue(jobId, out var job) && job.AgentId == agentId ? job.Receiver : null;
+
+    /// <summary>Whether a log or full backup of the agent is running (a self-update waits for it).</summary>
+    public bool BackupRunning(Guid agentId) =>
+        _jobs.Values.Any(j => j.AgentId == agentId && j.Request.Kind is SqlJobKinds.LogBackup or SqlJobKinds.FullBackup);
+
     /// <summary>The request of a running job, for the agent it was sent to (null otherwise).</summary>
     public SqlJobRequest? Get(Guid jobId, Guid agentId) =>
         _jobs.TryGetValue(jobId, out var job) && job.AgentId == agentId ? job.Request : null;
@@ -115,6 +126,8 @@ public sealed class SqlJobs(AgentRegistry registry, IOptions<AgentOptions> optio
 
         /// <summary>The agent process that accepted the job (empty until accepted, or for agents before run ids).</summary>
         public Guid RunId { get; set; }
+
+        public SqlBackupReceiver? Receiver { get; init; }
 
         public volatile string Signal = SqlJobSignals.Wait;
     }

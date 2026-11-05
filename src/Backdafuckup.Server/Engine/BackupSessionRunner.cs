@@ -302,6 +302,11 @@ internal sealed class VmBackupTask(
             {
                 var entity = await db.RestorePoints.FirstAsync(r => r.Id == restorePointId, CancellationToken.None).ConfigureAwait(false);
                 ApplyManifest(entity, manifest, committed.Path);
+                if (guest?.Quiescer?.SqlSnapshot is { Count: > 0 } recorded)
+                {
+                    await SqlBackupCatalog.RecordSnapshotAsync(db, entity, recorded, time.GetUtcNow(), CancellationToken.None).ConfigureAwait(false);
+                }
+
                 await db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
             }
 
@@ -615,6 +620,7 @@ internal sealed class VmBackupTask(
         entity.Consistency = manifest.Consistency;
         entity.ConsistencyReason = manifest.ConsistencyReason;
         entity.SqlDatabaseCount = manifest.SqlDatabaseCount ?? (manifest.Guest is null ? 0 : null);
+        entity.SqlBackupSetsRecorded = manifest.SqlSnapshot is null ? true : null;
         entity.LogicalBytes = manifest.Disks.Sum(d => d.CapacityBytes);
         entity.NewStoredBytes = manifest.Disks.Sum(d => d.Stats.NewStoredBytes);
         entity.Disks = manifest.Disks.Select(d => new RestorePointDisk

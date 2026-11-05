@@ -131,7 +131,7 @@ public static class InfrastructureEndpoints
 
         repositories.MapGet("/", async (AppDbContext db, CancellationToken ct) => await ListRepositoriesAsync(db, ct));
 
-        repositories.MapPost("/", async (CreateRepositoryDto request, AppDbContext db, TimeProvider time, CancellationToken ct) =>
+        repositories.MapPost("/", async (CreateRepositoryDto request, AppDbContext db, TimeProvider time, Sql.SqlCatalogBackfill backfill, CancellationToken ct) =>
         {
             if (await db.Repositories.AnyAsync(r => r.Name == request.Name, ct))
             {
@@ -175,7 +175,8 @@ public static class InfrastructureEndpoints
                 await db.SaveChangesAsync(ct);
                 if (import)
                 {
-                    await ImportRestorePointsAsync(entity.Id, repository, db, ct);
+                    await ImportRestorePointsAsync(entity.Id, repository, db, time, ct);
+                    await backfill.RecordSnapshotFullsAsync(ct);
                 }
 
                 return Results.Created($"/api/repositories/{entity.Id}", entity.ToDto(0, 0));
@@ -187,10 +188,11 @@ public static class InfrastructureEndpoints
                 ? Results.Ok(new StartedDto(await queue.EnqueueMaintenanceAsync(id, repository.Name, "User", ct)))
                 : Results.NotFound());
 
-        repositories.MapPost("/{id:guid}/rescan", async (Guid id, AppDbContext db, RepositoryManager manager, CancellationToken ct) =>
+        repositories.MapPost("/{id:guid}/rescan", async (Guid id, AppDbContext db, RepositoryManager manager, TimeProvider time, Sql.SqlCatalogBackfill backfill, CancellationToken ct) =>
         {
             var repository = await manager.GetAsync(id, ct);
-            var imported = await ImportRestorePointsAsync(id, repository, db, ct);
+            var imported = await ImportRestorePointsAsync(id, repository, db, time, ct);
+            await backfill.RecordSnapshotFullsAsync(ct);
             return Results.Ok(new { imported });
         });
 
@@ -217,6 +219,7 @@ public static class InfrastructureEndpoints
 
             await manager.CloseAsync(id);
             await db.RestorePoints.Where(r => r.RepositoryId == id).ExecuteDeleteAsync(ct);
+            await db.SqlBackups.Where(b => b.RepositoryId == id).ExecuteDeleteAsync(ct);
             await db.Repositories.Where(r => r.Id == id).ExecuteDeleteAsync(ct);
             return Results.NoContent(); // The data on disk is kept; it can be imported again.
         });
@@ -249,8 +252,11 @@ public static class InfrastructureEndpoints
         }).ToList();
     }
 
-    /// <summary>Adds restore points found in the repository but missing in the catalog (disaster recovery of the server).</summary>
-    private static async Task<int> ImportRestorePointsAsync(Guid repositoryId, IBackupRepository repository, AppDbContext db, CancellationToken ct)
+    /// <summary>
+    /// Adds restore points and SQL backups found in the repository but missing in the catalog (disaster recovery of the
+    /// server). The snapshot fulls of imported restore points are recorded by <see cref="Sql.SqlCatalogBackfill"/>.
+    /// </summary>
+    private static async Task<int> ImportRestorePointsAsync(Guid repositoryId, IBackupRepository repository, AppDbContext db, TimeProvider time, CancellationToken ct)
     {
         var known = await db.RestorePoints.Where(r => r.RepositoryId == repositoryId).Select(r => r.Id).ToListAsync(ct);
         var imported = 0;
@@ -279,6 +285,20 @@ public static class InfrastructureEndpoints
         }
 
         await db.SaveChangesAsync(ct);
+
+        var knownSqlBackups = await db.SqlBackups.Where(b => b.RepositoryId == repositoryId).Select(b => b.Id).ToListAsync(ct);
+        await foreach (var info in repository.ListSqlBackupsAsync(ct))
+        {
+            if (knownSqlBackups.Contains(info.SqlBackupId))
+            {
+                continue;
+            }
+
+            await Sql.SqlBackupCatalog.RecordSqlBackupAsync(db, repositoryId, info, time.GetUtcNow(), ct);
+            await db.SaveChangesAsync(ct);
+            imported++;
+        }
+
         return imported;
     }
 

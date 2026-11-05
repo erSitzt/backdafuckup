@@ -7,7 +7,7 @@ namespace Backdafuckup.Sql.Tests;
 /// One SQL Server container for all tests of the run (memory: about 2 GB). Only with BDFU_SQL_TESTS=1; the tests skip
 /// otherwise, so a solution-wide test run does not start it.
 /// </summary>
-public sealed class SqlServerFixture : IAsyncLifetime
+public class SqlServerFixture : IAsyncLifetime
 {
     public const string Image = "mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04";
 
@@ -25,12 +25,23 @@ public sealed class SqlServerFixture : IAsyncLifetime
             return;
         }
 
-        _container = new MsSqlBuilder(Image)
+        var builder = new MsSqlBuilder(ContainerImage)
             .WithEnvironment("MSSQL_MEMORY_LIMIT_MB", "2048")
-            .WithCreateParameterModifier(p => p.HostConfig!.Memory = 2400L * 1024 * 1024)
-            .Build();
+            .WithCreateParameterModifier(p => p.HostConfig!.Memory = 2400L * 1024 * 1024);
+        if (TimeZone is not null)
+        {
+            builder = builder.WithEnvironment("TZ", TimeZone);
+        }
+
+        _container = builder.Build();
         await _container.StartAsync();
     }
+
+    /// <summary>The image of this fixture's container.</summary>
+    protected virtual string ContainerImage => Image;
+
+    /// <summary>The container's time zone (IANA id, as <c>TZ</c>); null for UTC.</summary>
+    protected virtual string? TimeZone => null;
 
     public async ValueTask DisposeAsync()
     {
@@ -38,6 +49,8 @@ public sealed class SqlServerFixture : IAsyncLifetime
         {
             await _container.DisposeAsync();
         }
+
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>Reads a file inside the container (e.g. a backup SQL Server wrote).</summary>
@@ -63,6 +76,27 @@ public sealed class SqlServerFixture : IAsyncLifetime
         }
     }
 
+    /// <summary>The names of the files in a folder inside the container.</summary>
+    public async Task<List<string>> ListFilesAsync(string folder)
+    {
+        var result = await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["ls", "-1", folder]);
+        return [.. result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
+    }
+
+    /// <summary>Creates a folder inside the container that SQL Server can write to.</summary>
+    public async Task CreateDirectoryAsync(string path) =>
+        await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["mkdir", "-p", path]);
+
+    /// <summary>Renames a file inside the container (as the agent renames database files during an overwrite).</summary>
+    public async Task MoveFileAsync(string from, string to)
+    {
+        var result = await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["mv", from, to]);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"mv {from} {to} failed in the container: {result.Stderr}");
+        }
+    }
+
     /// <summary>Writes a file inside the container, readable for SQL Server's user.</summary>
     public async Task WriteFileAsync(string path, byte[] content) =>
         await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).CopyAsync(content, path);
@@ -80,4 +114,16 @@ public sealed class SqlServerFixture : IAsyncLifetime
         command.CommandTimeout = 300;
         await command.ExecuteNonQueryAsync();
     }
+}
+
+/// <summary>SQL Server 2019: no T-SQL snapshot backup, so a native full backup is the base of its log chain.</summary>
+public sealed class SqlServer2019Fixture : SqlServerFixture
+{
+    protected override string ContainerImage => "mcr.microsoft.com/mssql/server:2019-CU32-GDR12-ubuntu-20.04";
+}
+
+/// <summary>SQL Server 2022 in Europe/Berlin: local times in msdb and STOPAT differ from UTC.</summary>
+public sealed class SqlServerBerlinFixture : SqlServerFixture
+{
+    protected override string? TimeZone => "Europe/Berlin";
 }

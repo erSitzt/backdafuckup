@@ -67,6 +67,59 @@ public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory
             logger.LogInformation("Recorded the SQL databases of {Count} older restore point(s).", done);
         }
 
+        var recorded = await RecordSnapshotFullsAsync(cancellationToken).ConfigureAwait(false);
+        if (recorded > 0)
+        {
+            logger.LogInformation("Recorded the SQL Server snapshot backups of {Count} restore point(s) in the SQL catalog.", recorded);
+        }
+
+        return done + recorded;
+    }
+
+    /// <summary>
+    /// Puts the snapshot fulls of restore points into the SQL catalog that have not been recorded there yet (taken before
+    /// the catalog existed, imported, or recovered at startup).
+    /// </summary>
+    public async Task<int> RecordSnapshotFullsAsync(CancellationToken cancellationToken)
+    {
+        List<Guid> ids;
+        await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            ids = await db.RestorePoints
+                .Where(r => r.SqlBackupSetsRecorded == null && r.State == RestorePointState.Available)
+                .OrderBy(r => r.CreatedUtc)
+                .Select(r => r.Id)
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var done = 0;
+        foreach (var id in ids)
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            var point = await db.RestorePoints.FirstOrDefaultAsync(r => r.Id == id, cancellationToken).ConfigureAwait(false);
+            if (point is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                var repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
+                using var pin = repository.Pin(id);
+                await using var reader = await repository.OpenRestorePointAsync(id, cancellationToken).ConfigureAwait(false);
+                var snapshot = await StoredSqlSnapshot.ReadAsync(reader, cancellationToken).ConfigureAwait(false);
+                await SqlBackupCatalog.RecordSnapshotAsync(db, point, snapshot?.Instances ?? [], DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogInformation("The SQL Server snapshot of restore point {RestorePointId} could not be read ({Message}); it is tried again at the next start.", id, ex.Message);
+                continue;
+            }
+
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            done++;
+        }
+
         return done;
     }
 }

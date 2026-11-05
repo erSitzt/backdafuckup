@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -111,8 +112,11 @@ public sealed class SqlJobRunner
 
     private readonly string? _journalDirectory;
 
-    /// <param name="journalDirectory">Where an overwrite keeps its journal (the agent's folder); null: no overwrites.</param>
-    public SqlJobRunner(HttpClient http, Guid id, ISqlEnvironment sql, AgentLog log, IRestoreFileSystem? files = null, string? journalDirectory = null)
+    private readonly SqlInstanceLocks _locks;
+
+    /// <param name="journalDirectory">Where an overwrite keeps its journal and the backup lane its queue (the agent's folder); null: neither.</param>
+    /// <param name="locks">The agent's per-instance backup locks (shared by its jobs).</param>
+    public SqlJobRunner(HttpClient http, Guid id, ISqlEnvironment sql, AgentLog log, IRestoreFileSystem? files = null, string? journalDirectory = null, SqlInstanceLocks? locks = null)
     {
         _http = http;
         _id = id;
@@ -120,6 +124,7 @@ public sealed class SqlJobRunner
         _log = log;
         _files = files;
         _journalDirectory = journalDirectory;
+        _locks = locks ?? new SqlInstanceLocks();
     }
 
     private string Base => AgentProtocol.SqlJobsPath + "/" + _id.ToString("D");
@@ -255,6 +260,16 @@ public sealed class SqlJobRunner
 
                     await SnapshotAsync(request, result, Log, stop).ConfigureAwait(false);
                     break;
+                case SqlJobKinds.LogBackup:
+                case SqlJobKinds.FullBackup:
+                    if (_journalDirectory is null)
+                    {
+                        throw new InvalidOperationException("This agent cannot run SQL Server backups (no folder for its queue).");
+                    }
+
+                    var lane = new SqlBackupLane(_sql, _locks, SqlBackupQueue.Load(_journalDirectory, Log), new HttpBackupSink(this), Log);
+                    await lane.RunAsync(request, result, stop).ConfigureAwait(false);
+                    break;
                 case SqlJobKinds.DeleteFiles:
                     var files = request.Files ?? new List<string>();
                     if (_files is null || files.Count == 0)
@@ -315,6 +330,7 @@ public sealed class SqlJobRunner
     private async Task SnapshotAsync(SqlJobRequest request, SqlJobResult result, Action<string> log, CancellationToken stop)
     {
         var limit = TimeSpan.FromMilliseconds(request.HoldLimitMs > 0 ? request.HoldLimitMs : 120000);
+        using (var held = HoldInstances(request, log, stop))
         using (var suspend = new SqlSnapshotSuspend(_sql, request.Account!, log, copyOnly: request.CopyOnly ?? true))
         {
             var progress = suspend.Suspend(_sql.Instances(), request.Instance);
@@ -339,6 +355,97 @@ public sealed class SqlJobRunner
                     ? "the server took no VM snapshot (it failed or the backup stopped), so nothing was recorded"
                     : $"the VM snapshot was not reported done within {limit.TotalSeconds:0} s; the writes were resumed before it may have been taken");
             result.SuspendedMs = suspend.SuspendedMs;
+        }
+    }
+
+    /// <summary>
+    /// Waits until no log or full backup of the snapshot's instances runs (SQL Server refuses the suspend while a full
+    /// backup runs, and a log backup would wait for the suspended database); after <see cref="SqlJobRequest.LockWaitMs"/>
+    /// the snapshot goes on anyway and the log says what still ran.
+    /// </summary>
+    private IDisposable HoldInstances(SqlJobRequest request, Action<string> log, CancellationToken stop)
+    {
+        var held = new List<IDisposable>();
+        var wait = TimeSpan.FromMilliseconds(request.LockWaitMs > 0 ? request.LockWaitMs : 30 * 60000);
+        foreach (var instance in _sql.Instances().Where(i => request.Instance is null || string.Equals(i.Name, request.Instance, StringComparison.OrdinalIgnoreCase)))
+        {
+            var owner = _locks.Owner(instance.Name);
+            if (owner is not null)
+            {
+                log($"{instance.Name}: waiting for {owner} to finish before suspending.");
+            }
+
+            var lease = _locks.TryAcquire(instance.Name, wait, "the SQL Server snapshot", stop);
+            if (lease is null)
+            {
+                log($"{instance.Name}: {owner ?? "another backup"} still ran after {wait.TotalMinutes:0} min; suspending anyway (a database with a running full backup cannot be suspended).");
+                continue;
+            }
+
+            held.Add(lease);
+        }
+
+        return new Leases(held);
+    }
+
+    private sealed class Leases : IDisposable
+    {
+        private readonly List<IDisposable> _leases;
+
+        public Leases(List<IDisposable> leases) => _leases = leases;
+
+        public void Dispose()
+        {
+            foreach (var lease in _leases)
+            {
+                lease.Dispose();
+            }
+        }
+    }
+
+    /// <summary>The backup lane's way to the server: uploads and the commit over this job's channel.</summary>
+    private sealed class HttpBackupSink : ISqlBackupSink
+    {
+        private readonly SqlJobRunner _job;
+
+        public HttpBackupSink(SqlJobRunner job) => _job = job;
+
+        public async Task<bool> UploadAsync(SqlBackupUpload upload, System.IO.Stream content, CancellationToken cancellationToken)
+        {
+            using (var body = new StreamContent(content, 1 << 20))
+            {
+                body.Headers.ContentLength = upload.Length;
+                body.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+                using (var request = new HttpRequestMessage(HttpMethod.Put, _job.Base + "/backups/" + Uri.EscapeDataString(upload.FileId)) { Content = body })
+                {
+                    request.Headers.Add(AgentProtocol.BackupUploadHeader, Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(upload, AgentJson.Options))));
+                    using (var response = await _job._http.SendAsync(request, cancellationToken).ConfigureAwait(false))
+                    {
+                        var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            throw new InvalidOperationException($"the server did not take the file ({(int)response.StatusCode}): {text}");
+                        }
+
+                        return JsonSerializer.Deserialize<SqlBackupUploadReply>(text, AgentJson.Options)?.Known == true;
+                    }
+                }
+            }
+        }
+
+        public async Task<IReadOnlyList<string>> CommitAsync(CancellationToken cancellationToken)
+        {
+            using (var body = new StringContent("{}", Encoding.UTF8, "application/json"))
+            using (var response = await _job._http.PostAsync(_job.Base + "/backups/commit", body, cancellationToken).ConfigureAwait(false))
+            {
+                var text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new InvalidOperationException($"the server did not commit the files ({(int)response.StatusCode}): {text}");
+                }
+
+                return JsonSerializer.Deserialize<SqlBackupUploadReply>(text, AgentJson.Options)?.Committed ?? new List<string>();
+            }
         }
     }
 

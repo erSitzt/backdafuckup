@@ -250,6 +250,31 @@ public enum ScheduleKind
     Weekly,
 }
 
+/// <summary>The SQL Server backups of a job (see <c>SqlBackupSettingsDto</c>).</summary>
+public sealed class SqlBackupSettings
+{
+    public bool Enabled { get; set; }
+
+    public int LogIntervalMinutes { get; set; } = 60;
+
+    /// <summary>Native full backups of user databases; default weekly on Sunday at 20:00.</summary>
+    public JobSchedule FullSchedule { get; set; } = new() { Kind = ScheduleKind.Weekly, DaysOfWeek = 1 << (int)DayOfWeek.Sunday, TimeOfDay = new TimeOnly(20, 0) };
+
+    /// <summary>Full backups of master, msdb and model; default daily at 20:00.</summary>
+    public JobSchedule SystemSchedule { get; set; } = new() { Kind = ScheduleKind.Daily, TimeOfDay = new TimeOnly(20, 0) };
+
+    /// <summary>Native fulls also of databases whose base is the SQL Server snapshot (2022+ in SqlSnapshot mode).</summary>
+    public bool FullForAllDatabases { get; set; }
+
+    /// <summary>A database without a usable chain (new, after SIMPLE, after a break) gets a native full at once.</summary>
+    public bool FullOnChainBreak { get; set; } = true;
+
+    public List<string> ExcludedDatabases { get; set; } = [];
+
+    /// <summary>Folder in the guest for the backup files until they are sent; null: the instance's backup folder.</summary>
+    public string? StagingFolder { get; set; }
+}
+
 /// <summary>Daily or weekly schedule in a time zone (IANA id).</summary>
 public sealed class JobSchedule
 {
@@ -331,6 +356,9 @@ public sealed class BackupJob
     /// </summary>
     public bool SqlSnapshotCopyOnly { get; set; }
 
+    /// <summary>SQL Server backups the agent runs in the job's VMs (log chain, native and system fulls).</summary>
+    public SqlBackupSettings SqlBackup { get; set; } = new();
+
     public DateTimeOffset? NextRunUtc { get; set; }
 
     public DateTimeOffset? LastRunUtc { get; set; }
@@ -403,6 +431,9 @@ public sealed class RestorePointEntity
     /// <summary>SQL Server databases in the guest metadata; null until known (restore points from before it was recorded).</summary>
     public int? SqlDatabaseCount { get; set; }
 
+    /// <summary>Whether the snapshot fulls of its SQL Server snapshot are in the SQL catalog; null until checked (older restore points).</summary>
+    public bool? SqlBackupSetsRecorded { get; set; }
+
     public VmDescriptor? Vm { get; set; }
 
     public List<RestorePointDisk> Disks { get; set; } = [];
@@ -460,6 +491,12 @@ public enum SessionKind
 
     /// <summary>A SQL Server database of a restore point exported as a .bak (published, backed up, unpublished).</summary>
     SqlExport,
+
+    /// <summary>
+    /// The SQL Server backups of a job on one day (log, native and system fulls of all its VMs): not queued; every run of
+    /// the day reopens it, and its state is the worst of the day.
+    /// </summary>
+    SqlBackup,
 }
 
 public enum GuestProcessingMode

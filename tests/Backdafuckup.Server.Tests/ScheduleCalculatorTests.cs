@@ -49,4 +49,28 @@ public sealed class ScheduleCalculatorTests
         Assert.Null(ScheduleCalculator.Next(new JobSchedule { Kind = ScheduleKind.None }, Monday));
         Assert.Null(ScheduleCalculator.Next(new JobSchedule { Kind = ScheduleKind.Weekly, DaysOfWeek = 0 }, Monday));
     }
+
+    [Theory]
+    [InlineData(15, "2026-11-02T12:07:00Z", "2026-11-02T12:15:00Z")]
+    [InlineData(15, "2026-11-02T12:15:00Z", "2026-11-02T12:30:00Z")]
+    [InlineData(60, "2026-11-02T12:00:30Z", "2026-11-02T13:00:00Z")]
+    [InlineData(5, "2026-11-02T23:58:00Z", "2026-11-03T00:00:00Z")]
+    // 100 minutes does not divide a day: the last slot is 23:20, then midnight again.
+    [InlineData(100, "2026-11-02T23:30:00Z", "2026-11-03T00:00:00Z")]
+    [InlineData(100, "2026-11-03T00:00:00Z", "2026-11-03T01:40:00Z")]
+    public void Interval_slots_count_from_local_midnight(int minutes, string after, string expected)
+    {
+        Assert.Equal(DateTimeOffset.Parse(expected, System.Globalization.CultureInfo.InvariantCulture),
+            ScheduleCalculator.NextInterval(minutes, "UTC", DateTimeOffset.Parse(after, System.Globalization.CultureInfo.InvariantCulture)));
+    }
+
+    [Fact]
+    public void Interval_slots_follow_the_local_clock_across_daylight_saving()
+    {
+        // Europe/Berlin, hourly: 01:00 UTC is 03:00 CEST after the gap on 2027-03-28 (02:00 local does not exist).
+        Assert.Equal(new DateTimeOffset(2027, 3, 28, 1, 0, 0, TimeSpan.Zero), ScheduleCalculator.NextInterval(60, "Europe/Berlin", new DateTimeOffset(2027, 3, 28, 0, 10, 0, TimeSpan.Zero)));
+
+        // Local midnight in Berlin is 23:00 UTC in winter: the 15-minute slots are local quarter hours.
+        Assert.Equal(new DateTimeOffset(2026, 11, 2, 23, 0, 0, TimeSpan.Zero), ScheduleCalculator.NextInterval(1440, "Europe/Berlin", new DateTimeOffset(2026, 11, 2, 12, 0, 0, TimeSpan.Zero)));
+    }
 }

@@ -321,6 +321,31 @@ public static class OperationEndpoints
             errors["schedule"] = ["Select at least one weekday."];
         }
 
+        if (request.SqlBackup is { Enabled: true } sqlBackup)
+        {
+            if (!SqlBackupSettingsDto.IsValidInterval(sqlBackup.LogIntervalMinutes))
+            {
+                errors["sqlBackup.logIntervalMinutes"] = ["Back up the transaction logs every 5, 15 or 30 minutes, or every 60 to 1440 minutes."];
+            }
+
+            if (request.SqlCredentialId is null)
+            {
+                errors["sqlCredentialId"] = ["SQL Server backups need an account with the right to back up the databases (sysadmin): a Windows account or a SQL Server login."];
+            }
+            else if (!await db.Credentials.AnyAsync(c => c.Id == request.SqlCredentialId && (c.Kind == CredentialKind.Windows || c.Kind == CredentialKind.SqlServer), ct))
+            {
+                errors["sqlCredentialId"] = ["Unknown account: choose a Windows account or a SQL Server login under Credentials."];
+            }
+
+            foreach (var (name, schedule) in new[] { ("fullSchedule", sqlBackup.FullSchedule), ("systemSchedule", sqlBackup.SystemSchedule) })
+            {
+                if (schedule is not null && schedule.Kind.Equals("Weekly", StringComparison.OrdinalIgnoreCase) && schedule.Days.Count == 0)
+                {
+                    errors[$"sqlBackup.{name}"] = ["Select at least one weekday."];
+                }
+            }
+        }
+
         return errors.Count == 0 ? null : Results.ValidationProblem(errors);
     }
 
@@ -340,7 +365,8 @@ public static class OperationEndpoints
         job.GuestFailurePolicy = Enum.TryParse<GuestFailurePolicy>(request.GuestFailurePolicy, true, out var policy) ? policy : GuestFailurePolicy.CrashConsistentWithWarning;
         job.GuestCredentialId = request.GuestCredentialId;
         job.GuestProcessingMode = Enum.TryParse<GuestProcessingMode>(request.GuestProcessingMode, true, out var mode) && !int.TryParse(request.GuestProcessingMode, out _) ? mode : GuestProcessingMode.Vss;
-        job.SqlCredentialId = job.GuestProcessingMode == GuestProcessingMode.SqlSnapshot ? request.SqlCredentialId : null;
+        job.SqlBackup = request.SqlBackup.FromDto(job.Schedule.TimeZoneId);
+        job.SqlCredentialId = job.GuestProcessingMode == GuestProcessingMode.SqlSnapshot || job.SqlBackup.Enabled ? request.SqlCredentialId : null;
         job.SqlSnapshotCopyOnly = request.SqlSnapshotCopyOnly;
         job.RetryCount = Math.Clamp(request.RetryCount, 0, 10);
         job.TransportMode = Enum.TryParse<Backdafuckup.Core.DataMover.DiskTransportMode>(request.TransportMode, true, out var transport) ? transport : Backdafuckup.Core.DataMover.DiskTransportMode.Automatic;

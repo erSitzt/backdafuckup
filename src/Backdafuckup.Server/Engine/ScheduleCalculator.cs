@@ -36,6 +36,33 @@ public static class ScheduleCalculator
         return null;
     }
 
+    /// <summary>
+    /// The first slot strictly after <paramref name="afterUtc"/> of an interval schedule: every
+    /// <paramref name="minutes"/> from local midnight of <paramref name="timeZoneId"/> (e.g. :00/:15/:30/:45); a day
+    /// that is not a multiple of the interval starts again at midnight.
+    /// </summary>
+    public static DateTimeOffset NextInterval(int minutes, string timeZoneId, DateTimeOffset afterUtc)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(minutes, 1);
+        var zone = FindZone(timeZoneId);
+        var local = TimeZoneInfo.ConvertTime(afterUtc, zone).DateTime;
+        var midnight = local.Date;
+        var elapsed = (int)Math.Floor((local - midnight).TotalMinutes);
+        for (var slot = ((elapsed / minutes) + 1) * minutes; ; slot += minutes)
+        {
+            var candidate = slot >= 24 * 60 ? ToUtc(midnight.AddDays(1), zone) : ToUtc(midnight.AddMinutes(slot), zone);
+            if (candidate > afterUtc)
+            {
+                return candidate;
+            }
+
+            if (slot >= 24 * 60)
+            {
+                return NextInterval(minutes, timeZoneId, candidate);
+            }
+        }
+    }
+
     public static TimeZoneInfo FindZone(string id)
     {
         try

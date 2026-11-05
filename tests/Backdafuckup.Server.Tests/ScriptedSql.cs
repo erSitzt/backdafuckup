@@ -125,6 +125,33 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
         return new Connection(this);
     }
 
+    /// <summary>Stable GUIDs per database (family and database GUID), as msdb would report them.</summary>
+    public static Guid FamilyGuid(string database) => new(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes("family:" + database.ToUpperInvariant())));
+
+    public static Guid DatabaseGuid(string database) => new(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes("database:" + database.ToUpperInvariant())));
+
+    /// <summary>A table with the columns of <see cref="SqlBackupSets.Columns"/> and <paramref name="extra"/> after them.</summary>
+    private static DataTable BackupSetTable(params (string Name, Type Type)[] extra) =>
+        Table([
+            ("uuid", typeof(string)), ("type", typeof(string)), ("position", typeof(int)), ("copyOnly", typeof(bool)), ("snapshot", typeof(bool)),
+            ("first", typeof(string)), ("last", typeof(string)), ("checkpoint", typeof(string)), ("base", typeof(string)),
+            ("family", typeof(string)), ("database", typeof(string)), ("firstFork", typeof(string)), ("lastFork", typeof(string)), ("forkPoint", typeof(string)),
+            ("start", typeof(string)), ("finish", typeof(string)), ("timeZone", typeof(int)), ("model", typeof(string)),
+            ("size", typeof(string)), ("compressed", typeof(string)), ("name", typeof(string)),
+            .. extra]);
+
+    private static object[] BackupSetRow(
+        string database, string type, int position, bool copyOnly, bool snapshot, string first, string last, string checkpoint, string databaseBackupLsn, string name)
+    {
+        var family = FamilyGuid(database).ToString();
+        var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture);
+        return
+        [
+            Guid.NewGuid().ToString(), type, position, copyOnly, snapshot, first, last, checkpoint, databaseBackupLsn,
+            family, DatabaseGuid(database).ToString(), family, family, DBNull.Value, now, now, 0, "FULL", "8388608", DBNull.Value, name,
+        ];
+    }
+
     private (object? Scalar, DataTable? Table) Execute(string text, IReadOnlyDictionary<string, object?> parameters)
     {
         if (Hold is { } hold && hold.When(text))
@@ -213,15 +240,17 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                     return (null, table);
                 }
 
-                case "SELECT TOP (1) b.position, b.is_copy_only, CONVERT(varchar(30), b.first_lsn), CONVERT(varchar(30), b.last_lsn), CONVERT(varchar(30), b.checkpoint_lsn), " +
-                     "CONVERT(varchar(30), b.database_backup_lsn), " +
+                case "SELECT TOP (1) " + SqlBackupSets.Columns + ", " +
                      "(SELECT CAST(CASE WHEN r.last_log_backup_lsn IS NULL THEN 0 ELSE 1 END AS bit) FROM sys.database_recovery_status r WHERE r.database_id = DB_ID(@database)) " +
                      "FROM msdb.dbo.backupset b WHERE b.database_name = @database AND b.name = @name AND b.is_snapshot = 1 ORDER BY b.backup_set_id DESC":
                 {
-                    var table = Table(("position", typeof(int)), ("copyOnly", typeof(bool)), ("first", typeof(string)), ("last", typeof(string)), ("checkpoint", typeof(string)), ("base", typeof(string)), ("chain", typeof(bool)));
+                    var table = BackupSetTable(("chain", typeof(bool)));
                     var database = (string)parameters["@database"]!;
                     var set = SnapshotBackups.Last(b => b.Database == database && b.Name == (string)parameters["@name"]!);
-                    table.Rows.Add(set.Position, set.CopyOnly, "41000000012300001", "41000000012600001", "41000000012300001", set.CopyOnly ? "0" : "41000000004500001", LogChains.Contains(database));
+                    table.Rows.Add([
+                        .. BackupSetRow(database, "D", set.Position, set.CopyOnly, snapshot: true, "41000000012300001", "41000000012600001", "41000000012300001",
+                            set.CopyOnly ? "0" : "41000000004500001", (string)parameters["@name"]!),
+                        LogChains.Contains(database)]);
                     return (null, table);
                 }
 
@@ -380,10 +409,16 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 if (!SuspendedCopyOnly[database])
                 {
                     LogChains.Add(database);
+                    _logStart.TryAdd(database, 41000000012300001m);
                 }
 
                 File.AppendAllText(path, $"TAPE {database};");
                 return (null, null);
+            }
+
+            if (Lane(text, parameters) is { } lane)
+            {
+                return lane;
             }
 
             if (DropStatement().Match(text) is { Success: true } drop)
@@ -401,6 +436,145 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
             throw new NotSupportedException($"The scripted SQL Server does not know: {text}");
         }
     }
+
+    /// <summary>
+    /// The statements of the agent's backup lane (log and full backups). LSNs grow per backup; a log backup starts where
+    /// the previous one (or the full that started the chain) ended, as SQL Server does.
+    /// </summary>
+    private (object? Scalar, DataTable? Table)? Lane(string text, IReadOnlyDictionary<string, object?> parameters)
+    {
+        string Text(string name) => (string)parameters[name]!;
+        string Lsn(decimal value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        switch (text)
+        {
+            case SqlBackupLane.InstanceQuery:
+            {
+                var table = Table(("version", typeof(string)), ("edition", typeof(int)), ("backup", typeof(string)));
+                table.Rows.Add(ProductVersion, 4, @"C:\Program Files\Microsoft SQL Server\MSSQL16.SQLEXPRESS\MSSQL\Backup\");
+                return (null, table);
+            }
+
+            case SqlBackupLane.DatabasesQuery:
+            {
+                var table = Table(
+                    ("name", typeof(string)), ("id", typeof(int)), ("state", typeof(string)), ("ro", typeof(bool)), ("snapshot", typeof(bool)), ("replica", typeof(bool)),
+                    ("model", typeof(string)), ("chain", typeof(bool)), ("family", typeof(string)), ("database", typeof(string)), ("fork", typeof(string)));
+                foreach (var (name, database) in _databases.OrderBy(d => d.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    var family = FamilyGuid(name).ToString();
+                    table.Rows.Add(name, database.Id, Offline.Contains(name) ? "OFFLINE" : "ONLINE", false, false, false, SimpleRecovery.Contains(name) ? "SIMPLE" : "FULL",
+                        LogChains.Contains(name), family, DatabaseGuid(name).ToString(), family);
+                }
+
+                return (null, table);
+            }
+
+            case SqlBackupLane.ForeignQuery:
+            {
+                var table = BackupSetTable(("device", typeof(string)));
+                table.Columns.Add("database_name", typeof(string)).SetOrdinal(0);
+                foreach (var (database, row, device) in ForeignBackups)
+                {
+                    table.Rows.Add([database, .. row, device]);
+                }
+
+                return (null, table);
+            }
+
+            case SqlBackupLane.BackupSetByDeviceQuery:
+            {
+                var table = BackupSetTable();
+                if (_laneSets.TryGetValue(Text("@path"), out var row))
+                {
+                    table.Rows.Add(row);
+                }
+
+                return (null, table);
+            }
+
+            case SqlBackupLane.AllocatedQuery:
+                return (8L << 20, null);
+
+            case SqlBackupLane.FilesQuery:
+            {
+                var table = Table(("id", typeof(int)), ("name", typeof(string)), ("path", typeof(string)), ("type", typeof(string)), ("size", typeof(long)));
+                var id = 1;
+                foreach (var file in _databases[Text("@database")].Files)
+                {
+                    var log = file.EndsWith(".ldf", StringComparison.OrdinalIgnoreCase);
+                    table.Rows.Add(log ? 2 : id == 2 ? 3 : id, Path.GetFileNameWithoutExtension(file.Replace('\\', '/')), file, log ? "LOG" : "ROWS", 8L << 20);
+                    id++;
+                }
+
+                return (null, table);
+            }
+
+            case "BACKUP LOG @database TO DISK = @path WITH FORMAT, INIT, CHECKSUM, NAME = @name, DESCRIPTION = @description":
+            case "BACKUP DATABASE @database TO DISK = @path WITH FORMAT, INIT, CHECKSUM, NAME = @name, DESCRIPTION = @description":
+            {
+                var database = Text("@database");
+                var path = Text("@path");
+                var log = text.StartsWith("BACKUP LOG", StringComparison.Ordinal);
+                if (log && !LogChains.Contains(database))
+                {
+                    throw new ScriptedSqlException(4214, "BACKUP LOG cannot be performed because there is no current database backup.");
+                }
+
+                decimal first, last;
+                if (log)
+                {
+                    first = _logStart[database];
+                    last = _lsn += 100;
+                    _logStart[database] = last;
+                }
+                else
+                {
+                    first = _lsn += 100;
+                    last = first + 3;
+                    if (LogChains.Add(database))
+                    {
+                        _logStart[database] = first;
+                    }
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, $"TAPE {(log ? "LOG" : "FULL")} {database} {Lsn(first)}-{Lsn(last)};");
+                _laneSets[path] = BackupSetRow(database, log ? "L" : "D", 1, false, snapshot: false, Lsn(first), Lsn(last), Lsn(first), Lsn(first), Text("@name"));
+                LaneBackups.Add((database, log ? "L" : "D", path));
+                return (null, null);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Another tool's log backup of <paramref name="database"/> (e.g. a maintenance plan): it takes the log, so ours no longer continues.</summary>
+    public void TakeForeignLogBackup(string database, string device)
+    {
+        lock (_lock)
+        {
+            var first = _logStart[database];
+            var last = _lsn += 100;
+            _logStart[database] = last;
+            var lsn = (decimal v) => v.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var row = BackupSetRow(database, "L", 1, false, snapshot: false, lsn(first), lsn(last), lsn(first), lsn(first), "Maintenance plan log backup");
+            row[^1] = "Maintenance plan log backup";
+            ForeignBackups.Add((database, row, device));
+        }
+    }
+
+    /// <summary>Backups the lane took: database, type (D/L), path.</summary>
+    public List<(string Database, string Type, string Path)> LaneBackups { get; } = [];
+
+    /// <summary>Other tools' backup sets the lane's msdb query returns: database, row of <see cref="SqlBackupSets.Columns"/>, device.</summary>
+    public List<(string Database, object[] Row, string Device)> ForeignBackups { get; } = [];
+
+    /// <summary>Databases in SIMPLE recovery (all others are FULL).</summary>
+    public HashSet<string> SimpleRecovery { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly Dictionary<string, object[]> _laneSets = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, decimal> _logStart = new(StringComparer.OrdinalIgnoreCase);
+    private decimal _lsn = 41000000012600001m;
 
     private static DataTable Table(params (string Name, Type Type)[] columns)
     {

@@ -297,6 +297,24 @@ public sealed class StartupRecovery(
                 continue;
             }
 
+            if (session.Kind == SessionKind.SqlBackup)
+            {
+                // A day session of SQL Server backups: the interrupted run is a warning; the next run of the day reopens it.
+                // Backup files the agent wrote stay queued in the VM and are sent with that run.
+                foreach (var task in session.Tasks.Where(t => t.State is SessionState.Running or SessionState.Queued))
+                {
+                    task.State = SessionState.Warning;
+                    task.Error = "Service restarted during a run";
+                    task.EndedUtc = time.GetUtcNow();
+                }
+
+                session.State = Sql.SqlBackupService.Worst(session.Tasks.Select(t => t.State));
+                session.EndedUtc = time.GetUtcNow();
+                session.Summary = "The backup service was restarted during a run; the agents keep their backup files queued and send them with the next run.";
+                db.SessionLog.Add(new SessionLogEntry { SessionId = session.Id, TimestampUtc = time.GetUtcNow(), Severity = LogSeverity.Warning, Message = session.Summary });
+                continue;
+            }
+
             if (session.Kind == SessionKind.FileBrowse)
             {
                 // A file browser only reads; it simply ends with the service.
@@ -492,6 +510,9 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<FileRestore.FileRestoreSessionRunner>();
         services.AddSingleton<FileRestore.AgentTransfers>();
         services.AddSingleton<Sql.SqlJobs>();
+        services.Configure<Sql.SqlBackupOptions>(configuration.GetSection("SqlBackup"));
+        services.AddSingleton<Sql.SqlBackupService>();
+        services.AddHostedService(sp => sp.GetRequiredService<Sql.SqlBackupService>());
         services.Configure<Sql.SqlRestoreOptions>(configuration.GetSection("SqlRestore"));
         services.AddSingleton<Sql.SqlPublishSessionRunner>();
         services.AddSingleton<Sql.SqlRestoreSessionRunner>();

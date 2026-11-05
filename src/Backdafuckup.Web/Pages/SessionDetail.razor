@@ -17,7 +17,7 @@ else
         <MudText Typo="Typo.h4">@_session.Name</MudText>
         <MudChip T="string" Class="ml-3" Color="@Fmt.StateColor(_session.State)">@_session.State</MudChip>
         <MudSpacer />
-        @if (_session.State is "Running" or "Queued")
+        @if (_session.State is "Running" or "Queued" && _session.Kind != "SqlBackup")
         {
             @if (_session.Kind == "SqlPublish")
             {

@@ -30,6 +30,12 @@ public sealed class AgentOptions
     /// </summary>
     public TimeSpan SqlSnapshotHoldLimit { get; set; } = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// How long the SQL Server snapshot waits in the agent for a running log or full backup of the instance (SQL Server
+    /// refuses the suspend while a full backup runs); afterwards it suspends anyway.
+    /// </summary>
+    public TimeSpan SqlSnapshotLockWait { get; set; } = TimeSpan.FromMinutes(30);
+
     /// <summary>A file restore into a VM fails when the agent neither downloads nor reports for this long.</summary>
     public TimeSpan TransferSilenceLimit { get; set; } = TimeSpan.FromMinutes(5);
 

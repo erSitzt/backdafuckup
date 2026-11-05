@@ -134,7 +134,29 @@ public sealed record JobDto(
     Guid? GuestCredentialId,
     string GuestProcessingMode = GuestProcessingModes.Vss,
     Guid? SqlCredentialId = null,
-    bool SqlSnapshotCopyOnly = false);
+    bool SqlSnapshotCopyOnly = false,
+    SqlBackupSettingsDto? SqlBackup = null);
+
+/// <summary>
+/// SQL Server backups the agent runs in the job's VMs (the log chain): transaction log backups every
+/// <see cref="LogIntervalMinutes"/>, native full backups (the chain base without the SQL Server snapshot, or for all
+/// databases) and full backups of the system databases on their own schedules.
+/// </summary>
+public sealed record SqlBackupSettingsDto(
+    bool Enabled = false,
+    int LogIntervalMinutes = 60,
+    ScheduleDto? FullSchedule = null,
+    ScheduleDto? SystemSchedule = null,
+    bool FullForAllDatabases = false,
+    bool FullOnChainBreak = true,
+    IReadOnlyList<string>? ExcludedDatabases = null,
+    string? StagingFolder = null)
+{
+    /// <summary>The intervals offered as presets; longer ones (60 to 1440 minutes) can be chosen freely.</summary>
+    public static readonly IReadOnlyList<int> PresetIntervals = [5, 15, 30, 60];
+
+    public static bool IsValidInterval(int minutes) => minutes is 5 or 15 or 30 || minutes is >= 60 and <= 1440;
+}
 
 public sealed record SaveJobDto
 {
@@ -178,6 +200,9 @@ public sealed record SaveJobDto
 
     /// <summary>SQL Server snapshot: copy-only backups instead of regular full backups (default: regular full backups).</summary>
     public bool SqlSnapshotCopyOnly { get; init; }
+
+    /// <summary>SQL Server backups in the VMs (log chain); null: off.</summary>
+    public SqlBackupSettingsDto? SqlBackup { get; init; }
 
     public int RetryCount { get; init; } = 2;
 

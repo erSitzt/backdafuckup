@@ -13,6 +13,7 @@ namespace Backdafuckup.Storage;
 /// &lt;root&gt;/.owner.lock                       held exclusively by the owning server process
 /// &lt;root&gt;/chunks/&lt;hex[0..4]&gt;/&lt;sha256hex&gt;    write-once chunk files (see ChunkCodec)
 /// &lt;root&gt;/restore-points/&lt;vm&gt;/&lt;ts&gt;_&lt;id&gt;/   manifest.json (commit point), disk-*.idx, blobs
+/// &lt;root&gt;/sql-backups/&lt;vm&gt;/&lt;ts&gt;_&lt;id&gt;/      manifest.json (commit point), file-*.idx (SQL Server backup files)
 /// &lt;root&gt;/tmp/                              staging for atomic writes
 /// </code>
 /// Garbage collection is mark-and-sweep: chunks referenced by committed manifests, by active writers or by
@@ -30,14 +31,16 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
 
     private readonly string _chunksDirectory;
     private readonly string _restorePointsDirectory;
+    private readonly string _sqlBackupsDirectory;
     private readonly string _tempDirectory;
     private readonly FileStream _ownerLock;
     private readonly RepositoryDescriptor _descriptor;
     private readonly TimeProvider _time;
     private readonly Lock[] _stripes = Enumerable.Range(0, StripeCount).Select(_ => new Lock()).ToArray();
     private readonly ConcurrentDictionary<Guid, string> _restorePoints = new();
+    private readonly ConcurrentDictionary<Guid, string> _sqlBackups = new();
     private readonly ConcurrentDictionary<Guid, int> _pins = new();
-    private readonly ConcurrentDictionary<Guid, Writer> _activeWriters = new();
+    private readonly ConcurrentDictionary<Guid, ChunkWriterBase> _activeWriters = new();
     private readonly ConcurrentDictionary<string, byte> _knownPrefixDirectories = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _gcMutex = new(1, 1);
     private readonly Lock _lateMarksLock = new();
@@ -52,6 +55,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
         _time = time;
         _chunksDirectory = Path.Combine(root, "chunks");
         _restorePointsDirectory = Path.Combine(root, "restore-points");
+        _sqlBackupsDirectory = Path.Combine(root, "sql-backups");
         _tempDirectory = Path.Combine(root, "tmp");
         Info = new RepositoryInfo(descriptor.RepositoryId, root, descriptor.ChunkSize, descriptor.Hash, descriptor.Compression.Codec, descriptor.Compression.Level);
         Chunks = new ChunkReader(this);
@@ -87,7 +91,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
             throw new InvalidOperationException($"'{root}' already contains a backup repository. Import it instead of creating a new one.");
         }
 
-        foreach (var sub in new[] { "chunks", "restore-points", "tmp" })
+        foreach (var sub in new[] { "chunks", "restore-points", "sql-backups", "tmp" })
         {
             Directory.CreateDirectory(Path.Combine(root, sub));
         }
@@ -271,6 +275,34 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
                 progress?.Report($"Marked restore point {id} ({restorePoints} done, {marked.Count} chunks referenced)");
             }
 
+            var sqlBackups = 0;
+            foreach (var (id, directory) in _sqlBackups.ToArray())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var manifest = await TryReadSqlBackupManifestAsync(directory, cancellationToken).ConfigureAwait(false);
+                if (manifest is null)
+                {
+                    continue;
+                }
+
+                foreach (var file in manifest.Files)
+                {
+                    var index = await ReadSqlBackupIndexAsync(directory, manifest, file, cancellationToken).ConfigureAwait(false);
+                    foreach (var entry in index.Entries)
+                    {
+                        if (!entry.IsZero)
+                        {
+                            marked.Add(entry);
+                        }
+                    }
+                }
+
+                if (++sqlBackups % 100 == 0)
+                {
+                    progress?.Report($"Marked {sqlBackups} SQL backups ({marked.Count} chunks referenced)");
+                }
+            }
+
             // Sweep.
             long scanned = 0, deleted = 0, freed = 0;
             var cutoff = startedUtc - GcSafetyWindow;
@@ -420,7 +452,14 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
     private void Recover()
     {
         PurgeTemp(olderThan: TimeSpan.Zero);
-        foreach (var vmDirectory in Directory.EnumerateDirectories(_restorePointsDirectory))
+        Directory.CreateDirectory(_sqlBackupsDirectory);
+        RecoverObjects(_restorePointsDirectory, _restorePoints);
+        RecoverObjects(_sqlBackupsDirectory, _sqlBackups);
+    }
+
+    private static void RecoverObjects(string root, ConcurrentDictionary<Guid, string> objects)
+    {
+        foreach (var vmDirectory in Directory.EnumerateDirectories(root))
         {
             foreach (var directory in Directory.EnumerateDirectories(vmDirectory))
             {
@@ -433,7 +472,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
 
                 if (File.Exists(Path.Combine(directory, ManifestFileName)))
                 {
-                    _restorePoints[id] = directory;
+                    objects[id] = directory;
                 }
                 else
                 {
@@ -482,7 +521,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
         }
     }
 
-    private void OnWriterClosed(Writer writer)
+    private void OnWriterClosed(ChunkWriterBase writer)
     {
         if (writer.IsCommitted)
         {
@@ -492,7 +531,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
             }
         }
 
-        _activeWriters.TryRemove(writer.RestorePointId, out _);
+        _activeWriters.TryRemove(writer.Id, out _);
     }
 
     private string GetRestorePointDirectory(Guid restorePointId) =>

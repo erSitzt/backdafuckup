@@ -123,11 +123,12 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
                     Kind = SqlJobKinds.SnapshotSuspend,
                     Account = settings.Account,
                     HoldLimitMs = (int)options.SqlSnapshotHoldLimit.TotalMilliseconds,
+                    LockWaitMs = (int)options.SqlSnapshotLockWait.TotalMilliseconds,
                     BackupName = settings.BackupName,
                     CopyOnly = settings.CopyOnly,
                 },
                 cancellationToken).ConfigureAwait(false);
-            var (progress, failed) = await job.WaitForProgressAsync(options.PrepareTimeout, cancellationToken).ConfigureAwait(false);
+            var (progress, failed) = await job.WaitForProgressAsync(options.PrepareTimeout + options.SqlSnapshotLockWait, cancellationToken).ConfigureAwait(false);
             if (progress is null)
             {
                 log.Warning($"Guest processing: suspending SQL Server failed in the {agentName}: {failed?.Error ?? "no details"}. VSS is used for this VM.");

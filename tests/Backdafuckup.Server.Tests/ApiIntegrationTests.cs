@@ -17,6 +17,7 @@ using Backdafuckup.Xen.Xapi;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Testcontainers.PostgreSql;
@@ -49,6 +50,8 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             builder.UseSetting("Agent:PollHold", "00:00:01");
             // Lets a test publish for 0 minutes, so that the automatic unpublish runs at once.
             builder.UseSetting("SqlRestore:MinAutoUnpublishMinutes", "0");
+            // SQL Server backups run when a test calls the scheduler, not on their own.
+            builder.UseSetting("SqlBackup:TickInterval", "01:00:00");
             builder.ConfigureTestServices(services =>
             {
                 services.RemoveAll<Backdafuckup.Smb.ISmbShareConnector>();
@@ -1057,10 +1060,139 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             var stored = await StoredGuestMetadata.ReadAsync(reader, Ct);
             Assert.Equal("application", stored!.SqlDatabases.Single(d => d.Database == "shop").Consistency);
 
+            // The SQL catalog has both as snapshot fulls of the restore point, the base for point-in-time restores.
+            await using (var db = await _factory.Services.GetRequiredService<Microsoft.EntityFrameworkCore.IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>().CreateDbContextAsync(Ct))
+            {
+                var sets = await db.SqlBackupSets.Join(db.SqlDatabases, s => s.SqlDatabaseId, d => d.Id, (s, d) => new { d.Name, d.Instance, d.FamilyGuid, s.Kind, s.RestorePointId, s.Position, s.LastLsn, s.UtcOffsetMinutes })
+                    .OrderBy(s => s.Name).ToListAsync(Ct);
+                Assert.Equal(
+                    [("shop", 1, ScriptedSqlEnvironment.FamilyGuid("shop")), ("small", 2, ScriptedSqlEnvironment.FamilyGuid("small"))],
+                    sets.Select(s => (s.Name, s.Position, s.FamilyGuid)).ToList());
+                Assert.All(sets, s => Assert.Equal(
+                    ("SQLEXPRESS", Backdafuckup.Server.Data.SqlBackupSetKind.SnapshotFull, (Guid?)point.Id, 41000000012600001m, (int?)0),
+                    (s.Instance, s.Kind, s.RestorePointId, s.LastLsn, s.UtcOffsetMinutes)));
+                Assert.True(await db.RestorePoints.Where(r => r.Id == point.Id).Select(r => r.SqlBackupSetsRecorded == true).SingleAsync(Ct));
+
+                // A restore point recorded before the catalog (or imported) gets its snapshot fulls from the backfill.
+                await db.SqlDatabases.ExecuteDeleteAsync(Ct);
+                await db.RestorePoints.Where(r => r.Id == point.Id).ExecuteUpdateAsync(s => s.SetProperty(r => r.SqlBackupSetsRecorded, (bool?)null), Ct);
+                Assert.Equal(1, await _factory.Services.GetRequiredService<SqlCatalogBackfill>().RecordSnapshotFullsAsync(Ct));
+                Assert.Equal(2, await db.SqlBackupSets.CountAsync(s => s.RestorePointId == point.Id, Ct));
+                Assert.Equal(0, await _factory.Services.GetRequiredService<SqlCatalogBackfill>().RecordSnapshotFullsAsync(Ct));
+            }
+
             // The job's SQL Server account cannot be deleted while the job uses it.
             var delete = await client.DeleteAsync($"/api/credentials/sql/{login.Id}", Ct);
             Assert.Equal(HttpStatusCode.Conflict, delete.StatusCode);
             Assert.Contains("used by job(s) 'Files' (SQL Server account)", await delete.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
+    }
+
+    [Fact]
+    public async Task Sql_server_log_backups_run_in_the_agent_into_the_repository_and_a_broken_chain_gets_a_full_at_once()
+    {
+        var client = await SignedInClientAsync();
+        var image = WindowsTestDisk.Create([new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>())]);
+        var backupFolder = Path.Combine(_root, "sql-lane");
+        Directory.CreateDirectory(backupFolder);
+        var sql = new ScriptedSqlEnvironment(_ => []) { BackupFolder = backupFolder };
+        sql.AddDatabase("shop", @"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf");
+        sql.AddDatabase("simple1", @"D:\SQL\simple1.mdf", @"L:\Log\simple1_log.ldf");
+        sql.SimpleRecovery.Add("simple1");
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_backup", "Backup-1", null), Ct));
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+        var none = new ScheduleDto("None", "20:00", [], "UTC");
+
+        // The image backup with the SQL Server snapshot is the base: a full backup that starts the chains.
+        var point = await BackUpImageAsync(
+            client,
+            "sql07",
+            image,
+            async vm => started = await StartAgentAsync(vm, null, sql, null, [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", InBackup = true }]),
+            job => job with
+            {
+                GuestProcessingMode = GuestProcessingModes.SqlSnapshot,
+                SqlCredentialId = login.Id,
+                SqlBackup = new SqlBackupSettingsDto(Enabled: true, LogIntervalMinutes: 15, FullSchedule: none, SystemSchedule: none),
+            },
+            expectedState: "Warning");
+        var (_, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
+        var service = _factory!.Services.GetRequiredService<SqlBackupService>();
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>();
+        try
+        {
+            // First run: a log backup per database with a chain; SIMPLE is noted.
+            await service.TickAsync(Ct);
+            await service.WaitIdleAsync();
+
+            var sessions = (await client.GetFromJsonAsync<List<SessionSummaryDto>>("/api/sessions?kind=SqlBackup", Ct))!.Where(s => s.Kind == "SqlBackup").ToList();
+            var day = Assert.Single(sessions);
+            Assert.StartsWith("SQL Server backups – Files – ", day.Name, StringComparison.Ordinal);
+            var detail = await WaitForSessionAsync(client, day.Id);
+            Assert.Equal("Succeeded", detail.Session.State);
+            Assert.Equal(["sql07"], detail.Tasks.Select(t => t.ObjectName));
+            Assert.Equal([("shop", "L")], sql.LaneBackups.Select(b => (b.Database, b.Type)));
+            Assert.Empty(Directory.GetFiles(Path.Combine(backupFolder, "backdafuckup")));
+
+            var repository = await _factory.Services.GetRequiredService<Backdafuckup.Server.Engine.RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+            var backups = new List<Backdafuckup.Core.Repository.SqlBackupInfo>();
+            await foreach (var backup in repository.ListSqlBackupsAsync(Ct))
+            {
+                backups.Add(backup);
+            }
+
+            var stored = Assert.Single(backups);
+            Assert.Equal((Backdafuckup.Core.Repository.SqlBackupKind.Log, "SQLEXPRESS", "sql07"), (stored.Manifest.Kind, stored.Manifest.Instance, stored.Manifest.Source.VmName));
+            await using (var reader = await repository.OpenSqlBackupAsync(stored.SqlBackupId, Ct))
+            await using (var file = await reader.OpenFileAsync(stored.Manifest.Files[0].Key, Ct))
+            {
+                Assert.StartsWith("TAPE LOG shop 41000000012300001-", await new StreamReader(file).ReadToEndAsync(Ct), StringComparison.Ordinal);
+            }
+
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                var shop = await db.SqlDatabases.SingleAsync(d => d.Name == "shop", Ct);
+                Assert.Equal((Backdafuckup.Server.Data.SqlChainState.Ok, "FULL"), (shop.ChainState, shop.RecoveryModel));
+                Assert.Equal(Backdafuckup.Server.Data.SqlChainState.Simple, (await db.SqlDatabases.SingleAsync(d => d.Name == "simple1", Ct)).ChainState);
+
+                // The chain: the restore point's snapshot full, continued by the log backup.
+                var sets = await db.SqlBackupSets.Where(s => s.SqlDatabaseId == shop.Id).ToListAsync(Ct);
+                var plan = new SqlChain(sets.Select(SqlChainSet.From)).Plan(null);
+                Assert.Equal((Backdafuckup.Server.Data.SqlBackupSetKind.SnapshotFull, 1), (plan.Base.Kind, plan.Logs.Count));
+
+                var schedule = await db.SqlBackupSchedules.SingleAsync(Ct);
+                Assert.True(schedule.NextLogUtc > DateTimeOffset.UtcNow && schedule.NextLogUtc!.Value.Minute % 15 == 0, $"next log backup at {schedule.NextLogUtc}");
+                Assert.NotNull(schedule.ForeignCheckedUtc);
+
+                // Due again (as 15 minutes later).
+                schedule.NextLogUtc = DateTimeOffset.UtcNow.AddSeconds(-1);
+                await db.SaveChangesAsync(Ct);
+            }
+
+            // Another tool takes a log backup: ours no longer continues the chain, so shop gets a full backup at once.
+            sql.TakeForeignLogBackup("shop", @"\\nas\sql\shop_maintenance.trn");
+            await service.TickAsync(Ct);
+            await service.WaitIdleAsync();
+
+            detail = await WaitForSessionAsync(client, day.Id);
+            Assert.Equal("Warning", detail.Session.State);
+            Assert.Single((await client.GetFromJsonAsync<List<SessionSummaryDto>>("/api/sessions?kind=SqlBackup", Ct))!, s => s.Kind == "SqlBackup");
+            var log = await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{day.Id}/log", Ct);
+            Assert.Contains(log!, l => l.Message.Contains(@"another tool took log backup(s)", StringComparison.Ordinal) && l.Message.Contains(@"\\nas\sql\shop_maintenance.trn", StringComparison.Ordinal));
+            Assert.Contains(log!, l => l.Message.Contains("Full backup to restart the log chain: [shop]", StringComparison.Ordinal));
+            Assert.Equal([("shop", "L"), ("shop", "L"), ("shop", "D")], sql.LaneBackups.Select(b => (b.Database, b.Type)));
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                var shop = await db.SqlDatabases.SingleAsync(d => d.Name == "shop", Ct);
+                Assert.Equal(Backdafuckup.Server.Data.SqlChainState.Ok, shop.ChainState);
+                var sets = await db.SqlBackupSets.Where(s => s.SqlDatabaseId == shop.Id).ToListAsync(Ct);
+                Assert.Equal(Backdafuckup.Server.Data.SqlBackupSetKind.NativeFull, new SqlChain(sets.Select(SqlChainSet.From)).Plan(null).Base.Kind);
+            }
         }
         finally
         {
