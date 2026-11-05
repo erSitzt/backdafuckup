@@ -276,6 +276,12 @@ public sealed class SqlPublishSessionRunner(
                 throw new InvalidOperationException($"{account.UserName} cannot connect to {target}: {instance?.ConnectError ?? inventory.Error ?? "no such instance"}");
             }
 
+            if (instance.IsSysadmin != true)
+            {
+                throw new InvalidOperationException($"{account.UserName} is not sysadmin on {target}: it could attach the database for the export, but not back it up " +
+                    "(SQL Server keeps the database's original owner inside it, so only a sysadmin can open it). Choose a sysadmin account.");
+            }
+
             var taken = instance.Databases.Select(d => d.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var name = export.Database;
             for (var n = 1; taken.Contains(name); n++)

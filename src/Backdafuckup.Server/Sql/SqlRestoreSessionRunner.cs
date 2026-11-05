@@ -235,7 +235,7 @@ public sealed class SqlRestoreSessionRunner(
             }
             foreach (var line in attach.Log)
             {
-                log.Write(line.StartsWith("users in ", StringComparison.Ordinal) ? LogSeverity.Warning : LogSeverity.Info, line);
+                log.Write(line.StartsWith("users in ", StringComparison.Ordinal) || line.Contains(" cannot open ", StringComparison.Ordinal) ? LogSeverity.Warning : LogSeverity.Info, line);
             }
 
             if (!attach.Success)

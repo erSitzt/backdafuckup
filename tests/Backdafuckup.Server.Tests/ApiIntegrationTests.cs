@@ -1345,6 +1345,13 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             var request = new SqlExportRequestDto(point.Id, "SQLEXPRESS", "shop", point.VmNativeId, "SQLEXPRESS", login.Id, null, Download: true);
             Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/sql/exports", request with { Folder = @"Backup\here" }, Ct)).StatusCode);
 
+            // Not sysadmin: refused before anything is published (it could attach the database, but not open it to back it up).
+            var refused = await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/exports", request, Ct))).SessionId);
+            Assert.True(refused.Session.State == "Failed", refused.Session.Summary);
+            Assert.Contains("bdfu_export is not sysadmin on ", refused.Session.Summary, StringComparison.Ordinal);
+            Assert.DoesNotContain(sql.Statements, t => t.StartsWith("CREATE DATABASE", StringComparison.Ordinal));
+            sql.Sysadmin = true;
+
             var session = (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/exports", request, Ct))).SessionId;
             var detail = await WaitForSessionAsync(client, session);
             var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{session}/log", Ct))!.Select(l => l.Message));

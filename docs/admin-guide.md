@@ -332,7 +332,8 @@ Restore points show their consistency ("application", or "crash" plus the reason
 
 **Accounts**
 - A Windows account (the agent logs on with it in the guest; `.\name` for local accounts works) or a SQL Server login, stored under *Credentials*. The agent never stores the account.
-- Publish and restore as a new database need `dbcreator` or `sysadmin`; overwrite needs `sysadmin`.
+- Publish and restore as a new database need `dbcreator` or `sysadmin`; overwrite and export .bak need `sysadmin`.
+- With `dbcreator` only, the account attaches the database but cannot open it afterwards: SQL Server makes it the owner, but the database's `dbo` user keeps the original owner (e.g. `sa`), and a login without access cannot take ownership either. Sysadmins (and the original owner) can open it. The dialog and the session log say so; the log names the `ALTER AUTHORIZATION ON DATABASE::[name] TO [account]` a sysadmin runs to give it to the account. The users in the database without a login are then not listed (they can only be read inside it).
 
 **What an attach changes** (publish, restore as a new database): the attaching account becomes the owner, TRUSTWORTHY is off, Service Broker is off. Database users whose login does not exist on the target instance are listed in the session log, with the `ALTER USER … WITH LOGIN` to fix them. SQL Server sets the files' permissions itself (its service, Administrators).
 

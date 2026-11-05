@@ -71,7 +71,75 @@ public sealed class SqlAttachTests(SqlServerFixture sql) : IClassFixture<SqlServ
     }
 
     /// <summary>The container as the agent's SQL environment: one running default instance, connections as sa.</summary>
-    private sealed class ContainerSql(SqlServerFixture sql) : ISqlEnvironment
+    [Fact]
+    public async Task A_dbcreator_login_that_attaches_a_database_cannot_open_it_and_is_told_why()
+    {
+        Assert.SkipUnless(SqlServerFixture.Enabled, "Tests against a SQL Server container need about 2 GB of memory. Set BDFU_SQL_TESTS=1 for the run to enable them.");
+
+        // Files of a database that sa owns (dbo has the SID 0x01), attached by a login that is only dbcreator.
+        await sql.ExecuteAsync(
+            $"CREATE DATABASE own_src ON (NAME = own_src, FILENAME = '{Folder}/own_src.mdf', SIZE = 8MB) LOG ON (NAME = own_src_log, FILENAME = '{Folder}/own_src_log.ldf', SIZE = 4MB);");
+        await sql.ExecuteAsync("USE own_src; CREATE TABLE t (id int); INSERT t VALUES (7);");
+        await sql.ExecuteAsync(
+            "USE master; EXEC sp_detach_db 'own_src'; CREATE LOGIN bdfu_creator WITH PASSWORD = N'Creator-Pa55word!', CHECK_POLICY = OFF; ALTER SERVER ROLE dbcreator ADD MEMBER bdfu_creator;");
+        var account = new SqlAccount { Kind = SqlAccountKinds.Sql, UserName = "bdfu_creator" };
+        var environment = new ContainerSql(sql, sql.ConnectionStringFor("bdfu_creator", "Creator-Pa55word!"));
+        var log = new List<string>();
+
+        SqlAttach.AttachFiles(environment, "MSSQLSERVER", account, "own_restored", [$"{Folder}/own_src.mdf", $"{Folder}/own_src_log.ldf"], (_, _) => { }, "test", log.Add, () => { }, describe: true);
+
+        // Attached, owned by the login in master, but dbo inside is still sa: the login cannot open it, a sysadmin can.
+        Assert.True(log.Any(l => l.StartsWith("bdfu_creator cannot open [own_restored] itself: SQL Server made it the owner", StringComparison.Ordinal)
+            && l.Contains("ALTER AUTHORIZATION ON DATABASE::[own_restored] TO [bdfu_creator]", StringComparison.Ordinal)), string.Join("\n", log));
+        Assert.DoesNotContain(log, l => l.StartsWith("the attached database could not be described", StringComparison.Ordinal));
+        Assert.Contains(log, l => l.StartsWith("database [own_restored]: owner bdfu_creator,", StringComparison.Ordinal));
+        Assert.Equal("sa", await ScalarTextAsync("SELECT SUSER_SNAME(sid) FROM own_restored.sys.database_principals WHERE name = 'dbo'"));
+        Assert.Equal(7, await ScalarIntAsync("SELECT id FROM own_restored.dbo.t"));
+        await using (var connection = new SqlConnection(sql.ConnectionStringFor("bdfu_creator", "Creator-Pa55word!")))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT id FROM own_restored.dbo.t";
+            await Assert.ThrowsAsync<SqlException>(() => command.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+        }
+
+        // After the sysadmin's ALTER AUTHORIZATION the login can open it.
+        await sql.ExecuteAsync("ALTER AUTHORIZATION ON DATABASE::[own_restored] TO [bdfu_creator];");
+        await using (var connection = new SqlConnection(sql.ConnectionStringFor("bdfu_creator", "Creator-Pa55word!")))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT id FROM own_restored.dbo.t";
+            Assert.Equal(7, await command.ExecuteScalarAsync(TestContext.Current.CancellationToken));
+        }
+
+        // As sa (sysadmin) the account can open what it attached.
+        await sql.ExecuteAsync("USE master; EXEC sp_detach_db 'own_restored';");
+        log.Clear();
+        SqlAttach.AttachFiles(new ContainerSql(sql), "MSSQLSERVER", Sa, "own_again", [$"{Folder}/own_src.mdf", $"{Folder}/own_src_log.ldf"], (_, _) => { }, "test", log.Add, () => { }, describe: false);
+        Assert.DoesNotContain(log, l => l.Contains("cannot open", StringComparison.Ordinal));
+        await sql.ExecuteAsync("DROP DATABASE own_again;");
+    }
+
+    private async Task<int?> ScalarIntAsync(string text)
+    {
+        await using var connection = new SqlConnection(sql.AdminConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = text;
+        return await command.ExecuteScalarAsync() as int?;
+    }
+
+    private async Task<string?> ScalarTextAsync(string text)
+    {
+        await using var connection = new SqlConnection(sql.AdminConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = text;
+        return await command.ExecuteScalarAsync() as string;
+    }
+
+    private sealed class ContainerSql(SqlServerFixture sql, string? connectionString = null) : ISqlEnvironment
     {
         public List<SqlInstanceInfo> Instances() => [new() { Name = "MSSQLSERVER", ServiceName = "MSSQLSERVER", ServiceState = "Running" }];
 
@@ -79,7 +147,7 @@ public sealed class SqlAttachTests(SqlServerFixture sql) : IClassFixture<SqlServ
 
         public DbConnection Open(string instance, SqlAccount account)
         {
-            var connection = new SqlConnection(sql.AdminConnectionString);
+            var connection = new SqlConnection(connectionString ?? sql.AdminConnectionString);
             connection.Open();
             return connection;
         }

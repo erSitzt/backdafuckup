@@ -575,9 +575,11 @@ else
         }
         else if (_exportMode)
         {
-            if (target.IsSysadmin != true && target.IsDbCreator != true)
+            if (target.IsSysadmin != true)
             {
-                checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} may not create databases on instance {target.Name}; it needs the server role dbcreator or sysadmin."));
+                // dbcreator can attach, but the attached database keeps its original owner inside, so it cannot be opened (or backed up) by the account.
+                checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} is not sysadmin on instance {target.Name}: it could attach the database, but not back it up " +
+                    "(SQL Server keeps the database's original owner inside it, so only a sysadmin can open it). Choose a sysadmin account."));
             }
 
             var exportFolder = _exportFolder?.Trim();
@@ -604,6 +606,11 @@ else
             if (target.IsSysadmin != true && target.IsDbCreator != true)
             {
                 checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} may not create databases on instance {target.Name}; it needs the server role dbcreator or sysadmin."));
+            }
+            else if (target.IsSysadmin != true)
+            {
+                checks.Add((Severity.Info, $"{target.LoginName ?? _targetSql.Account} is dbcreator, not sysadmin: it attaches the database, but cannot open it afterwards, because SQL Server " +
+                    "keeps the database's original owner inside it. Sysadmins (and the original owner) can; the session log names the ALTER AUTHORIZATION that gives it to this account."));
             }
 
             if (name.Length is 0 or > 128)

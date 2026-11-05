@@ -80,18 +80,48 @@ public static class SqlAttach
             }
 
             log($"attached database {SqlPublishDatabase.Quote(database)} to instance {instance.Name} ({stateText ?? "state unknown"}), as {account.UserName}.");
+            var canOpen = CheckAccess(connection, database, account, log);
             if (describe)
             {
-                Describe(connection, instance.Name, database, log);
+                Describe(connection, instance.Name, database, canOpen, log);
             }
         }
+    }
+
+    /// <summary>
+    /// An attach makes the attaching login the owner in master, but the database's own dbo user keeps the SID of the
+    /// original owner, so a login that is not sysadmin cannot open the database it attached; it cannot take ownership
+    /// either (SQL Server refuses ALTER AUTHORIZATION without access). Returns whether the account can open it, and
+    /// says what a sysadmin can do if not.
+    /// </summary>
+    private static bool CheckAccess(DbConnection connection, string database, SqlAccount account, Action<string> log)
+    {
+        var quoted = SqlPublishDatabase.Quote(database);
+        try
+        {
+            using (var command = Command(connection, "SELECT HAS_DBACCESS(@name)", ("@name", database)))
+            {
+                if (Convert.ToInt32(command.ExecuteScalar(), CultureInfo.InvariantCulture) == 1)
+                {
+                    return true;
+                }
+            }
+        }
+        catch (DbException)
+        {
+        }
+
+        log($"{account.UserName} cannot open {quoted} itself: SQL Server made it the owner, but the database's dbo user keeps the original owner, and only a sysadmin " +
+            $"(or the original owner) can open it. To give it to {account.UserName}, a sysadmin runs ALTER AUTHORIZATION ON DATABASE::{quoted} TO [{account.UserName.Replace("]", "]]")}]; " +
+            "with a sysadmin account this does not happen.");
+        return false;
     }
 
     /// <summary>
     /// What the attach changed or left to do: owner (the attaching login), TRUSTWORTHY (always off after an attach),
     /// Service Broker, recovery model, and database users whose login does not exist on this instance.
     /// </summary>
-    private static void Describe(DbConnection connection, string instance, string database, Action<string> log)
+    private static void Describe(DbConnection connection, string instance, string database, bool canOpen, Action<string> log)
     {
         try
         {
@@ -107,6 +137,12 @@ public static class SqlAttach
                         $"Service Broker {(reader.GetBoolean(2) ? "on" : "off")}, recovery model {(reader.IsDBNull(3) ? "unknown" : reader.GetString(3))}, " +
                         $"compatibility level {(reader.IsDBNull(4) ? "unknown" : Convert.ToInt32(reader.GetValue(4), CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture))}.");
                 }
+            }
+
+            if (!canOpen)
+            {
+                // Its users can only be read inside it.
+                return;
             }
 
             var orphans = new List<string>();

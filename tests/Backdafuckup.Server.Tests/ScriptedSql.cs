@@ -147,6 +147,10 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 case "SELECT DB_ID(@name)":
                 case "SELECT database_id FROM sys.databases WHERE name = @name":
                     return (_databases.TryGetValue(Name(), out var found) ? found.Id : DBNull.Value, null);
+                case "SELECT HAS_DBACCESS(@name)":
+                    // The scripted logins can open what they attach.
+                    return (1, null);
+
                 case "SELECT state_desc FROM sys.databases WHERE name = @name":
                     return (_databases.ContainsKey(Name()) ? (Offline.Contains(Name()) ? "OFFLINE" : "ONLINE") : null, null);
                 case "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)), CAST(SERVERPROPERTY('Edition') AS nvarchar(128)), CAST(SERVERPROPERTY('EngineEdition') AS int), SUSER_SNAME(), IS_SRVROLEMEMBER('sysadmin'), IS_SRVROLEMEMBER('dbcreator')":
