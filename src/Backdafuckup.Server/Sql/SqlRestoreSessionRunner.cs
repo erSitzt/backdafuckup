@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Backdafuckup.Agent.Protocol;
+using Backdafuckup.Core.Repository;
 using Backdafuckup.Contracts;
 using Backdafuckup.Core.Operations;
 using Backdafuckup.FileLevel;
@@ -48,6 +49,30 @@ public sealed class SqlRestoreSessionRunner(
     {
         var request = JsonSerializer.Deserialize<SqlRestoreRequestDto>(session.Parameters ?? "null")
             ?? throw new InvalidOperationException("The restore session has no parameters.");
+        ChainChoice? chain = null;
+        if (request.SqlDatabaseId is { } databaseId)
+        {
+            try
+            {
+                await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+                chain = await ChooseChainAsync(db, databaseId, request.PointInTimeUtc, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is SqlChainException or KeyNotFoundException)
+            {
+                var failed = await tracker.AddTaskAsync(session.Id, request.TargetVmNativeId, $"{request.Instance}\\{request.Database}", CancellationToken.None).ConfigureAwait(false);
+                events.CreateLog(session.Id, failed.Id).Error(ex.Message);
+                await FinishTaskAsync(failed.Id, SessionState.Failed, ex.Message).ConfigureAwait(false);
+                return (SessionState.Failed, ex.Message);
+            }
+
+            if (chain.Base.Kind == SqlBackupSetKind.NativeFull)
+            {
+                return await RestoreFromNativeAsync(session, request, chain, cancellationToken).ConfigureAwait(false);
+            }
+
+            request = request with { RestorePointId = chain.Base.RestorePointId!.Value };
+        }
+
         RestorePointEntity point;
         await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -214,9 +239,30 @@ public sealed class SqlRestoreSessionRunner(
                     $"Writing the files to {target} failed ({report?.Error ?? $"{missing.Count} of {targets.Count} file(s) not written or not as in the backup: {string.Join(", ", missing)}; see the log"}); {outcome}.");
             }
 
+            if (chain is not null)
+            {
+                // To a point in time: the snapshot's .bkm onto the written files, then the log backups.
+                var snapshot = await StoredSqlSnapshot.ReadAsync(reader, cancellationToken).ConfigureAwait(false);
+                var metadata = snapshot?.Instances.FirstOrDefault(i => string.Equals(i.Name, request.Instance, StringComparison.OrdinalIgnoreCase))?.Metadata
+                    ?? throw new InvalidOperationException($"The restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} has no SQL Server snapshot metadata (.bkm) of {request.Instance}.");
+                log.Info($"All {targets.Count} file(s) written and checked (SHA-256, {VmBackupTask.Format(plan.Bytes)}); restoring them to {chain.Origin}. This cannot be stopped halfway.");
+                var staged = request.Overwrite ? StagingName(request.DatabaseName) : request.DatabaseName;
+                await RestoreChainAsync(agent, host, account, instance, staged, chain, metadata, [.. files.Select((f, i) => (f.Path, written[i]))], request.Overwrite, written, log).ConfigureAwait(false);
+                if (request.Overwrite)
+                {
+                    return await OverwriteAsync(request, agent, account, instance, target, source, chain.Origin, targets, written, plan.Bytes, task.Id, log).ConfigureAwait(false);
+                }
+
+                var restored = $"Restored {source} to {chain.Origin} as {SqlCatalog.QuoteName(request.DatabaseName)} on {target}: the restore point of {point.CreatedUtc.ToLocalTime():g} " +
+                    $"and {chain.Logs.Count} log backup(s), {targets.Count} file(s) in {string.Join(", ", targets.Select(t => t[..t.LastIndexOf('\\')]).Distinct(StringComparer.OrdinalIgnoreCase))}.";
+                log.Info(restored);
+                await FinishTaskAsync(task.Id, SessionState.Succeeded, null, plan.Bytes).ConfigureAwait(false);
+                return (SessionState.Succeeded, restored);
+            }
+
             if (request.Overwrite)
             {
-                return await OverwriteAsync(request, agent, account, instance, target, source, point, targets, written, plan.Bytes, task.Id, log).ConfigureAwait(false);
+                return await OverwriteAsync(request, agent, account, instance, target, source, Origin(point), targets, written, plan.Bytes, task.Id, log).ConfigureAwait(false);
             }
 
             log.Info($"All {targets.Count} file(s) written and checked (SHA-256, {VmBackupTask.Format(plan.Bytes)}); attaching them. This cannot be stopped halfway.");
@@ -231,7 +277,7 @@ public sealed class SqlRestoreSessionRunner(
             }
             catch (SqlJobLostException lost)
             {
-                return await AttachLostAsync(request, agent, account, instance, target, source, point, targets, written, plan.Bytes, task.Id, lost, log).ConfigureAwait(false);
+                return await AttachLostAsync(request, agent, account, instance, target, source, Origin(point), targets, written, plan.Bytes, task.Id, lost, log).ConfigureAwait(false);
             }
             foreach (var line in attach.Log)
             {
@@ -269,7 +315,7 @@ public sealed class SqlRestoreSessionRunner(
     /// back on failure). Not stoppable: it ends with the database online, either with the restored or with its own files.
     /// </summary>
     private async Task<(SessionState State, string Summary)> OverwriteAsync(
-        SqlRestoreRequestDto request, AgentEntity agent, SqlAccount account, SqlInstanceInfo instance, string target, string source, RestorePointEntity point,
+        SqlRestoreRequestDto request, AgentEntity agent, SqlAccount account, SqlInstanceInfo instance, string target, string source, string origin,
         IReadOnlyList<string> targets, IReadOnlyList<string> written, long bytes, Guid taskId, IOperationLog log)
     {
         log.Info($"All {targets.Count} file(s) written beside the database's own and checked (SHA-256, {VmBackupTask.Format(bytes)}); overwriting the database. This cannot be stopped halfway.");
@@ -287,7 +333,7 @@ public sealed class SqlRestoreSessionRunner(
         }
         catch (SqlJobLostException lost)
         {
-            return await OverwriteLostAsync(request, agent, account, instance, target, source, point, targets, written, bytes, taskId, lost, log).ConfigureAwait(false);
+            return await OverwriteLostAsync(request, agent, account, instance, target, source, origin, targets, written, bytes, taskId, lost, log).ConfigureAwait(false);
         }
         foreach (var line in replace.Log)
         {
@@ -302,11 +348,234 @@ public sealed class SqlRestoreSessionRunner(
                 (removed ? " The restored files were deleted again." : " Not all restored files could be deleted (see the log)."));
         }
 
-        var summary = $"Overwrote {SqlCatalog.QuoteName(request.DatabaseName)} on {target} with {source} from the restore point of {point.CreatedUtc.ToLocalTime():g}: " +
+        var summary = $"Overwrote {SqlCatalog.QuoteName(request.DatabaseName)} on {target} with {source} from {origin}: " +
             $"{targets.Count} file(s), {VmBackupTask.Format(bytes)}; the previous files were {(request.KeepReplacedFiles ? $"kept as *{SqlReplaceNames.ReplacedSuffix}" : "deleted")}.";
         log.Info(summary);
         await FinishTaskAsync(taskId, SessionState.Succeeded, null, bytes).ConfigureAwait(false);
         return (SessionState.Succeeded, summary);
+    }
+
+    private static string Origin(RestorePointEntity point) => $"the restore point of {point.CreatedUtc.ToLocalTime():g}";
+
+    /// <summary>
+    /// A point-in-time restore whose base is a native full backup: no restore point and no file transfer; the agent
+    /// downloads the full and the log backups and SQL Server creates the files. An overwrite restores into
+    /// <c>*.bdfu-new</c> files under a staging name first and swaps them in like any overwrite.
+    /// </summary>
+    private async Task<(SessionState State, string Summary)> RestoreFromNativeAsync(SessionEntity session, SqlRestoreRequestDto request, ChainChoice chain, CancellationToken cancellationToken)
+    {
+        var source = $"{request.Instance}\\{request.Database}";
+        var task = await tracker.AddTaskAsync(session.Id, chain.Database.VmNativeId, source, cancellationToken).ConfigureAwait(false);
+        var log = events.CreateLog(session.Id, task.Id, await SqlRestoreRecovery.LogPrefixAsync(agents, chain.Database.VmName, chain.Database.VmNativeId, request.TargetVmNativeId, cancellationToken).ConfigureAwait(false));
+        await tracker.UpdateTaskAsync(task.Id, t => { t.State = SessionState.Running; t.StartedUtc = time.GetUtcNow(); }, CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            var baseFiles = chain.Base.Files ?? throw new InvalidOperationException(
+                $"The full backup {chain.Base.FileName} does not list the database's files (taken by an agent before this was recorded); choose a later point in time.");
+            var agent = await SqlEndpoints.SqlAgentAsync(request.TargetVmNativeId, agents, registry, cancellationToken).ConfigureAwait(false);
+            var host = $"{agent.HostName} ({agent.IpAddresses ?? agent.RemoteAddress ?? "address unknown"})";
+            var account = await SqlEndpoints.AccountAsync(request.CredentialId, dbFactory, protector, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException("Choose the account that restores the database.");
+            var inventory = await jobs.RunAsync(
+                agent.Id, new SqlJobRequest { Kind = SqlJobKinds.Inventory, Instance = request.TargetInstance, Account = account }, TimeSpan.FromMinutes(2), cancellationToken).ConfigureAwait(false);
+            if (!inventory.Success || inventory.Inventory is null)
+            {
+                throw new InvalidOperationException($"The agent in {host} could not check SQL Server: {inventory.Error ?? "no answer"}");
+            }
+
+            var instance = inventory.Inventory.Instances.FirstOrDefault(i => string.Equals(i.Name, request.TargetInstance, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException($"{host} has no SQL Server instance {request.TargetInstance}.");
+            var target = $"{host}, instance {instance.Name}";
+            if (request.Overwrite && !registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlReplaceFiles))
+            {
+                throw new InvalidOperationException($"The agent in {host} (version {agent.AgentVersion}) cannot overwrite SQL Server databases yet; try again in a few minutes.");
+            }
+
+            // Primary data file first, then the other data files, then the logs.
+            var files = baseFiles.Where(f => f.Type != "LOG").OrderBy(f => f.FileId).Concat(baseFiles.Where(f => f.Type == "LOG").OrderBy(f => f.FileId)).ToList();
+            if (files.Any(f => f.Type is not ("ROWS" or "LOG")))
+            {
+                throw new InvalidOperationException($"{source} has FILESTREAM or full-text files ({string.Join(", ", files.Where(f => f.Type is not ("ROWS" or "LOG")).Select(f => f.PhysicalName))}); they cannot be restored yet.");
+            }
+
+            IReadOnlyList<string> targets;
+            try
+            {
+                targets = request.Overwrite
+                    ? [.. files.Select(f => f.PhysicalName)]
+                    : SqlRestoreFiles.TargetPaths(
+                        request.DatabaseName, [.. files.Select(f => (f.PhysicalName, f.Type == "LOG" ? "log" : "data"))], request.FileLocation, request.DataFolder, request.LogFolder,
+                        instance.DefaultDataFolder, instance.DefaultLogFolder);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new InvalidOperationException($"{ex.Message} ({target})", ex);
+            }
+
+            Check(request, instance, inventory.Inventory.Volumes, [.. files.Select(f => (f.Type == "LOG" ? "log" : "data", f.SizeBytes))], targets,
+                chain.Database.ProductVersion, SqlCatalog.Product(chain.Database.ProductVersion), account, target, log);
+            IReadOnlyList<string> written = request.Overwrite ? [.. targets.Select(t => t + SqlReplaceNames.NewSuffix)] : targets;
+            await tracker.UpdateSessionAsync(session.Id, s => s.Parameters = SqlRestoreRecovery.WithPlannedFiles(s.Parameters, written), CancellationToken.None).ConfigureAwait(false);
+            log.Info((request.Overwrite
+                    ? $"Overwriting SQL Server database {SqlCatalog.QuoteName(request.DatabaseName)} on {target} with {source} at {chain.Origin}, as {account.UserName}: restored beside it (*{SqlReplaceNames.NewSuffix}) first, then swapped in. "
+                    : $"Restoring SQL Server database {source} at {chain.Origin} to {target} as {SqlCatalog.QuoteName(request.DatabaseName)}, as {account.UserName}: ") +
+                string.Join(", ", files.Select((f, i) => $"{f.LogicalName} → {written[i]}")) + ".");
+            var bytes = chain.Base.Size + chain.Logs.Sum(l => l.Size);
+            var staged = request.Overwrite ? StagingName(request.DatabaseName) : request.DatabaseName;
+            await RestoreChainAsync(agent, host, account, instance, staged, chain, null, [.. files.Select((f, i) => (f.PhysicalName, written[i]))], request.Overwrite, written, log).ConfigureAwait(false);
+            if (request.Overwrite)
+            {
+                return await OverwriteAsync(request, agent, account, instance, target, source, chain.Origin, targets, written, bytes, task.Id, log).ConfigureAwait(false);
+            }
+
+            var summary = $"Restored {source} to {chain.Origin} as {SqlCatalog.QuoteName(request.DatabaseName)} on {target}: the full backup of " +
+                $"{chain.Base.FinishUtc.UtcDateTime:yyyy-MM-dd HH:mm} UTC and {chain.Logs.Count} log backup(s), {targets.Count} file(s) in " +
+                string.Join(", ", targets.Select(t => t[..t.LastIndexOf('\\')]).Distinct(StringComparer.OrdinalIgnoreCase)) + ".";
+            log.Info(summary);
+            await FinishTaskAsync(task.Id, SessionState.Succeeded, null, bytes).ConfigureAwait(false);
+            return (SessionState.Succeeded, summary);
+        }
+        catch (Exception ex)
+        {
+            log.Error(ex.Message);
+            await FinishTaskAsync(task.Id, SessionState.Failed, ex.Message).ConfigureAwait(false);
+            return (SessionState.Failed, ex.Message);
+        }
+    }
+
+    /// <summary>The database a point-in-time overwrite restores into first (then detached and swapped in).</summary>
+    private static string StagingName(string database) => database.Length > 110 ? database[..110] + "_bdfu_pit" : database + "_bdfu_pit";
+
+    /// <summary>The base and log backups of a point-in-time restore, from the SQL catalog (only what the repositories still hold).</summary>
+    internal sealed record ChainChoice(SqlDatabaseEntity Database, SqlRestorePlan Plan, SqlBackupSetEntity Base, List<SqlBackupSetEntity> Logs, string Origin);
+
+    /// <summary>The backup sets of a database the repositories still hold (restore point or SQL backup available).</summary>
+    internal static async Task<List<SqlBackupSetEntity>> UsableSetsAsync(AppDbContext db, IReadOnlyCollection<Guid> databaseIds, CancellationToken cancellationToken)
+    {
+        var sets = await db.SqlBackupSets.AsNoTracking().Where(s => databaseIds.Contains(s.SqlDatabaseId)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var points = (await db.RestorePoints.Where(r => r.State == RestorePointState.Available).Select(r => r.Id).ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
+        var backups = (await db.SqlBackups.Where(b => b.State == SqlBackupState.Available).Select(b => b.Id).ToListAsync(cancellationToken).ConfigureAwait(false)).ToHashSet();
+        return [.. sets
+            .Where(s => s.Kind == SqlBackupSetKind.SnapshotFull ? s.RestorePointId is { } p && points.Contains(p) : s.SqlBackupId is { } b && backups.Contains(b))
+            .Where(s => s.Kind != SqlBackupSetKind.SystemFull)];
+    }
+
+    internal static async Task<ChainChoice> ChooseChainAsync(AppDbContext db, Guid databaseId, DateTimeOffset? at, CancellationToken cancellationToken)
+    {
+        var database = await db.SqlDatabases.AsNoTracking().FirstOrDefaultAsync(d => d.Id == databaseId, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException("The database is no longer in the SQL catalog.");
+        var usable = await UsableSetsAsync(db, [databaseId], cancellationToken).ConfigureAwait(false);
+        var plan = new SqlChain(usable.Select(SqlChainSet.From)).Plan(at);
+        var origin = at is { } time
+            ? $"{time.UtcDateTime:yyyy-MM-dd HH:mm:ss} UTC"
+            : $"the latest backup ({plan.ReachedUtc.UtcDateTime:yyyy-MM-dd HH:mm:ss} UTC)";
+        return new ChainChoice(database, plan, usable.First(s => s.Id == plan.Base.Id), [.. plan.Logs.Select(l => usable.First(s => s.Id == l.Id))], origin);
+    }
+
+    /// <summary>
+    /// Runs the restore in the agent: base (the .bkm onto the files in place, or a native full), log backups, STOPAT,
+    /// RECOVERY; with <paramref name="detach"/> the database is detached afterwards (an overwrite swaps its files in).
+    /// The SQL backup objects stay pinned meanwhile. If the agent restarts in the middle, the incomplete database is
+    /// dropped and the files are deleted.
+    /// </summary>
+    private async Task RestoreChainAsync(
+        AgentEntity agent, string host, SqlAccount account, SqlInstanceInfo instance, string database, ChainChoice chain, byte[]? metadata,
+        IReadOnlyList<(string Original, string Target)> moves, bool detach, IReadOnlyList<string> cleanup, IOperationLog log)
+    {
+        if (!registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlRestoreChain))
+        {
+            throw new InvalidOperationException($"The agent in {host} (version {agent.AgentVersion}) cannot restore to a point in time yet. It updates itself within a few minutes after a server update; try again then.");
+        }
+
+        var files = new Dictionary<string, SqlJobFile>(StringComparer.Ordinal);
+        var pins = new List<IDisposable>();
+        try
+        {
+            SqlChainFile Add(SqlBackupSetEntity set, IBackupRepository repository)
+            {
+                var id = set.Id.ToString("N");
+                files[id] = new SqlJobFile(repository, set.SqlBackupId!.Value, set.FileKey!, set.FileName ?? id, set.Size);
+                return new SqlChainFile { FileId = id, FileName = set.FileName ?? id + ".bak", Length = set.Size, Sha256 = set.Sha256 ?? string.Empty };
+            }
+
+            async Task<IBackupRepository> PinAsync(SqlBackupSetEntity set)
+            {
+                var repository = await repositories.GetAsync(set.RepositoryId, CancellationToken.None).ConfigureAwait(false);
+                pins.Add(repository.PinSqlBackup(set.SqlBackupId!.Value));
+                return repository;
+            }
+
+            var request = new SqlChainRestoreRequest
+            {
+                Metadata = metadata,
+                Position = chain.Base.Position,
+                StopAt = chain.Plan.StopAtLocal,
+                Moves = [.. moves.Select(m => new SqlChainMove { OriginalPath = m.Original, TargetPath = m.Target })],
+                Detach = detach,
+            };
+            if (metadata is null)
+            {
+                request.BaseFile = Add(chain.Base, await PinAsync(chain.Base).ConfigureAwait(false));
+            }
+
+            foreach (var set in chain.Logs)
+            {
+                request.Logs.Add(Add(set, await PinAsync(set).ConfigureAwait(false)));
+            }
+
+            log.Info($"Restoring to {chain.Origin}: {(metadata is null ? $"the full backup {chain.Base.FileName} of {chain.Base.FinishUtc.UtcDateTime:yyyy-MM-dd HH:mm} UTC" : "the SQL Server snapshot")}, " +
+                $"then {chain.Logs.Count} log backup(s) ({VmBackupTask.Format(chain.Logs.Sum(l => l.Size))})" +
+                (chain.Plan.StopAtLocal is { } stopAt ? $" up to {stopAt} (SQL Server's local time)." : " to the end of the last one."));
+            SqlJobResult result;
+            try
+            {
+                result = await jobs.RunAsync(
+                    agent.Id,
+                    new SqlJobRequest { Kind = SqlJobKinds.RestoreChain, Instance = instance.Name, Account = account, Database = database, Chain = request },
+                    options.Value.AttachTimeout,
+                    CancellationToken.None,
+                    files: files).ConfigureAwait(false);
+            }
+            catch (SqlJobLostException lost)
+            {
+                log.Warning($"{lost.Message}; dropping the incomplete database {SqlCatalog.QuoteName(database)} and deleting its files.");
+                try
+                {
+                    var drop = await jobs.RunAsync(
+                        agent.Id, new SqlJobRequest { Kind = SqlJobKinds.DropRestoring, Instance = instance.Name, Account = account, Database = database }, TimeSpan.FromMinutes(5), CancellationToken.None)
+                        .ConfigureAwait(false);
+                    foreach (var line in drop.Log)
+                    {
+                        log.Info(line);
+                    }
+                }
+                catch (Exception ex) when (ex is TimeoutException or InvalidOperationException)
+                {
+                    log.Warning($"The incomplete database could not be dropped ({ex.Message}); drop {SqlCatalog.QuoteName(database)} by hand.");
+                }
+
+                await DeleteAsync(agent, account, [.. cleanup], log).ConfigureAwait(false);
+                throw new InvalidOperationException($"The agent in {host} restarted during the restore; nothing was restored.", lost);
+            }
+
+            foreach (var line in result.Log)
+            {
+                log.Write(line.StartsWith("users in ", StringComparison.Ordinal) || line.Contains(" cannot open ", StringComparison.Ordinal) ? LogSeverity.Warning : LogSeverity.Info, line);
+            }
+
+            if (!result.Success)
+            {
+                await DeleteAsync(agent, account, [.. cleanup], log).ConfigureAwait(false);
+                throw new InvalidOperationException($"{host}: {result.Error ?? "the agent did not report the restore."}");
+            }
+        }
+        finally
+        {
+            foreach (var pin in pins)
+            {
+                pin.Dispose();
+            }
+        }
     }
 
     /// <summary>
@@ -317,6 +586,14 @@ public sealed class SqlRestoreSessionRunner(
     private static void Check(
         SqlMountDto described, SqlDatabaseDto database, SqlRestoreRequestDto request, SqlInstanceInfo instance, IReadOnlyList<SqlVolumeInfo> volumes,
         IReadOnlyList<SqlFileDto> files, IReadOnlyList<string> targets, SqlAccount account, string target, IOperationLog log)
+    {
+        var origin = described.Instances.FirstOrDefault(i => string.Equals(i.Name, database.Instance, StringComparison.OrdinalIgnoreCase));
+        Check(request, instance, volumes, [.. files.Select(f => (f.Kind, f.SizeBytes ?? 0))], targets, origin?.Version, origin?.Product, account, target, log);
+    }
+
+    private static void Check(
+        SqlRestoreRequestDto request, SqlInstanceInfo instance, IReadOnlyList<SqlVolumeInfo> volumes, IReadOnlyList<(string Kind, long Size)> files,
+        IReadOnlyList<string> targets, string? sourceVersion, string? sourceProduct, SqlAccount account, string target, IOperationLog log)
     {
         if (!instance.Connected)
         {
@@ -358,29 +635,28 @@ public sealed class SqlRestoreSessionRunner(
             }
         }
 
-        var origin = described.Instances.FirstOrDefault(i => string.Equals(i.Name, database.Instance, StringComparison.OrdinalIgnoreCase));
-        var sourceMajor = Major(origin?.Version);
+        var sourceMajor = Major(sourceVersion);
         var targetMajor = Major(instance.ProductVersion ?? instance.SetupVersion);
         if (sourceMajor is { } from && targetMajor is { } to)
         {
             if (to < from)
             {
-                problems.Add($"the database comes from {origin?.Product ?? "a newer SQL Server"} and the instance is {SqlCatalog.Product(instance.ProductVersion) ?? "older"}; SQL Server attaches databases only on the same or a newer version");
+                problems.Add($"the database comes from {sourceProduct ?? "a newer SQL Server"} and the instance is {SqlCatalog.Product(instance.ProductVersion) ?? "older"}; SQL Server attaches databases only on the same or a newer version");
             }
             else if (to > from)
             {
-                log.Info($"{SqlCatalog.Product(instance.ProductVersion)} upgrades the database from {origin?.Product} when it attaches it; it cannot be attached to the older version afterwards.");
+                log.Info($"{SqlCatalog.Product(instance.ProductVersion)} upgrades the database from {sourceProduct} when it attaches it; it cannot be attached to the older version afterwards.");
             }
         }
 
-        var dataBytes = files.Where(f => f.Kind == "data").Sum(f => f.SizeBytes ?? 0);
+        var dataBytes = files.Where(f => f.Kind == "data").Sum(f => f.Size);
         var limit = (targetMajor ?? 0) >= 17 ? 50L << 30 : 10L << 30;
         if (instance.EngineEdition == 4 && dataBytes > limit)
         {
             problems.Add($"the instance is SQL Server Express (databases up to {VmBackupTask.Format(limit)}), the database has {VmBackupTask.Format(dataBytes)} of data files");
         }
 
-        foreach (var drive in targets.Select((t, i) => (Root: t[..3], Size: files[i].SizeBytes ?? 0)).GroupBy(t => t.Root, StringComparer.OrdinalIgnoreCase))
+        foreach (var drive in targets.Select((t, i) => (Root: t[..3], Size: files[i].Size)).GroupBy(t => t.Root, StringComparer.OrdinalIgnoreCase))
         {
             var needed = drive.Sum(d => d.Size);
             var volume = volumes.FirstOrDefault(v => string.Equals(v.Root, drive.Key, StringComparison.OrdinalIgnoreCase));
@@ -409,7 +685,7 @@ public sealed class SqlRestoreSessionRunner(
     /// If not, the files are deleted again.
     /// </summary>
     private async Task<(SessionState State, string Summary)> AttachLostAsync(
-        SqlRestoreRequestDto request, AgentEntity agent, SqlAccount account, SqlInstanceInfo instance, string target, string source, RestorePointEntity point,
+        SqlRestoreRequestDto request, AgentEntity agent, SqlAccount account, SqlInstanceInfo instance, string target, string source, string origin,
         IReadOnlyList<string> targets, IReadOnlyList<string> written, long bytes, Guid taskId, SqlJobLostException lost, IOperationLog log)
     {
         var name = SqlCatalog.QuoteName(request.DatabaseName);
@@ -426,7 +702,7 @@ public sealed class SqlRestoreSessionRunner(
 
         if (found is not null && found.Files.Select(f => f.PhysicalName).Order(StringComparer.OrdinalIgnoreCase).SequenceEqual(targets.Order(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase))
         {
-            var summary = $"Restored {source} from the restore point of {point.CreatedUtc.ToLocalTime():g} as {name} on {target}: {targets.Count} file(s), " +
+            var summary = $"Restored {source} from {origin} as {name} on {target}: {targets.Count} file(s), " +
                 $"{VmBackupTask.Format(bytes)}; the agent restarted right after the attach, so the log lacks its description of the database (owner, users without a login).";
             log.Warning(summary);
             await FinishTaskAsync(taskId, SessionState.Warning, summary, bytes).ConfigureAwait(false);
@@ -444,7 +720,7 @@ public sealed class SqlRestoreSessionRunner(
     /// it offline. Restored copies left beside the files are deleted.
     /// </summary>
     private async Task<(SessionState State, string Summary)> OverwriteLostAsync(
-        SqlRestoreRequestDto request, AgentEntity agent, SqlAccount account, SqlInstanceInfo instance, string target, string source, RestorePointEntity point,
+        SqlRestoreRequestDto request, AgentEntity agent, SqlAccount account, SqlInstanceInfo instance, string target, string source, string origin,
         IReadOnlyList<string> targets, IReadOnlyList<string> written, long bytes, Guid taskId, SqlJobLostException lost, IOperationLog log)
     {
         var name = SqlCatalog.QuoteName(request.DatabaseName);
@@ -473,7 +749,7 @@ public sealed class SqlRestoreSessionRunner(
 
         if (recovery.Outcome == SqlReplaceOutcomes.Completed)
         {
-            var summary = $"Overwrote {name} on {target} with {source} from the restore point of {point.CreatedUtc.ToLocalTime():g}: {targets.Count} file(s), " +
+            var summary = $"Overwrote {name} on {target} with {source} from {origin}: {targets.Count} file(s), " +
                 $"{VmBackupTask.Format(bytes)}; the agent restarted after the database was online with the restored files, so the overwrite is complete.";
             log.Warning(summary);
             await FinishTaskAsync(taskId, SessionState.Warning, summary, bytes).ConfigureAwait(false);

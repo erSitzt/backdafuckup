@@ -260,6 +260,28 @@ public sealed class SqlJobRunner
 
                     await SnapshotAsync(request, result, Log, stop).ConfigureAwait(false);
                     break;
+                case SqlJobKinds.RestoreChain:
+                {
+                    var fs = _files ?? throw new InvalidOperationException("This agent cannot restore databases.");
+                    var restorer = new SqlChainRestorer(_sql, new SqlBackupFiles(), DownloadAsync, (path, accounts) =>
+                    {
+                        foreach (var account in accounts)
+                        {
+                            fs.GrantFullControl(path, account);
+                        }
+                    }, Log);
+                    await restorer.RestoreAsync(request, _id, stop).ConfigureAwait(false);
+                    break;
+                }
+
+                case SqlJobKinds.DropRestoring:
+                    if (request.Account is null || string.IsNullOrEmpty(request.Instance) || string.IsNullOrEmpty(request.Database))
+                    {
+                        throw new InvalidOperationException("The job names no instance, account or database.");
+                    }
+
+                    DropRestoring(request.Instance!, request.Account, request.Database!, Log);
+                    break;
                 case SqlJobKinds.LogBackup:
                 case SqlJobKinds.FullBackup:
                     if (_journalDirectory is null)
@@ -446,6 +468,70 @@ public sealed class SqlJobRunner
 
                 return JsonSerializer.Deserialize<SqlBackupUploadReply>(text, AgentJson.Options)?.Committed ?? new List<string>();
             }
+        }
+    }
+
+    /// <summary>Downloads a backup file of this job into the guest, checked by length and SHA-256.</summary>
+    private async Task DownloadAsync(SqlChainFile file, string path, CancellationToken cancellationToken)
+    {
+        var files = new SqlBackupFiles();
+        using (var response = await _http.GetAsync(Base + "/files/" + Uri.EscapeDataString(file.FileId), HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false))
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException($"The server did not send {file.FileName} ({(int)response.StatusCode}): {await response.Content.ReadAsStringAsync().ConfigureAwait(false)}");
+            }
+
+            using (var source = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
+            using (var target = files.Create(path))
+            using (var sha = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256))
+            {
+                var buffer = new byte[1 << 20];
+                long length = 0;
+                int read;
+                while ((read = await source.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
+                {
+                    sha.AppendData(buffer, 0, read);
+                    await target.WriteAsync(buffer, 0, read, cancellationToken).ConfigureAwait(false);
+                    length += read;
+                }
+
+                var hash = BitConverter.ToString(sha.GetHashAndReset()).Replace("-", string.Empty).ToLowerInvariant();
+                if (length != file.Length || !string.Equals(hash, file.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new System.IO.InvalidDataException($"{file.FileName} arrived with {length:N0} bytes and SHA-256 {hash}, expected {file.Length:N0} bytes and {file.Sha256}.");
+                }
+            }
+        }
+    }
+
+    /// <summary>Drops a database only while it is RESTORING (what a restore the agent's restart interrupted left).</summary>
+    private void DropRestoring(string instance, SqlAccount account, string database, Action<string> log)
+    {
+        using (var connection = _sql.Open(instance, account))
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT state_desc FROM sys.databases WHERE name = @name";
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "@name";
+            parameter.Value = database;
+            command.Parameters.Add(parameter);
+            var state = command.ExecuteScalar() as string;
+            if (state is null)
+            {
+                log($"{SqlPublishDatabase.Quote(database)} does not exist (any more).");
+                return;
+            }
+
+            if (!string.Equals(state, "RESTORING", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"{SqlPublishDatabase.Quote(database)} is {state}, not RESTORING: it is left alone.");
+            }
+
+            command.Parameters.Clear();
+            command.CommandText = $"DROP DATABASE {SqlPublishDatabase.Quote(database)}";
+            command.ExecuteNonQuery();
+            log($"dropped the incomplete database {SqlPublishDatabase.Quote(database)} (RESTORING).");
         }
     }
 

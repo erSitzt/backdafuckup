@@ -1,0 +1,106 @@
+@page "/sql/databases"
+@inject ApiClient Api
+@inject NavigationManager Navigation
+
+<PageTitle>SQL Server – backdafuckup</PageTitle>
+<div class="d-flex align-center mb-2">
+    <MudText Typo="Typo.h4">SQL Server databases</MudText>
+    <MudSpacer />
+    <MudTextField T="string" @bind-Value="_filter" Placeholder="Filter (VM, instance, database)" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search"
+                  Immediate="true" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:320px" />
+</div>
+<MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
+    The databases of the backed-up SQL Server instances: what their log chain covers and whether it is intact. Open one to
+    restore it to any second of that time. Jobs back up the logs when their SQL Server backups are turned on (job settings).
+</MudText>
+
+@if (_error is not null)
+{
+    <MudAlert Severity="Severity.Error" Class="mb-3">@_error</MudAlert>
+}
+else if (_databases is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else if (_databases.Count == 0)
+{
+    <MudAlert Severity="Severity.Info">
+        No SQL Server databases in the catalog yet. They appear with the first image backup with the SQL Server snapshot or the first
+        SQL Server backup run of a job.
+    </MudAlert>
+}
+else
+{
+    <MudTable Items="Filtered()" Dense="true" Hover="true" Elevation="1" OnRowClick="@((TableRowClickEventArgs<SqlCatalogDatabaseDto> e) => Navigation.NavigateTo($"/sql/databases/{e.Item!.Id}"))"
+              RowStyle="cursor:pointer">
+        <HeaderContent>
+            <MudTh>VM</MudTh>
+            <MudTh>Instance</MudTh>
+            <MudTh>Database</MudTh>
+            <MudTh>Recovery</MudTh>
+            <MudTh>Log chain</MudTh>
+            <MudTh>Last log backup</MudTh>
+            <MudTh>Last full backup</MudTh>
+            <MudTh>Restorable</MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd>@context.VmName</MudTd>
+            <MudTd>@context.Instance</MudTd>
+            <MudTd><b>@context.Name</b></MudTd>
+            <MudTd>@(context.RecoveryModel ?? "–")</MudTd>
+            <MudTd>
+                <MudTooltip Text="@(context.ChainReason ?? ChainText(context.ChainState))">
+                    <MudChip T="string" Size="Size.Small" Color="@ChainColor(context.ChainState)">@ChainLabel(context.ChainState)</MudChip>
+                </MudTooltip>
+            </MudTd>
+            <MudTd>@Fmt.Time(context.LastLogUtc)</MudTd>
+            <MudTd>@Fmt.Time(context.LastFullUtc)</MudTd>
+            <MudTd>@(context.CoveredFromUtc is { } from ? $"{Fmt.Time(from)} – {Fmt.Time(context.CoveredToUtc)}" : "–")</MudTd>
+        </RowTemplate>
+    </MudTable>
+}
+
+@code {
+    private List<SqlCatalogDatabaseDto>? _databases;
+    private string? _error;
+    private string _filter = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _databases = await Api.GetAsync<List<SqlCatalogDatabaseDto>>("api/sql/databases");
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private IEnumerable<SqlCatalogDatabaseDto> Filtered() =>
+        (_databases ?? []).Where(d => _filter.Length == 0
+            || $"{d.VmName} {d.Instance} {d.Name}".Contains(_filter, StringComparison.OrdinalIgnoreCase));
+
+    internal static string ChainLabel(string state) => state switch
+    {
+        "Ok" => "intact",
+        "NoBase" => "no full backup",
+        "Broken" => "broken",
+        "Simple" => "SIMPLE",
+        _ => "not yet backed up",
+    };
+
+    internal static string ChainText(string state) => state switch
+    {
+        "Ok" => "A full backup and an unbroken chain of log backups since then.",
+        "Simple" => "SIMPLE recovery: no log backups; restorable to the times of its full backups only.",
+        _ => "No log backups of this database by backdafuckup yet.",
+    };
+
+    internal static Color ChainColor(string state) => state switch
+    {
+        "Ok" => Color.Success,
+        "Broken" or "NoBase" => Color.Warning,
+        _ => Color.Default,
+    };
+}

@@ -121,6 +121,9 @@ public sealed record SqlPublishRequestDto(
 /// Restore a database of a restore point: as a new database (<see cref="DatabaseName"/> must be free), or with
 /// <see cref="Overwrite"/> over the original database (same VM, instance and name; its files go back where they are,
 /// the previous ones are deleted unless <see cref="KeepReplacedFiles"/>).
+/// With <see cref="SqlDatabaseId"/> it is a restore to a point in time (<see cref="PointInTimeUtc"/>, null: the latest
+/// backup): the server picks the base (a restore point's SQL Server snapshot or a native full) and the log backups;
+/// <see cref="RestorePointId"/> is then ignored.
 /// </summary>
 public sealed record SqlRestoreRequestDto(
     Guid RestorePointId,
@@ -134,7 +137,9 @@ public sealed record SqlRestoreRequestDto(
     string? DataFolder,
     string? LogFolder,
     bool Overwrite = false,
-    bool KeepReplacedFiles = false);
+    bool KeepReplacedFiles = false,
+    Guid? SqlDatabaseId = null,
+    DateTimeOffset? PointInTimeUtc = null);
 
 /// <summary>
 /// Export a database of a restore point as a .bak: it is published on <see cref="TargetInstance"/> (a staging instance,
@@ -219,3 +224,45 @@ public static class SqlRestoreFiles
         return paths;
     }
 }
+
+// ---- SQL catalog (log chain, point-in-time restore) ----
+
+/// <summary>A database of a backed-up SQL Server instance with the state of its log chain.</summary>
+public sealed record SqlCatalogDatabaseDto(
+    Guid Id,
+    string VmNativeId,
+    string VmName,
+    string Instance,
+    string Name,
+    string? RecoveryModel,
+    string? ProductVersion,
+    string ChainState,
+    string? ChainReason,
+    DateTimeOffset? LastLogUtc,
+    DateTimeOffset? LastFullUtc,
+    DateTimeOffset? CoveredFromUtc,
+    DateTimeOffset? CoveredToUtc,
+    Guid? JobId);
+
+/// <summary>A span of time the database can be restored to, from one base on.</summary>
+public sealed record SqlCoverageSpanDto(DateTimeOffset FromUtc, DateTimeOffset ToUtc, string BaseKind, int Logs);
+
+/// <summary>Time not covered between two spans, and why.</summary>
+public sealed record SqlCoverageGapDto(DateTimeOffset FromUtc, DateTimeOffset ToUtc, string Reason);
+
+public sealed record SqlCatalogDatabaseDetailDto(SqlCatalogDatabaseDto Database, IReadOnlyList<SqlCoverageSpanDto> Spans, IReadOnlyList<SqlCoverageGapDto> Gaps);
+
+/// <summary>A file of the database in the base of a restore: its path in the backup and its kind ("data" or "log").</summary>
+public sealed record SqlPlanFileDto(string Path, string Kind, long? SizeBytes);
+
+/// <summary>What a restore to a point in time applies: the base, the log backups and STOPAT.</summary>
+public sealed record SqlRestorePlanDto(
+    string BaseKind,
+    DateTimeOffset BaseUtc,
+    Guid? RestorePointId,
+    long BaseBytes,
+    int Logs,
+    long LogBytes,
+    string? StopAtLocal,
+    DateTimeOffset ReachedUtc,
+    IReadOnlyList<SqlPlanFileDto> Files);

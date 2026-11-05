@@ -13,8 +13,15 @@
                 <td><MudLink Href="@($"/sessions/{s.Id}")">@s.Name</MudLink></td>
                 <td>@s.Kind</td>
                 <td><MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(s.State)">@s.State</MudChip></td>
-                <td>@Fmt.Time(s.StartedUtc ?? s.CreatedUtc)</td>
-                <td>@Fmt.Duration(s.StartedUtc, s.EndedUtc)</td>
+                <td>
+                    @Fmt.Time(s.StartedUtc ?? s.CreatedUtc)
+                    @if (s.Kind == "SqlBackup")
+                    {
+                        <br /><MudText Typo="Typo.caption">@(s.State == "Running" ? "running now" : $"last run {Fmt.Time(s.EndedUtc)}")</MudText>
+                    }
+                </td>
+                @* A day session of SQL Server backups spans the day's runs: its "duration" would only mislead. *@
+                <td>@(s.Kind == "SqlBackup" ? "–" : Fmt.Duration(s.StartedUtc, s.EndedUtc))</td>
                 <td>@Fmt.Bytes(m?.ProcessedBytes)</td>
                 <td>@Fmt.Bytes(s.ReadBytes)</td>
                 <td>@Fmt.Bytes(s.TransferredBytes)</td>

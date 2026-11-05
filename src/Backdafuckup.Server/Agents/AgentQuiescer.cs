@@ -9,7 +9,8 @@ namespace Backdafuckup.Server.Agents;
 
 /// <summary>The SQL Server snapshot instead of the VSS freeze: the job channel, the account and the backup's name in msdb.</summary>
 /// <param name="CopyOnly">Copy-only backups (outside the backup chain) instead of regular full backups.</param>
-public sealed record SqlSnapshotSettings(Sql.SqlJobs Jobs, SqlAccount Account, string BackupName, bool CopyOnly = false);
+/// <param name="LogBackups">The job backs up the transaction logs itself (its SQL Server backups watch the log chain).</param>
+public sealed record SqlSnapshotSettings(Sql.SqlJobs Jobs, SqlAccount Account, string BackupName, bool CopyOnly = false, bool LogBackups = false);
 
 /// <summary>
 /// Guest freeze through the backdafuckup agent for one VM backup: prepare (VSS writer metadata), freeze (our VSS
@@ -107,6 +108,9 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
     /// databases. Returns null if no database could be suspended (the reason is logged): the caller falls back to VSS.
     /// A failing command throws (crash-consistent) as for VSS.
     /// </summary>
+    /// <summary>The job backs up the transaction logs itself.</summary>
+    private bool LogBackups => sql?.LogBackups == true;
+
     private async Task<IGuestFreeze?> SuspendSqlAsync(SqlSnapshotSettings settings, IOperationLog log, CancellationToken cancellationToken)
     {
         RunningSqlJob? job = null;
@@ -412,7 +416,8 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
                   (problems.Length > 0 ? $" Not consistent: {problems}." : string.Empty);
             return new GuestFreezeResult(false, all ? null : $"SQL Server snapshot: {problems}", freezeTime, held, [])
             {
-                Sql = new SqlSnapshotOutcome(all, summary, LogChainWarnings(instances, TimeSpan.FromDays(1))),
+                // A job with its own log backups watches the chain in its SQL Server backup sessions.
+                Sql = new SqlSnapshotOutcome(all, summary, owner.LogBackups ? [] : LogChainWarnings(instances, TimeSpan.FromDays(1))),
             };
         }
 

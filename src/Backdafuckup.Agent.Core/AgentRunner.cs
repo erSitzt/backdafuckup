@@ -558,6 +558,11 @@ public sealed class AgentRunner
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlAttachFiles);
             }
 
+            if (_sql is not null && _restoreFiles is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlRestoreChain))
+            {
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlRestoreChain);
+            }
+
             if (_sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlBackupChain))
             {
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlBackupChain);

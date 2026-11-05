@@ -21,6 +21,17 @@ public class SqlBackupFiles
     public virtual void Delete(string path) => File.Delete(path);
 
     public virtual void CreateDirectory(string path) => Directory.CreateDirectory(path);
+
+    /// <summary>Creates a new file (never replaces one).</summary>
+    public virtual Stream Create(string path) => new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 20, useAsync: true);
+
+    public virtual void DeleteDirectory(string path)
+    {
+        if (Directory.Exists(path))
+        {
+            Directory.Delete(path, recursive: true);
+        }
+    }
 }
 
 /// <summary>Where the backup lane sends finished backup files (the server, over the job's HTTPS channel).</summary>

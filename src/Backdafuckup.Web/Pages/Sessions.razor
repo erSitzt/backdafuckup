@@ -62,7 +62,13 @@ else
         }
 
         var index = _sessions.FindIndex(s => s.Id == session.Id);
-        if (index >= 0)
+        if (index >= 0 && session.Kind == "SqlBackup" && session.State == "Running")
+        {
+            // A run of the day reopens its SQL Server backup session: it moves to the top.
+            _sessions.RemoveAt(index);
+            _sessions.Insert(0, session);
+        }
+        else if (index >= 0)
         {
             _sessions[index] = session;
         }

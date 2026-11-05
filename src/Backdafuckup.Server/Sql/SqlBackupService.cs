@@ -209,7 +209,7 @@ public sealed class SqlBackupService(
 
             await events.FlushAsync().ConfigureAwait(false);
             await ScheduleNextAsync(job, vm, work, started, run, CancellationToken.None).ConfigureAwait(false);
-            await CloseDayAsync(job.Id, sessionId, taskId, previous, run, CancellationToken.None).ConfigureAwait(false);
+            await CloseDayAsync(job, sessionId, taskId, previous, run, CancellationToken.None).ConfigureAwait(false);
         }
 
         if (_retained.TryGetValue((job.Id, vm.NativeId), out var day) && day == DateOnly.FromDateTime(started.UtcDateTime))
@@ -614,9 +614,9 @@ public sealed class SqlBackupService(
         }
     }
 
-    private async Task CloseDayAsync(Guid jobId, Guid sessionId, Guid taskId, SessionState? previous, RunOutcome run, CancellationToken cancellationToken)
+    private async Task CloseDayAsync(BackupJob job, Guid sessionId, Guid taskId, SessionState? previous, RunOutcome run, CancellationToken cancellationToken)
     {
-        var gate = _sessionLocks.GetOrAdd(jobId, _ => new SemaphoreSlim(1, 1));
+        var gate = _sessionLocks.GetOrAdd(job.Id, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -632,14 +632,15 @@ public sealed class SqlBackupService(
 
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             var states = await db.SessionTasks.Where(t => t.SessionId == sessionId).Select(t => t.State).ToListAsync(cancellationToken).ConfigureAwait(false);
-            var local = now.UtcDateTime.ToString("HH:mm", CultureInfo.InvariantCulture);
+            // The job's time zone, as its schedule and the console's log times.
+            var local = TimeZoneInfo.ConvertTime(now, ScheduleCalculator.FindZone(job.Schedule.TimeZoneId)).ToString("HH:mm", CultureInfo.InvariantCulture);
             await tracker.UpdateSessionAsync(sessionId, s =>
             {
                 s.State = Worst(states);
                 s.EndedUtc = s.State == SessionState.Running ? null : now;
                 s.TransferredBytes += run.Bytes;
                 s.Progress = 100;
-                s.Summary = $"Last run {local} UTC: {run.Logs} log backup(s), {run.Fulls} full backup(s), {run.Bytes:N0} bytes" +
+                s.Summary = $"Last run {local}: {run.Logs} log backup(s), {run.Fulls} full backup(s), {run.Bytes:N0} bytes" +
                     (run.State == SessionState.Succeeded ? "." : $"; {run.Lines.LastOrDefault(l => l.Severity != LogSeverity.Info).Message}");
             }, cancellationToken).ConfigureAwait(false);
         }

@@ -100,6 +100,12 @@ public static class AgentProtocol
     public const string CapabilitySqlBackupChain = "sql-backup-chain-v1";
 
     /// <summary>
+    /// The agent restores a database from a full backup and log backups up to a point in time
+    /// (<see cref="SqlJobKinds.RestoreChain"/>), downloading the backup files from <c>GET {SqlJobsPath}/{id}/files/{fileId}</c>.
+    /// </summary>
+    public const string CapabilitySqlRestoreChain = "sql-restore-chain-v1";
+
+    /// <summary>
     /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
     /// <see cref="PublishInfo.BlockSize"/> bytes), <c>POST {id}/status</c> (heartbeat; the answer says whether to stop).
     /// </summary>
@@ -636,6 +642,16 @@ public static class SqlJobKinds
     /// or with <see cref="SqlJobRequest.SystemDatabases"/> of <c>master</c>, <c>msdb</c> and <c>model</c>.
     /// </summary>
     public const string FullBackup = "full-backup";
+
+    /// <summary>
+    /// Restores <see cref="SqlJobRequest.Database"/> (a new name) from <see cref="SqlJobRequest.Chain"/>: the base (the
+    /// snapshot's <c>.bkm</c> onto files already in place, or a native <c>.bak</c>), the log backups with NORECOVERY,
+    /// the last one up to STOPAT, then RECOVERY. On failure the database is dropped and the files it created deleted.
+    /// </summary>
+    public const string RestoreChain = "restore-chain";
+
+    /// <summary>Drops <see cref="SqlJobRequest.Database"/> only if it is RESTORING (left by a restore the agent's restart interrupted).</summary>
+    public const string DropRestoring = "drop-restoring";
 }
 
 /// <summary>How an overwrite that an agent restart interrupted ended (<see cref="SqlJobKinds.ReplaceRecovery"/>).</summary>
@@ -949,6 +965,52 @@ public sealed class SqlJobRequest
 
     /// <summary>LogBackup/FullBackup/SnapshotSuspend: how long to wait for another backup of the instance in the agent (ms).</summary>
     public int LockWaitMs { get; set; }
+
+    /// <summary>RestoreChain: what to restore.</summary>
+    public SqlChainRestoreRequest? Chain { get; set; }
+}
+
+/// <summary>A restore from a full backup and log backups (<see cref="SqlJobKinds.RestoreChain"/>).</summary>
+public sealed class SqlChainRestoreRequest
+{
+    /// <summary>The snapshot's <c>.bkm</c> (restored with METADATA_ONLY onto the files in place); null for a native base.</summary>
+    public byte[]? Metadata { get; set; }
+
+    /// <summary>A native full backup to download; null for a snapshot base.</summary>
+    public SqlChainFile? BaseFile { get; set; }
+
+    /// <summary>The backup set's position in the base (<c>RESTORE … WITH FILE = n</c>).</summary>
+    public int Position { get; set; } = 1;
+
+    /// <summary>The log backups in order.</summary>
+    public List<SqlChainFile> Logs { get; set; } = new List<SqlChainFile>();
+
+    /// <summary>STOPAT for the last log backup, in SQL Server's local time (<c>yyyy-MM-ddTHH:mm:ss.fff</c>); null: to its end.</summary>
+    public string? StopAt { get; set; }
+
+    /// <summary>Where each file of the backup goes: by its original physical name.</summary>
+    public List<SqlChainMove> Moves { get; set; } = new List<SqlChainMove>();
+
+    /// <summary>Detach the database after recovery (an overwrite swaps its files in afterwards).</summary>
+    public bool Detach { get; set; }
+}
+
+public sealed class SqlChainFile
+{
+    public string FileId { get; set; } = string.Empty;
+
+    public string FileName { get; set; } = string.Empty;
+
+    public long Length { get; set; }
+
+    public string Sha256 { get; set; } = string.Empty;
+}
+
+public sealed class SqlChainMove
+{
+    public string OriginalPath { get; set; } = string.Empty;
+
+    public string TargetPath { get; set; } = string.Empty;
 }
 
 public sealed class SqlJobResult

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Backdafuckup.Agent.Protocol;
+using Backdafuckup.Core.Repository;
 using Backdafuckup.Server.Agents;
 using Microsoft.Extensions.Options;
 
@@ -17,11 +18,12 @@ public sealed class SqlJobs(AgentRegistry registry, IOptions<AgentOptions> optio
     /// Sends the job to the agent and waits up to <paramref name="timeout"/> for its result. Backup jobs take their files
     /// through <paramref name="receiver"/>.
     /// </summary>
-    public async Task<SqlJobResult> RunAsync(Guid agentId, SqlJobRequest request, TimeSpan timeout, CancellationToken cancellationToken, SqlBackupReceiver? receiver = null)
+    public async Task<SqlJobResult> RunAsync(
+        Guid agentId, SqlJobRequest request, TimeSpan timeout, CancellationToken cancellationToken, SqlBackupReceiver? receiver = null, IReadOnlyDictionary<string, SqlJobFile>? files = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         request.JobId = Guid.NewGuid();
-        var job = new Job(agentId, request, new TaskCompletionSource<SqlJobResult>(TaskCreationOptions.RunContinuationsAsynchronously)) { Receiver = receiver };
+        var job = new Job(agentId, request, new TaskCompletionSource<SqlJobResult>(TaskCreationOptions.RunContinuationsAsynchronously)) { Receiver = receiver, Files = files };
         _jobs[request.JobId] = job;
         try
         {
@@ -93,6 +95,10 @@ public sealed class SqlJobs(AgentRegistry registry, IOptions<AgentOptions> optio
     public SqlBackupReceiver? Receiver(Guid jobId, Guid agentId) =>
         _jobs.TryGetValue(jobId, out var job) && job.AgentId == agentId ? job.Receiver : null;
 
+    /// <summary>A file a running restore job may download, for the agent it was sent to (null otherwise).</summary>
+    public SqlJobFile? File(Guid jobId, Guid agentId, string fileId) =>
+        _jobs.TryGetValue(jobId, out var job) && job.AgentId == agentId && job.Files is { } files && files.TryGetValue(fileId, out var file) ? file : null;
+
     /// <summary>Whether a log or full backup of the agent is running (a self-update waits for it).</summary>
     public bool BackupRunning(Guid agentId) =>
         _jobs.Values.Any(j => j.AgentId == agentId && j.Request.Kind is SqlJobKinds.LogBackup or SqlJobKinds.FullBackup);
@@ -129,9 +135,14 @@ public sealed class SqlJobs(AgentRegistry registry, IOptions<AgentOptions> optio
 
         public SqlBackupReceiver? Receiver { get; init; }
 
+        public IReadOnlyDictionary<string, SqlJobFile>? Files { get; init; }
+
         public volatile string Signal = SqlJobSignals.Wait;
     }
 }
+
+/// <summary>A backup file of a SQL backup object that a restore job downloads.</summary>
+public sealed record SqlJobFile(IBackupRepository Repository, Guid SqlBackupId, string Key, string FileName, long Length);
 
 /// <summary>The agent restarted (service restart, crash, VM reboot) while it ran the job: the job is gone.</summary>
 public sealed class SqlJobLostException(string kind)

@@ -83,6 +83,10 @@ public class SqlServerFixture : IAsyncLifetime
         return [.. result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
     }
 
+    /// <summary>Deletes a folder inside the container with what is in it.</summary>
+    public async Task DeleteDirectoryAsync(string path) =>
+        await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["rm", "-rf", path]);
+
     /// <summary>Creates a folder inside the container that SQL Server can write to.</summary>
     public async Task CreateDirectoryAsync(string path) =>
         await (_container ?? throw new InvalidOperationException("The SQL Server container is not running.")).ExecAsync(["mkdir", "-p", path]);

@@ -53,6 +53,9 @@ public static class SqlEndpoints
 
         app.MapPost("/api/sql/publishes", StartPublishAsync);
         app.MapPost("/api/sql/restores", StartRestoreAsync);
+        app.MapGet("/api/sql/databases", ListDatabasesAsync);
+        app.MapGet("/api/sql/databases/{id:guid}", DatabaseAsync);
+        app.MapGet("/api/sql/databases/{id:guid}/plan", PlanAsync);
         app.MapPost("/api/sql/exports", StartExportAsync);
 
         // The .bak of an export session on the server: its name and size, a one-time link, the download.
@@ -204,10 +207,38 @@ public static class SqlEndpoints
     private static async Task<IResult> StartRestoreAsync(
         SqlRestoreRequestDto request, AppDbContext db, AgentService agents, AgentRegistry registry, SessionQueue queue, HttpContext http, CancellationToken ct)
     {
-        var point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == request.RestorePointId, ct);
-        if (point is null || point.State != RestorePointState.Available)
+        RestorePointEntity? point;
+        if (request.SqlDatabaseId is { } databaseId)
         {
-            return Results.Problem("The restore point is not available (deleted, or still being written).", statusCode: StatusCodes.Status404NotFound);
+            // To a point in time: the source comes from the SQL catalog, and the chain must reach the time now already.
+            Sql.SqlRestoreSessionRunner.ChainChoice chain;
+            try
+            {
+                chain = await Sql.SqlRestoreSessionRunner.ChooseChainAsync(db, databaseId, request.PointInTimeUtc, ct);
+            }
+            catch (Exception ex) when (ex is Sql.SqlChainException or KeyNotFoundException)
+            {
+                return Results.Problem(ex.Message, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            request = request with { Instance = chain.Database.Instance, Database = chain.Database.Name, RestorePointId = chain.Base.RestorePointId ?? Guid.Empty };
+            point = new RestorePointEntity
+            {
+                Id = request.RestorePointId,
+                RepositoryId = chain.Base.RepositoryId,
+                JobName = string.Empty,
+                PlatformId = chain.Database.PlatformId,
+                VmNativeId = chain.Database.VmNativeId,
+                VmName = chain.Database.VmName,
+            };
+        }
+        else
+        {
+            point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == request.RestorePointId, ct);
+            if (point is null || point.State != RestorePointState.Available)
+            {
+                return Results.Problem("The restore point is not available (deleted, or still being written).", statusCode: StatusCodes.Status404NotFound);
+            }
         }
 
         var name = request.DatabaseName?.Trim() ?? string.Empty;
@@ -249,7 +280,8 @@ public static class SqlEndpoints
         try
         {
             var agent = await SqlAgentAsync(request.TargetVmNativeId, agents, registry, ct);
-            var capability = request.Overwrite ? AgentProtocol.CapabilitySqlReplaceFiles : AgentProtocol.CapabilitySqlAttachFiles;
+            var capability = request.SqlDatabaseId is not null ? AgentProtocol.CapabilitySqlRestoreChain
+                : request.Overwrite ? AgentProtocol.CapabilitySqlReplaceFiles : AgentProtocol.CapabilitySqlAttachFiles;
             if (!registry.HasCapability(agent.Id, capability))
             {
                 return Results.Problem(
@@ -265,6 +297,75 @@ public static class SqlEndpoints
         var id = await queue.EnqueueSqlRestoreAsync(request with { DatabaseName = name }, point.RepositoryId, point.VmName, http.User.Identity?.Name ?? "user", ct);
         return Results.Ok(new StartedDto(id));
     }
+
+    /// <summary>The databases of the SQL catalog with their chain state and the span of time they can be restored to.</summary>
+    private static async Task<IResult> ListDatabasesAsync(AppDbContext db, CancellationToken ct)
+    {
+        var databases = await db.SqlDatabases.AsNoTracking().OrderBy(d => d.VmName).ThenBy(d => d.Instance).ThenBy(d => d.Name).ToListAsync(ct);
+        var sets = (await SqlRestoreSessionRunner.UsableSetsAsync(db, [.. databases.Select(d => d.Id)], ct)).ToLookup(s => s.SqlDatabaseId);
+        return Results.Ok(databases.Select(d => ToDto(d, new SqlChain(sets[d.Id].Select(SqlChainSet.From)).Coverage().Spans)).ToList());
+    }
+
+    private static async Task<IResult> DatabaseAsync(Guid id, AppDbContext db, CancellationToken ct)
+    {
+        var database = await db.SqlDatabases.AsNoTracking().FirstOrDefaultAsync(d => d.Id == id, ct);
+        if (database is null)
+        {
+            return Results.NotFound();
+        }
+
+        var (spans, gaps) = new SqlChain((await SqlRestoreSessionRunner.UsableSetsAsync(db, [id], ct)).Select(SqlChainSet.From)).Coverage();
+        return Results.Ok(new SqlCatalogDatabaseDetailDto(
+            ToDto(database, spans),
+            [.. spans.Select(s => new SqlCoverageSpanDto(s.FromUtc, s.ToUtc, s.BaseKind.ToString(), s.Logs))],
+            [.. gaps.Select(g => new SqlCoverageGapDto(g.FromUtc, g.ToUtc, g.Reason))]));
+    }
+
+    /// <summary>What a restore to <paramref name="at"/> (null: the latest point) applies; 400 with the reason if nothing reaches it.</summary>
+    private static async Task<IResult> PlanAsync(Guid id, DateTimeOffset? at, AppDbContext db, RepositoryManager repositories, CancellationToken ct)
+    {
+        SqlRestoreSessionRunner.ChainChoice chain;
+        try
+        {
+            chain = await SqlRestoreSessionRunner.ChooseChainAsync(db, id, at, ct);
+        }
+        catch (Exception ex) when (ex is SqlChainException or KeyNotFoundException)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        List<SqlPlanFileDto> files;
+        if (chain.Base.Files is { } baseFiles)
+        {
+            files = [.. baseFiles.OrderBy(f => f.Type == "LOG" ? 1 : 0).ThenBy(f => f.FileId).Select(f => new SqlPlanFileDto(f.PhysicalName, f.Type == "LOG" ? "log" : "data", f.SizeBytes))];
+        }
+        else
+        {
+            // A snapshot base: the files as the restore point's guest metadata lists them.
+            var repository = await repositories.GetAsync(chain.Base.RepositoryId, ct);
+            await using var reader = await repository.OpenRestorePointAsync(chain.Base.RestorePointId!.Value, ct);
+            var stored = await StoredGuestMetadata.ReadAsync(reader, ct);
+            var guest = stored?.SqlDatabases.FirstOrDefault(d =>
+                string.Equals(d.Instance, chain.Database.Instance, StringComparison.OrdinalIgnoreCase) && string.Equals(d.Database, chain.Database.Name, StringComparison.OrdinalIgnoreCase));
+            // The writer may list the files without kind (the restore classifies them by their first page): the extension tells for the preview.
+            static string FullPath(GuestSqlFile f) => f.Path.TrimEnd('\\') + "\\" + f.Spec;
+            files = guest is null ? [] :
+            [
+                .. guest.DataFiles.Select(f => new SqlPlanFileDto(FullPath(f), "data", null)),
+                .. guest.OtherFiles.Where(f => !f.Spec.EndsWith(".ldf", StringComparison.OrdinalIgnoreCase)).Select(f => new SqlPlanFileDto(FullPath(f), "data", null)),
+                .. guest.LogFiles.Select(f => new SqlPlanFileDto(FullPath(f), "log", null)),
+                .. guest.OtherFiles.Where(f => f.Spec.EndsWith(".ldf", StringComparison.OrdinalIgnoreCase)).Select(f => new SqlPlanFileDto(FullPath(f), "log", null)),
+            ];
+        }
+
+        return Results.Ok(new SqlRestorePlanDto(
+            chain.Base.Kind.ToString(), chain.Base.FinishUtc, chain.Base.RestorePointId, chain.Base.Size, chain.Logs.Count, chain.Logs.Sum(l => l.Size),
+            chain.Plan.StopAtLocal, chain.Plan.ReachedUtc, files));
+    }
+
+    private static SqlCatalogDatabaseDto ToDto(SqlDatabaseEntity d, IReadOnlyList<SqlCoverage> spans) => new(
+        d.Id, d.VmNativeId, d.VmName, d.Instance, d.Name, d.RecoveryModel, d.ProductVersion, d.ChainState.ToString(), d.ChainReason, d.LastLogUtc, d.LastFullUtc,
+        spans.Count == 0 ? null : spans[0].FromUtc, spans.Count == 0 ? null : spans[^1].ToUtc, d.JobId);
 
     /// <summary>The online agent of a VM that runs SQL jobs, or a message that says what is missing.</summary>
     internal static async Task<AgentEntity> SqlAgentAsync(string vmNativeId, AgentService agents, AgentRegistry registry, CancellationToken ct)

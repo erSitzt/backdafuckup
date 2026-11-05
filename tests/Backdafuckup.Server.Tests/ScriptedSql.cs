@@ -179,7 +179,7 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                     return (1, null);
 
                 case "SELECT state_desc FROM sys.databases WHERE name = @name":
-                    return (_databases.ContainsKey(Name()) ? (Offline.Contains(Name()) ? "OFFLINE" : "ONLINE") : null, null);
+                    return (_databases.ContainsKey(Name()) ? (Offline.Contains(Name()) ? "OFFLINE" : Restoring.Contains(Name()) ? "RESTORING" : "ONLINE") : null, null);
                 case "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)), CAST(SERVERPROPERTY('Edition') AS nvarchar(128)), CAST(SERVERPROPERTY('EngineEdition') AS int), SUSER_SNAME(), IS_SRVROLEMEMBER('sysadmin'), IS_SRVROLEMEMBER('dbcreator')":
                 {
                     var table = Table(("version", typeof(string)), ("edition", typeof(string)), ("engine", typeof(int)), ("login", typeof(string)), ("sysadmin", typeof(int)), ("dbcreator", typeof(int)));
@@ -421,6 +421,11 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 return lane;
             }
 
+            if (Restore(text, parameters) is { } restore)
+            {
+                return restore;
+            }
+
             if (DropStatement().Match(text) is { Success: true } drop)
             {
                 if (FailDrops > 0)
@@ -547,6 +552,77 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
 
         return null;
     }
+
+    /// <summary>
+    /// The statements of a restore to a point in time: the file list of a .bkm ("TAPE a;TAPE b;", by position) or of a
+    /// native full ("TAPE FULL a …"), RESTORE DATABASE (METADATA_ONLY onto files in place, or creating them), RESTORE LOG,
+    /// RECOVERY and the detach of an overwrite's staging database.
+    /// </summary>
+    private (object? Scalar, DataTable? Table)? Restore(string text, IReadOnlyDictionary<string, object?> parameters)
+    {
+        string Text(string name) => (string)parameters[name]!;
+        if (text == SqlChainRestorer.FileListQuery)
+        {
+            var content = File.ReadAllText(Text("@path"));
+            var database = content.StartsWith("TAPE FULL ", StringComparison.Ordinal)
+                ? content["TAPE FULL ".Length..].Split(' ')[0]
+                : content.Split(';', StringSplitOptions.RemoveEmptyEntries)[(int)parameters["@position"]! - 1]["TAPE ".Length..];
+            var table = Table(("LogicalName", typeof(string)), ("PhysicalName", typeof(string)), ("Type", typeof(string)));
+            foreach (var file in _databases[database].Files)
+            {
+                var log = file.EndsWith(".ldf", StringComparison.OrdinalIgnoreCase);
+                table.Rows.Add(Path.GetFileNameWithoutExtension(file.Replace('\\', '/')), file, log ? "L" : "D");
+            }
+
+            return (null, table);
+        }
+
+        if (RestoreDatabaseStatement().Match(text) is { Success: true } restore)
+        {
+            var database = Text("@database");
+            Assert.False(_databases.ContainsKey(database), $"{database} exists already");
+            var files = Enumerable.Range(0, parameters.Keys.Count(k => k.StartsWith("@physical", StringComparison.Ordinal))).Select(i => Text($"@physical{i}")).ToList();
+            _databases[database] = (_nextId++, files);
+            Restoring.Add(database);
+            Restores.Add((database, restore.Groups["metadata"].Success ? "snapshot" : "full", Text("@path")));
+            return (null, null);
+        }
+
+        if (text.StartsWith("RESTORE LOG @database FROM DISK = @path WITH ", StringComparison.Ordinal))
+        {
+            var database = Text("@database");
+            Assert.True(Restoring.Contains(database), $"{database} is not restoring");
+            Assert.True(File.Exists(Text("@path")), "a log backup that was not downloaded");
+            Restores.Add((database, parameters.TryGetValue("@stopat", out var stopAt) ? $"log STOPAT {stopAt}" : "log", File.ReadAllText(Text("@path"))));
+            if (text.Contains("RECOVERY", StringComparison.Ordinal) && !text.Contains("NORECOVERY", StringComparison.Ordinal))
+            {
+                Restoring.Remove(database);
+            }
+
+            return (null, null);
+        }
+
+        switch (text)
+        {
+            case "RESTORE DATABASE @database WITH RECOVERY":
+                Restoring.Remove(Text("@database"));
+                return (null, null);
+            case "EXEC sp_detach_db @dbname = @database":
+                Assert.True(_databases.Remove(Text("@database")));
+                return (null, null);
+        }
+
+        return null;
+    }
+
+    /// <summary>Databases being restored (NORECOVERY so far).</summary>
+    public HashSet<string> Restoring { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>What restores applied: database, kind (snapshot, full, log, log STOPAT …) and the file (or its content for logs).</summary>
+    public List<(string Database, string Kind, string File)> Restores { get; } = [];
+
+    [GeneratedRegex(@"^RESTORE DATABASE @database FROM DISK = @path WITH (?<metadata>METADATA_ONLY, )?FILE = @position, MOVE @logical0 TO @physical0(, MOVE @logical\d+ TO @physical\d+)*, NORECOVERY$")]
+    private static partial Regex RestoreDatabaseStatement();
 
     /// <summary>Another tool's log backup of <paramref name="database"/> (e.g. a maintenance plan): it takes the log, so ours no longer continues.</summary>
     public void TakeForeignLogBackup(string database, string device)

@@ -40,7 +40,7 @@ public static class OperationEndpoints
             var recent = await db.Sessions.Where(s => s.Kind == SessionKind.Backup && s.EndedUtc >= since).ToListAsync(ct);
             var running = await db.Sessions.Where(s => s.State == SessionState.Running || s.State == SessionState.Stopping || s.State == SessionState.Queued)
                 .OrderBy(s => s.CreatedUtc).ToListAsync(ct);
-            var latest = await db.Sessions.OrderByDescending(s => s.CreatedUtc).Take(10).ToListAsync(ct);
+            var latest = await db.Sessions.OrderByDescending(s => s.Kind == SessionKind.SqlBackup && s.EndedUtc != null ? s.EndedUtc : s.CreatedUtc).Take(10).ToListAsync(ct);
             var vms = await db.Inventory.Where(i => i.Kind == InventoryKind.Vm).Select(i => i.NativeId).Distinct().ToListAsync(ct);
             var protectedVms = await db.RestorePoints.Where(r => r.State == RestorePointState.Available).Select(r => r.VmNativeId).Distinct().ToListAsync(ct);
             return new DashboardDto(
@@ -169,7 +169,9 @@ public static class OperationEndpoints
                 query = query.Where(s => s.JobId == job);
             }
 
-            return (await query.OrderByDescending(s => s.CreatedUtc).Take(Math.Clamp(limit ?? 100, 1, 1000)).ToListAsync(ct)).Select(s => s.ToDto());
+            // A day session of SQL Server backups counts from its last run (it is reopened by every run of the day).
+            return (await query.OrderByDescending(s => s.Kind == SessionKind.SqlBackup && s.EndedUtc != null ? s.EndedUtc : s.CreatedUtc)
+                .Take(Math.Clamp(limit ?? 100, 1, 1000)).ToListAsync(ct)).Select(s => s.ToDto());
         });
 
         sessions.MapGet("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>

@@ -1120,7 +1120,8 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
                 SqlCredentialId = login.Id,
                 SqlBackup = new SqlBackupSettingsDto(Enabled: true, LogIntervalMinutes: 15, FullSchedule: none, SystemSchedule: none),
             },
-            expectedState: "Warning");
+            // The snapshot starts the log chains, but the job backs up the logs itself: no warning about missing log backups.
+            expectedState: "Succeeded");
         var (_, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
         var service = _factory!.Services.GetRequiredService<SqlBackupService>();
         var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>();
@@ -1193,6 +1194,178 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
                 var sets = await db.SqlBackupSets.Where(s => s.SqlDatabaseId == shop.Id).ToListAsync(Ct);
                 Assert.Equal(Backdafuckup.Server.Data.SqlBackupSetKind.NativeFull, new SqlChain(sets.Select(SqlChainSet.From)).Plan(null).Base.Kind);
             }
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
+    }
+
+    [Fact]
+    public async Task A_sql_database_is_restored_to_a_point_in_time_from_the_snapshot_and_its_log_backups()
+    {
+        var client = await SignedInClientAsync();
+        var mdf = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11);
+        var ldf = WindowsTestDisk.SqlFile(2, 512 << 10, 0x22);
+        var image = WindowsTestDisk.Create(
+            [
+                new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+                new WindowsTestDisk.Volume('D', 8, new Dictionary<string, byte[]> { ["SQL/shop.mdf"] = mdf }),
+                new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]> { ["Log/shop_log.ldf"] = ldf }),
+            ],
+            software: root =>
+            {
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\Instance Names\SQL").SetValue("SQLEXPRESS", "MSSQL16.SQLEXPRESS");
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\MSSQL16.SQLEXPRESS\Setup").SetValue("Version", "16.0.1000.6");
+            });
+        var fs = new SandboxRestoreFileSystem(Path.Combine(_root, "sql-pit-guest"));
+        var backupFolder = Path.Combine(_root, "sql-pit-backup");
+        Directory.CreateDirectory(backupFolder);
+        var sql = new ScriptedSqlEnvironment(path => File.ReadAllBytes(fs.Local(path))) { BackupFolder = backupFolder };
+        sql.AddDatabase("shop", @"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf");
+        static GuestSqlFile F(string path, string spec) => new() { Path = path, Spec = spec };
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_backup", "Backup-1", null), Ct));
+        var none = new ScheduleDto("None", "20:00", [], "UTC");
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+        var point = await BackUpImageAsync(
+            client,
+            "sql08",
+            image,
+            async vm => started = await StartAgentAsync(
+                vm, fs, sql, null,
+                [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", DataFiles = [F(@"D:\SQL\", "shop.mdf")], LogFiles = [F(@"L:\Log\", "shop_log.ldf")], InBackup = true }]),
+            job => job with
+            {
+                GuestProcessingMode = GuestProcessingModes.SqlSnapshot,
+                SqlCredentialId = login.Id,
+                SqlBackup = new SqlBackupSettingsDto(Enabled: true, LogIntervalMinutes: 15, FullSchedule: none, SystemSchedule: none),
+            });
+        var (_, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
+        var service = _factory!.Services.GetRequiredService<SqlBackupService>();
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>();
+        try
+        {
+            // Two log backups on top of the snapshot.
+            for (var run = 0; run < 2; run++)
+            {
+                await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+                {
+                    await db.SqlBackupSchedules.ExecuteUpdateAsync(s => s.SetProperty(x => x.NextLogUtc, DateTimeOffset.UtcNow.AddSeconds(-1)), Ct);
+                }
+
+                await service.TickAsync(Ct);
+                await service.WaitIdleAsync();
+            }
+
+            Guid shopId;
+            List<Backdafuckup.Server.Data.SqlBackupSetEntity> logs;
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                shopId = (await db.SqlDatabases.SingleAsync(d => d.Name == "shop", Ct)).Id;
+                logs = await db.SqlBackupSets.Where(s => s.SqlDatabaseId == shopId && s.Kind == Backdafuckup.Server.Data.SqlBackupSetKind.Log).OrderBy(s => s.FinishUtc).ToListAsync(Ct);
+            }
+
+            Assert.Equal(2, logs.Count);
+            SqlRestoreRequestDto Request(string name, DateTimeOffset? at) =>
+                new(Guid.Empty, "SQLEXPRESS", "shop", point.VmNativeId, "SQLEXPRESS", login.Id, name, SqlRestoreFiles.Original, null, null, SqlDatabaseId: shopId, PointInTimeUtc: at);
+            async Task<(SessionDetailDto Detail, string Log)> RestoreAsync(SqlRestoreRequestDto request)
+            {
+                var detail = await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/restores", request, Ct))).SessionId);
+                var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{detail.Session.Id}/log", Ct))!.Select(l => l.Message));
+                return (detail, log);
+            }
+
+            // Before the snapshot: refused at once, naming the oldest point.
+            var early = await client.PostAsJsonAsync("/api/sql/restores", Request("shop_early", point.CreatedUtc.AddDays(-1)), Ct);
+            Assert.Equal(HttpStatusCode.BadRequest, early.StatusCode);
+            Assert.Contains("before the oldest full backup", await early.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+
+            // The latest point: the snapshot's files written, its .bkm restored onto them, both logs, RECOVERY.
+            var (latest, latestLog) = await RestoreAsync(Request("shop_latest", null));
+            Assert.True(latest.Session.State == "Succeeded", latest.Session.Summary + "\n" + latestLog);
+            Assert.Equal([@"D:\SQL\shop_latest.mdf", @"L:\Log\shop_latest_log.ldf"], sql.DatabaseFiles("shop_latest"));
+            Assert.Equal(mdf, File.ReadAllBytes(fs.Local(@"D:\SQL\shop_latest.mdf")));
+            Assert.Equal(["snapshot", "log", "log"], sql.Restores.Where(r => r.Database == "shop_latest").Select(r => r.Kind));
+            Assert.Contains("restored the SQL Server snapshot as [shop_latest]", latestLog, StringComparison.Ordinal);
+            Assert.Contains("applied 2 log backup(s)", latestLog, StringComparison.Ordinal);
+            Assert.Contains(@"Restored SQLEXPRESS\shop to the latest backup", latest.Session.Summary, StringComparison.Ordinal);
+
+            // The end of the first log backup: only it, with STOPAT in SQL Server's local time (UTC here).
+            var at = logs[0].FinishUtc;
+            var (pit, pitLog) = await RestoreAsync(Request("shop_pit", at));
+            Assert.True(pit.Session.State == "Succeeded", pit.Session.Summary + "\n" + pitLog);
+            var applied = sql.Restores.Where(r => r.Database == "shop_pit").ToList();
+            Assert.Equal(["snapshot", $"log STOPAT {at.UtcDateTime:yyyy-MM-ddTHH:mm:ss.fff}"], applied.Select(r => r.Kind));
+            Assert.StartsWith("TAPE LOG shop 41000000012300001-", applied[1].File, StringComparison.Ordinal);
+            Assert.Empty(Directory.GetDirectories(Path.Combine(backupFolder, "backdafuckup")));
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
+    }
+
+    [Fact]
+    public async Task Without_the_sql_server_snapshot_a_native_full_is_the_base_and_the_restore_downloads_it_with_the_logs()
+    {
+        var client = await SignedInClientAsync();
+        var image = WindowsTestDisk.Create([new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>())]);
+        var fs = new SandboxRestoreFileSystem(Path.Combine(_root, "sql-native-guest"));
+        var backupFolder = Path.Combine(_root, "sql-native-backup");
+        Directory.CreateDirectory(backupFolder);
+        var sql = new ScriptedSqlEnvironment(_ => []) { BackupFolder = backupFolder };
+        sql.AddDatabase("shop", @"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf");
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_backup", "Backup-1", null), Ct));
+        var none = new ScheduleDto("None", "20:00", [], "UTC");
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+
+        // VSS (no SQL Server snapshot): the image is no base for log backups.
+        await BackUpImageAsync(
+            client, "sql09", image, async vm => started = await StartAgentAsync(vm, fs, sql),
+            job => job with { SqlCredentialId = login.Id, SqlBackup = new SqlBackupSettingsDto(Enabled: true, LogIntervalMinutes: 15, FullSchedule: none, SystemSchedule: none) });
+        var (_, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
+        var service = _factory!.Services.GetRequiredService<SqlBackupService>();
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>();
+        try
+        {
+            // First run: shop has no chain, so a native full starts it; second run: a log backup continues it.
+            for (var run = 0; run < 2; run++)
+            {
+                await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+                {
+                    await db.SqlBackupSchedules.ExecuteUpdateAsync(s => s.SetProperty(x => x.NextLogUtc, DateTimeOffset.UtcNow.AddSeconds(-1)), Ct);
+                }
+
+                await service.TickAsync(Ct);
+                await service.WaitIdleAsync();
+            }
+
+            Assert.Equal([("shop", "D"), ("shop", "L")], sql.LaneBackups.Select(b => (b.Database, b.Type)));
+            Guid shopId;
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                var shop = await db.SqlDatabases.SingleAsync(d => d.Name == "shop", Ct);
+                shopId = shop.Id;
+                var full = await db.SqlBackupSets.SingleAsync(s => s.SqlDatabaseId == shopId && s.Kind == Backdafuckup.Server.Data.SqlBackupSetKind.NativeFull, Ct);
+                Assert.Equal([@"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf"], full.Files!.Select(f => f.PhysicalName));
+            }
+
+            var request = new SqlRestoreRequestDto(Guid.Empty, "SQLEXPRESS", "shop", "unused", "SQLEXPRESS", login.Id, "shop_native", SqlRestoreFiles.Original, null, null, SqlDatabaseId: shopId)
+            {
+                TargetVmNativeId = (await client.GetFromJsonAsync<List<RestorePointDto>>("/api/restore-points", Ct))!.Single(p => p.VmName == "sql09").VmNativeId,
+            };
+            var detail = await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/restores", request, Ct))).SessionId);
+            var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{detail.Session.Id}/log", Ct))!.Select(l => l.Message));
+            Assert.True(detail.Session.State == "Succeeded", detail.Session.Summary + "\n" + log);
+            Assert.Equal([@"D:\SQL\shop_native.mdf", @"L:\Log\shop_native_log.ldf"], sql.DatabaseFiles("shop_native"));
+            var applied = sql.Restores.Where(r => r.Database == "shop_native").ToList();
+            Assert.Equal(["full", "log"], applied.Select(r => r.Kind));
+            Assert.StartsWith("TAPE LOG shop ", applied[1].File, StringComparison.Ordinal);
+            Assert.Contains("downloading the full backup shop_", log, StringComparison.Ordinal);
+            Assert.Contains("the full backup of", detail.Session.Summary, StringComparison.Ordinal);
+            Assert.Empty(Directory.GetDirectories(Path.Combine(backupFolder, "backdafuckup")));
         }
         finally
         {

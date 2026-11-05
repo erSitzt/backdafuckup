@@ -94,7 +94,7 @@ public static class SqlAttach
     /// either (SQL Server refuses ALTER AUTHORIZATION without access). Returns whether the account can open it, and
     /// says what a sysadmin can do if not.
     /// </summary>
-    private static bool CheckAccess(DbConnection connection, string database, SqlAccount account, Action<string> log)
+    internal static bool CheckAccess(DbConnection connection, string database, SqlAccount account, Action<string> log)
     {
         var quoted = SqlPublishDatabase.Quote(database);
         try
@@ -121,7 +121,7 @@ public static class SqlAttach
     /// What the attach changed or left to do: owner (the attaching login), TRUSTWORTHY (always off after an attach),
     /// Service Broker, recovery model, and database users whose login does not exist on this instance.
     /// </summary>
-    private static void Describe(DbConnection connection, string instance, string database, bool canOpen, Action<string> log)
+    internal static void Describe(DbConnection connection, string instance, string database, bool canOpen, Action<string> log)
     {
         try
         {

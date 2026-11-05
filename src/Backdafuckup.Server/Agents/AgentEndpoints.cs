@@ -396,6 +396,27 @@ public static class AgentEndpoints
             }
         }).WithMetadata(new Microsoft.AspNetCore.Mvc.DisableRequestSizeLimitAttribute());
 
+        // A restore job downloads the backup files it applies (from the repository, checked chunk by chunk and by SHA-256).
+        agent.MapGet("/sql-jobs/{id:guid}/files/{fileId}", async (Guid id, string fileId, AgentService agents, Sql.SqlJobs jobs, HttpContext http, CancellationToken ct) =>
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return Results.Unauthorized();
+            }
+
+            if (jobs.File(id, agentId, fileId) is not { } file)
+            {
+                return Results.Problem("The SQL job is not running (any more) or has no such file.", statusCode: StatusCodes.Status404NotFound);
+            }
+
+            await using var reader = await file.Repository.OpenSqlBackupAsync(file.SqlBackupId, ct);
+            await using var stream = await reader.OpenFileAsync(file.Key, ct);
+            http.Response.ContentType = "application/octet-stream";
+            http.Response.ContentLength = file.Length;
+            await stream.CopyToAsync(http.Response.Body, 1 << 20, ct);
+            return Results.Empty;
+        });
+
         agent.MapPost("/sql-jobs/{id:guid}/backups/commit", async (Guid id, AgentService agents, Sql.SqlJobs jobs, HttpContext http, CancellationToken ct) =>
         {
             if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
