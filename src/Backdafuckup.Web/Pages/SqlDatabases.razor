@@ -87,14 +87,14 @@ else
         "NoBase" => "no full backup",
         "Broken" => "broken",
         "Simple" => "SIMPLE",
-        _ => "not yet backed up",
+        _ => "not checked yet",
     };
 
     internal static string ChainText(string state) => state switch
     {
         "Ok" => "A full backup and an unbroken chain of log backups since then.",
         "Simple" => "SIMPLE recovery: no log backups; restorable to the times of its full backups only.",
-        _ => "No log backups of this database by backdafuckup yet.",
+        _ => "No SQL Server backup run has checked the chain yet (new database, or a repository just imported); the next run does.",
     };
 
     internal static Color ChainColor(string state) => state switch

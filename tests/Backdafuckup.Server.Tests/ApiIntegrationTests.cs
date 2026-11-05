@@ -1299,6 +1299,90 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Assert.Equal(["snapshot", $"log STOPAT {at.UtcDateTime:yyyy-MM-ddTHH:mm:ss.fff}"], applied.Select(r => r.Kind));
             Assert.StartsWith("TAPE LOG shop 41000000012300001-", applied[1].File, StringComparison.Ordinal);
             Assert.Empty(Directory.GetDirectories(Path.Combine(backupFolder, "backdafuckup")));
+
+            // A catalog rebuilt from the repository (disaster recovery of the server) keeps the chain: the restore
+            // point's snapshot full and the SQL backups' log backups come back with the import.
+            Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/jobs/{point.JobId}", Ct)).StatusCode);
+            Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/repositories/{point.RepositoryId}", Ct)).StatusCode);
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                Assert.Equal(0, await db.SqlBackupSets.CountAsync(Ct));
+            }
+
+            var imported = await client.PostAsJsonAsync("/api/repositories", new CreateRepositoryDto { Name = "Imported", Path = Path.Combine(_root, "repo") }, Ct);
+            Assert.Equal(HttpStatusCode.Created, imported.StatusCode);
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                var kinds = await db.SqlBackupSets.Join(db.SqlDatabases.Where(d => d.Name == "shop"), s => s.SqlDatabaseId, d => d.Id, (s, _) => s.Kind).ToListAsync(Ct);
+                Assert.Equal(
+                    [Backdafuckup.Server.Data.SqlBackupSetKind.SnapshotFull, Backdafuckup.Server.Data.SqlBackupSetKind.Log, Backdafuckup.Server.Data.SqlBackupSetKind.Log],
+                    kinds.Order());
+            }
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
+    }
+
+    /// <summary>
+    /// Not a test: with BDFU_UI_FIXTURE=&lt;folder&gt; it leaves a repository for checking the SQL Server pages by hand: a
+    /// restore point with the SQL Server snapshot of shop, log backups every 15 minutes over four hours, another tool's
+    /// log backup (a gap) and the full backup that restarts the chain.
+    /// </summary>
+    [Fact]
+    public async Task Ui_fixture_with_a_log_chain_over_hours()
+    {
+        var keep = Environment.GetEnvironmentVariable("BDFU_UI_FIXTURE");
+        Assert.SkipUnless(keep is { Length: > 0 }, "Only builds a repository for checking the console (BDFU_UI_FIXTURE=<folder>).");
+        var client = await SignedInClientAsync();
+        var image = WindowsTestDisk.Create(
+            [
+                new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+                new WindowsTestDisk.Volume('D', 8, new Dictionary<string, byte[]> { ["SQL/shop.mdf"] = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11) }),
+                new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]> { ["Log/shop_log.ldf"] = WindowsTestDisk.SqlFile(2, 512 << 10, 0x22) }),
+            ]);
+        var fs = new SandboxRestoreFileSystem(Path.Combine(_root, "ui-guest"));
+        var backupFolder = Path.Combine(_root, "ui-backup");
+        Directory.CreateDirectory(backupFolder);
+        var clock = DateTime.UtcNow.AddHours(-4);
+        var sql = new ScriptedSqlEnvironment(path => File.ReadAllBytes(fs.Local(path))) { BackupFolder = backupFolder, Now = () => clock };
+        sql.AddDatabase("shop", @"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf");
+        static GuestSqlFile F(string path, string spec) => new() { Path = path, Spec = spec };
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_backup", "Backup-1", null), Ct));
+        var none = new ScheduleDto("None", "20:00", [], "UTC");
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+        await BackUpImageAsync(
+            client, "sql-ui", image,
+            async vm => started = await StartAgentAsync(
+                vm, fs, sql, null,
+                [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", DataFiles = [F(@"D:\SQL\", "shop.mdf")], LogFiles = [F(@"L:\Log\", "shop_log.ldf")], InBackup = true }]),
+            job => job with { GuestProcessingMode = GuestProcessingModes.SqlSnapshot, SqlCredentialId = login.Id, SqlBackup = new SqlBackupSettingsDto(Enabled: true, LogIntervalMinutes: 15, FullSchedule: none, SystemSchedule: none) });
+        var (_, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
+        var service = _factory!.Services.GetRequiredService<SqlBackupService>();
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>();
+        try
+        {
+            for (var run = 1; run <= 15; run++)
+            {
+                clock = clock.AddMinutes(15);
+                if (run == 8)
+                {
+                    // Another tool takes a log backup: the next run finds the gap and takes a full at once.
+                    sql.TakeForeignLogBackup("shop", @"\\nas\sql\shop_maintenance.trn");
+                }
+
+                await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+                {
+                    await db.SqlBackupSchedules.ExecuteUpdateAsync(s => s.SetProperty(x => x.NextLogUtc, DateTimeOffset.UtcNow.AddSeconds(-1)), Ct);
+                }
+
+                await service.TickAsync(Ct);
+                await service.WaitIdleAsync();
+            }
+
+            CopyDirectory(Path.Combine(_root, "repo"), keep!);
         }
         finally
         {

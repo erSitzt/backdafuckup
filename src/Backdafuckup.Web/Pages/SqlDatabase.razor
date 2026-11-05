@@ -63,15 +63,24 @@ else
                     <div style="position:absolute;top:0;bottom:0;left:@Left(at);width:3px;margin-left:-1px;background:var(--mud-palette-error)"></div>
                 }
             </div>
-            <MudSlider T="double" Value="_slider" ValueChanged="OnSliderChanged" Min="0" Max="total" Step="1" Immediate="false" Color="Color.Error" Class="mt-1" />
+            <div style="position:relative;height:16px">
+                @foreach (var tick in HourTicks(from, to))
+                {
+                    <div style="position:absolute;left:@Left(tick);transform:translateX(-50%);font-size:11px;color:var(--mud-palette-text-secondary);border-left:1px solid var(--mud-palette-lines-default);padding-left:2px;white-space:nowrap">
+                        @tick.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture)
+                    </div>
+                }
+            </div>
+            <MudSlider T="double" Value="_slider" ValueChanged="OnSliderChanged" Min="0" Max="total" Step="1" Immediate="true" Color="Color.Error" Class="mt-1"
+                       aria-label="Point in time" />
             <div class="d-flex align-center mb-2" style="flex-wrap:wrap;gap:4px">
                 <MudText Typo="Typo.caption">@Fmt.Time(from)</MudText>
                 <MudSpacer />
-                <MudTooltip Text="The oldest restorable point"><MudIconButton Icon="@Icons.Material.Filled.FirstPage" Size="Size.Small" OnClick="@(() => JumpAsync(from))" /></MudTooltip>
-                <MudTooltip Text="The end of the previous backup"><MudIconButton Icon="@Icons.Material.Filled.ChevronLeft" Size="Size.Small" OnClick="@(() => StepAsync(-1))" /></MudTooltip>
-                <MudText Typo="Typo.body1" Class="mx-2"><b>@(_latest ? $"latest ({Fmt.Time(to)})" : Selected() is { } shown ? shown.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) : "–")</b></MudText>
-                <MudTooltip Text="The end of the next backup"><MudIconButton Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" OnClick="@(() => StepAsync(1))" /></MudTooltip>
-                <MudTooltip Text="The latest backup"><MudIconButton Icon="@Icons.Material.Filled.LastPage" Size="Size.Small" OnClick="LatestAsync" /></MudTooltip>
+                <MudTooltip Text="The oldest restorable point"><MudIconButton Icon="@Icons.Material.Filled.FirstPage" Size="Size.Small" OnClick="@(() => JumpAsync(from))" aria-label="Oldest point" /></MudTooltip>
+                <MudTooltip Text="The end of the previous backup"><MudIconButton Icon="@Icons.Material.Filled.ChevronLeft" Size="Size.Small" OnClick="@(() => StepAsync(-1))" aria-label="Previous backup" /></MudTooltip>
+                <MudText Typo="Typo.body1" Class="mx-2" Style="min-width:230px;text-align:center"><b>@SelectedText(to)</b></MudText>
+                <MudTooltip Text="The end of the next backup"><MudIconButton Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" OnClick="@(() => StepAsync(1))" aria-label="Next backup" /></MudTooltip>
+                <MudTooltip Text="The latest backup"><MudIconButton Icon="@Icons.Material.Filled.LastPage" Size="Size.Small" OnClick="LatestAsync" aria-label="Latest point" /></MudTooltip>
                 <MudSpacer />
                 <MudText Typo="Typo.caption">@Fmt.Time(to)</MudText>
             </div>
@@ -91,8 +100,8 @@ else
             @if (_plan is { } plan)
             {
                 <MudText Typo="Typo.body2" Class="mb-2">
-                    Restores @BaseText(plan.BaseKind) of @Fmt.Time(plan.BaseUtc) (@Fmt.Bytes(plan.BaseBytes)), then @plan.Logs log backup(s) (@Fmt.Bytes(plan.LogBytes))
-                    @(plan.StopAtLocal is { } stop ? $"up to {stop} (SQL Server's time)" : "to the end of the last one") — the state of @Fmt.Time(plan.ReachedUtc).
+                    Restores @BaseText(plan.BaseKind) of @Fmt.Time(plan.BaseUtc) (@Fmt.Bytes(plan.BaseBytes))@(plan.Logs == 0 ? " and no log backup" : $", then {plan.Logs} log backup(s) ({Fmt.Bytes(plan.LogBytes)})")
+                    @(plan.StopAtLocal is { } stop ? $"up to {plan.ReachedUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss} (STOPAT {stop.Replace('T', ' ')[..19]} in SQL Server's time)" : plan.Logs == 0 ? string.Empty : "to the end of the last one") — the state of @plan.ReachedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture).
                 </MudText>
                 <div class="d-flex gap-2">
                     <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(false))">Restore as a new database</MudButton>
@@ -137,6 +146,14 @@ else
                     </MudSelect>
                 </MudItem>
             </MudGrid>
+            @if (_agents.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Dense="true">No VM has an agent that can restore SQL Server databases. Install the agent under Guest Agents; agents update themselves after a server update.</MudAlert>
+            }
+            @if (_accounts.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Dense="true">No account yet. Add a Windows credential or a SQL Server login under <MudLink Href="/infrastructure/credentials">Credentials</MudLink>.</MudAlert>
+            }
             <div>
                 <MudButton Variant="Variant.Outlined" Size="Size.Small" StartIcon="@Icons.Material.Filled.Cable" Disabled="@(_targetVm is null || _accountId is null || _checking)" OnClick="CheckTargetAsync">Connect</MudButton>
                 @if (_checking)
@@ -215,6 +232,8 @@ else
     private DateTimeOffset? _pointInTime;
     private double _slider;
     private string? _snapped;
+    private DateTimeOffset? _dragging;
+    private CancellationTokenSource? _settle;
     private SqlRestorePlanDto? _plan;
     private string? _planError;
     private bool _open;
@@ -264,11 +283,48 @@ else
         _ => "log backup",
     };
 
+    /// <summary>While the slider moves, its time shows at once; the plan follows when it rests for a moment.</summary>
     private async Task OnSliderChanged(double seconds)
     {
         _slider = seconds;
         var (from, to) = Range();
+        _dragging = from.AddSeconds(seconds);
+        _settle?.Cancel();
+        var settle = _settle = new CancellationTokenSource();
+        try
+        {
+            await Task.Delay(400, settle.Token);
+        }
+        catch (TaskCanceledException)
+        {
+            return;
+        }
+
+        _dragging = null;
         await SelectAsync(seconds >= (to - from).TotalSeconds ? null : from.AddSeconds(seconds));
+    }
+
+    private string SelectedText(DateTimeOffset to) =>
+        _dragging is { } moving ? moving.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
+        : _latest ? $"latest ({to.ToLocalTime():yyyy-MM-dd HH:mm:ss})"
+        : Selected() is { } shown ? shown.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) : "–";
+
+    /// <summary>Full local hours (or every 2, 6, 12, 24 hours for longer ranges) for the axis.</summary>
+    private static IEnumerable<DateTimeOffset> HourTicks(DateTimeOffset from, DateTimeOffset to)
+    {
+        var hours = (to - from).TotalHours;
+        var step = hours <= 12 ? 1 : hours <= 24 ? 2 : hours <= 72 ? 6 : hours <= 168 ? 12 : 24;
+        var local = from.ToLocalTime();
+        var tick = new DateTimeOffset(local.Year, local.Month, local.Day, local.Hour, 0, 0, local.Offset).AddHours(1);
+        while (tick.Hour % step != 0)
+        {
+            tick = tick.AddHours(1);
+        }
+
+        for (; tick < to; tick = tick.AddHours(step))
+        {
+            yield return tick;
+        }
     }
 
     private Task JumpAsync(DateTimeOffset at) => SelectAsync(at);
@@ -324,7 +380,8 @@ else
             }
 
             _latest = chosen >= to;
-            _pointInTime = _latest ? null : new DateTimeOffset(chosen.UtcDateTime.AddTicks(-(chosen.UtcDateTime.Ticks % TimeSpan.TicksPerSecond)), TimeSpan.Zero);
+            // Exact: the end of a backup keeps its milliseconds (cutting them off would land before it).
+            _pointInTime = _latest ? null : chosen.ToUniversalTime();
         }
 
         var selected = Selected() ?? to;

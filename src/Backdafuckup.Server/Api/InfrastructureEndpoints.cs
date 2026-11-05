@@ -152,6 +152,7 @@ public static class InfrastructureEndpoints
                 return Results.Problem($"The directory cannot be used: {ex.Message}", statusCode: StatusCodes.Status400BadRequest);
             }
 
+            BackupRepositoryEntity created;
             await using (repository)
             {
                 if (await db.Repositories.AnyAsync(r => r.RepositoryUuid == repository.Info.RepositoryId, ct))
@@ -176,11 +177,19 @@ public static class InfrastructureEndpoints
                 if (import)
                 {
                     await ImportRestorePointsAsync(entity.Id, repository, db, time, ct);
-                    await backfill.RecordSnapshotFullsAsync(ct);
                 }
 
-                return Results.Created($"/api/repositories/{entity.Id}", entity.ToDto(0, 0));
+                created = entity;
             }
+
+            // Only now: reading the restore points' SQL Server snapshots opens the repository again, which its owner
+            // lock refuses while it is open here.
+            if (import)
+            {
+                await backfill.RecordSnapshotFullsAsync(ct);
+            }
+
+            return Results.Created($"/api/repositories/{created.Id}", created.ToDto(0, 0));
         });
 
         repositories.MapPost("/{id:guid}/gc", async (Guid id, AppDbContext db, SessionQueue queue, CancellationToken ct) =>

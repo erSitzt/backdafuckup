@@ -140,11 +140,14 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
             ("size", typeof(string)), ("compressed", typeof(string)), ("name", typeof(string)),
             .. extra]);
 
-    private static object[] BackupSetRow(
+    /// <summary>SQL Server's clock (UTC; the scripted server runs in UTC): when backups start and finish.</summary>
+    public Func<DateTime> Now { get; set; } = () => DateTime.UtcNow;
+
+    private object[] BackupSetRow(
         string database, string type, int position, bool copyOnly, bool snapshot, string first, string last, string checkpoint, string databaseBackupLsn, string name)
     {
         var family = FamilyGuid(database).ToString();
-        var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture);
+        var now = Now().ToString("yyyy-MM-ddTHH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture);
         return
         [
             Guid.NewGuid().ToString(), type, position, copyOnly, snapshot, first, last, checkpoint, databaseBackupLsn,
