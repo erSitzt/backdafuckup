@@ -250,7 +250,11 @@ public sealed record SqlCoverageSpanDto(DateTimeOffset FromUtc, DateTimeOffset T
 /// <summary>Time not covered between two spans, and why.</summary>
 public sealed record SqlCoverageGapDto(DateTimeOffset FromUtc, DateTimeOffset ToUtc, string Reason);
 
-public sealed record SqlCatalogDatabaseDetailDto(SqlCatalogDatabaseDto Database, IReadOnlyList<SqlCoverageSpanDto> Spans, IReadOnlyList<SqlCoverageGapDto> Gaps);
+public sealed record SqlCatalogDatabaseDetailDto(
+    SqlCatalogDatabaseDto Database, IReadOnlyList<SqlCoverageSpanDto> Spans, IReadOnlyList<SqlCoverageGapDto> Gaps, IReadOnlyList<SqlBackupPointDto> Points);
+
+/// <summary>The end of a backup within the restorable time (a natural point to restore to): kind "SnapshotFull", "NativeFull" or "Log".</summary>
+public sealed record SqlBackupPointDto(DateTimeOffset FinishUtc, string Kind, long Bytes);
 
 /// <summary>A file of the database in the base of a restore: its path in the backup and its kind ("data" or "log").</summary>
 public sealed record SqlPlanFileDto(string Path, string Kind, long? SizeBytes);

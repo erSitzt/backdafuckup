@@ -31,82 +31,74 @@ else
         <MudAlert Severity="@(d.ChainState == "Simple" ? Severity.Info : Severity.Warning)" Dense="true" Class="mb-3">@d.ChainReason</MudAlert>
     }
 
-    <MudPaper Class="pa-3 mb-3" Elevation="1">
-        <MudText Typo="Typo.h6" Class="mb-2">Restorable time</MudText>
+    <MudPaper Class="pa-3" Elevation="1">
+        <MudText Typo="Typo.h6" Class="mb-2">Restore to a point in time</MudText>
         @if (_detail.Spans.Count == 0)
         {
             <MudText Typo="Typo.body2">No backup of this database can be restored yet (no full backup it could start from).</MudText>
         }
         else
         {
-            var from = _detail.Spans[0].FromUtc;
-            var to = DateTimeOffset.UtcNow > _detail.Spans[^1].ToUtc ? DateTimeOffset.UtcNow : _detail.Spans[^1].ToUtc;
+            var (from, to) = Range();
             var total = Math.Max(1, (to - from).TotalSeconds);
-            string Left(DateTimeOffset t) => ((t - from).TotalSeconds / total * 100).ToString("0.###", CultureInfo.InvariantCulture) + "%";
+            string Left(DateTimeOffset t) => (Math.Clamp((t - from).TotalSeconds / total * 100, 0, 100)).ToString("0.###", CultureInfo.InvariantCulture) + "%";
             string Width(DateTimeOffset a, DateTimeOffset b) => (Math.Max(0.4, (b - a).TotalSeconds / total * 100)).ToString("0.###", CultureInfo.InvariantCulture) + "%";
-            <div style="position:relative;height:28px;background:var(--mud-palette-background-gray);border-radius:4px;overflow:hidden">
+            <div style="position:relative;height:30px;background:var(--mud-palette-background-gray);border-radius:4px;overflow:hidden">
                 @foreach (var span in _detail.Spans)
                 {
                     <div title="@($"{Fmt.Time(span.FromUtc)} – {Fmt.Time(span.ToUtc)}: {BaseText(span.BaseKind)} and {span.Logs} log backup(s)")"
-                         style="position:absolute;top:0;bottom:0;left:@Left(span.FromUtc);width:@Width(span.FromUtc, span.ToUtc);background:var(--mud-palette-success)"></div>
+                         style="position:absolute;top:0;bottom:0;left:@Left(span.FromUtc);width:@Width(span.FromUtc, span.ToUtc);background:var(--mud-palette-success-lighten)"></div>
                 }
                 @foreach (var gap in _detail.Gaps)
                 {
-                    <div title="@gap.Reason" style="position:absolute;top:0;bottom:0;left:@Left(gap.FromUtc);width:@Width(gap.FromUtc, gap.ToUtc);background:var(--mud-palette-warning)"></div>
+                    <div title="@($"not covered: {gap.Reason}")" style="position:absolute;top:0;bottom:0;left:@Left(gap.FromUtc);width:@Width(gap.FromUtc, gap.ToUtc);background:var(--mud-palette-warning)"></div>
                 }
-                @if (_plan is not null && _pointInTime is { } at)
+                @foreach (var point in _detail.Points)
                 {
-                    <div style="position:absolute;top:0;bottom:0;left:@Left(at);width:2px;background:var(--mud-palette-error)"></div>
+                    <div title="@($"{Fmt.Time(point.FinishUtc)}: {PointText(point.Kind)} ({Fmt.Bytes(point.Bytes)})")"
+                         style="position:absolute;bottom:0;left:@Left(point.FinishUtc);width:2px;height:@(point.Kind == "Log" ? "45%" : "100%");background:var(--mud-palette-success-darken)"></div>
+                }
+                @if (Selected() is { } at)
+                {
+                    <div style="position:absolute;top:0;bottom:0;left:@Left(at);width:3px;margin-left:-1px;background:var(--mud-palette-error)"></div>
                 }
             </div>
-            <div class="d-flex mb-2">
+            <MudSlider T="double" Value="_slider" ValueChanged="OnSliderChanged" Min="0" Max="total" Step="1" Immediate="false" Color="Color.Error" Class="mt-1" />
+            <div class="d-flex align-center mb-2" style="flex-wrap:wrap;gap:4px">
                 <MudText Typo="Typo.caption">@Fmt.Time(from)</MudText>
+                <MudSpacer />
+                <MudTooltip Text="The oldest restorable point"><MudIconButton Icon="@Icons.Material.Filled.FirstPage" Size="Size.Small" OnClick="@(() => JumpAsync(from))" /></MudTooltip>
+                <MudTooltip Text="The end of the previous backup"><MudIconButton Icon="@Icons.Material.Filled.ChevronLeft" Size="Size.Small" OnClick="@(() => StepAsync(-1))" /></MudTooltip>
+                <MudText Typo="Typo.body1" Class="mx-2"><b>@(_latest ? $"latest ({Fmt.Time(to)})" : Selected() is { } shown ? shown.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) : "–")</b></MudText>
+                <MudTooltip Text="The end of the next backup"><MudIconButton Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" OnClick="@(() => StepAsync(1))" /></MudTooltip>
+                <MudTooltip Text="The latest backup"><MudIconButton Icon="@Icons.Material.Filled.LastPage" Size="Size.Small" OnClick="LatestAsync" /></MudTooltip>
                 <MudSpacer />
                 <MudText Typo="Typo.caption">@Fmt.Time(to)</MudText>
             </div>
-            <MudSimpleTable Dense="true" Elevation="0">
-                <thead><tr><th>From</th><th>To</th><th>Base</th><th>Log backups</th></tr></thead>
-                <tbody>
-                    @foreach (var span in _detail.Spans)
-                    {
-                        <tr><td>@Fmt.Time(span.FromUtc)</td><td>@Fmt.Time(span.ToUtc)</td><td>@BaseText(span.BaseKind)</td><td>@span.Logs</td></tr>
-                    }
-                    @foreach (var gap in _detail.Gaps)
-                    {
-                        <tr style="color:var(--mud-palette-warning-darken)"><td>@Fmt.Time(gap.FromUtc)</td><td>@Fmt.Time(gap.ToUtc)</td><td colspan="2">not covered: @gap.Reason</td></tr>
-                    }
-                </tbody>
-            </MudSimpleTable>
-        }
-    </MudPaper>
-
-    <MudPaper Class="pa-3" Elevation="1">
-        <MudText Typo="Typo.h6" Class="mb-2">Restore to a point in time</MudText>
-        <MudRadioGroup T="bool" Value="_latest" ValueChanged="OnLatestChanged">
-            <MudRadio T="bool" Value="true" Color="Color.Primary">The latest backup</MudRadio>
-            <MudRadio T="bool" Value="false" Color="Color.Primary">A point in time (local time, to the second)</MudRadio>
-        </MudRadioGroup>
-        @if (!_latest)
-        {
             <div class="d-flex gap-2 align-center mb-2" style="flex-wrap:wrap">
-                <MudTextField T="string" @bind-Value="_timeText" Label="yyyy-MM-dd HH:mm:ss" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:240px" Immediate="true" />
-                <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="PlanAsync">Check</MudButton>
+                <MudTextField T="string" @bind-Value="_timeText" Label="Exact time (yyyy-MM-dd HH:mm:ss, local)" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:300px" Immediate="true" />
+                <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="TypedAsync">Use</MudButton>
+                <MudText Typo="Typo.caption">Green: restorable · dark marks: ends of full (tall) and log backups (short) · orange: not covered</MudText>
             </div>
-        }
-        @if (_planError is not null)
-        {
-            <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-2">@_planError</MudAlert>
-        }
-        @if (_plan is { } plan)
-        {
-            <MudText Typo="Typo.body2" Class="mb-2">
-                Restores @BaseText(plan.BaseKind) of @Fmt.Time(plan.BaseUtc) (@Fmt.Bytes(plan.BaseBytes)), then @plan.Logs log backup(s) (@Fmt.Bytes(plan.LogBytes))
-                @(plan.StopAtLocal is { } stop ? $"up to {stop} (SQL Server's time)" : "to the end of the last one") — the state of @Fmt.Time(plan.ReachedUtc).
-            </MudText>
-            <div class="d-flex gap-2">
-                <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(false))">Restore as a new database</MudButton>
-                <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(true))">Overwrite the original</MudButton>
-            </div>
+            @if (_snapped is not null)
+            {
+                <MudAlert Severity="Severity.Info" Dense="true" Class="mb-2">@_snapped</MudAlert>
+            }
+            @if (_planError is not null)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-2">@_planError</MudAlert>
+            }
+            @if (_plan is { } plan)
+            {
+                <MudText Typo="Typo.body2" Class="mb-2">
+                    Restores @BaseText(plan.BaseKind) of @Fmt.Time(plan.BaseUtc) (@Fmt.Bytes(plan.BaseBytes)), then @plan.Logs log backup(s) (@Fmt.Bytes(plan.LogBytes))
+                    @(plan.StopAtLocal is { } stop ? $"up to {stop} (SQL Server's time)" : "to the end of the last one") — the state of @Fmt.Time(plan.ReachedUtc).
+                </MudText>
+                <div class="d-flex gap-2">
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(false))">Restore as a new database</MudButton>
+                    <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(true))">Overwrite the original</MudButton>
+                </div>
+            }
         }
     </MudPaper>
 }
@@ -221,6 +213,8 @@ else
     private bool _latest = true;
     private string _timeText = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
     private DateTimeOffset? _pointInTime;
+    private double _slider;
+    private string? _snapped;
     private SqlRestorePlanDto? _plan;
     private string? _planError;
     private bool _open;
@@ -247,7 +241,7 @@ else
             _detail = await Api.GetAsync<SqlCatalogDatabaseDetailDto>($"api/sql/databases/{Id}");
             if (_detail.Spans.Count > 0)
             {
-                await PlanAsync();
+                await SelectAsync(null);
             }
         }
         catch (ApiException ex)
@@ -258,35 +252,92 @@ else
 
     private static string BaseText(string kind) => kind == "NativeFull" ? "the full backup" : "the SQL Server snapshot of the restore point";
 
-    private async Task OnLatestChanged(bool latest)
+    /// <summary>The restorable range: from the oldest span to the newest.</summary>
+    private (DateTimeOffset From, DateTimeOffset To) Range() => (_detail!.Spans[0].FromUtc, _detail.Spans[^1].ToUtc);
+
+    private DateTimeOffset? Selected() => _latest ? _detail?.Spans.LastOrDefault()?.ToUtc : _pointInTime;
+
+    private static string PointText(string kind) => kind switch
     {
-        _latest = latest;
-        _plan = null;
-        _planError = null;
-        if (latest)
+        "SnapshotFull" => "restore point with the SQL Server snapshot",
+        "NativeFull" => "full backup",
+        _ => "log backup",
+    };
+
+    private async Task OnSliderChanged(double seconds)
+    {
+        _slider = seconds;
+        var (from, to) = Range();
+        await SelectAsync(seconds >= (to - from).TotalSeconds ? null : from.AddSeconds(seconds));
+    }
+
+    private Task JumpAsync(DateTimeOffset at) => SelectAsync(at);
+
+    private Task LatestAsync() => SelectAsync(null);
+
+    /// <summary>To the end of the previous or next backup (from the selected point).</summary>
+    private Task StepAsync(int direction)
+    {
+        var current = Selected() ?? Range().To;
+        var points = _detail!.Points.Select(p => p.FinishUtc).Distinct().OrderBy(p => p).ToList();
+        var next = direction < 0 ? points.LastOrDefault(p => p < current.AddMilliseconds(-500)) : points.FirstOrDefault(p => p > current.AddMilliseconds(500));
+        return next == default ? Task.CompletedTask : SelectAsync(next);
+    }
+
+    private async Task TypedAsync()
+    {
+        if (!DateTime.TryParseExact(_timeText.Trim(), ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm"], CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var local))
         {
-            await PlanAsync();
+            _planError = "Enter the time as yyyy-MM-dd HH:mm:ss (local time).";
+            return;
         }
+
+        await SelectAsync(new DateTimeOffset(local).ToUniversalTime());
+    }
+
+    /// <summary>Selects a point (null: the latest); a point in a gap or outside snaps to the nearest restorable time.</summary>
+    private async Task SelectAsync(DateTimeOffset? at)
+    {
+        _snapped = null;
+        var (from, to) = Range();
+        if (at is null || at >= to)
+        {
+            _latest = true;
+            _pointInTime = null;
+            if (at > to)
+            {
+                _snapped = $"No backup reaches further than {Fmt.Time(to)} yet: the latest point is chosen.";
+            }
+        }
+        else
+        {
+            var chosen = at.Value < from ? from : at.Value;
+            if (_detail!.Gaps.FirstOrDefault(g => g.FromUtc < chosen && chosen < g.ToUtc) is { } gap)
+            {
+                var nearer = chosen - gap.FromUtc <= gap.ToUtc - chosen ? gap.FromUtc : gap.ToUtc;
+                _snapped = $"{chosen.ToLocalTime():HH:mm:ss} is not covered ({gap.Reason}); moved to {nearer.ToLocalTime():HH:mm:ss}.";
+                chosen = nearer;
+            }
+            else if (at.Value < from)
+            {
+                _snapped = $"The oldest restorable point is {Fmt.Time(from)}.";
+            }
+
+            _latest = chosen >= to;
+            _pointInTime = _latest ? null : new DateTimeOffset(chosen.UtcDateTime.AddTicks(-(chosen.UtcDateTime.Ticks % TimeSpan.TicksPerSecond)), TimeSpan.Zero);
+        }
+
+        var selected = Selected() ?? to;
+        _slider = Math.Clamp((selected - from).TotalSeconds, 0, (to - from).TotalSeconds);
+        _timeText = selected.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        await PlanAsync();
     }
 
     private async Task PlanAsync()
     {
         _plan = null;
         _planError = null;
-        _pointInTime = null;
-        var query = string.Empty;
-        if (!_latest)
-        {
-            if (!DateTime.TryParseExact(_timeText.Trim(), ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm"], CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var local))
-            {
-                _planError = "Enter the time as yyyy-MM-dd HH:mm:ss (local time).";
-                return;
-            }
-
-            _pointInTime = new DateTimeOffset(local).ToUniversalTime();
-            query = "?at=" + Uri.EscapeDataString(_pointInTime.Value.ToString("O", CultureInfo.InvariantCulture));
-        }
-
+        var query = _latest || _pointInTime is null ? string.Empty : "?at=" + Uri.EscapeDataString(_pointInTime.Value.ToString("O", CultureInfo.InvariantCulture));
         try
         {
             _plan = await Api.GetAsync<SqlRestorePlanDto>($"api/sql/databases/{Id}/plan{query}");

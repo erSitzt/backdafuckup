@@ -314,11 +314,18 @@ public static class SqlEndpoints
             return Results.NotFound();
         }
 
-        var (spans, gaps) = new SqlChain((await SqlRestoreSessionRunner.UsableSetsAsync(db, [id], ct)).Select(SqlChainSet.From)).Coverage();
+        var sets = await SqlRestoreSessionRunner.UsableSetsAsync(db, [id], ct);
+        var (spans, gaps) = new SqlChain(sets.Select(SqlChainSet.From)).Coverage();
+        var points = sets
+            .Where(s => spans.Any(span => span.FromUtc <= s.FinishUtc && s.FinishUtc <= span.ToUtc))
+            .OrderBy(s => s.FinishUtc)
+            .Select(s => new SqlBackupPointDto(s.FinishUtc, s.Kind.ToString(), s.Size))
+            .ToList();
         return Results.Ok(new SqlCatalogDatabaseDetailDto(
             ToDto(database, spans),
             [.. spans.Select(s => new SqlCoverageSpanDto(s.FromUtc, s.ToUtc, s.BaseKind.ToString(), s.Logs))],
-            [.. gaps.Select(g => new SqlCoverageGapDto(g.FromUtc, g.ToUtc, g.Reason))]));
+            [.. gaps.Select(g => new SqlCoverageGapDto(g.FromUtc, g.ToUtc, g.Reason))],
+            points));
     }
 
     /// <summary>What a restore to <paramref name="at"/> (null: the latest point) applies; 400 with the reason if nothing reaches it.</summary>
