@@ -567,6 +567,35 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         Assert.Equal(LogSeverity.Info, line.Severity);
     }
 
+    [Fact]
+    public async Task Sql_snapshot_without_an_account_uses_vss_and_warns()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql06", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await using (var db = await DbAsync())
+        {
+            // E.g. the account was deleted before deleting was refused: the job has the method but no account.
+            await db.Jobs.Where(j => j.Id == jobId).ExecuteUpdateAsync(s => s.SetProperty(j => j.GuestProcessingMode, GuestProcessingMode.SqlSnapshot).SetProperty(j => j.SqlCredentialId, (Guid?)null), Ct);
+        }
+
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { SqlSnapshotCapable = true };
+        await agent.StartAsync(Ct);
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Warning, session.State);
+        lock (agent.Commands)
+        {
+            Assert.Equal([AgentCommandKinds.PrepareBackup, AgentCommandKinds.Freeze, AgentCommandKinds.Thaw], agent.Commands);
+        }
+
+        Assert.Equal("application", (await LatestRestorePointAsync()).Consistency);
+        await using var context = await DbAsync();
+        var log = await context.SessionLog.Where(l => l.SessionId == session.Id && l.Severity == LogSeverity.Warning).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("SQL Server snapshot: the job has no SQL Server account", StringComparison.Ordinal) && m.Contains("VSS is used for VM ", StringComparison.Ordinal));
+    }
+
     private async Task EnableSqlSnapshotAsync(Guid jobId, string userName, string password)
     {
         await using var db = await DbAsync();
@@ -679,6 +708,40 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         Assert.Equal(ConnectionStatus.Connected, connection.Status);
         Assert.Null(connection.LastError);
         Assert.NotNull(connection.LastConnectedUtc);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Recovery_names_what_an_interrupted_sql_restore_may_have_left_in_the_vm(bool overwrite)
+    {
+        var request = new SqlRestoreRequestDto(Guid.NewGuid(), "SQLEXPRESS", "shop", "vm-1", "SQLEXPRESS", Guid.NewGuid(), overwrite ? "shop" : "shop_copy", SqlRestoreFiles.Original, null, null, overwrite);
+        string[] files = overwrite ? [@"D:\SQL\shop.mdf.bdfu-new", @"L:\Log\shop_log.ldf.bdfu-new"] : [@"D:\SQL\shop_copy.mdf", @"L:\Log\shop_copy_log.ldf"];
+        Guid planned, early;
+        await using (var db = await DbAsync())
+        {
+            var parameters = System.Text.Json.JsonSerializer.Serialize(request);
+            SessionEntity Session(string? withFiles) => new()
+            {
+                Kind = SessionKind.SqlRestore, Name = "SQL restore", TriggeredBy = "test", State = SessionState.Running, CreatedUtc = DateTimeOffset.UtcNow,
+                ServerInstanceId = "an earlier process", Parameters = withFiles,
+            };
+            var withPlan = Session(Backdafuckup.Server.Sql.SqlRestoreRecovery.WithPlannedFiles(parameters, files));
+            var withoutPlan = Session(parameters);
+            db.Sessions.AddRange(withPlan, withoutPlan);
+            await db.SaveChangesAsync(Ct);
+            (planned, early) = (withPlan.Id, withoutPlan.Id);
+        }
+
+        await Services.GetRequiredService<StartupRecovery>().RunAsync(Ct);
+
+        await using var check = await DbAsync();
+        var summary = (await check.Sessions.AsNoTracking().SingleAsync(s => s.Id == planned, Ct)).Summary!;
+        Assert.Contains(string.Join(", ", files), summary, StringComparison.Ordinal);
+        Assert.Contains(overwrite ? "check that [shop] is online" : "Check whether [shop_copy] is attached there", summary, StringComparison.Ordinal);
+        Assert.Equal(
+            $"The backup service was restarted before this restore of [{request.DatabaseName}] to instance SQLEXPRESS of the target VM wrote any file; nothing was changed.",
+            (await check.Sessions.AsNoTracking().SingleAsync(s => s.Id == early, Ct)).Summary);
     }
 
     [Fact]

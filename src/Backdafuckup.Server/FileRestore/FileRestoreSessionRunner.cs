@@ -527,6 +527,11 @@ public sealed class FileRestoreSessionRunner(
             }
 
             var silence = now - transfer.LastHeartbeat;
+            if (transfer.AgentRestarted)
+            {
+                throw new TimeoutException($"The agent in {host} restarted (service restart, crash or VM reboot) during the restore. Files restored so far stay in the VM.");
+            }
+
             if (silence > agentOptions.Value.TransferSilenceLimit)
             {
                 throw new TimeoutException(

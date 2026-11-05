@@ -38,6 +38,7 @@ public sealed class SqlRestoreSessionRunner(
     SqlJobs jobs,
     IOptions<AgentOptions> agentOptions,
     IOptions<SqlRestoreOptions> options,
+    IHostApplicationLifetime lifetime,
     TimeProvider time)
 {
     /// <summary>Kept free on a target volume beside the restored files.</summary>
@@ -131,6 +132,7 @@ public sealed class SqlRestoreSessionRunner(
 
             // What the agent writes: the target paths, or for an overwrite the copies beside the database's own files.
             IReadOnlyList<string> written = request.Overwrite ? [.. targets.Select(t => t + SqlReplaceNames.NewSuffix)] : targets;
+            await tracker.UpdateSessionAsync(session.Id, s => s.Parameters = SqlRestoreRecovery.WithPlannedFiles(s.Parameters, written), CancellationToken.None).ConfigureAwait(false);
             log.Info(request.Overwrite
                 ? $"Overwriting SQL Server database {SqlCatalog.QuoteName(request.DatabaseName)} on {target} with {source} ({files.Count} file(s), {VmBackupTask.Format(database.TotalBytes)}, " +
                   $"{database.Consistency}) from the restore point of {point.CreatedUtc.ToLocalTime():g}, as {account.UserName}. The files are written beside the database's own " +
@@ -183,6 +185,12 @@ public sealed class SqlRestoreSessionRunner(
 
                 report = await WaitForAgentAsync(transfer, host, log, cancellationToken).ConfigureAwait(false);
             }
+            catch (TransferLostException lost)
+            {
+                transfers.Remove(transfer);
+                var cleanup = await CleanUpLostTransferAsync(agent, account, written, transfer, log).ConfigureAwait(false);
+                throw new InvalidOperationException($"Writing the files to {target} failed: {lost.Message}; {cleanup}.", lost);
+            }
             finally
             {
                 transfers.Remove(transfer);
@@ -212,11 +220,19 @@ public sealed class SqlRestoreSessionRunner(
             }
 
             log.Info($"All {targets.Count} file(s) written and checked (SHA-256, {VmBackupTask.Format(plan.Bytes)}); attaching them. This cannot be stopped halfway.");
-            var attach = await jobs.RunAsync(
-                agent.Id,
-                new SqlJobRequest { Kind = SqlJobKinds.AttachFiles, Instance = instance.Name, Account = account, Database = request.DatabaseName, Files = [.. targets] },
-                options.Value.AttachTimeout,
-                CancellationToken.None).ConfigureAwait(false);
+            SqlJobResult attach;
+            try
+            {
+                attach = await jobs.RunAsync(
+                    agent.Id,
+                    new SqlJobRequest { Kind = SqlJobKinds.AttachFiles, Instance = instance.Name, Account = account, Database = request.DatabaseName, Files = [.. targets] },
+                    options.Value.AttachTimeout,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (SqlJobLostException lost)
+            {
+                return await AttachLostAsync(request, agent, account, instance, target, source, point, targets, written, plan.Bytes, task.Id, lost, log).ConfigureAwait(false);
+            }
             foreach (var line in attach.Log)
             {
                 log.Write(line.StartsWith("users in ", StringComparison.Ordinal) ? LogSeverity.Warning : LogSeverity.Info, line);
@@ -257,14 +273,22 @@ public sealed class SqlRestoreSessionRunner(
         IReadOnlyList<string> targets, IReadOnlyList<string> written, long bytes, Guid taskId, IOperationLog log)
     {
         log.Info($"All {targets.Count} file(s) written beside the database's own and checked (SHA-256, {VmBackupTask.Format(bytes)}); overwriting the database. This cannot be stopped halfway.");
-        var replace = await jobs.RunAsync(
-            agent.Id,
-            new SqlJobRequest
-            {
-                Kind = SqlJobKinds.ReplaceFiles, Instance = instance.Name, Account = account, Database = request.DatabaseName, Files = [.. targets], KeepReplaced = request.KeepReplacedFiles,
-            },
-            options.Value.AttachTimeout,
-            CancellationToken.None).ConfigureAwait(false);
+        SqlJobResult replace;
+        try
+        {
+            replace = await jobs.RunAsync(
+                agent.Id,
+                new SqlJobRequest
+                {
+                    Kind = SqlJobKinds.ReplaceFiles, Instance = instance.Name, Account = account, Database = request.DatabaseName, Files = [.. targets], KeepReplaced = request.KeepReplacedFiles,
+                },
+                options.Value.AttachTimeout,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (SqlJobLostException lost)
+        {
+            return await OverwriteLostAsync(request, agent, account, instance, target, source, point, targets, written, bytes, taskId, lost, log).ConfigureAwait(false);
+        }
         foreach (var line in replace.Log)
         {
             log.Write(line.Contains("failed", StringComparison.Ordinal) || line.Contains("by hand", StringComparison.Ordinal) ? LogSeverity.Warning : LogSeverity.Info, line);
@@ -380,7 +404,142 @@ public sealed class SqlRestoreSessionRunner(
         version?.Split('.') is [var first, ..] && int.TryParse(first, out var major) ? major : null;
 
     /// <summary>Deletes the files a failed or stopped restore wrote (through the agent, with its guards); true if all are gone.</summary>
-    private async Task<bool> DeleteAsync(AgentEntity agent, SqlAccount account, List<string> written, IOperationLog log)
+    /// <summary>
+    /// The agent restarted during the attach: the inventory shows whether the database is there with the restored files.
+    /// If not, the files are deleted again.
+    /// </summary>
+    private async Task<(SessionState State, string Summary)> AttachLostAsync(
+        SqlRestoreRequestDto request, AgentEntity agent, SqlAccount account, SqlInstanceInfo instance, string target, string source, RestorePointEntity point,
+        IReadOnlyList<string> targets, IReadOnlyList<string> written, long bytes, Guid taskId, SqlJobLostException lost, IOperationLog log)
+    {
+        var name = SqlCatalog.QuoteName(request.DatabaseName);
+        log.Warning($"{target}: {lost.Message}. Checking whether {name} was attached.");
+        var check = await jobs.RunAsync(
+            agent.Id, new SqlJobRequest { Kind = SqlJobKinds.Inventory, Instance = instance.Name, Account = account }, TimeSpan.FromMinutes(2), CancellationToken.None).ConfigureAwait(false);
+        var found = check.Inventory?.Instances.FirstOrDefault(i => string.Equals(i.Name, instance.Name, StringComparison.OrdinalIgnoreCase))
+            ?.Databases.FirstOrDefault(d => string.Equals(d.Name, request.DatabaseName, StringComparison.OrdinalIgnoreCase));
+        if (!check.Success || check.Inventory is null)
+        {
+            throw new InvalidOperationException($"{target}: {lost.Message}, and the instance could not be checked afterwards ({check.Error ?? "no inventory"}). " +
+                $"If {name} is not attached, delete the restored files: {string.Join(", ", written)}.");
+        }
+
+        if (found is not null && found.Files.Select(f => f.PhysicalName).Order(StringComparer.OrdinalIgnoreCase).SequenceEqual(targets.Order(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase))
+        {
+            var summary = $"Restored {source} from the restore point of {point.CreatedUtc.ToLocalTime():g} as {name} on {target}: {targets.Count} file(s), " +
+                $"{VmBackupTask.Format(bytes)}; the agent restarted right after the attach, so the log lacks its description of the database (owner, users without a login).";
+            log.Warning(summary);
+            await FinishTaskAsync(taskId, SessionState.Warning, summary, bytes).ConfigureAwait(false);
+            return (SessionState.Warning, summary);
+        }
+
+        var removed = await DeleteAsync(agent, account, [.. written], log).ConfigureAwait(false);
+        throw new InvalidOperationException($"{target}: {lost.Message} before {name} was attached." +
+            (removed ? " The restored files were deleted again." : " Not all restored files could be deleted (see the log)."));
+    }
+
+    /// <summary>
+    /// The agent restarted during the overwrite: at its start it recovered from its journal (the database's own files
+    /// back, or the overwrite completed); it now reports which and brings the database online if the overwrite had taken
+    /// it offline. Restored copies left beside the files are deleted.
+    /// </summary>
+    private async Task<(SessionState State, string Summary)> OverwriteLostAsync(
+        SqlRestoreRequestDto request, AgentEntity agent, SqlAccount account, SqlInstanceInfo instance, string target, string source, RestorePointEntity point,
+        IReadOnlyList<string> targets, IReadOnlyList<string> written, long bytes, Guid taskId, SqlJobLostException lost, IOperationLog log)
+    {
+        var name = SqlCatalog.QuoteName(request.DatabaseName);
+        if (!registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlReplaceRecovery))
+        {
+            throw new InvalidOperationException(
+                $"{target}: {lost.Message}. This agent cannot report how it recovered the overwrite: check {name} on instance {instance.Name}. If it is offline, " +
+                $"its own files are in place: bring it online with ALTER DATABASE {name} SET ONLINE. Restored copies may lie beside them as *{SqlReplaceNames.NewSuffix}.");
+        }
+
+        log.Warning($"{target}: {lost.Message}. At its start the agent recovered the overwrite from its journal; asking it how that ended.");
+        var recovery = await jobs.RunAsync(
+            agent.Id,
+            new SqlJobRequest { Kind = SqlJobKinds.ReplaceRecovery, Instance = instance.Name, Account = account, Database = request.DatabaseName },
+            TimeSpan.FromMinutes(5),
+            CancellationToken.None).ConfigureAwait(false);
+        foreach (var line in recovery.Log)
+        {
+            log.Info(line);
+        }
+
+        if (!recovery.Success)
+        {
+            throw new InvalidOperationException($"{target}: {lost.Message}, and the recovery did not finish: {recovery.Error ?? "no details"}");
+        }
+
+        if (recovery.Outcome == SqlReplaceOutcomes.Completed)
+        {
+            var summary = $"Overwrote {name} on {target} with {source} from the restore point of {point.CreatedUtc.ToLocalTime():g}: {targets.Count} file(s), " +
+                $"{VmBackupTask.Format(bytes)}; the agent restarted after the database was online with the restored files, so the overwrite is complete.";
+            log.Warning(summary);
+            await FinishTaskAsync(taskId, SessionState.Warning, summary, bytes).ConfigureAwait(false);
+            return (SessionState.Warning, summary);
+        }
+
+        // Rolled back, or nothing had changed yet: the restored copies are *.bdfu-new beside the database's own files.
+        var removed = await DeleteAsync(agent, account, [.. written], log).ConfigureAwait(false);
+        throw new InvalidOperationException(
+            $"{target}: {lost.Message}. {name} has its own files again, in the state it had before" +
+            (recovery.Outcome == SqlReplaceOutcomes.Untouched ? " (the overwrite had not changed anything yet)" : string.Empty) + "; nothing was overwritten." +
+            (removed ? " The restored files were deleted again." : " Not all restored files could be deleted (see the log)."));
+    }
+
+    /// <summary>
+    /// The agent went silent or restarted while it wrote the files: once it is back (up to the leftover wait limit) the
+    /// files written so far are deleted. These are the ones it reported, and the ones the server sent completely: the agent
+    /// may have finished them without reporting it (it reports every 2 s), so they are deleted only if their content is
+    /// the restored one. Returns what happened, naming the files if they stay.
+    /// </summary>
+    private async Task<string> CleanUpLostTransferAsync(AgentEntity agent, SqlAccount account, IReadOnlyList<string> written, AgentTransfer transfer, IOperationLog log)
+    {
+        const string temporary = "a partly written file may be left as .bdfu-restore-*.tmp in the target folder";
+        var writtenSoFar = new List<string>();
+        var hashes = new List<string?>();
+        for (var i = 0; i < written.Count; i++)
+        {
+            if (transfer.Written[i] || transfer.Hashes[i] is not null)
+            {
+                writtenSoFar.Add(written[i]);
+                hashes.Add(transfer.Written[i] ? null : transfer.Hashes[i]);
+            }
+        }
+
+        if (writtenSoFar.Count == 0)
+        {
+            return $"no file was complete yet ({temporary})";
+        }
+
+        var deadline = time.GetUtcNow() + options.Value.LeftoverWaitLimit;
+        if (!registry.IsOnline(agent.Id, TimeSpan.FromSeconds(30)))
+        {
+            log.Info($"Waiting up to {options.Value.LeftoverWaitLimit.TotalMinutes:0} minutes for the agent in {agent.HostName} to delete the {writtenSoFar.Count} file(s) written so far.");
+        }
+
+        while (!registry.IsOnline(agent.Id, TimeSpan.FromSeconds(30)) && time.GetUtcNow() < deadline && !lifetime.ApplicationStopping.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), time, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        if (!registry.IsOnline(agent.Id, TimeSpan.FromSeconds(30)))
+        {
+            return $"the agent did not come back within {options.Value.LeftoverWaitLimit.TotalMinutes:0} minutes, so the files written so far stay in the VM; delete them by hand: " +
+                $"{string.Join(", ", writtenSoFar)} ({temporary})";
+        }
+
+        return await DeleteAsync(agent, account, writtenSoFar, log, hashes).ConfigureAwait(false)
+            ? $"the files written so far were deleted again ({temporary})"
+            : $"not all files written so far could be deleted; delete them by hand: {string.Join(", ", writtenSoFar)}";
+    }
+
+    /// <summary>The agent stopped reporting or restarted during the transfer.</summary>
+    private sealed class TransferLostException(string message) : Exception(message);
+
+    /// <param name="hashes">Per file the restored content's SHA-256, or null: a file with a hash is deleted only if it matches.</param>
+    private async Task<bool> DeleteAsync(AgentEntity agent, SqlAccount account, List<string> written, IOperationLog log, List<string?>? hashes = null)
     {
         if (written.Count == 0)
         {
@@ -390,7 +549,10 @@ public sealed class SqlRestoreSessionRunner(
         try
         {
             var result = await jobs.RunAsync(
-                agent.Id, new SqlJobRequest { Kind = SqlJobKinds.DeleteFiles, Account = account, Files = written }, TimeSpan.FromMinutes(5), CancellationToken.None).ConfigureAwait(false);
+                agent.Id,
+                new SqlJobRequest { Kind = SqlJobKinds.DeleteFiles, Account = account, Files = written, ExpectedHashes = hashes },
+                TimeSpan.FromMinutes(30),
+                CancellationToken.None).ConfigureAwait(false);
             foreach (var line in result.Log)
             {
                 log.Info(line);
@@ -436,9 +598,14 @@ public sealed class SqlRestoreSessionRunner(
             }
 
             var silence = now - transfer.LastHeartbeat;
+            if (transfer.AgentRestarted)
+            {
+                throw new TransferLostException($"the agent in {host} restarted (service restart, crash or VM reboot) while it wrote the files");
+            }
+
             if (silence > agentOptions.Value.TransferSilenceLimit)
             {
-                throw new TimeoutException($"The agent in {host} has not reported for {silence.TotalMinutes:0} minutes (VM stopped, network down or agent restarted); files it wrote stay in the VM.");
+                throw new TransferLostException($"the agent in {host} has not reported for {silence.TotalMinutes:0} minutes while it wrote the files (VM stopped, network down or agent restarted)");
             }
         }
     }

@@ -233,9 +233,10 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
         var warnings = new List<string>();
         if (started.Count > 0)
         {
+            var one = started.Count == 1;
             warnings.Add($"This full backup started the log chain of {string.Join(", ", started)} (FULL recovery, no full backup before). From now on SQL Server frees " +
-                "their transaction log only after log backups, so it grows until log backups run. Take log backups, set the recovery model to SIMPLE, " +
-                "or choose copy-only backups in the job.");
+                $"{(one ? "its transaction log" : "their transaction logs")} only after log backups; without them {(one ? "it grows" : "they grow")}. " +
+                "Take log backups, set the recovery model to SIMPLE, or choose copy-only backups in the job.");
         }
 
         if (stale.Count > 0)
@@ -373,6 +374,12 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
             {
                 return GuestFreezeResult.NotConsistent($"the {owner.AgentName} did not report the SQL Server snapshot within {Seconds(owner.ThawTimeout)}; it resumes SQL Server after {Seconds(owner.SqlHoldLimit)} at the latest.")
                     with { Sql = new SqlSnapshotOutcome(false, "no result from the agent") };
+            }
+            catch (Sql.SqlJobLostException lost)
+            {
+                // Its connections closed with it, so SQL Server resumed the writes by itself.
+                return GuestFreezeResult.NotConsistent($"{lost.Message} (the {owner.AgentName}); SQL Server resumed the writes when the agent's connections closed, " +
+                    "and the snapshot backups were not reported.") with { Sql = new SqlSnapshotOutcome(false, "the agent restarted") };
             }
             finally
             {

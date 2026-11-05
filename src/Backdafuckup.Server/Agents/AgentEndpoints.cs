@@ -25,7 +25,8 @@ public static class AgentEndpoints
                 : Results.Problem("The enrollment secret is not valid (renewed in the console?).", statusCode: StatusCodes.Status403Forbidden));
 
         agent.MapPost("/poll", async (
-            AgentPollRequest request, AgentService agents, AgentRegistry registry, AgentPackages packages, IHostApplicationLifetime lifetime, HttpContext http, CancellationToken ct) =>
+            AgentPollRequest request, AgentService agents, AgentRegistry registry, AgentPackages packages, Sql.SqlJobs sqlJobs, Publishing.DiskPublishes publishes,
+            FileRestore.AgentTransfers transfers, IHostApplicationLifetime lifetime, HttpContext http, CancellationToken ct) =>
         {
             if (await agents.AuthenticateAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
             {
@@ -35,6 +36,13 @@ public static class AgentEndpoints
             await agents.UpdateAsync(agentId, request.Host ?? new AgentHostInfo(), http.Connection.RemoteIpAddress?.ToString(), ct);
             registry.SetCapabilities(agentId, request.Host?.Capabilities);
             registry.SetReportedWork(agentId, request.Busy);
+            if (registry.ObserveRun(agentId, request.RunId))
+            {
+                // A new process: what the previous one ran is gone (its journals clean up the guest at its start).
+                sqlJobs.AgentRestarted(agentId);
+                publishes.AgentRestarted(agentId);
+                transfers.AgentRestarted(agentId);
+            }
 
             // A different set of files on the server (after a server update): offer the update, but never during a backup
             // operation or while commands wait (a restart between freeze and thaw would break the freeze).
@@ -202,6 +210,11 @@ public static class AgentEndpoints
 
         credentials.MapDelete("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>
         {
+            if (await Api.CredentialUse.DescribeAsync(db, id, ct) is { } used)
+            {
+                return Results.Problem(used, statusCode: StatusCodes.Status409Conflict);
+            }
+
             var deleted = await db.Credentials.Where(c => c.Id == id && c.Kind == CredentialKind.Windows).ExecuteDeleteAsync(ct);
             return deleted > 0 ? Results.NoContent() : Results.NotFound();
         });

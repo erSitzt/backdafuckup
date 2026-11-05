@@ -39,6 +39,9 @@ public sealed class DiskPublish
 
     public bool StopRequested { get; internal set; }
 
+    /// <summary>The agent restarted while this ran: it removes what it set up from its journal at start, and reports nothing more.</summary>
+    public bool AgentRestarted { get; internal set; }
+
     /// <summary>The agent's last report (state, mount folders, overlay size).</summary>
     public PublishStatus? Status { get; internal set; }
 
@@ -72,6 +75,15 @@ public sealed class DiskPublishes(AgentRegistry registry, IOptions<AgentOptions>
     private readonly ConcurrentDictionary<Guid, DiskPublish> _publishes = new();
 
     internal TimeProvider Time => time;
+
+    /// <summary>The agent restarted (a new run id at its poll): its publishes end at once instead of after the silence limit.</summary>
+    public void AgentRestarted(Guid agentId)
+    {
+        foreach (var publish in _publishes.Values.Where(p => p.AgentId == agentId))
+        {
+            publish.AgentRestarted = true;
+        }
+    }
 
     /// <summary>
     /// Hands the disks to the agent and waits until it has mounted the volumes (or failed). On failure the publish is
@@ -254,6 +266,11 @@ public sealed class DiskPublishes(AgentRegistry registry, IOptions<AgentOptions>
             catch (TimeoutException) when (time.GetUtcNow() < deadline)
             {
                 var silent = time.GetUtcNow() - publish.LastHeartbeat;
+                if (publish.AgentRestarted)
+                {
+                    throw new TimeoutException("The agent restarted (service restart, crash or VM reboot).");
+                }
+
                 if (silent > PublishSilenceLimit)
                 {
                     throw new TimeoutException($"The agent has not reported for {silent.TotalMinutes:0} minutes.");

@@ -9,7 +9,8 @@ namespace Backdafuckup.Server.Agents;
 /// <summary>How a VM is processed in the guest for one backup.</summary>
 /// <param name="Quiescer">Freezes the guest around the snapshot; null if the backup will be crash-consistent.</param>
 /// <param name="Reason">Why there is no quiescer (agent missing, offline, installation failed).</param>
-public sealed record GuestPreparation(AgentQuiescer? Quiescer, string? Reason);
+/// <param name="Warning">Guest processing works, but not as the job asks (e.g. VSS because the SQL Server account is missing): the session warns.</param>
+public sealed record GuestPreparation(AgentQuiescer? Quiescer, string? Reason, bool Warning = false);
 
 /// <summary>Installs the agent into a VM (push installation); implemented by the agent deployer.</summary>
 public interface IAgentInstaller
@@ -39,6 +40,7 @@ public sealed class GuestProcessingService(
         ArgumentNullException.ThrowIfNull(log);
         var agent = await agents.FindForVmAsync(vm.NativeId, cancellationToken).ConfigureAwait(false);
         SqlSnapshotSettings? sql = null;
+        var warning = false;
         if (job.GuestProcessingMode == GuestProcessingMode.SqlSnapshot)
         {
             try
@@ -47,13 +49,15 @@ public sealed class GuestProcessingService(
             }
             catch (InvalidOperationException ex)
             {
-                return new GuestPreparation(null, $"SQL Server snapshot: {ex.Message}");
+                // VSS needs no account: better than a crash-consistent backup.
+                log.Warning($"Guest processing: SQL Server snapshot: {ex.Message} VSS is used for VM {vm.CachedName}.");
+                warning = true;
             }
         }
 
         if (agent is not null && agents.IsOnline(agent.Id))
         {
-            return Use(agent, sql);
+            return Use(agent, sql, warning);
         }
 
         var missing = agent is null
@@ -77,11 +81,11 @@ public sealed class GuestProcessingService(
         agent = await agents.WaitForVmAsync(vm.NativeId, options.Value.InstallWaitTimeout, cancellationToken).ConfigureAwait(false);
         return agent is null
             ? new GuestPreparation(null, $"The agent was installed in VM {vm.CachedName}, but did not report to the server within {options.Value.InstallWaitTimeout.TotalMinutes:0} minutes (check the address under Guest agents → Settings and port 9555 from the guest).")
-            : Use(agent, sql);
+            : Use(agent, sql, warning);
     }
 
-    private GuestPreparation Use(AgentEntity agent, SqlSnapshotSettings? sql) =>
-        new(new AgentQuiescer(registry, options.Value, agent.Id, $"agent on {agent.HostName} ({agent.RemoteAddress ?? agent.IpAddresses ?? "address unknown"})", sql), null);
+    private GuestPreparation Use(AgentEntity agent, SqlSnapshotSettings? sql, bool warning) =>
+        new(new AgentQuiescer(registry, options.Value, agent.Id, $"agent on {agent.HostName} ({agent.RemoteAddress ?? agent.IpAddresses ?? "address unknown"})", sql), null, warning);
 
     /// <summary>The job's SQL account (decrypted only into this in-memory setting, which reaches the agent in the SQL job).</summary>
     private async Task<SqlSnapshotSettings> SqlSettingsAsync(BackupJob job, string backupName, CancellationToken cancellationToken)

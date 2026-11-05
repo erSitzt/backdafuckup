@@ -48,6 +48,9 @@ public interface IRestoreFileSystem
     /// <summary>Deletes a regular file (never a folder or a link).</summary>
     void Delete(string path);
 
+    /// <summary>Opens a regular file for reading (e.g. to check its content before deleting it).</summary>
+    Stream OpenRead(string path);
+
     /// <summary>
     /// Adds an "allow full control" entry for <paramref name="account"/> (a name such as <c>NT SERVICE\MSSQL$SQLEXPRESS</c>
     /// or a SID) to the file's DACL; the other entries stay.
@@ -161,6 +164,17 @@ public abstract class PortableRestoreFileSystem : IRestoreFileSystem
         }
 
         File.Move(Map(path), Map(newPath));
+    }
+
+    public Stream OpenRead(string path)
+    {
+        Guard(path);
+        if (Probe(path) != RestorePathKind.File)
+        {
+            throw new IOException($"{path} is not a regular file.");
+        }
+
+        return new FileStream(Map(path), FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
     }
 
     public void Delete(string path)

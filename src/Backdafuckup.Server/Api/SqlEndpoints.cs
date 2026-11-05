@@ -42,7 +42,14 @@ public static class SqlEndpoints
         });
 
         logins.MapDelete("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>
-            await db.Credentials.Where(c => c.Id == id && c.Kind == CredentialKind.SqlServer).ExecuteDeleteAsync(ct) > 0 ? Results.NoContent() : Results.NotFound());
+        {
+            if (await CredentialUse.DescribeAsync(db, id, ct) is { } used)
+            {
+                return Results.Problem(used, statusCode: StatusCodes.Status409Conflict);
+            }
+
+            return await db.Credentials.Where(c => c.Id == id && c.Kind == CredentialKind.SqlServer).ExecuteDeleteAsync(ct) > 0 ? Results.NoContent() : Results.NotFound();
+        });
 
         app.MapPost("/api/sql/publishes", StartPublishAsync);
         app.MapPost("/api/sql/restores", StartRestoreAsync);

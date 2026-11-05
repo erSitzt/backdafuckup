@@ -122,10 +122,18 @@ public sealed class SessionRunnerService(
                 _ => (SessionState.Failed, "Unknown session kind."),
             };
 
-            // Stopping a publish (Unpublish) is its normal end; the runner says itself how it ended.
-            if (cancellationToken.IsCancellationRequested && state != SessionState.Failed && session.Kind != SessionKind.SqlPublish)
+            // The SQL runners say themselves how a stop ended: stopping a publish (Unpublish) is its normal end, and an
+            // attach, overwrite or .bak backup that was running when the stop came is finished, so it did not stop.
+            if (cancellationToken.IsCancellationRequested && state != SessionState.Failed)
             {
-                state = SessionState.Stopped;
+                if (session.Kind is not (SessionKind.SqlPublish or SessionKind.SqlRestore or SessionKind.SqlExport))
+                {
+                    state = SessionState.Stopped;
+                }
+                else if (session.Kind != SessionKind.SqlPublish && state is SessionState.Succeeded or SessionState.Warning)
+                {
+                    log.Info("The stop came during a step that cannot be interrupted; that step was finished, so the session did not stop.");
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -301,7 +309,9 @@ public sealed class StartupRecovery(
 
             session.State = SessionState.Failed;
             session.EndedUtc = time.GetUtcNow();
-            session.Summary = "The backup service was restarted while this session was running.";
+            session.Summary = session.Kind == SessionKind.SqlRestore
+                ? Sql.SqlRestoreRecovery.Summary(session.Parameters)
+                : "The backup service was restarted while this session was running.";
             foreach (var task in session.Tasks.Where(t => t.State is SessionState.Running or SessionState.Queued))
             {
                 task.State = SessionState.Failed;

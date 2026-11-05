@@ -245,7 +245,7 @@ internal sealed class VmBackupTask(
 
             await tracker.UpdateTaskAsync(taskId, t => t.Metrics = CurrentMetrics(), CancellationToken.None).ConfigureAwait(false);
             var (manifestDisks, warnings) = await BackupDisksAsync(backup, writer, baseline, baseReader, cancellationToken).ConfigureAwait(false);
-            warnings |= consistencyWarning;
+            warnings |= consistencyWarning || guest?.Warning == true;
             ManifestBlob? guestBlob = null;
             ManifestBlob? vssBlob = null;
             ManifestBlob? sqlSnapshotBlob = null;

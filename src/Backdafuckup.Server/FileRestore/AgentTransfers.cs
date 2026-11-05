@@ -60,6 +60,9 @@ public sealed class AgentTransfer : IDisposable
 
     public bool CancelRequested { get; internal set; }
 
+    /// <summary>The agent restarted while this ran (a new run id at its poll): it reports nothing more.</summary>
+    public bool AgentRestarted { get; internal set; }
+
     /// <summary>Completed with the agent's final report.</summary>
     internal TaskCompletionSource<FileTransferProgress> Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -144,6 +147,15 @@ public sealed class AgentTransfers(TimeProvider time)
     internal TimeProvider Time => time;
 
     internal void Add(AgentTransfer transfer) => _transfers[transfer.Id] = transfer;
+
+    /// <summary>The agent restarted: its transfers end at once instead of after the silence limit.</summary>
+    public void AgentRestarted(Guid agentId)
+    {
+        foreach (var transfer in _transfers.Values.Where(t => t.AgentId == agentId))
+        {
+            transfer.AgentRestarted = true;
+        }
+    }
 
     internal void Remove(AgentTransfer transfer) => _transfers.TryRemove(transfer.Id, out _);
 

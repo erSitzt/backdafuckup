@@ -32,6 +32,17 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
     /// <summary>Makes the next attach fail with this SQL Server error number.</summary>
     public int? FailAttachWith { get; set; }
 
+    /// <summary>
+    /// If set, the first statement that matches waits for the gate (and sets <see cref="HoldReached"/> first): keeps a job
+    /// running, e.g. to stop the session or restart the agent meanwhile. With <see cref="HoldFails"/> it then fails.
+    /// </summary>
+    public (Func<string, bool> When, ManualResetEventSlim Gate)? Hold { get; set; }
+
+    public ManualResetEventSlim HoldReached { get; } = new();
+
+    /// <summary>The held statement fails when the gate opens (its connection broke).</summary>
+    public bool HoldFails { get; set; }
+
     /// <summary>SERVERPROPERTY('ProductVersion') of the instance (SQL Server 2022 Express by default).</summary>
     public string ProductVersion { get; set; } = "16.0.4305.5";
 
@@ -116,6 +127,17 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
 
     private (object? Scalar, DataTable? Table) Execute(string text, IReadOnlyDictionary<string, object?> parameters)
     {
+        if (Hold is { } hold && hold.When(text))
+        {
+            Hold = null;
+            HoldReached.Set();
+            hold.Gate.Wait(TimeSpan.FromSeconds(120));
+            if (HoldFails)
+            {
+                throw new ScriptedSqlException(10054, "A transport-level error has occurred (the connection was closed).");
+            }
+        }
+
         lock (_lock)
         {
             Statements.Add(text);
@@ -126,7 +148,7 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 case "SELECT database_id FROM sys.databases WHERE name = @name":
                     return (_databases.TryGetValue(Name(), out var found) ? found.Id : DBNull.Value, null);
                 case "SELECT state_desc FROM sys.databases WHERE name = @name":
-                    return (_databases.ContainsKey(Name()) ? "ONLINE" : null, null);
+                    return (_databases.ContainsKey(Name()) ? (Offline.Contains(Name()) ? "OFFLINE" : "ONLINE") : null, null);
                 case "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)), CAST(SERVERPROPERTY('Edition') AS nvarchar(128)), CAST(SERVERPROPERTY('EngineEdition') AS int), SUSER_SNAME(), IS_SRVROLEMEMBER('sysadmin'), IS_SRVROLEMEMBER('dbcreator')":
                 {
                     var table = Table(("version", typeof(string)), ("edition", typeof(string)), ("engine", typeof(int)), ("login", typeof(string)), ("sysadmin", typeof(int)), ("dbcreator", typeof(int)));

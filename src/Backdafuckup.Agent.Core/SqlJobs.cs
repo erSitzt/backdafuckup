@@ -124,6 +124,44 @@ public sealed class SqlJobRunner
 
     private string Base => AgentProtocol.SqlJobsPath + "/" + _id.ToString("D");
 
+    /// <summary>The files to delete: missing ones are left out, and a file whose content is not the expected restored one is kept.</summary>
+    private static List<string> KeepForeign(IRestoreFileSystem fs, List<string> files, List<string?> hashes, Action<string> log)
+    {
+        var delete = new List<string>();
+        for (var i = 0; i < files.Count; i++)
+        {
+            var expected = i < hashes.Count ? hashes[i] : null;
+            if (expected is null)
+            {
+                delete.Add(files[i]);
+                continue;
+            }
+
+            if (fs.Probe(files[i]) != RestorePathKind.File)
+            {
+                continue;
+            }
+
+            string actual;
+            using (var stream = fs.OpenRead(files[i]))
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            {
+                actual = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", string.Empty);
+            }
+
+            if (string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+            {
+                delete.Add(files[i]);
+            }
+            else
+            {
+                log($"kept {files[i]}: its content is not the restored file's (SHA-256 {actual}), so it was not written by this restore.");
+            }
+        }
+
+        return delete;
+    }
+
     /// <summary>The job's kind once its request is fetched.</summary>
     public string? Kind { get; private set; }
 
@@ -185,6 +223,14 @@ public sealed class SqlJobRunner
 
                     SqlReplace.Replace(_sql, _files, _journalDirectory, request.Instance!, request.Account, request.Database!, request.Files, request.KeepReplaced, Log);
                     break;
+                case SqlJobKinds.ReplaceRecovery:
+                    if (request.Account is null || string.IsNullOrEmpty(request.Instance) || string.IsNullOrEmpty(request.Database) || _journalDirectory is null)
+                    {
+                        throw new InvalidOperationException(_journalDirectory is null ? "This agent cannot overwrite databases." : "The job names no instance, account or database.");
+                    }
+
+                    result.Outcome = SqlReplace.Recovery(_sql, _journalDirectory, request.Instance!, request.Account, request.Database!, Log);
+                    break;
                 case SqlJobKinds.BackupDatabase:
                     if (request.Account is null || string.IsNullOrEmpty(request.Instance) || string.IsNullOrEmpty(request.Database) || string.IsNullOrEmpty(request.FileName))
                     {
@@ -214,6 +260,11 @@ public sealed class SqlJobRunner
                     if (_files is null || files.Count == 0)
                     {
                         throw new InvalidOperationException(_files is null ? "This agent cannot delete restored files." : "The job names no files.");
+                    }
+
+                    if (request.ExpectedHashes is { } hashes)
+                    {
+                        files = KeepForeign(_files, files, hashes, Log);
                     }
 
                     if (SqlAttach.DeleteFiles(_files, files, Log) is { Count: > 0 } failed)

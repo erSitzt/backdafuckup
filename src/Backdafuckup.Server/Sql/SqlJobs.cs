@@ -32,6 +32,7 @@ public sealed class SqlJobs(AgentRegistry registry, IOptions<AgentOptions> optio
                 throw new InvalidOperationException(accepted.Error ?? "The agent did not accept the SQL job.");
             }
 
+            job.RunId = registry.RunOf(agentId);
             return await job.Result.Task.WaitAsync(timeout, time, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -62,6 +63,8 @@ public sealed class SqlJobs(AgentRegistry registry, IOptions<AgentOptions> optio
             {
                 throw new InvalidOperationException(accepted.Error ?? "The agent did not accept the SQL job.");
             }
+
+            job.RunId = registry.RunOf(agentId);
         }
         catch
         {
@@ -87,6 +90,19 @@ public sealed class SqlJobs(AgentRegistry registry, IOptions<AgentOptions> optio
     public SqlJobRequest? Get(Guid jobId, Guid agentId) =>
         _jobs.TryGetValue(jobId, out var job) && job.AgentId == agentId ? job.Request : null;
 
+    /// <summary>
+    /// The agent restarted (a new run id at its poll): the jobs its previous process accepted fail at once with
+    /// <see cref="SqlJobLostException"/>, instead of waiting for their timeout.
+    /// </summary>
+    public void AgentRestarted(Guid agentId)
+    {
+        var current = registry.RunOf(agentId);
+        foreach (var job in _jobs.Values.Where(j => j.AgentId == agentId && j.RunId != Guid.Empty && j.RunId != current))
+        {
+            job.Result.TrySetException(new SqlJobLostException(job.Request.Kind));
+        }
+    }
+
     public bool Complete(Guid jobId, Guid agentId, SqlJobResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
@@ -97,8 +113,18 @@ public sealed class SqlJobs(AgentRegistry registry, IOptions<AgentOptions> optio
     {
         public TaskCompletionSource<SqlSnapshotProgress> Progress { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>The agent process that accepted the job (empty until accepted, or for agents before run ids).</summary>
+        public Guid RunId { get; set; }
+
         public volatile string Signal = SqlJobSignals.Wait;
     }
+}
+
+/// <summary>The agent restarted (service restart, crash, VM reboot) while it ran the job: the job is gone.</summary>
+public sealed class SqlJobLostException(string kind)
+    : InvalidOperationException($"the agent restarted (service restart, crash or VM reboot) while it ran the SQL Server job {kind}")
+{
+    public string Kind { get; } = kind;
 }
 
 /// <summary>A two-stage SQL job in progress (see <see cref="SqlJobs.StartAsync"/>).</summary>

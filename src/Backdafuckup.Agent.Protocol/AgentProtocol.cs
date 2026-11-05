@@ -78,6 +78,12 @@ public static class AgentProtocol
     public const string CapabilitySqlReplaceFiles = "sql-replace-files-v1";
 
     /// <summary>
+    /// The agent reports how it recovered an overwrite that its restart interrupted and brings the database back online
+    /// (<see cref="SqlJobKinds.ReplaceRecovery"/>).
+    /// </summary>
+    public const string CapabilitySqlReplaceRecovery = "sql-replace-recovery-v1";
+
+    /// <summary>
     /// The agent backs up a database to a <c>.bak</c> file and verifies it (<see cref="SqlJobKinds.BackupDatabase"/>), and
     /// uploads it on request (<c>PUT {SqlJobsPath}/{id}/file?name=</c>).
     /// </summary>
@@ -175,6 +181,12 @@ public sealed class AgentPollRequest
     /// self-update while it is set, also after a server restart, and queues further work for this agent.
     /// </summary>
     public string? Busy { get; set; }
+
+    /// <summary>
+    /// Random for each start of the agent process. A new value tells the server that the agent restarted (service
+    /// restart, crash, VM reboot): the SQL jobs the previous process accepted are gone. Empty from agents before this field.
+    /// </summary>
+    public Guid RunId { get; set; }
 }
 
 /// <summary>Answer to a poll: a command, or an update offer.</summary>
@@ -592,6 +604,26 @@ public static class SqlJobKinds
     /// sends the file to the server. The result names the file and its size.
     /// </summary>
     public const string BackupDatabase = "backup-database";
+
+    /// <summary>
+    /// After the agent restarted during a <see cref="ReplaceFiles"/> job of <see cref="SqlJobRequest.Database"/>: reports
+    /// how its recovery at start ended (<see cref="SqlJobResult.Outcome"/>, one of <see cref="SqlReplaceOutcomes"/>) and,
+    /// if the database got its own files back and was taken offline by the overwrite, brings it online again.
+    /// </summary>
+    public const string ReplaceRecovery = "replace-recovery";
+}
+
+/// <summary>How an overwrite that an agent restart interrupted ended (<see cref="SqlJobKinds.ReplaceRecovery"/>).</summary>
+public static class SqlReplaceOutcomes
+{
+    /// <summary>The database had come online with the restored files: the overwrite stands.</summary>
+    public const string Completed = "completed";
+
+    /// <summary>The database has its own files again (and is online as before); the restored copies are <c>*.bdfu-new</c>.</summary>
+    public const string RolledBack = "rolled-back";
+
+    /// <summary>The overwrite had not changed anything yet (no journal): the database is as before.</summary>
+    public const string Untouched = "untouched";
 }
 
 /// <summary>File names of <see cref="SqlJobKinds.ReplaceFiles"/>, shared by server and agent.</summary>
@@ -749,6 +781,13 @@ public sealed class SqlJobRequest
     public List<string>? Files { get; set; }
 
     /// <summary>
+    /// DeleteFiles: per entry of <see cref="Files"/> the SHA-256 (hex) the restored file has, or null. A file with a
+    /// hash is deleted only if its content matches, otherwise it is kept and named: used for files the agent may have
+    /// finished without reporting it before it restarted.
+    /// </summary>
+    public List<string?>? ExpectedHashes { get; set; }
+
+    /// <summary>
     /// SnapshotSuspend: the longest time the databases stay suspended. After it the agent closes its connections, which
     /// resumes SQL Server, and the databases are reported as failed.
     /// </summary>
@@ -808,6 +847,9 @@ public sealed class SqlJobResult
 
     /// <summary>BackupDatabase: the upload reached the server completely.</summary>
     public bool Uploaded { get; set; }
+
+    /// <summary>ReplaceRecovery: one of <see cref="SqlReplaceOutcomes"/>.</summary>
+    public string? Outcome { get; set; }
 
     /// <summary>What the job did, for the session log (e.g. "removed database [shop_published]").</summary>
     public List<string> Log { get; set; } = new List<string>();

@@ -719,15 +719,21 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     }
 
     /// <summary>The real agent loop over HTTP with its file system mapped into a sandbox folder (C:\x → {sandbox}/C/x).</summary>
+    /// <param name="directory">The agent's folder: a new one, or an earlier agent's (an agent restart: same key, journals, new process).</param>
     private async Task<(Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)> StartAgentAsync(
-        string vmNativeId, IRestoreFileSystem? fs, ISqlEnvironment? sql = null, Func<string, IPublishHost>? publish = null, List<GuestSqlDatabase>? sqlDatabases = null)
+        string vmNativeId, IRestoreFileSystem? fs, ISqlEnvironment? sql = null, Func<string, IPublishHost>? publish = null, List<GuestSqlDatabase>? sqlDatabases = null,
+        string? directory = null)
     {
-        var directory = Path.Combine(_root, "agent-" + Guid.NewGuid().ToString("N")[..8]);
+        var restart = directory is not null;
+        directory ??= Path.Combine(_root, "agent-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(directory);
         var paths = new AgentPaths(directory);
         var secret = await _factory!.Services.GetRequiredService<AgentSettingsStore>().GetEnrollmentSecretAsync(Ct);
-        await File.WriteAllTextAsync(paths.ConfigFile, System.Text.Json.JsonSerializer.Serialize(
-            new AgentConfig { ServerUrl = "https://localhost/", EnrollmentSecret = secret }, Backdafuckup.Agent.Core.AgentJson.Options), Ct);
+        if (!restart)
+        {
+            await File.WriteAllTextAsync(paths.ConfigFile, System.Text.Json.JsonSerializer.Serialize(
+                new AgentConfig { ServerUrl = "https://localhost/", EnrollmentSecret = secret }, Backdafuckup.Agent.Core.AgentJson.Options), Ct);
+        }
         var runner = new AgentRunner(paths, new SimulatedHost(vmNativeId), new SimulatedVss(sqlDatabases), new AgentLog(paths.LogFile), _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200), fs, sql, publish?.Invoke(directory));
         var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var running = Task.Run(() => runner.RunAsync(stop.Token), Ct);
@@ -1050,11 +1056,163 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Assert.All(instance.Databases, d => Assert.Equal(("41000000012300001", "41000000012600001"), (d.FirstLsn, d.LastLsn)));
             var stored = await StoredGuestMetadata.ReadAsync(reader, Ct);
             Assert.Equal("application", stored!.SqlDatabases.Single(d => d.Database == "shop").Consistency);
+
+            // The job's SQL Server account cannot be deleted while the job uses it.
+            var delete = await client.DeleteAsync($"/api/credentials/sql/{login.Id}", Ct);
+            Assert.Equal(HttpStatusCode.Conflict, delete.StatusCode);
+            Assert.Contains("used by job(s) 'Files' (SQL Server account)", await delete.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
         }
         finally
         {
             await stop.CancelAsync();
             await running;
+        }
+    }
+
+    [Fact]
+    public async Task An_agent_restart_while_restored_files_are_written_deletes_the_files_written_so_far()
+    {
+        var client = await SignedInClientAsync();
+        var mdf = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11);
+        var ldf = WindowsTestDisk.SqlFile(2, 512 << 10, 0x22);
+        var image = WindowsTestDisk.Create(
+            [
+                new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+                new WindowsTestDisk.Volume('D', 8, new Dictionary<string, byte[]> { ["SQL/shop.mdf"] = mdf }),
+                new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]> { ["Log/shop_log.ldf"] = ldf }),
+            ],
+            software: root =>
+            {
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\Instance Names\SQL").SetValue("SQLEXPRESS", "MSSQL16.SQLEXPRESS");
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\MSSQL16.SQLEXPRESS\Setup").SetValue("Version", "16.0.1000.6");
+            });
+        var sandbox = Path.Combine(_root, "sql-restore-restart-guest");
+        using var gate = new ManualResetEventSlim();
+        var gated = new SecondFileGatedSandbox(sandbox, gate);
+        var plain = new SandboxRestoreFileSystem(sandbox);
+        var sql = new ScriptedSqlEnvironment(path => File.ReadAllBytes(plain.Local(path)));
+        sql.AddDatabase("shop", @"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf");
+        static GuestSqlFile F(string path, string spec) => new() { Path = path, Spec = spec };
+        List<GuestSqlDatabase> databases = [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", DataFiles = [F(@"D:\SQL\", "shop.mdf")], LogFiles = [F(@"L:\Log\", "shop_log.ldf")], InBackup = true }];
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+        var point = await BackUpImageAsync(client, "sql09", image, async vm => started = await StartAgentAsync(vm, gated, sql, null, databases));
+        var (_, firstStop, firstRunning) = started ?? throw new InvalidOperationException("The agent did not start.");
+        var folder = Assert.Single(Directory.GetDirectories(_root, "agent-*"));
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_restore", "Restore-1", null), Ct));
+        (CancellationTokenSource Stop, Task Running)? second = null;
+        try
+        {
+            // The first file is written (maybe not reported yet: the agent reports every 2 s), the second one is being written.
+            var session = (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/restores",
+                new SqlRestoreRequestDto(point.Id, "SQLEXPRESS", "shop", point.VmNativeId, "SQLEXPRESS", login.Id, "shop_copy", SqlRestoreFiles.Original, null, null), Ct))).SessionId;
+            Assert.True(gated.Reached.Wait(TimeSpan.FromSeconds(60), Ct), "the second file was not started");
+            Assert.True(File.Exists(plain.Local(@"D:\SQL\shop_copy.mdf")));
+            await firstStop.CancelAsync();
+            await firstRunning;
+
+            var (_, secondStop, secondRunning) = await StartAgentAsync(point.VmNativeId, plain, sql, null, databases, folder);
+            second = (secondStop, secondRunning);
+            var detail = await WaitForSessionAsync(client, session);
+            var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{session}/log", Ct))!.Select(l => l.Message));
+
+            Assert.True(detail.Session.State == "Failed", detail.Session.Summary + "\n" + log);
+            Assert.True(
+                detail.Session.Summary!.Contains("the agent in SQL01 (10.0.0.5) restarted (service restart, crash or VM reboot) while it wrote the files; the files written so far were deleted again", StringComparison.Ordinal),
+                detail.Session.Summary + "\n" + log);
+            Assert.False(File.Exists(plain.Local(@"D:\SQL\shop_copy.mdf")));
+            Assert.False(File.Exists(plain.Local(@"L:\Log\shop_copy_log.ldf")));
+            Assert.DoesNotContain(sql.Statements, t => t.StartsWith("CREATE DATABASE [shop_copy]", StringComparison.Ordinal));
+        }
+        finally
+        {
+            gated.Fail = true;
+            gate.Set();
+            if (second is { } agent)
+            {
+                await agent.Stop.CancelAsync();
+                await agent.Running;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task An_agent_restart_during_an_overwrite_gives_the_database_its_own_files_back_and_brings_it_online()
+    {
+        var client = await SignedInClientAsync();
+        var mdf = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11);
+        var ldf = WindowsTestDisk.SqlFile(2, 512 << 10, 0x22);
+        var image = WindowsTestDisk.Create(
+            [
+                new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+                new WindowsTestDisk.Volume('D', 8, new Dictionary<string, byte[]> { ["SQL/shop.mdf"] = mdf }),
+                new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]> { ["Log/shop_log.ldf"] = ldf }),
+            ],
+            software: root =>
+            {
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\Instance Names\SQL").SetValue("SQLEXPRESS", "MSSQL16.SQLEXPRESS");
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\MSSQL16.SQLEXPRESS\Setup").SetValue("Version", "16.0.1000.6");
+            });
+        var sandbox = Path.Combine(_root, "sql-overwrite-restart-guest");
+        var fs = new SandboxRestoreFileSystem(sandbox);
+        var sql = new ScriptedSqlEnvironment(path => File.ReadAllBytes(fs.Local(path))) { Sysadmin = true };
+        string[] files = [@"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf"];
+        sql.AddDatabase("shop", files);
+        static GuestSqlFile F(string path, string spec) => new() { Path = path, Spec = spec };
+        List<GuestSqlDatabase> databases = [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", DataFiles = [F(@"D:\SQL\", "shop.mdf")], LogFiles = [F(@"L:\Log\", "shop_log.ldf")], InBackup = true }];
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+        var point = await BackUpImageAsync(client, "sql08", image, async vm => started = await StartAgentAsync(vm, fs, sql, null, databases));
+        var (_, firstStop, firstRunning) = started ?? throw new InvalidOperationException("The agent did not start.");
+        var folder = Assert.Single(Directory.GetDirectories(_root, "agent-*"));
+
+        // The database as it is now: other content than in the backup.
+        var own = files.Select((_, i) => Enumerable.Repeat((byte)(0xA0 + i), 4096).ToArray()).ToList();
+        foreach (var (file, i) in files.Select((f, i) => (f, i)))
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(fs.Local(file))!);
+            File.WriteAllBytes(fs.Local(file), own[i]);
+        }
+
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_admin", "Admin-1", null), Ct));
+        using var gate = new ManualResetEventSlim();
+        (CancellationTokenSource Stop, Task Running)? second = null;
+        try
+        {
+            // The overwrite has taken the database offline and swapped the files when the agent "dies" (its job hangs).
+            sql.Hold = (t => t == "ALTER DATABASE [shop] SET ONLINE", gate);
+            var session = (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/restores",
+                new SqlRestoreRequestDto(point.Id, "SQLEXPRESS", "shop", point.VmNativeId, "SQLEXPRESS", login.Id, "shop", SqlRestoreFiles.Original, null, null, Overwrite: true), Ct))).SessionId;
+            Assert.True(sql.HoldReached.Wait(TimeSpan.FromSeconds(60), Ct), "the overwrite did not reach SET ONLINE");
+            Assert.Equal([mdf, ldf], files.Select(f => File.ReadAllBytes(fs.Local(f))));
+            Assert.Contains("shop", sql.Offline);
+            await firstStop.CancelAsync();
+            await firstRunning;
+
+            // The agent starts again in its folder: it puts the database's own files back; the server notices the new process.
+            var (_, secondStop, secondRunning) = await StartAgentAsync(point.VmNativeId, fs, sql, null, databases, folder);
+            second = (secondStop, secondRunning);
+            var detail = await WaitForSessionAsync(client, session);
+            var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{session}/log", Ct))!.Select(l => l.Message));
+
+            Assert.True(detail.Session.State == "Failed", detail.Session.Summary + "\n" + log);
+            Assert.Contains("the agent restarted (service restart, crash or VM reboot) while it ran the SQL Server job replace-files", detail.Session.Summary, StringComparison.Ordinal);
+            Assert.Contains("[shop] has its own files again, in the state it had before; nothing was overwritten. The restored files were deleted again.", detail.Session.Summary, StringComparison.Ordinal);
+            Assert.Contains("brought [shop] on instance SQLEXPRESS online again with its own files.", log, StringComparison.Ordinal);
+            Assert.Equal(own, files.Select(f => File.ReadAllBytes(fs.Local(f))));
+            Assert.Equal(own, files.Select(f => sql.OnlineFiles[f]));
+            Assert.Empty(sql.Offline);
+            Assert.Empty(Directory.GetFiles(sandbox, "*.bdfu-*", SearchOption.AllDirectories));
+            Assert.Empty(Directory.GetFiles(folder, "sql-replace*.json"));
+        }
+        finally
+        {
+            // The first agent's hung job ends with a broken connection.
+            sql.HoldFails = true;
+            gate.Set();
+            if (second is { } agent)
+            {
+                await agent.Stop.CancelAsync();
+                await agent.Running;
+            }
         }
     }
 
@@ -1314,6 +1472,22 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         Assert.True(defaults.Session.State == "Succeeded", defaults.Session.Summary);
         Assert.Equal([@"D:\Data\shop_default.mdf", @"D:\Data\shop_default_2.ndf", @"L:\Logs\shop_default_log.ldf"], sql.DatabaseFiles("shop_default"));
 
+        // Stopped while attaching: the attach cannot be interrupted, so it finishes and the session says so instead of "Stopped".
+        using (var gate = new ManualResetEventSlim())
+        {
+            sql.Hold = (t => t.StartsWith("CREATE DATABASE [shop_stopped]", StringComparison.Ordinal), gate);
+            var attaching = (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/restores", Request("shop_stopped"), Ct))).SessionId;
+            Assert.True(sql.HoldReached.Wait(TimeSpan.FromSeconds(60), Ct), "the attach did not start");
+            (await client.PostAsync($"/api/sessions/{attaching}/stop", null, Ct)).EnsureSuccessStatusCode();
+            gate.Set();
+            var stopped = await WaitForSessionAsync(client, attaching);
+            var stoppedLog = await LogAsync(attaching);
+            Assert.True(stopped.Session.State == "Succeeded", stopped.Session.Summary + "\n" + stoppedLog);
+            Assert.Contains("as [shop_stopped] on SQL01", stopped.Session.Summary, StringComparison.Ordinal);
+            Assert.Contains("The stop came during a step that cannot be interrupted; that step was finished", stoppedLog, StringComparison.Ordinal);
+            Assert.Equal([@"D:\SQL\shop_stopped.mdf", @"D:\SQL\shop_stopped_2.ndf", @"L:\Log\shop_stopped_log.ldf"], sql.DatabaseFiles("shop_stopped"));
+        }
+
         // An older instance than the backup's: refused before anything is written.
         sql.ProductVersion = "15.0.2000.5";
         var older = await RestoreAsync(Request("shop_old"));
@@ -1553,6 +1727,36 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
 
         protected override string Map(string windowsPath) =>
             Path.Combine([root, windowsPath[..1], .. windowsPath[3..].Split('\\', StringSplitOptions.RemoveEmptyEntries)]);
+    }
+
+    /// <summary>
+    /// A sandbox whose second temporary file waits for <paramref name="gate"/> (and then fails with <see cref="Fail"/>):
+    /// the first file is finished, the second one is being written, e.g. when the agent restarts.
+    /// </summary>
+    private sealed class SecondFileGatedSandbox(string root, ManualResetEventSlim gate) : PortableRestoreFileSystem
+    {
+        private string? _first;
+
+        public ManualResetEventSlim Reached { get; } = new();
+
+        public bool Fail { get; set; }
+
+        public override string? CheckRoot(string path) => null;
+
+        protected override string Map(string windowsPath)
+        {
+            if (windowsPath.Contains(".bdfu-restore-", StringComparison.Ordinal) && Interlocked.CompareExchange(ref _first, windowsPath, null) is { } first && first != windowsPath)
+            {
+                Reached.Set();
+                gate.Wait(TimeSpan.FromSeconds(120));
+                if (Fail)
+                {
+                    throw new IOException("The device is not ready (simulated).");
+                }
+            }
+
+            return Path.Combine([root, windowsPath[..1], .. windowsPath[3..].Split('\\', StringSplitOptions.RemoveEmptyEntries)]);
+        }
     }
 
     /// <summary>A sandbox whose first temporary file waits for <paramref name="gate"/>: keeps a transfer running.</summary>

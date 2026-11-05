@@ -69,6 +69,29 @@ public sealed class AgentRegistry(TimeProvider time)
 
     public void Touch(Guid agentId) => Channel(agentId).LastContact = time.GetUtcNow();
 
+    /// <summary>
+    /// Notes the run id the agent polled with (<see cref="AgentPollRequest.RunId"/>). True if it differs from the one
+    /// before: the agent restarted, and the jobs its previous process accepted are gone.
+    /// </summary>
+    public bool ObserveRun(Guid agentId, Guid runId)
+    {
+        if (runId == Guid.Empty)
+        {
+            return false;
+        }
+
+        var channel = Channel(agentId);
+        lock (channel)
+        {
+            var previous = channel.RunId;
+            channel.RunId = runId;
+            return previous != Guid.Empty && previous != runId;
+        }
+    }
+
+    /// <summary>The agent's process as of its last poll (empty: not known yet, or an agent before run ids).</summary>
+    public Guid RunOf(Guid agentId) => _agents.TryGetValue(agentId, out var channel) ? channel.RunId : Guid.Empty;
+
     /// <summary>What the agent reported it can do with its last poll (kept in memory; agents poll every ≤ 50 s).</summary>
     public void SetCapabilities(Guid agentId, IReadOnlyCollection<string>? capabilities) =>
         Channel(agentId).Capabilities = capabilities is null ? [] : [.. capabilities];
@@ -232,6 +255,8 @@ public sealed class AgentRegistry(TimeProvider time)
         public DateTimeOffset ReportedWorkAt;
 
         public DateTimeOffset WorkEndedAt;
+
+        public Guid RunId;
 
         public Channel<AgentCommand> Commands { get; } = System.Threading.Channels.Channel.CreateUnbounded<AgentCommand>();
 

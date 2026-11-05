@@ -30,6 +30,9 @@ public static class SqlReplace
 
     public const string JournalFile = "sql-replace.json";
 
+    /// <summary>How the recovery at agent start ended, per database, until the server asks (<see cref="Recovery"/>).</summary>
+    public const string OutcomeFile = "sql-replace-outcome.json";
+
     /// <param name="files">The database's files as they are now (and as they are in the backup); the restored ones lie beside them with <see cref="NewSuffix"/>.</param>
     public static void Replace(
         ISqlEnvironment sql, IRestoreFileSystem fs, string journalDirectory, string instanceName, SqlAccount account, string database,
@@ -60,7 +63,7 @@ public static class SqlReplace
                 }
             }
 
-            var journal = new Journal { Instance = instance.Name, Database = database, Files = files.ToList() };
+            var journal = new Journal { Instance = instance.Name, Database = database, Files = files.ToList(), KeepReplaced = keepReplaced, WasOnline = state != "OFFLINE" };
             var journalPath = Path.Combine(journalDirectory, JournalFile);
             Write(journalPath, journal);
             var online = false;
@@ -99,6 +102,10 @@ public static class SqlReplace
                 Execute(connection, $"ALTER DATABASE {name} SET ONLINE");
                 EnsureOnline(connection, database, log);
                 online = true;
+
+                // From here on the overwrite stands: after a crash, recovery only deletes the previous files.
+                journal.Online = true;
+                Write(journalPath, journal);
             }
             catch (Exception ex) when (!online && (ex is DbException || ex is IOException || ex is UnauthorizedAccessException || ex is InvalidOperationException))
             {
@@ -113,20 +120,30 @@ public static class SqlReplace
             }
 
             log($"{name} on instance {instance.Name} is online with the restored files.");
-            if (!keepReplaced)
-            {
-                var failed = SqlAttach.DeleteFiles(fs, journal.MovedAside.Select(f => f + ReplacedSuffix).ToList(), _ => { });
-                log(failed.Count == 0
-                    ? $"deleted the database's previous files (*{ReplacedSuffix})."
-                    : $"the previous files could not all be deleted; delete them by hand: {string.Join("; ", failed)}");
-            }
-            else if (journal.MovedAside.Count > 0)
-            {
-                log($"kept the database's previous files: {string.Join(", ", journal.MovedAside.Select(f => f + ReplacedSuffix))}.");
-            }
-
+            FinishReplaced(fs, journal, log);
             Delete(journalPath);
         }
+    }
+
+    /// <summary>The overwrite stands: deletes the database's previous files, or names them if they are kept.</summary>
+    private static void FinishReplaced(IRestoreFileSystem fs, Journal journal, Action<string> log)
+    {
+        var previous = journal.MovedAside.Select(f => f + ReplacedSuffix).Where(f => fs.Probe(f) == RestorePathKind.File).ToList();
+        if (previous.Count == 0)
+        {
+            return;
+        }
+
+        if (journal.KeepReplaced)
+        {
+            log($"kept the database's previous files: {string.Join(", ", previous)}.");
+            return;
+        }
+
+        var failed = SqlAttach.DeleteFiles(fs, previous, _ => { });
+        log(failed.Count == 0
+            ? $"deleted the database's previous files (*{ReplacedSuffix})."
+            : $"the previous files could not all be deleted; delete them by hand: {string.Join("; ", failed)}");
     }
 
     /// <summary>
@@ -158,7 +175,26 @@ public static class SqlReplace
             return;
         }
 
+        if (journal.Online)
+        {
+            // Interrupted after the database came online with the restored files: the overwrite stands.
+            log($"An overwrite of [{journal.Database}] on instance {journal.Instance} was interrupted after the database came online with the restored files; " +
+                "the overwrite is complete.");
+            FinishReplaced(fs, journal, line => log("Overwrite cleanup: " + line));
+            RecordOutcome(journalDirectory, new Outcome { Instance = journal.Instance, Database = journal.Database, Result = SqlReplaceOutcomes.Completed });
+            Delete(journalPath);
+            return;
+        }
+
         var problems = PutBack(fs, journal, log);
+        if (problems.Count == 0)
+        {
+            RecordOutcome(journalDirectory, new Outcome
+            {
+                Instance = journal.Instance, Database = journal.Database, Result = SqlReplaceOutcomes.RolledBack, BringOnline = journal.Offline && journal.WasOnline,
+            });
+        }
+
         log(problems.Count == 0
             ? $"An overwrite of [{journal.Database}] on instance {journal.Instance} was interrupted; its own files are back in place. " +
               (journal.Offline ? $"It is offline: bring it online with ALTER DATABASE [{journal.Database.Replace("]", "]]")}] SET ONLINE." : "It was not taken offline.")
@@ -166,6 +202,89 @@ public static class SqlReplace
         if (problems.Count == 0)
         {
             Delete(journalPath);
+        }
+    }
+
+    /// <summary>
+    /// The server asks after the agent restarted during an overwrite of <paramref name="database"/>: how the recovery at
+    /// start ended. A database that got its own files back and was online before goes online again (the recovery had no
+    /// account for that). Throws if the recovery could not put the files back.
+    /// </summary>
+    public static string Recovery(ISqlEnvironment sql, string journalDirectory, string instanceName, SqlAccount account, string database, Action<string> log)
+    {
+        SqlAttach.CheckName(database);
+        var journalPath = Path.Combine(journalDirectory, JournalFile);
+        if (File.Exists(journalPath)
+            && JsonSerializer.Deserialize<Journal>(File.ReadAllText(journalPath), AgentJson.Options) is { } pending
+            && string.Equals(pending.Database, database, StringComparison.OrdinalIgnoreCase) && string.Equals(pending.Instance, instanceName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"The interrupted overwrite of {SqlPublishDatabase.Quote(database)} could not be recovered: its files could not all be put back (see the agent log). " +
+                $"Files: {string.Join(", ", pending.Files)}; the database's own files may be *{ReplacedSuffix}, the restored ones *{NewSuffix}.");
+        }
+
+        var outcomePath = Path.Combine(journalDirectory, OutcomeFile);
+        var outcomes = ReadOutcomes(outcomePath);
+        var outcome = outcomes.FirstOrDefault(o => string.Equals(o.Database, database, StringComparison.OrdinalIgnoreCase) && string.Equals(o.Instance, instanceName, StringComparison.OrdinalIgnoreCase));
+        if (outcome is null)
+        {
+            log($"no interrupted overwrite of {SqlPublishDatabase.Quote(database)} was found: it had not changed anything yet.");
+            return SqlReplaceOutcomes.Untouched;
+        }
+
+        if (outcome.Result == SqlReplaceOutcomes.RolledBack && outcome.BringOnline)
+        {
+            var instance = sql.Instances().FirstOrDefault(i => string.Equals(i.Name, instanceName, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException($"This VM has no SQL Server instance {instanceName}.");
+            using (var connection = sql.Open(instance.Name, account))
+            {
+                string? state;
+                using (var command = SqlAttach.Command(connection, "SELECT state_desc FROM sys.databases WHERE name = @name", ("@name", database)))
+                {
+                    state = command.ExecuteScalar() as string;
+                }
+
+                if (state == "OFFLINE")
+                {
+                    Execute(connection, $"ALTER DATABASE {SqlPublishDatabase.Quote(database)} SET ONLINE");
+                    log($"brought {SqlPublishDatabase.Quote(database)} on instance {instance.Name} online again with its own files.");
+                }
+
+                EnsureOnline(connection, database, log);
+            }
+        }
+
+        outcomes.Remove(outcome);
+        if (outcomes.Count == 0)
+        {
+            Delete(outcomePath);
+        }
+        else
+        {
+            File.WriteAllText(outcomePath, JsonSerializer.Serialize(outcomes, AgentJson.Options));
+        }
+
+        return outcome.Result;
+    }
+
+    private static void RecordOutcome(string journalDirectory, Outcome outcome)
+    {
+        var path = Path.Combine(journalDirectory, OutcomeFile);
+        var outcomes = ReadOutcomes(path);
+        outcomes.RemoveAll(o => string.Equals(o.Database, outcome.Database, StringComparison.OrdinalIgnoreCase) && string.Equals(o.Instance, outcome.Instance, StringComparison.OrdinalIgnoreCase));
+        outcomes.Add(outcome);
+        File.WriteAllText(path, JsonSerializer.Serialize(outcomes, AgentJson.Options));
+    }
+
+    private static List<Outcome> ReadOutcomes(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? JsonSerializer.Deserialize<List<Outcome>>(File.ReadAllText(path), AgentJson.Options) ?? new List<Outcome>() : new List<Outcome>();
+        }
+        catch (JsonException)
+        {
+            return new List<Outcome>();
         }
     }
 
@@ -379,6 +498,20 @@ public static class SqlReplace
     }
 
     /// <summary>What an overwrite has done so far (no account, no password).</summary>
+    /// <summary>How the recovery at agent start ended for one database.</summary>
+    public sealed class Outcome
+    {
+        public string Instance { get; set; } = string.Empty;
+
+        public string Database { get; set; } = string.Empty;
+
+        /// <summary>One of <see cref="SqlReplaceOutcomes"/>.</summary>
+        public string Result { get; set; } = string.Empty;
+
+        /// <summary>Rolled back: the overwrite had taken the database offline; it goes online again when the server asks.</summary>
+        public bool BringOnline { get; set; }
+    }
+
     public sealed class Journal
     {
         public string Instance { get; set; } = string.Empty;
@@ -388,6 +521,18 @@ public static class SqlReplace
         public List<string> Files { get; set; } = new List<string>();
 
         public bool Offline { get; set; }
+
+        /// <summary>
+        /// The database came online with the restored files: the overwrite is done, only the previous files
+        /// (*.bdfu-replaced) remain to be deleted. Recovery must not put anything back then.
+        /// </summary>
+        public bool Online { get; set; }
+
+        /// <summary>Keep the previous files (*.bdfu-replaced) instead of deleting them.</summary>
+        public bool KeepReplaced { get; set; }
+
+        /// <summary>The database was online before the overwrite (it took it offline).</summary>
+        public bool WasOnline { get; set; }
 
         /// <summary>Files whose restored copy is (or is being) put in place.</summary>
         public List<string> Swapped { get; set; } = new List<string>();

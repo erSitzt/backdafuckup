@@ -109,8 +109,10 @@ public sealed class SqlPublishSessionRunner(
                     await FinishTaskAsync(task.Id, SessionState.Stopped, "Service stopped").ConfigureAwait(false);
                     return (SessionState.Stopped, $"Unpublished when the backup service stopped, after {duration}.");
                 case EndReason.Lost when !DiskPublishes.HasEnded(publish):
-                    log.Warning($"The agent in {host} has not reported for {(time.GetUtcNow() - publish.LastHeartbeat).TotalMinutes:0} minutes (agent or VM restarted, network?). " +
-                        "When it is back, it removes the volumes from its journal.");
+                    log.Warning(publish.AgentRestarted
+                        ? $"The agent in {host} restarted (service restart, crash or VM reboot); at its start it removed the volumes from its journal."
+                        : $"The agent in {host} has not reported for {(time.GetUtcNow() - publish.LastHeartbeat).TotalMinutes:0} minutes (agent or VM restarted, network?). " +
+                          "When it is back, it removes the volumes from its journal.");
                     await publishes.UnpublishAsync(publish, TimeSpan.FromSeconds(1), CancellationToken.None).ConfigureAwait(false);
                     break;
                 case EndReason.Lost:
@@ -135,7 +137,8 @@ public sealed class SqlPublishSessionRunner(
             var notes = new List<string>();
             if (reason == EndReason.Lost)
             {
-                notes.Add(ended ? $"the agent in {agent.HostName} ended it on its own" : $"the agent in {agent.HostName} stopped reporting");
+                notes.Add(ended ? $"the agent in {agent.HostName} ended it on its own"
+                    : publish.AgentRestarted ? $"the agent in {agent.HostName} restarted meanwhile" : $"the agent in {agent.HostName} stopped reporting");
             }
 
             if (status?.DatabaseLeft is not null && leftover is null)
@@ -407,7 +410,7 @@ public sealed class SqlPublishSessionRunner(
                 return EndReason.Expired;
             }
 
-            if (DiskPublishes.HasEnded(publish) || time.GetUtcNow() - publish.LastHeartbeat > DiskPublishes.PublishSilenceLimit)
+            if (DiskPublishes.HasEnded(publish) || publish.AgentRestarted || time.GetUtcNow() - publish.LastHeartbeat > DiskPublishes.PublishSilenceLimit)
             {
                 return EndReason.Lost;
             }

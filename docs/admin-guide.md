@@ -319,7 +319,16 @@ Restore points show their consistency ("application", or "crash" plus the reason
 - The database must have exactly the files the backup has. If files were added, removed or moved since, restore it as a new database instead.
 - The account must be `sysadmin`. The restored files need the database's space once more until the previous ones are deleted.
 - Not possible for system databases, database snapshots (or databases that have snapshots), mirrored or replicated databases, availability groups, and databases with FILESTREAM or full-text files.
-- If the agent is interrupted during the swap (crash, VM restart), it puts the database's own files back when it starts again. The database then stays offline; the agent log names the `ALTER DATABASE … SET ONLINE` to run.
+- If the agent is interrupted during the swap (crash, service or VM restart), it puts the database's own files back when it starts again, from its journal. The server notices the restart, asks the agent how that ended, brings the database online again with the session's account and deletes the restored copies; the session fails with "nothing was overwritten". If the database was already online with the restored files, the overwrite stands and the session ends with a warning.
+
+**Interruptions** (all ways of getting a database back)
+- **Agent restart** (service restart, crash, VM reboot): the agent sends a new run id with its next poll, and the server ends what that agent was doing at once instead of waiting for a timeout:
+  - while files are written: the files written so far are deleted once the agent is back (up to 20 minutes, `SqlRestore:LeftoverWaitLimit`); a file the agent finished without reporting it is deleted only if its content is the restored file's. If the agent does not come back, the session lists the files. A partly written temporary file (`.bdfu-restore-*.tmp`) may stay in the target folder.
+  - during the attach: the server checks whether the database is attached with the restored files; if not, it deletes them.
+  - during a publish or an export: the agent removes the mounts and the iSCSI session from its journal when it starts; the server then removes a database left attached with the session's account.
+- **Server restart:** publishes and exports end, and the agent removes what it set up when it gets 404. A restore session fails with a summary that names the files it was writing and what to check (whether the database is attached or online). The agent finishes or rolls back an overwrite on its own.
+- **Stop:** an attach, an overwrite or the backup of an export cannot be stopped halfway. A stop during one of them lets it finish; the session then shows the real result and says so in the log.
+- An account that a job or a running session uses cannot be deleted under *Credentials*; the message names the jobs. A job with the SQL Server snapshot but no account (from before this check) falls back to VSS with a warning.
 
 **Accounts**
 - A Windows account (the agent logs on with it in the guest; `.\name` for local accounts works) or a SQL Server login, stored under *Credentials*. The agent never stores the account.

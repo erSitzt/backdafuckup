@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -27,6 +28,7 @@ public sealed class AgentRunner
     private readonly ISqlEnvironment? _sql;
     private readonly IPublishHost? _publish;
     private readonly object _workLock = new object();
+    private readonly ConcurrentDictionary<Guid, SqlJobRunner> _sqlJobs = new ConcurrentDictionary<Guid, SqlJobRunner>();
     private Task? _work;
     private string? _workName;
     private string? _postponedUpdate;
@@ -63,10 +65,20 @@ public sealed class AgentRunner
         {
             lock (_workLock)
             {
-                return _work is { IsCompleted: false } ? _workName : null;
+                if (_work is { IsCompleted: false })
+                {
+                    return _workName;
+                }
             }
+
+            // SQL jobs run beside the work slot, but a restart in the middle of an attach, an overwrite or a backup would
+            // break it: they count too (only the inventory just reads).
+            return _sqlJobs.Values.Where(j => j.Kind != SqlJobKinds.Inventory).Select(j => $"SQL Server job {j.Kind ?? "(starting)"}").FirstOrDefault();
         }
     }
+
+    /// <summary>Random for this process: tells the server when the agent restarted (<see cref="AgentPollRequest.RunId"/>).</summary>
+    public Guid RunId { get; } = Guid.NewGuid();
 
     /// <summary>Runs until <paramref name="stop"/>; returns <see cref="AgentProtocol.RestartExitCode"/> after a self-update.</summary>
     public async Task<int> RunAsync(CancellationToken stop)
@@ -200,7 +212,7 @@ public sealed class AgentRunner
         _log.Write($"Connected to {http.BaseAddress}.");
         while (!stop.IsCancellationRequested)
         {
-            using (var response = await http.PostAsync(AgentProtocol.PollPath, Json(new AgentPollRequest { Host = HostInfo(force: false), Busy = Busy }), stop).ConfigureAwait(false))
+            using (var response = await http.PostAsync(AgentProtocol.PollPath, Json(new AgentPollRequest { Host = HostInfo(force: false), Busy = Busy, RunId = RunId }), stop).ConfigureAwait(false))
             {
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
                 {
@@ -374,11 +386,19 @@ public sealed class AgentRunner
         var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
         client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
         var job = new SqlJobRunner(client, command.JobId, _sql, _log, _restoreFiles, _paths.BaseDirectory);
+        _sqlJobs[command.JobId] = job;
         _ = Task.Run(async () =>
         {
-            using (client)
+            try
             {
-                await job.RunAsync(stop).ConfigureAwait(false);
+                using (client)
+                {
+                    await job.RunAsync(stop).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                _sqlJobs.TryRemove(command.JobId, out _);
             }
 
             // A database left attached from a publish kept its disk in use; with it gone, the journal's cleanup can finish
@@ -528,6 +548,7 @@ public sealed class AgentRunner
             if (_restoreFiles is not null && _sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlReplaceFiles))
             {
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlReplaceFiles);
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlReplaceRecovery);
             }
 
             if (_sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlBackup))
