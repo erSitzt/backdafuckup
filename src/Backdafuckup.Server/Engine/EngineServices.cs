@@ -522,6 +522,7 @@ public static class EngineServiceCollectionExtensions
         services.AddHostedService<FileRestore.FileRestoreSweeper>();
         services.AddSingleton<Sql.SqlCatalog>();
         services.AddSingleton<Sql.SqlExportFiles>();
+        services.AddSingleton<Sql.SqlBackupDownloads>();
         services.AddHostedService<Sql.SqlExportSweeper>();
         services.AddSingleton<Sql.SqlCatalogBackfill>();
         services.AddHostedService(sp => sp.GetRequiredService<Sql.SqlCatalogBackfill>());

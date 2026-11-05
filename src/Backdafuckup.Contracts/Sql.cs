@@ -108,7 +108,9 @@ public sealed record SqlPublishRequestDto(
     string TargetInstance,
     Guid CredentialId,
     string DatabaseName,
-    int AutoUnpublishMinutes);
+    int AutoUnpublishMinutes,
+    Guid? SqlDatabaseId = null,
+    DateTimeOffset? PointInTimeUtc = null);
 
 /// <summary>
 /// Restore a database of a restore point as a new database: the agent in the target VM writes its files
@@ -251,7 +253,14 @@ public sealed record SqlCoverageSpanDto(DateTimeOffset FromUtc, DateTimeOffset T
 public sealed record SqlCoverageGapDto(DateTimeOffset FromUtc, DateTimeOffset ToUtc, string Reason);
 
 public sealed record SqlCatalogDatabaseDetailDto(
-    SqlCatalogDatabaseDto Database, IReadOnlyList<SqlCoverageSpanDto> Spans, IReadOnlyList<SqlCoverageGapDto> Gaps, IReadOnlyList<SqlBackupPointDto> Points);
+    SqlCatalogDatabaseDto Database, IReadOnlyList<SqlCoverageSpanDto> Spans, IReadOnlyList<SqlCoverageGapDto> Gaps, IReadOnlyList<SqlBackupPointDto> Points)
+{
+    /// <summary>The native full and system database backups the agent took, newest first: downloadable as .bak.</summary>
+    public IReadOnlyList<SqlBackupFileDto> Fulls { get; init; } = [];
+}
+
+/// <summary>A .bak in the repository: kind "NativeFull" or "SystemFull", when it finished, its file name and length.</summary>
+public sealed record SqlBackupFileDto(Guid Id, string Kind, DateTimeOffset FinishUtc, string FileName, long Bytes);
 
 /// <summary>The end of a backup within the restorable time (a natural point to restore to): kind "SnapshotFull", "NativeFull" or "Log".</summary>
 public sealed record SqlBackupPointDto(DateTimeOffset FinishUtc, string Kind, long Bytes);

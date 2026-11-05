@@ -22,6 +22,7 @@
   - Backup: VSS, or the T-SQL snapshot backup for SQL Server 2022+ as a full (default) or copy-only backup, with the `.bkm` and LSNs in the restore point
   - SQL browser with export of the files (ZIP) and as `.bak`, publish without copying (loopback iSCSI with a write overlay), restore as a new database (same or another VM or instance), overwrite of the original with rollback
   - Recovery from agent crashes, VM reboots and server restarts
+  - Log backups and point-in-time restore (spec `2026-11-05-1932-sql-log-backup-pitr`, moved up from phase 2 on 2026-11-05): log backups every 5/15/30/60 minutes or longer, run by the server through the agent and stored in the repository; native fulls (SQL Server before 2022, VSS mode, or on schedule) and daily system database fulls; a log-chain watch (other tools' backups, SIMPLE switches, forks, RPO) with a full at once on a break; one session per job and day; a SQL Server page per database with a timeline and a slider to the second; restore as a new database, overwrite with a last log backup, and publish at a point in time; `.bak` download of the fulls
 - **File-level restore:** restore single files and folders from guest disks without restoring the whole VM. It moved here from phase 2 as a knock-out criterion (2026-11-02).
   - Browser download, back into the VM (Windows through the guest agent, Linux over SSH/SFTP with sudo), or to an SMB share.
   - File systems: NTFS, ext2/3/4, XFS, LVM (linear).
@@ -30,10 +31,7 @@
 
 - **Tape out:** move or copy backups to tape on an HPE MSL tape library
 - **Offsite / immutable copy:** backup copies to a secondary site, S3 or immutable storage
-- **SQL transaction log backup & point-in-time recovery:** SQL Server log backups and point-in-time restore, run directly from the backup app
-  - Log backups every 15/30/60 minutes per job by the agent, uploaded to the repository, with a log-chain watch (foreign log backups, recovery model changes, RPO)
-  - Restore to a second: the full snapshot backup (`.bkm`, `RESTORE … WITH METADATA_ONLY, NORECOVERY`) plus the log backups up to `STOPAT`; as a publish without copying, as a new database, or overwriting the original with an optional tail-log backup. The path is checked in container tests (2026-11-05)
-  - Own spec; first SQL Server 2022+, later a streaming full as the base for older versions
+- **SQL Server, follow-ups:** differential backups; automatic restore tests (restore to a point in time into a test instance and `DBCC CHECKDB` on a schedule); mail/webhook alerts for chain breaks and RPO; availability groups and failover cluster instances; streaming fulls without staging space in the VM (VDI); resumable uploads; repository pack files for the many small log backup objects
 - **Publish for file-level restore:** mount a restore point's volumes into a VM over the same loopback iSCSI as the SQL publish
 - **VMware vSphere support:** back up and restore vSphere VMs using only public vSphere APIs, with no VDDK and no Broadcom partner program
   - Snapshots and CBT through the vim25 Web Services API

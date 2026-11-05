@@ -30,7 +30,14 @@ else
                 break;
 
             case 1:
-                <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="Pool" Variant="Variant.Outlined" Class="mb-3">
+                @if (_pools.Count == 0)
+                {
+                    <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">
+                        No virtualization pool yet. Add one under <MudLink Href="/infrastructure/pools">Virtualization Pools</MudLink>; its VMs are listed here then.
+                    </MudAlert>
+                }
+                <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="Pool" Variant="Variant.Outlined" Class="mb-3"
+                           ToStringFunc="@(id => _pools.FirstOrDefault(p => p.Id == id)?.DisplayName ?? string.Empty)">
                     @foreach (var pool in _pools)
                     {
                         <MudSelectItem T="Guid" Value="pool.Id">@pool.DisplayName</MudSelectItem>

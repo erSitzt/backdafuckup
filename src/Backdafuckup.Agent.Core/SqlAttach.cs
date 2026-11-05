@@ -133,7 +133,7 @@ public static class SqlAttach
                 if (reader.Read())
                 {
                     log($"database {SqlPublishDatabase.Quote(database)}: owner {(reader.IsDBNull(0) ? "unknown" : reader.GetString(0))}, " +
-                        $"TRUSTWORTHY {(reader.GetBoolean(1) ? "on" : "off (SQL Server turns it off when attaching)")}, " +
+                        $"TRUSTWORTHY {(reader.GetBoolean(1) ? "on" : "off (SQL Server turns it off when it attaches or restores a database)")}, " +
                         $"Service Broker {(reader.GetBoolean(2) ? "on" : "off")}, recovery model {(reader.IsDBNull(3) ? "unknown" : reader.GetString(3))}, " +
                         $"compatibility level {(reader.IsDBNull(4) ? "unknown" : Convert.ToInt32(reader.GetValue(4), CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture))}.");
                 }

@@ -36,7 +36,7 @@ public sealed class SqlAttachTests(SqlServerFixture sql) : IClassFixture<SqlServ
         Assert.True(attached);
         Assert.Equal(files, granted);
         Assert.Contains("attached database [att]]restored] to instance MSSQLSERVER (ONLINE), as sa.", log);
-        Assert.Contains(log, l => l.Contains("owner sa, TRUSTWORTHY off (SQL Server turns it off when attaching)", StringComparison.Ordinal));
+        Assert.Contains(log, l => l.Contains("owner sa, TRUSTWORTHY off (SQL Server turns it off when it attaches or restores a database)", StringComparison.Ordinal));
         Assert.Contains(log, l => l.StartsWith("users in [att]]restored] without a login on instance MSSQLSERVER: shop_app (sql user).", StringComparison.Ordinal));
         Assert.Equal(42, await ScalarAsync("SELECT id FROM [att]]restored].dbo.t"));
 

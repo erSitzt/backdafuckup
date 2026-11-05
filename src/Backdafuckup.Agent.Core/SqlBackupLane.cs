@@ -233,6 +233,65 @@ public sealed class SqlBackupLane
         }
     }
 
+    /// <summary>
+    /// The last log backup of <paramref name="database"/> before an overwrite: taken now on <paramref name="connection"/>
+    /// and left in the queue, which the next SQL Server backup run sends. Nothing if the database has no log chain.
+    /// </summary>
+    public string QueueLogBackup(DbConnection connection, string instance, string database, string? folder, Guid? jobId, Guid? sessionId)
+    {
+        string? version;
+        int edition;
+        string? defaultBackupPath;
+        using (var command = Command(connection, InstanceQuery))
+        using (var reader = command.ExecuteReader())
+        {
+            reader.Read();
+            version = reader.IsDBNull(0) ? null : reader.GetString(0);
+            edition = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture);
+            defaultBackupPath = reader.IsDBNull(2) ? null : reader.GetString(2);
+        }
+
+        var discovered = Discover(connection, instance).FirstOrDefault(d => string.Equals(d.Name, database, StringComparison.OrdinalIgnoreCase));
+        if (discovered is null || !discovered.HasLogChain || string.Equals(discovered.RecoveryModel, "SIMPLE", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"{SqlPublishDatabase.Quote(database)} has no log chain (SIMPLE recovery or no full backup yet): no last log backup.";
+        }
+
+        var info = _sql.Instances().FirstOrDefault(i => string.Equals(i.Name, instance, StringComparison.OrdinalIgnoreCase));
+        var baseFolder = folder ?? info?.BackupFolder ?? defaultBackupPath
+            ?? throw new InvalidOperationException($"{instance} has no backup folder for the last log backup.");
+        var staging = Combine(baseFolder, NamePrefix);
+        _files.CreateDirectory(staging);
+        var entry = new SqlBackupQueueEntry
+        {
+            Instance = instance,
+            ProductVersion = version,
+            Database = discovered.Name,
+            Kind = SqlBackupActions.Log,
+            Path = Combine(staging, FileName(discovered.Name, SqlBackupActions.Log, _utcNow())),
+            StartedUtc = _utcNow(),
+            BackupJobId = jobId,
+            SessionId = sessionId,
+        };
+        _queue.Add(entry);
+        try
+        {
+            BackUp(connection, entry, new SqlJobRequest { BackupJobId = jobId, SessionId = sessionId }, edition != 4, new SqlBackupDatabaseOutcome());
+            entry.BackupSet = ReadBackupSet(connection, entry.Path) ?? throw new InvalidOperationException($"msdb does not list the backup {entry.Path}.");
+            (entry.Sha256, entry.Length) = Hash(entry.Path);
+            _queue.Update(entry);
+        }
+        catch (Exception)
+        {
+            TryDelete(entry.Path);
+            _queue.Remove(new[] { entry.Id });
+            throw;
+        }
+
+        return $"took the last log backup of {SqlPublishDatabase.Quote(discovered.Name)} ({Path.GetFileName(entry.Path)}, {entry.Length:N0} bytes, LSN {entry.BackupSet.FirstLsn}–{entry.BackupSet.LastLsn}); " +
+            "it waits in the VM and is sent with the next SQL Server backup run.";
+    }
+
     /// <summary>What to do with a database in this job.</summary>
     private static SqlBackupDatabaseOutcome Plan(SqlJobRequest request, DiscoveredDatabase database)
     {

@@ -295,7 +295,7 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 case "SELECT state_desc, user_access_desc FROM sys.databases WHERE name = @name":
                 {
                     var table = Table(("state", typeof(string)), ("access", typeof(string)));
-                    table.Rows.Add(Offline.Contains(Name()) ? "OFFLINE" : "ONLINE", "MULTI_USER");
+                    table.Rows.Add(Offline.Contains(Name()) ? "OFFLINE" : "ONLINE", SingleUser.Contains(Name()) ? "SINGLE_USER" : "MULTI_USER");
                     return (null, table);
                 }
 
@@ -339,6 +339,21 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                 }
 
                 _databases[name] = (_nextId++, files);
+                return (null, null);
+            }
+
+            if (UserAccessStatement().Match(text) is { Success: true } access)
+            {
+                var name = access.Groups["name"].Value.Replace("]]", "]", StringComparison.Ordinal);
+                if (access.Groups["access"].Value == "SINGLE_USER")
+                {
+                    SingleUser.Add(name);
+                }
+                else
+                {
+                    SingleUser.Remove(name);
+                }
+
                 return (null, null);
             }
 
@@ -677,6 +692,12 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
 
     [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET OFFLINE WITH ROLLBACK IMMEDIATE$")]
     private static partial Regex OfflineStatement();
+
+    [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET (?<access>SINGLE_USER(?= WITH ROLLBACK IMMEDIATE)|MULTI_USER)( WITH ROLLBACK IMMEDIATE)?$")]
+    private static partial Regex UserAccessStatement();
+
+    /// <summary>Databases in single-user mode (an overwrite's last log backup).</summary>
+    public HashSet<string> SingleUser { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     [GeneratedRegex(@"^ALTER DATABASE \[(?<name>(?:[^\]]|\]\])+)\] SET ONLINE$")]
     private static partial Regex OnlineStatement();

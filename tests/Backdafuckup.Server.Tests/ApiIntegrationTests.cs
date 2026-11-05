@@ -1300,6 +1300,33 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Assert.StartsWith("TAPE LOG shop 41000000012300001-", applied[1].File, StringComparison.Ordinal);
             Assert.Empty(Directory.GetDirectories(Path.Combine(backupFolder, "backdafuckup")));
 
+            // Overwrite the original at the end of the first log backup: restored beside it under a staging name, detached,
+            // then its last log backup in single-user mode (queued in the VM), offline, swapped, online, multi-user again.
+            sql.Sysadmin = true;
+            var (overwrite, overwriteLog) = await RestoreAsync(Request("shop", at) with { Overwrite = true });
+            Assert.True(overwrite.Session.State == "Succeeded", overwrite.Session.Summary + "\n" + overwriteLog);
+            Assert.Equal(["snapshot", $"log STOPAT {at.UtcDateTime:yyyy-MM-ddTHH:mm:ss.fff}"], sql.Restores.Where(r => r.Database == "shop_bdfu_pit").Select(r => r.Kind));
+            var singleUser = sql.Statements.IndexOf("ALTER DATABASE [shop] SET SINGLE_USER WITH ROLLBACK IMMEDIATE");
+            Assert.True(singleUser >= 0 && singleUser < sql.Statements.IndexOf("ALTER DATABASE [shop] SET OFFLINE WITH ROLLBACK IMMEDIATE"), "single-user before offline");
+            Assert.Empty(sql.SingleUser);
+            Assert.Equal(("shop", "L"), (sql.LaneBackups[^1].Database, sql.LaneBackups[^1].Type));
+            Assert.Contains("took the last log backup of [shop]", overwriteLog, StringComparison.Ordinal);
+            Assert.Contains("set [shop] to MULTI_USER again", overwriteLog, StringComparison.Ordinal);
+            Assert.Equal([@"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf"], sql.DatabaseFiles("shop"));
+
+            // The next run sends the queued last log backup with its own.
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                await db.SqlBackupSchedules.ExecuteUpdateAsync(x => x.SetProperty(y => y.NextLogUtc, DateTimeOffset.UtcNow.AddSeconds(-1)), Ct);
+            }
+
+            await service.TickAsync(Ct);
+            await service.WaitIdleAsync();
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                Assert.Equal(4, await db.SqlBackupSets.CountAsync(x => x.SqlDatabaseId == shopId && x.Kind == Backdafuckup.Server.Data.SqlBackupSetKind.Log, Ct));
+            }
+
             // A catalog rebuilt from the repository (disaster recovery of the server) keeps the chain: the restore
             // point's snapshot full and the SQL backups' log backups come back with the import.
             Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/jobs/{point.JobId}", Ct)).StatusCode);
@@ -1315,7 +1342,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             {
                 var kinds = await db.SqlBackupSets.Join(db.SqlDatabases.Where(d => d.Name == "shop"), s => s.SqlDatabaseId, d => d.Id, (s, _) => s.Kind).ToListAsync(Ct);
                 Assert.Equal(
-                    [Backdafuckup.Server.Data.SqlBackupSetKind.SnapshotFull, Backdafuckup.Server.Data.SqlBackupSetKind.Log, Backdafuckup.Server.Data.SqlBackupSetKind.Log],
+                    [Backdafuckup.Server.Data.SqlBackupSetKind.SnapshotFull, .. Enumerable.Repeat(Backdafuckup.Server.Data.SqlBackupSetKind.Log, 4)],
                     kinds.Order());
             }
         }
@@ -1392,6 +1419,224 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_sql_database_is_published_at_a_point_in_time_with_its_log_backups_applied_in_the_overlay()
+    {
+        var lab = await SqlLogChainAsync("sql09", publish: true);
+        var (client, point, sql, logs) = (lab.Client, lab.Point, lab.Sql, lab.Logs);
+        try
+        {
+            var at = logs[0].FinishUtc;
+
+            // Published at the end of the first log backup: the restore point's volumes mounted, the .bkm restored onto
+            // the mounted files (no attach), the first log with STOPAT; the backup's own files are not copied.
+            var request = new SqlPublishRequestDto(Guid.Empty, "SQLEXPRESS", "shop", point.VmNativeId, "SQLEXPRESS", lab.Login.Id, "shop_published", 60, lab.ShopId, at);
+            var published = (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/publishes", request, Ct))).SessionId;
+            var log = await WaitForLogAsync(client, published, "Published: ");
+            var folder = log[(log.IndexOf("files under ", StringComparison.Ordinal) + 12)..].Split(')')[0];
+            Assert.Equal(
+                ["snapshot", $"log STOPAT {at.UtcDateTime:yyyy-MM-ddTHH:mm:ss.fff}"],
+                sql.Restores.Where(r => r.Database == "shop_published").Select(r => r.Kind));
+            Assert.Equal([Path.Combine(folder, "D", "SQL", "shop.mdf"), Path.Combine(folder, "L", "Log", "shop_log.ldf")], sql.DatabaseFiles("shop_published"));
+            Assert.DoesNotContain(sql.Statements, s => s.StartsWith("CREATE DATABASE", StringComparison.Ordinal));
+            Assert.Contains("1 log backup(s) up to ", log, StringComparison.Ordinal);
+            Assert.False(File.Exists(lab.Fs.Local(@"D:\SQL\shop_published.mdf")));
+            Assert.Empty(Directory.GetDirectories(Path.Combine(lab.BackupFolder, "backdafuckup")));
+
+            // Unpublish: offline and drop, the volumes go; nothing is left.
+            Assert.Equal(HttpStatusCode.NoContent, (await client.PostAsync($"/api/sessions/{published}/stop", null, Ct)).StatusCode);
+            var unpublished = await WaitForSessionAsync(client, published);
+            Assert.True(unpublished.Session.State == "Succeeded", unpublished.Session.Summary);
+            Assert.Empty(sql.DatabaseFiles("shop_published"));
+            Assert.Empty(new PublishJournal(lab.Guest()!.WorkFolder).Read());
+
+            // Before the snapshot: refused at once.
+            var early = await client.PostAsJsonAsync("/api/sql/publishes", request with { PointInTimeUtc = point.CreatedUtc.AddDays(-1) }, Ct);
+            Assert.Equal(HttpStatusCode.BadRequest, early.StatusCode);
+        }
+        finally
+        {
+            await lab.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Sql_backups_older_than_the_oldest_restore_point_are_removed_unless_in_use_and_an_offline_agent_is_a_warning()
+    {
+        var lab = await SqlLogChainAsync("sql10", publish: false);
+        var service = _factory!.Services.GetRequiredService<SqlBackupService>();
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>();
+        var options = _factory.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentOptions>>().Value;
+        var window = options.OnlineWindow;
+        try
+        {
+            var repository = await _factory.Services.GetRequiredService<Backdafuckup.Server.Engine.RepositoryManager>().GetAsync(lab.Point.RepositoryId, Ct);
+            async Task<List<Guid>> StoredAsync()
+            {
+                var ids = new List<Guid>();
+                await foreach (var backup in repository.ListSqlBackupsAsync(Ct))
+                {
+                    ids.Add(backup.SqlBackupId);
+                }
+
+                return ids;
+            }
+
+            async Task<List<Backdafuckup.Server.Data.SqlBackupEntity>> BackupsAsync()
+            {
+                await using var db = await dbFactory.CreateDbContextAsync(Ct);
+                return await db.SqlBackups.AsNoTracking().OrderBy(b => b.CreatedUtc).ToListAsync(Ct);
+            }
+
+            async Task AgeAsync(Guid id)
+            {
+                await using var db = await dbFactory.CreateDbContextAsync(Ct);
+                await db.SqlBackups.Where(b => b.Id == id).ExecuteUpdateAsync(x => x.SetProperty(b => b.CreatedUtc, lab.Point.CreatedUtc.AddHours(-1)), Ct);
+            }
+
+            // Both log backups are newer than the restore point: kept.
+            var backups = await BackupsAsync();
+            Assert.Equal(2, backups.Count);
+            Assert.Equal(0, await service.ApplyRetentionAsync(lab.Point.JobId!.Value, lab.Point.VmNativeId, Ct));
+
+            // One older than the oldest restore point: removed with its backup sets, from the catalog and the repository.
+            await AgeAsync(backups[0].Id);
+            Assert.Equal(1, await service.ApplyRetentionAsync(lab.Point.JobId!.Value, lab.Point.VmNativeId, Ct));
+            Assert.Equal([backups[1].Id], (await BackupsAsync()).Select(b => b.Id));
+            Assert.Equal([backups[1].Id], await StoredAsync());
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                Assert.Equal(1, await db.SqlBackupSets.CountAsync(x => x.Kind == Backdafuckup.Server.Data.SqlBackupSetKind.Log, Ct));
+            }
+
+            // In use by a restore: kept for now, removed once it is released.
+            await AgeAsync(backups[1].Id);
+            using (repository.PinSqlBackup(backups[1].Id))
+            {
+                Assert.Equal(0, await service.ApplyRetentionAsync(lab.Point.JobId!.Value, lab.Point.VmNativeId, Ct));
+                Assert.Equal(Backdafuckup.Server.Data.SqlBackupState.Available, Assert.Single(await BackupsAsync()).State);
+            }
+
+            Assert.Equal(1, await service.ApplyRetentionAsync(lab.Point.JobId!.Value, lab.Point.VmNativeId, Ct));
+            Assert.Empty(await BackupsAsync());
+            Assert.Empty(await StoredAsync());
+
+            // The agent goes offline: the next run is a warning naming the host, nothing fails.
+            await lab.DisposeAsync();
+            options.OnlineWindow = TimeSpan.Zero;
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                await db.SqlBackupSchedules.ExecuteUpdateAsync(x => x.SetProperty(y => y.NextLogUtc, DateTimeOffset.UtcNow.AddSeconds(-1)), Ct);
+            }
+
+            await service.TickAsync(Ct);
+            await service.WaitIdleAsync();
+            var day = Assert.Single((await lab.Client.GetFromJsonAsync<List<SessionSummaryDto>>("/api/sessions?kind=SqlBackup", Ct))!, x => x.Kind == "SqlBackup");
+            var detail = await WaitForSessionAsync(lab.Client, day.Id);
+            Assert.Equal("Warning", detail.Session.State);
+            var log = string.Join("\n", (await lab.Client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{day.Id}/log", Ct))!.Select(l => l.Message));
+            Assert.Contains("is offline (last contact ", log, StringComparison.Ordinal);
+            Assert.Contains("The log chain stays intact", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            options.OnlineWindow = window;
+            await lab.DisposeAsync();
+        }
+    }
+
+    /// <summary>A VM backed up with the SQL Server snapshot, its agent running, and two log backups of [shop] on top.</summary>
+    private sealed class SqlLogChainLab(Func<Task> stop) : IAsyncDisposable
+    {
+        private bool _stopped;
+
+        public required HttpClient Client { get; init; }
+        public required RestorePointDto Point { get; init; }
+        public required ScriptedSqlEnvironment Sql { get; init; }
+        public required SandboxRestoreFileSystem Fs { get; init; }
+        public required string BackupFolder { get; init; }
+        public required SqlCredentialDto Login { get; init; }
+        public required Guid ShopId { get; init; }
+        public required List<Backdafuckup.Server.Data.SqlBackupSetEntity> Logs { get; init; }
+        public required Func<IscsiGuestHost?> Guest { get; init; }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (!_stopped)
+            {
+                _stopped = true;
+                await stop();
+            }
+        }
+    }
+
+    private async Task<SqlLogChainLab> SqlLogChainAsync(string vmName, bool publish)
+    {
+        var client = await SignedInClientAsync();
+        var mdf = WindowsTestDisk.SqlFile(1, 1 << 20, 0x11);
+        var ldf = WindowsTestDisk.SqlFile(2, 512 << 10, 0x22);
+        var image = WindowsTestDisk.Create(
+            [
+                new WindowsTestDisk.Volume('C', 8, new Dictionary<string, byte[]>()),
+                new WindowsTestDisk.Volume('D', 8, new Dictionary<string, byte[]> { ["SQL/shop.mdf"] = mdf }),
+                new WindowsTestDisk.Volume('L', 8, new Dictionary<string, byte[]> { ["Log/shop_log.ldf"] = ldf }),
+            ],
+            software: root =>
+            {
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\Instance Names\SQL").SetValue("SQLEXPRESS", "MSSQL16.SQLEXPRESS");
+                root.CreateSubKey(@"Microsoft\Microsoft SQL Server\MSSQL16.SQLEXPRESS\Setup").SetValue("Version", "16.0.1000.6");
+            });
+        var fs = new SandboxRestoreFileSystem(Path.Combine(_root, vmName + "-guest"));
+        var backupFolder = Path.Combine(_root, vmName + "-backup");
+        Directory.CreateDirectory(backupFolder);
+        IscsiGuestHost? guest = null;
+        var sql = new ScriptedSqlEnvironment(path => guest is not null ? guest.ReadFile(path) : File.ReadAllBytes(fs.Local(path))) { BackupFolder = backupFolder };
+        sql.AddDatabase("shop", @"D:\SQL\shop.mdf", @"L:\Log\shop_log.ldf");
+        static GuestSqlFile F(string path, string spec) => new() { Path = path, Spec = spec };
+        var login = await Read<SqlCredentialDto>(client.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_backup", "Backup-1", null), Ct));
+        var none = new ScheduleDto("None", "20:00", [], "UTC");
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? started = null;
+        var point = await BackUpImageAsync(
+            client,
+            vmName,
+            image,
+            async vm => started = await StartAgentAsync(
+                vm, fs, sql, publish ? directory => guest = new IscsiGuestHost(Path.Combine(directory, "publish")) : null,
+                [new GuestSqlDatabase { Instance = "SQLEXPRESS", Database = "shop", DataFiles = [F(@"D:\SQL\", "shop.mdf")], LogFiles = [F(@"L:\Log\", "shop_log.ldf")], InBackup = true }]),
+            job => job with
+            {
+                GuestProcessingMode = GuestProcessingModes.SqlSnapshot,
+                SqlCredentialId = login.Id,
+                SqlBackup = new SqlBackupSettingsDto(Enabled: true, LogIntervalMinutes: 15, FullSchedule: none, SystemSchedule: none),
+            });
+        var (_, stop, running) = started ?? throw new InvalidOperationException("The agent did not start.");
+        var service = _factory!.Services.GetRequiredService<SqlBackupService>();
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>();
+        for (var run = 0; run < 2; run++)
+        {
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                await db.SqlBackupSchedules.ExecuteUpdateAsync(s => s.SetProperty(x => x.NextLogUtc, DateTimeOffset.UtcNow.AddSeconds(-1)), Ct);
+            }
+
+            await service.TickAsync(Ct);
+            await service.WaitIdleAsync();
+        }
+
+        await using var context = await dbFactory.CreateDbContextAsync(Ct);
+        var shopId = (await context.SqlDatabases.SingleAsync(d => d.Name == "shop", Ct)).Id;
+        var logs = await context.SqlBackupSets.Where(s => s.SqlDatabaseId == shopId && s.Kind == Backdafuckup.Server.Data.SqlBackupSetKind.Log).OrderBy(s => s.FinishUtc).ToListAsync(Ct);
+        Assert.Equal(2, logs.Count);
+        return new SqlLogChainLab(async () =>
+        {
+            await stop.CancelAsync();
+            await running;
+        })
+        {
+            Client = client, Point = point, Sql = sql, Fs = fs, BackupFolder = backupFolder, Login = login, ShopId = shopId, Logs = logs, Guest = () => guest,
+        };
+    }
+
+    [Fact]
     public async Task Without_the_sql_server_snapshot_a_native_full_is_the_base_and_the_restore_downloads_it_with_the_logs()
     {
         var client = await SignedInClientAsync();
@@ -1450,6 +1695,23 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Assert.Contains("downloading the full backup shop_", log, StringComparison.Ordinal);
             Assert.Contains("the full backup of", detail.Session.Summary, StringComparison.Ordinal);
             Assert.Empty(Directory.GetDirectories(Path.Combine(backupFolder, "backdafuckup")));
+
+            // The native full is offered as .bak: a one-time link, the file straight from the repository.
+            var page = (await client.GetFromJsonAsync<SqlCatalogDatabaseDetailDto>($"/api/sql/databases/{shopId}", Ct))!;
+            var bak = Assert.Single(page.Fulls);
+            Assert.Equal("NativeFull", bak.Kind);
+            var ticket = await Read<FileDownloadTicketDto>(client.PostAsJsonAsync($"/api/sql/backup-sets/{bak.Id}/link", new { }, Ct));
+            using (var download = await client.GetAsync("/" + ticket.Url, Ct))
+            {
+                Assert.Equal(HttpStatusCode.OK, download.StatusCode);
+                Assert.Equal(bak.FileName, download.Content.Headers.ContentDisposition?.FileNameStar);
+                var content = await download.Content.ReadAsByteArrayAsync(Ct);
+                Assert.Equal(bak.Bytes, content.Length);
+                Assert.StartsWith("TAPE FULL shop", System.Text.Encoding.UTF8.GetString(content), StringComparison.Ordinal);
+            }
+
+            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/" + ticket.Url, Ct)).StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync($"/api/sql/backup-sets/{Guid.NewGuid()}/link", new { }, Ct)).StatusCode);
         }
         finally
         {
@@ -1838,7 +2100,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         Assert.Equal(targets.Select(t => $@"{t} NT SERVICE\MSSQL$SQLEXPRESS"), fs.Grants);
         Assert.Contains(@"Restored SQLEXPRESS\shop from the restore point of ", restored.Session.Summary, StringComparison.Ordinal);
         Assert.Contains(@"as [shop_restored] on SQL01", restored.Session.Summary, StringComparison.Ordinal);
-        Assert.Contains("TRUSTWORTHY off (SQL Server turns it off when attaching)", log, StringComparison.Ordinal);
+        Assert.Contains("TRUSTWORTHY off (SQL Server turns it off when it attaches or restores a database)", log, StringComparison.Ordinal);
         Assert.Contains("without a login on instance SQLEXPRESS: shop_app (sql user)", log, StringComparison.Ordinal);
         Assert.Contains(@"D:\SQL\shop.mdf → D:\SQL\shop_restored.mdf", log, StringComparison.Ordinal);
 

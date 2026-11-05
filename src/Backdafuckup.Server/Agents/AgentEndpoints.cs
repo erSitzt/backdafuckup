@@ -532,6 +532,29 @@ public static class AgentEndpoints
             return Results.Json(publish.Info, AgentJson.Options);
         });
 
+        // A publish at a point in time downloads the log backups it applies (from the repository, checked like a restore job's).
+        agent.MapGet("/publishes/{id:guid}/files/{fileId}", async (Guid id, string fileId, AgentService agents, Publishing.DiskPublishes publishes, HttpContext http, CancellationToken ct) =>
+        {
+            var (error, publish) = await FindAsync(id, agents, publishes, http, ct);
+            if (publish is null)
+            {
+                return error!;
+            }
+
+            if (publish.Files is not { } files || !files.TryGetValue(fileId, out var file))
+            {
+                return Results.Problem("The publish has no such file.", statusCode: StatusCodes.Status404NotFound);
+            }
+
+            publish.LastHeartbeat = publishes.Time.GetUtcNow();
+            await using var reader = await file.Repository.OpenSqlBackupAsync(file.SqlBackupId, ct);
+            await using var stream = await reader.OpenFileAsync(file.Key, ct);
+            http.Response.ContentType = "application/octet-stream";
+            http.Response.ContentLength = file.Length;
+            await stream.CopyToAsync(http.Response.Body, 1 << 20, ct);
+            return Results.Empty;
+        });
+
         agent.MapGet("/publishes/{id:guid}/disks/{disk:int}/blocks/{block:long}", async (Guid id, int disk, long block, AgentService agents, Publishing.DiskPublishes publishes, HttpContext http, CancellationToken ct) =>
         {
             var (error, publish) = await FindAsync(id, agents, publishes, http, ct);

@@ -44,6 +44,17 @@ public sealed class SqlPublishSessionRunner(
     {
         var request = JsonSerializer.Deserialize<SqlPublishRequestDto>(session.Parameters ?? "null")
             ?? throw new InvalidOperationException("The publish session has no parameters.");
+        SqlRestoreSessionRunner.ChainChoice? chain = null;
+        if (request.SqlDatabaseId is { } databaseId)
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            chain = await SqlRestoreSessionRunner.ChooseChainAsync(db, databaseId, request.PointInTimeUtc, cancellationToken).ConfigureAwait(false);
+            request = request with
+            {
+                RestorePointId = chain.Base.RestorePointId ?? throw new InvalidOperationException("The base of this point in time is a full backup, not a restore point: restore it as a new database instead."),
+            };
+        }
+
         RestorePointEntity point;
         await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -58,10 +69,35 @@ public sealed class SqlPublishSessionRunner(
         var target = $"instance {request.TargetInstance}";
         try
         {
-            await using var setup = await SetUpAsync(request, point, "publish", [AgentProtocol.CapabilitySqlPublish], cancellationToken).ConfigureAwait(false);
+            await using var setup = await SetUpAsync(
+                request, point, "publish", chain is null ? [AgentProtocol.CapabilitySqlPublish] : [AgentProtocol.CapabilitySqlPublish, AgentProtocol.CapabilitySqlRestoreChain], cancellationToken)
+                .ConfigureAwait(false);
             var (planned, agent, host, account) = (setup.Planned, setup.Agent, setup.Host, setup.Account);
             target = $"{host}, instance {request.TargetInstance}";
             planned.Info.Sql = new PublishSqlDatabase { Instance = request.TargetInstance, Account = account, Database = request.DatabaseName, Files = planned.Files };
+            using var chainPins = new PinSet();
+            Dictionary<string, SqlJobFile>? chainFiles = null;
+            if (chain is not null)
+            {
+                var snapshot = await StoredSqlSnapshot.ReadAsync(setup.Reader, cancellationToken).ConfigureAwait(false);
+                var metadata = snapshot?.Instances.FirstOrDefault(i => string.Equals(i.Name, request.Instance, StringComparison.OrdinalIgnoreCase))?.Metadata
+                    ?? throw new InvalidOperationException($"The restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} has no SQL Server snapshot metadata (.bkm) of {request.Instance}.");
+                chainFiles = [];
+                var logs = new List<SqlChainFile>();
+                foreach (var set in chain.Logs)
+                {
+                    var repository = await repositories.GetAsync(set.RepositoryId, cancellationToken).ConfigureAwait(false);
+                    chainPins.Add(repository.PinSqlBackup(set.SqlBackupId!.Value));
+                    var id = set.Id.ToString("N");
+                    chainFiles[id] = new SqlJobFile(repository, set.SqlBackupId.Value, set.FileKey!, set.FileName ?? id, set.Size);
+                    logs.Add(new SqlChainFile { FileId = id, FileName = set.FileName ?? id + ".trn", Length = set.Size, Sha256 = set.Sha256 ?? string.Empty });
+                }
+
+                planned.Info.Sql.Chain = new SqlChainRestoreRequest { Metadata = metadata, Position = chain.Base.Position, Logs = logs, StopAt = chain.Plan.StopAtLocal };
+                log.Info($"Publishing at {chain.Origin}: the SQL Server snapshot of the restore point, then {logs.Count} log backup(s) " +
+                    (chain.Plan.StopAtLocal is { } stopAt ? $"up to {stopAt} (SQL Server's local time)." : "to the end of the last one.") +
+                    " The log backups are applied in the overlay; the backup is unchanged.");
+            }
             planned.Info.MaxOverlayBytes = options.Value.MaxOverlayBytes;
             log.Info(
                 $"Publishing SQL Server database {source} ({planned.Database.Files.Count} file(s), {VmBackupTask.Format(planned.Database.TotalBytes)}, {planned.Database.Consistency}) " +
@@ -77,7 +113,7 @@ public sealed class SqlPublishSessionRunner(
             DiskPublish publish;
             try
             {
-                publish = await publishes.PublishAsync(agent.Id, planned.Info, planned.Disks, line => log.Info(line), options.Value.PublishTimeout, cancellationToken).ConfigureAwait(false);
+                publish = await publishes.PublishAsync(agent.Id, planned.Info, planned.Disks, line => log.Info(line), options.Value.PublishTimeout, cancellationToken, chainFiles).ConfigureAwait(false);
             }
             catch (PublishFailedException ex)
             {
@@ -558,9 +594,26 @@ public sealed class SqlPublishSessionRunner(
                 Volume = name,
                 Path = string.Join('\\', GuestPath.Parse(file.GuestPath!).Components),
                 Kind = file.Kind == "log" ? "log" : "data",
+                OriginalPath = file.Path,
             });
         }
 
         return new Plan(database, info, disks, files);
+    }
+
+    /// <summary>Pins released together (the SQL backups a publish at a point in time downloads).</summary>
+    private sealed class PinSet : IDisposable
+    {
+        private readonly List<IDisposable> _pins = [];
+
+        public void Add(IDisposable pin) => _pins.Add(pin);
+
+        public void Dispose()
+        {
+            foreach (var pin in _pins)
+            {
+                pin.Dispose();
+            }
+        }
     }
 }

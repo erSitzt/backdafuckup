@@ -776,7 +776,27 @@ public sealed class PublishRunner
                 var mountFolders = info.Volumes.Select((v, i) => (v.Name, Folder: mounts[i])).ToDictionary(m => m.Name, m => m.Folder, StringComparer.OrdinalIgnoreCase);
                 try
                 {
-                    await WithHeartbeatAsync(() => SqlPublishDatabase.Attach(_sql!, _host, database, mountFolders, Write, () => _status.Database = database.Database), disks).ConfigureAwait(false);
+                    if (database.Chain is { } chain)
+                    {
+                        // At a point in time: the snapshot's .bkm onto the mounted files, then the log backups (writes go to the overlay).
+                        chain.Moves = database.Files.Select(f => new SqlChainMove
+                        {
+                            OriginalPath = f.OriginalPath ?? throw new InvalidOperationException($"The publish names no original path for {f.Path}."),
+                            TargetPath = SqlPublishDatabase.FilePath(mountFolders.TryGetValue(f.Volume, out var mounted) ? mounted
+                                : throw new InvalidOperationException($"Volume {f.Volume} of file {f.Path} is not part of the publish."), f.Path),
+                        }).ToList();
+                        var restorer = new SqlChainRestorer(
+                            _sql!, new SqlBackupFiles(),
+                            (file, path, token) => SqlJobRunner.DownloadAsync(_http, Base + "/files/" + Uri.EscapeDataString(file.FileId), file, path, token),
+                            (path, accounts) => _host.GrantAccess(path, accounts, Write), Write);
+                        var request = new SqlJobRequest { Kind = SqlJobKinds.RestoreChain, Instance = database.Instance, Account = database.Account, Database = database.Database, Chain = chain };
+                        await WithHeartbeatAsync(() => restorer.RestoreAsync(request, _id, CancellationToken.None).GetAwaiter().GetResult(), disks).ConfigureAwait(false);
+                        _status.Database = database.Database;
+                    }
+                    else
+                    {
+                        await WithHeartbeatAsync(() => SqlPublishDatabase.Attach(_sql!, _host, database, mountFolders, Write, () => _status.Database = database.Database), disks).ConfigureAwait(false);
+                    }
                 }
                 catch when (_status.Database is null)
                 {

@@ -58,6 +58,13 @@ public static class SqlEndpoints
         app.MapGet("/api/sql/databases/{id:guid}/plan", PlanAsync);
         app.MapPost("/api/sql/exports", StartExportAsync);
 
+        // The .bak of a native full or system database backup: a one-time link, then the file from the repository.
+        app.MapPost("/api/sql/backup-sets/{id:guid}/link", async (Guid id, AppDbContext db, SqlBackupDownloads downloads, HttpContext http, CancellationToken ct) =>
+            await DownloadableSets(db).FirstOrDefaultAsync(s => s.Id == id, ct) is { } set
+                ? Results.Ok(new FileDownloadTicketDto(downloads.Issue(id, http.User.Identity?.Name ?? string.Empty), set.FileName ?? "backup.bak", (int)SqlBackupDownloads.LinkLifetime.TotalSeconds))
+                : Results.Problem("This backup is not in the repository any more (removed by retention) or is not a full backup of the agent.", statusCode: StatusCodes.Status404NotFound));
+        app.MapGet("/api/sql/backup-sets/downloads/{token}", DownloadBackupAsync);
+
         // The .bak of an export session on the server: its name and size, a one-time link, the download.
         app.MapGet("/api/sql/exports/{sessionId:guid}", (Guid sessionId, SqlExportFiles files) =>
             files.Find(sessionId) is { } file ? Results.Ok(file) : Results.NotFound());
@@ -103,6 +110,27 @@ public static class SqlEndpoints
     private static async Task<IResult> StartPublishAsync(
         SqlPublishRequestDto request, AppDbContext db, AgentService agents, AgentRegistry registry, SessionQueue queue, Microsoft.Extensions.Options.IOptions<SqlRestoreOptions> options, HttpContext http, CancellationToken ct)
     {
+        if (request.SqlDatabaseId is { } databaseId)
+        {
+            // At a point in time: the base must be a restore point (its files are mounted, nothing is copied).
+            try
+            {
+                var chain = await SqlRestoreSessionRunner.ChooseChainAsync(db, databaseId, request.PointInTimeUtc, ct);
+                if (chain.Base.RestorePointId is not { } basePoint)
+                {
+                    return Results.Problem(
+                        $"The base of this point in time is a full backup, not a restore point with the SQL Server snapshot: it cannot be published without copying. Restore it as a new database instead.",
+                        statusCode: StatusCodes.Status400BadRequest);
+                }
+
+                request = request with { RestorePointId = basePoint, Instance = chain.Database.Instance, Database = chain.Database.Name };
+            }
+            catch (Exception ex) when (ex is SqlChainException or KeyNotFoundException)
+            {
+                return Results.Problem(ex.Message, statusCode: StatusCodes.Status400BadRequest);
+            }
+        }
+
         var point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == request.RestorePointId, ct);
         if (point is null || point.State != RestorePointState.Available)
         {
@@ -136,7 +164,8 @@ public static class SqlEndpoints
         try
         {
             var agent = await SqlAgentAsync(request.TargetVmNativeId, agents, registry, ct);
-            if (!registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlPublish))
+            if (!registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlPublish)
+                || (request.SqlDatabaseId is not null && !registry.HasCapability(agent.Id, AgentProtocol.CapabilitySqlRestoreChain)))
             {
                 return Results.Problem(
                     $"The agent in {agent.HostName} (version {agent.AgentVersion}) cannot publish SQL Server databases yet. It updates itself within a few minutes after a server update.",
@@ -321,11 +350,62 @@ public static class SqlEndpoints
             .OrderBy(s => s.FinishUtc)
             .Select(s => new SqlBackupPointDto(s.FinishUtc, s.Kind.ToString(), s.Size))
             .ToList();
+        var fulls = await DownloadableSets(db).Where(s => s.SqlDatabaseId == id).OrderByDescending(s => s.FinishUtc).Take(100).ToListAsync(ct);
         return Results.Ok(new SqlCatalogDatabaseDetailDto(
             ToDto(database, spans),
             [.. spans.Select(s => new SqlCoverageSpanDto(s.FromUtc, s.ToUtc, s.BaseKind.ToString(), s.Logs))],
             [.. gaps.Select(g => new SqlCoverageGapDto(g.FromUtc, g.ToUtc, g.Reason))],
-            points));
+            points)
+        {
+            Fulls = [.. fulls.Select(s => new SqlBackupFileDto(s.Id, s.Kind.ToString(), s.FinishUtc, DownloadName(database, s), s.Size))],
+        });
+    }
+
+    /// <summary>The native full and system database backups whose SQL backup object is available.</summary>
+    private static IQueryable<SqlBackupSetEntity> DownloadableSets(AppDbContext db) =>
+        db.SqlBackupSets.AsNoTracking().Where(s =>
+            (s.Kind == SqlBackupSetKind.NativeFull || s.Kind == SqlBackupSetKind.SystemFull) && s.SqlBackupId != null && s.FileKey != null
+            && db.SqlBackups.Any(b => b.Id == s.SqlBackupId && b.State == SqlBackupState.Available));
+
+    private static string DownloadName(SqlDatabaseEntity database, SqlBackupSetEntity set) =>
+        set.FileName is { Length: > 0 } name ? name : $"{database.Name}_{set.FinishUtc.UtcDateTime:yyyyMMddTHHmmssZ}.bak";
+
+    /// <summary>
+    /// Streams the .bak of a native full or system database backup from the repository (pinned meanwhile). An error after
+    /// the first byte aborts the connection, so the browser reports a failed download instead of saving a short file.
+    /// </summary>
+    private static async Task<IResult> DownloadBackupAsync(
+        string token, AppDbContext db, SqlBackupDownloads downloads, RepositoryManager repositories, ILoggerFactory loggers, HttpContext http, CancellationToken ct)
+    {
+        var user = http.User.Identity?.Name ?? string.Empty;
+        var set = downloads.Redeem(token, user) is { } id ? await DownloadableSets(db).FirstOrDefaultAsync(s => s.Id == id, ct) : null;
+        if (set is null)
+        {
+            return Results.Problem("This download link has expired or was used already, or the backup was removed since. Start the download again on the database's page.", statusCode: StatusCodes.Status404NotFound);
+        }
+
+        var database = await db.SqlDatabases.AsNoTracking().FirstAsync(d => d.Id == set.SqlDatabaseId, ct);
+        var logger = loggers.CreateLogger("Backdafuckup.Server.Sql.SqlBackupDownloads");
+        var repository = await repositories.GetAsync(set.RepositoryId, ct);
+        using var pin = repository.PinSqlBackup(set.SqlBackupId!.Value);
+        await using var reader = await repository.OpenSqlBackupAsync(set.SqlBackupId.Value, ct);
+        await using var stream = await reader.OpenFileAsync(set.FileKey!, ct);
+        var name = DownloadName(database, set);
+        http.Response.ContentType = "application/octet-stream";
+        http.Response.ContentLength = set.Size;
+        http.Response.Headers.ContentDisposition = new Microsoft.Net.Http.Headers.ContentDispositionHeaderValue("attachment") { FileNameStar = name }.ToString();
+        logger.LogInformation("{User} downloads {File} ({Bytes} bytes) of {Instance}\\{Database} on {Vm}.", user, name, set.Size, database.Instance, database.Name, database.VmName);
+        try
+        {
+            await stream.CopyToAsync(http.Response.Body, 1 << 20, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning("The download of {File} of {Instance}\\{Database} on {Vm} by {User} failed: {Message}", name, database.Instance, database.Name, database.VmName, user, ex.Message);
+            http.Abort();
+        }
+
+        return Results.Empty;
     }
 
     /// <summary>What a restore to <paramref name="at"/> (null: the latest point) applies; 400 with the reason if nothing reaches it.</summary>

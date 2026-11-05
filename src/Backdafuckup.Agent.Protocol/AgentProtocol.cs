@@ -968,6 +968,12 @@ public sealed class SqlJobRequest
 
     /// <summary>RestoreChain: what to restore.</summary>
     public SqlChainRestoreRequest? Chain { get; set; }
+
+    /// <summary>
+    /// ReplaceFiles: take the database's last log backup before it goes offline (into the backup lane's queue; the next
+    /// SQL Server backup run sends it), so everything written until the overwrite stays restorable.
+    /// </summary>
+    public bool FinalLogBackup { get; set; }
 }
 
 /// <summary>A restore from a full backup and log backups (<see cref="SqlJobKinds.RestoreChain"/>).</summary>
@@ -1192,6 +1198,12 @@ public sealed class PublishSqlDatabase
 
     /// <summary>All files of the database, the primary data file first.</summary>
     public List<PublishSqlFile> Files { get; set; } = new List<PublishSqlFile>();
+
+    /// <summary>
+    /// A publish at a point in time: the snapshot's .bkm and the log backups are restored onto the mounted files
+    /// (<c>GET {PublishesPath}/{id}/files/{fileId}</c>) instead of attaching them. Needs <see cref="AgentProtocol.CapabilitySqlRestoreChain"/>.
+    /// </summary>
+    public SqlChainRestoreRequest? Chain { get; set; }
 }
 
 public sealed class PublishSqlFile
@@ -1204,6 +1216,9 @@ public sealed class PublishSqlFile
 
     /// <summary>"data" or "log".</summary>
     public string Kind { get; set; } = "data";
+
+    /// <summary>The file's path in the backed-up VM (as SQL Server knew it), for a restore at a point in time.</summary>
+    public string? OriginalPath { get; set; }
 }
 
 public sealed class PublishDisk

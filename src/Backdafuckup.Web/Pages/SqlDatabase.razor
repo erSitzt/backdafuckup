@@ -3,6 +3,7 @@
 @inject ApiClient Api
 @inject ISnackbar Snackbar
 @inject NavigationManager Navigation
+@inject IJSRuntime JS
 
 <PageTitle>@(_detail?.Database.Name ?? "SQL Server database") – backdafuckup</PageTitle>
 
@@ -73,22 +74,22 @@ else
             </div>
             <MudSlider T="double" Value="_slider" ValueChanged="OnSliderChanged" Min="0" Max="total" Step="1" Immediate="true" Color="Color.Error" Class="mt-1"
                        aria-label="Point in time" />
-            <div class="d-flex align-center mb-2" style="flex-wrap:wrap;gap:4px">
+            <div class="d-flex justify-space-between">
                 <MudText Typo="Typo.caption">@Fmt.Time(from)</MudText>
-                <MudSpacer />
+                <MudText Typo="Typo.caption">@Fmt.Time(to)</MudText>
+            </div>
+            <div class="d-flex align-center justify-center mb-2" style="gap:4px">
                 <MudTooltip Text="The oldest restorable point"><MudIconButton Icon="@Icons.Material.Filled.FirstPage" Size="Size.Small" OnClick="@(() => JumpAsync(from))" aria-label="Oldest point" /></MudTooltip>
                 <MudTooltip Text="The end of the previous backup"><MudIconButton Icon="@Icons.Material.Filled.ChevronLeft" Size="Size.Small" OnClick="@(() => StepAsync(-1))" aria-label="Previous backup" /></MudTooltip>
-                <MudText Typo="Typo.body1" Class="mx-2" Style="min-width:230px;text-align:center"><b>@SelectedText(to)</b></MudText>
+                <MudText Typo="Typo.body1" Class="mx-2" Style="flex:0 1 260px;text-align:center"><b>@SelectedText(to)</b></MudText>
                 <MudTooltip Text="The end of the next backup"><MudIconButton Icon="@Icons.Material.Filled.ChevronRight" Size="Size.Small" OnClick="@(() => StepAsync(1))" aria-label="Next backup" /></MudTooltip>
                 <MudTooltip Text="The latest backup"><MudIconButton Icon="@Icons.Material.Filled.LastPage" Size="Size.Small" OnClick="LatestAsync" aria-label="Latest point" /></MudTooltip>
-                <MudSpacer />
-                <MudText Typo="Typo.caption">@Fmt.Time(to)</MudText>
             </div>
             <div class="d-flex gap-2 align-center mb-2" style="flex-wrap:wrap">
                 <MudTextField T="string" @bind-Value="_timeText" Label="Exact time (yyyy-MM-dd HH:mm:ss, local)" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:300px" Immediate="true" />
                 <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="TypedAsync">Use</MudButton>
-                <MudText Typo="Typo.caption">Green: restorable · dark marks: ends of full (tall) and log backups (short) · orange: not covered</MudText>
             </div>
+            <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block mb-2">Green: restorable · dark marks: ends of full (tall) and log backups (short) · orange: not covered · red: the chosen time</MudText>
             @if (_snapped is not null)
             {
                 <MudAlert Severity="Severity.Info" Dense="true" Class="mb-2">@_snapped</MudAlert>
@@ -103,18 +104,51 @@ else
                     Restores @BaseText(plan.BaseKind) of @Fmt.Time(plan.BaseUtc) (@Fmt.Bytes(plan.BaseBytes))@(plan.Logs == 0 ? " and no log backup" : $", then {plan.Logs} log backup(s) ({Fmt.Bytes(plan.LogBytes)})")
                     @(plan.StopAtLocal is { } stop ? $"up to {plan.ReachedUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss} (STOPAT {stop.Replace('T', ' ')[..19]} in SQL Server's time)" : plan.Logs == 0 ? string.Empty : "to the end of the last one") — the state of @plan.ReachedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture).
                 </MudText>
-                <div class="d-flex gap-2">
+                <div class="d-flex gap-2 flex-wrap">
                     <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(false))">Restore as a new database</MudButton>
                     <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(true))">Overwrite the original</MudButton>
+                    <MudTooltip Text="@(plan.RestorePointId is null ? "Publishing needs a restore point as the base; this time starts from a full backup. Restore it as a new database instead." : "Attach it in a VM from the backup without copying the files; the log backups are applied in a temporary overlay.")">
+                        <MudButton Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Publish" Disabled="@(plan.RestorePointId is null)" OnClick="@(() => OpenAsync(false, true))">Publish</MudButton>
+                    </MudTooltip>
                 </div>
             }
         }
     </MudPaper>
+
+    @if (_detail.Fulls.Count > 0)
+    {
+        <MudPaper Class="pa-3 mt-4" Elevation="1">
+            <MudText Typo="Typo.h6">Full backups (.bak)</MudText>
+            <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
+                The full backups the agent took, read straight from the repository. Restore one anywhere with
+                <span class="mono">RESTORE DATABASE … FROM DISK = N'…' WITH MOVE …</span> (<span class="mono">RESTORE FILELISTONLY</span> lists the files).
+            </MudText>
+            <MudTable Items="_detail.Fulls" Dense="true" Elevation="0" Hover="true" Breakpoint="Breakpoint.Sm">
+                <HeaderContent>
+                    <MudTh>Finished</MudTh>
+                    <MudTh>Kind</MudTh>
+                    <MudTh>File</MudTh>
+                    <MudTh Style="text-align:right">Size</MudTh>
+                    <MudTh></MudTh>
+                </HeaderContent>
+                <RowTemplate>
+                    <MudTd DataLabel="Finished" Style="white-space:nowrap">@Fmt.Time(context.FinishUtc)</MudTd>
+                    <MudTd DataLabel="Kind">@(context.Kind == "SystemFull" ? "system database" : "full")</MudTd>
+                    <MudTd DataLabel="File" Class="mono" Style="word-break:break-all">@context.FileName</MudTd>
+                    <MudTd DataLabel="Size" Style="text-align:right;white-space:nowrap">@Fmt.Bytes(context.Bytes)</MudTd>
+                    <MudTd Style="text-align:right">
+                        <MudButton Size="Size.Small" Variant="Variant.Text" StartIcon="@Icons.Material.Filled.Download" OnClick="@(() => DownloadAsync(context))"
+                                   aria-label="@($"Download {context.FileName}")">Download</MudButton>
+                    </MudTd>
+                </RowTemplate>
+            </MudTable>
+        </MudPaper>
+    }
 }
 
 <MudDialog @bind-Visible="_open" Options="@(new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true, CloseOnEscapeKey = true })">
     <TitleContent>
-        <MudText Typo="Typo.h6">@(_overwrite ? $"Overwrite {_detail?.Database.Name}" : $"Restore {_detail?.Database.Name} as a new database")</MudText>
+        <MudText Typo="Typo.h6">@(_overwrite ? $"Overwrite {_detail?.Database.Name}" : _publish ? $"Publish {_detail?.Database.Name}" : $"Restore {_detail?.Database.Name} as a new database")</MudText>
         <MudText Typo="Typo.body2">@_detail?.Database.Instance on @_detail?.Database.VmName, @(_plan is null ? "" : $"state of {Fmt.Time(_plan.ReachedUtc)}")</MudText>
     </TitleContent>
     <DialogContent>
@@ -123,13 +157,23 @@ else
             {
                 <MudAlert Severity="Severity.Warning" Dense="true">
                     The database is restored beside its own files first (*.bdfu-new). Then it goes offline for the swap: open connections are dropped
-                    and their transactions rolled back. What was written after the last log backup is lost; what the log backups hold stays
-                    restorable. If the database does not come online with the restored files, it gets its own back.
+                    and their transactions rolled back. If its job backs up its logs, it gets a last log backup right before (in single-user mode),
+                    so everything up to the swap stays restorable; otherwise what was written after its last backup is lost. If it does not come
+                    online with the restored files, it gets its own back.
                 </MudAlert>
+            }
+            else if (_publish)
+            {
+                <MudText Typo="Typo.body2">
+                    The agent in the target VM mounts the volumes of the restore point (read from the backup, nothing is copied), restores the
+                    database from its SQL Server snapshot onto them and applies the log backups up to the chosen time. Everything it writes goes to
+                    a temporary overlay in the VM and is discarded when the database is unpublished; the backup stays as it is.
+                </MudText>
             }
             <MudGrid Spacing="2">
                 <MudItem xs="12" md="6">
-                    <MudSelect T="string" Value="_targetVm" ValueChanged="OnTargetVmChanged" Label="Target VM" Variant="Variant.Outlined" Dense="true" Disabled="_overwrite">
+                    <MudSelect T="string" Value="_targetVm" ValueChanged="OnTargetVmChanged" Label="Target VM" Variant="Variant.Outlined" Dense="true" Disabled="_overwrite" ToStringFunc="VmLabel"
+                               HelperText="@(_publish ? "VMs whose agent can publish SQL Server databases." : "VMs whose agent can restore SQL Server databases.")">
                         @foreach (var a in _agents)
                         {
                             <MudSelectItem T="string" Value="@a.VmNativeId">@($"{a.VmName ?? a.HostName} ({a.HostName}{(a.Online ? "" : ", offline")})")</MudSelectItem>
@@ -138,7 +182,7 @@ else
                 </MudItem>
                 <MudItem xs="12" md="6">
                     <MudSelect T="Guid?" Value="_accountId" ValueChanged="OnAccountChanged" Label="Account" Variant="Variant.Outlined" Dense="true"
-                               HelperText="A Windows account or a SQL Server login with dbcreator or sysadmin (overwrite: sysadmin).">
+                               HelperText="@(_overwrite ? "A Windows account or a SQL Server login that is sysadmin." : "A Windows account or a SQL Server login with dbcreator or sysadmin.")">
                         @foreach (var (id, text) in _accounts)
                         {
                             <MudSelectItem T="Guid?" Value="@id">@text</MudSelectItem>
@@ -148,7 +192,7 @@ else
             </MudGrid>
             @if (_agents.Count == 0)
             {
-                <MudAlert Severity="Severity.Info" Dense="true">No VM has an agent that can restore SQL Server databases. Install the agent under Guest Agents; agents update themselves after a server update.</MudAlert>
+                <MudAlert Severity="Severity.Info" Dense="true">No VM has an agent that can @(_publish ? "publish" : "restore") SQL Server databases. Install the agent under Guest Agents; agents update themselves after a server update.</MudAlert>
             }
             @if (_accounts.Count == 0)
             {
@@ -181,7 +225,17 @@ else
                         <MudTextField T="string" @bind-Value="_name" Label="Database name" Variant="Variant.Outlined" Immediate="true" Margin="Margin.Dense" Disabled="_overwrite" />
                     </MudItem>
                 </MudGrid>
-                @if (_overwrite)
+                @if (_publish)
+                {
+                    <MudSelect T="int" @bind-Value="_publishHours" Label="Unpublish automatically after" Variant="Variant.Outlined" Dense="true"
+                               HelperText="Or earlier with Unpublish in the session." Style="max-width:320px">
+                        @foreach (var hours in new[] { 1, 2, 4, 8, 24, 72 })
+                        {
+                            <MudSelectItem T="int" Value="@hours">@(hours == 1 ? "1 hour" : $"{hours} hours")</MudSelectItem>
+                        }
+                    </MudSelect>
+                }
+                else if (_overwrite)
                 {
                     <MudCheckBox T="bool" @bind-Value="_keepReplaced" Color="Color.Primary" Label="Keep the previous files (as *.bdfu-replaced beside the database's files)" />
                 }
@@ -218,7 +272,7 @@ else
     <DialogActions>
         <MudButton OnClick="@(() => _open = false)">Cancel</MudButton>
         <MudButton Variant="Variant.Filled" Color="@(_overwrite ? Color.Error : Color.Primary)" Disabled="@(_target is null || _instance is null || string.IsNullOrWhiteSpace(_name) || _starting)"
-                   OnClick="StartAsync">@(_overwrite ? "Overwrite" : "Restore")</MudButton>
+                   OnClick="StartAsync">@(_overwrite ? "Overwrite" : _publish ? "Publish" : "Restore")</MudButton>
     </DialogActions>
 </MudDialog>
 
@@ -239,6 +293,8 @@ else
     private bool _open;
     private bool _overwrite;
     private bool _keepReplaced;
+    private bool _publish;
+    private int _publishHours = 8;
     private List<AgentDto> _agents = [];
     private List<(Guid Id, string Text)> _accounts = [];
     private string? _targetVm;
@@ -266,6 +322,25 @@ else
         catch (ApiException ex)
         {
             _error = ex.Message;
+        }
+    }
+
+    /// <summary>A VM by its name (the select shows the value itself when the VM has no agent in the list, e.g. for an overwrite).</summary>
+    private string VmLabel(string? vm) =>
+        _agents.FirstOrDefault(a => a.VmNativeId == vm) is { } agent ? $"{agent.VmName ?? agent.HostName} ({agent.HostName}{(agent.Online ? "" : ", offline")})"
+        : vm is not null && vm == _detail?.Database.VmNativeId ? _detail.Database.VmName
+        : vm ?? string.Empty;
+
+    private async Task DownloadAsync(SqlBackupFileDto full)
+    {
+        try
+        {
+            var ticket = await Api.PostAsync<FileDownloadTicketDto>($"api/sql/backup-sets/{full.Id}/link", new { });
+            await JS.InvokeVoidAsync("bdfuDownload", ticket.Url);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Warning);
         }
     }
 
@@ -405,7 +480,7 @@ else
         }
     }
 
-    private async Task OpenAsync(bool overwrite)
+    private async Task OpenAsync(bool overwrite, bool publish = false)
     {
         if (_detail is null)
         {
@@ -413,13 +488,14 @@ else
         }
 
         _overwrite = overwrite;
+        _publish = publish;
         _target = null;
         _checkError = null;
         _instance = overwrite ? _detail.Database.Instance : null;
-        _name = overwrite ? _detail.Database.Name : $"{_detail.Database.Name}_restored";
+        _name = overwrite ? _detail.Database.Name : publish ? $"{_detail.Database.Name}_published" : $"{_detail.Database.Name}_restored";
         try
         {
-            _agents = [.. (await Api.GetAsync<List<AgentDto>>("api/agents")).Where(a => a.CanRestoreSql && a.VmNativeId is not null).OrderBy(a => a.VmName ?? a.HostName)];
+            _agents = [.. (await Api.GetAsync<List<AgentDto>>("api/agents")).Where(a => (publish ? a.CanPublishSql : a.CanRestoreSql) && a.VmNativeId is not null).OrderBy(a => a.VmName ?? a.HostName)];
             var windows = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
             var logins = await Api.GetAsync<List<SqlCredentialDto>>("api/credentials/sql");
             _accounts = [.. windows.Select(c => (c.Id, $"{c.UserName} (Windows)")), .. logins.Select(c => (c.Id, $"{c.UserName} (SQL login)"))];
@@ -500,10 +576,13 @@ else
         _starting = true;
         try
         {
-            var request = new SqlRestoreRequestDto(
-                Guid.Empty, _detail.Database.Instance, _detail.Database.Name, _targetVm, _instance, _accountId.Value, _name.Trim(), _fileLocation, _dataFolder, _logFolder,
-                _overwrite, _keepReplaced, Id, _latest ? null : _pointInTime);
-            var started = await Api.PostAsync<StartedDto>("api/sql/restores", request);
+            var started = _publish
+                ? await Api.PostAsync<StartedDto>("api/sql/publishes", new SqlPublishRequestDto(
+                    Guid.Empty, _detail.Database.Instance, _detail.Database.Name, _targetVm, _instance, _accountId.Value, _name.Trim(), _publishHours * 60,
+                    Id, _latest ? null : _pointInTime))
+                : await Api.PostAsync<StartedDto>("api/sql/restores", new SqlRestoreRequestDto(
+                    Guid.Empty, _detail.Database.Instance, _detail.Database.Name, _targetVm, _instance, _accountId.Value, _name.Trim(), _fileLocation, _dataFolder, _logFolder,
+                    _overwrite, _keepReplaced, Id, _latest ? null : _pointInTime));
             _open = false;
             Navigation.NavigateTo($"/sessions/{started.SessionId}");
         }

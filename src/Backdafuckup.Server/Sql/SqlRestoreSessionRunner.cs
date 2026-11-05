@@ -319,6 +319,19 @@ public sealed class SqlRestoreSessionRunner(
         IReadOnlyList<string> targets, IReadOnlyList<string> written, long bytes, Guid taskId, IOperationLog log)
     {
         log.Info($"All {targets.Count} file(s) written beside the database's own and checked (SHA-256, {VmBackupTask.Format(bytes)}); overwriting the database. This cannot be stopped halfway.");
+        // With SQL Server backups in the VM's job: the last log backup before it goes offline keeps everything written until now restorable.
+        BackupJob? backups = null;
+        if (agent.VmNativeId is { } vm)
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(CancellationToken.None).ConfigureAwait(false);
+            backups = await db.Jobs.AsNoTracking().FirstOrDefaultAsync(j => j.SqlBackup.Enabled && j.Objects.Any(o => o.NativeId == vm), CancellationToken.None).ConfigureAwait(false);
+        }
+
+        if (backups is not null)
+        {
+            log.Info($"Before it goes offline, the database's last log backup is taken in single-user mode (job {backups.Name} sends it with its next SQL Server backup run).");
+        }
+
         SqlJobResult replace;
         try
         {
@@ -327,6 +340,7 @@ public sealed class SqlRestoreSessionRunner(
                 new SqlJobRequest
                 {
                     Kind = SqlJobKinds.ReplaceFiles, Instance = instance.Name, Account = account, Database = request.DatabaseName, Files = [.. targets], KeepReplaced = request.KeepReplacedFiles,
+                    FinalLogBackup = backups is not null, BackupJobId = backups?.Id, Folder = backups?.SqlBackup.StagingFolder,
                 },
                 options.Value.AttachTimeout,
                 CancellationToken.None).ConfigureAwait(false);

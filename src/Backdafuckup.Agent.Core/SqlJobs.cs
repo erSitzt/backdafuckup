@@ -226,7 +226,14 @@ public sealed class SqlJobRunner
                         throw new InvalidOperationException("This agent cannot overwrite databases.");
                     }
 
-                    SqlReplace.Replace(_sql, _files, _journalDirectory, request.Instance!, request.Account, request.Database!, request.Files, request.KeepReplaced, Log);
+                    Func<DbConnection, string>? finalLog = null;
+                    if (request.FinalLogBackup)
+                    {
+                        var queueLane = new SqlBackupLane(_sql, _locks, SqlBackupQueue.Load(_journalDirectory, Log), new HttpBackupSink(this), Log);
+                        finalLog = connection => queueLane.QueueLogBackup(connection, request.Instance!, request.Database!, request.Folder, request.BackupJobId, request.SessionId);
+                    }
+
+                    SqlReplace.Replace(_sql, _files, _journalDirectory, request.Instance!, request.Account, request.Database!, request.Files, request.KeepReplaced, Log, finalLog);
                     break;
                 case SqlJobKinds.ReplaceRecovery:
                     if (request.Account is null || string.IsNullOrEmpty(request.Instance) || string.IsNullOrEmpty(request.Database) || _journalDirectory is null)
@@ -472,10 +479,14 @@ public sealed class SqlJobRunner
     }
 
     /// <summary>Downloads a backup file of this job into the guest, checked by length and SHA-256.</summary>
-    private async Task DownloadAsync(SqlChainFile file, string path, CancellationToken cancellationToken)
+    private Task DownloadAsync(SqlChainFile file, string path, CancellationToken cancellationToken) =>
+        DownloadAsync(_http, Base + "/files/" + Uri.EscapeDataString(file.FileId), file, path, cancellationToken);
+
+    /// <summary>Downloads a backup file from <paramref name="url"/> into the guest, checked by length and SHA-256 (restore jobs and publishes).</summary>
+    public static async Task DownloadAsync(HttpClient http, string url, SqlChainFile file, string path, CancellationToken cancellationToken)
     {
         var files = new SqlBackupFiles();
-        using (var response = await _http.GetAsync(Base + "/files/" + Uri.EscapeDataString(file.FileId), HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false))
+        using (var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false))
         {
             if (!response.IsSuccessStatusCode)
             {

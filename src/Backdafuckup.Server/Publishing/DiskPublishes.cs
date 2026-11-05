@@ -14,8 +14,9 @@ namespace Backdafuckup.Server.Publishing;
 /// </summary>
 public sealed class DiskPublish
 {
-    internal DiskPublish(Guid agentId, PublishInfo info, IReadOnlyList<GuestDiskSource> disks, Action<string> log, TimeProvider time)
+    internal DiskPublish(Guid agentId, PublishInfo info, IReadOnlyList<GuestDiskSource> disks, Action<string> log, TimeProvider time, IReadOnlyDictionary<string, Sql.SqlJobFile>? files = null)
     {
+        Files = files;
         AgentId = agentId;
         Info = info;
         Disks = disks;
@@ -34,6 +35,9 @@ public sealed class DiskPublish
 
     /// <summary>Receives the agent's log lines.</summary>
     internal Action<string> Log { get; }
+
+    /// <summary>Backup files the agent downloads for a publish at a point in time (by file id).</summary>
+    internal IReadOnlyDictionary<string, Sql.SqlJobFile>? Files { get; }
 
     public DateTimeOffset LastHeartbeat { get; internal set; }
 
@@ -93,7 +97,9 @@ public sealed class DiskPublishes(AgentRegistry registry, IOptions<AgentOptions>
     /// The agent refused the publish, could not mount it (the message says why), or did not report the mount within
     /// <paramref name="timeout"/>.
     /// </exception>
-    public async Task<DiskPublish> PublishAsync(Guid agentId, PublishInfo info, IReadOnlyList<GuestDiskSource> disks, Action<string> log, TimeSpan timeout, CancellationToken cancellationToken)
+    public async Task<DiskPublish> PublishAsync(
+        Guid agentId, PublishInfo info, IReadOnlyList<GuestDiskSource> disks, Action<string> log, TimeSpan timeout, CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, Sql.SqlJobFile>? files = null)
     {
         ArgumentNullException.ThrowIfNull(info);
         ArgumentNullException.ThrowIfNull(disks);
@@ -103,7 +109,7 @@ public sealed class DiskPublishes(AgentRegistry registry, IOptions<AgentOptions>
         }
 
         info.PublishId = Guid.NewGuid();
-        var publish = new DiskPublish(agentId, info, disks, log, time);
+        var publish = new DiskPublish(agentId, info, disks, log, time, files);
         _publishes[publish.Id] = publish;
         var mounted = false;
         try

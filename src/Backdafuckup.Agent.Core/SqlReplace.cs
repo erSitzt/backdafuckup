@@ -34,9 +34,13 @@ public static class SqlReplace
     public const string OutcomeFile = "sql-replace-outcome.json";
 
     /// <param name="files">The database's files as they are now (and as they are in the backup); the restored ones lie beside them with <see cref="NewSuffix"/>.</param>
+    /// <param name="finalLog">
+    /// Takes the last log backup of the database before it goes offline (in single-user mode, so nothing is written
+    /// after it); returns what it did. Null: none.
+    /// </param>
     public static void Replace(
         ISqlEnvironment sql, IRestoreFileSystem fs, string journalDirectory, string instanceName, SqlAccount account, string database,
-        IReadOnlyList<string> files, bool keepReplaced, Action<string> log)
+        IReadOnlyList<string> files, bool keepReplaced, Action<string> log, Func<DbConnection, string>? finalLog = null)
     {
         SqlAttach.CheckName(database);
         var instance = sql.Instances().FirstOrDefault(i => string.Equals(i.Name, instanceName, StringComparison.OrdinalIgnoreCase))
@@ -71,6 +75,15 @@ public static class SqlReplace
             {
                 if (state != "OFFLINE")
                 {
+                    if (finalLog is not null)
+                    {
+                        // Everything written until now stays restorable: single-user (only this connection), then the last
+                        // log backup, then offline. MULTI_USER comes back when the database is online again (EnsureOnline).
+                        Execute(connection, $"ALTER DATABASE {name} SET SINGLE_USER WITH ROLLBACK IMMEDIATE");
+                        log($"set {name} to single-user (open transactions rolled back) for its last log backup.");
+                        log(finalLog(connection));
+                    }
+
                     Execute(connection, $"ALTER DATABASE {name} SET OFFLINE WITH ROLLBACK IMMEDIATE");
                     log($"took {name} on instance {instance.Name} offline (open transactions rolled back).");
                 }

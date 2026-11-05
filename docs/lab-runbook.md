@@ -128,6 +128,27 @@ Two Windows VMs with SQL Server and the agent (the lab's `bdfu-lab-sql1` and `bd
 | F13 | *Export .bak* of `shop` into the other VM with the download option (sysadmin). | A copy-only `.bak` with checksums (compressed except on Express) in the instance's backup folder, `RESTORE VERIFYONLY` passed; the session page offers the download for 24 hours, and its SHA-256 equals the file in the VM. With the dbcreator login the export is refused before anything happens. |
 | F14 | Repeat F5, F10 and F11 with the .NET Framework 4.8 agent on Windows Server 2012 R2. | As there. |
 
+### G. SQL Server log backups and point-in-time restore
+
+The VMs, accounts and job of section F. In the job's guest processing: *SQL Server backups* on, log backups every 15 minutes (G9: 5 minutes), the Windows account. A marker table in `shop` (`CREATE TABLE dbo.marker (n int, at datetime2 DEFAULT sysdatetime())`), filled with one row per step, gives the times to restore to. Check in the guest with `msdb.dbo.backupset` (`type`, `first_lsn`, `last_lsn`, `name`, `description`) and the agent folder `sql-backups\queue.json`.
+
+| # | Steps | Expected |
+|---|---|---|
+| G1 | Turn the backups on and wait for the next quarter hour. | One day session "SQL Server backups – <job> – <date>" with a task per VM; a log backup per FULL database (name `backdafuckup log`); the staging folder and the queue are empty afterwards. *SQL Server* lists the databases with the chain *intact*. |
+| G2 | Let it run for an hour. | The day session is reopened by each run, the summary names the last one ("last run …"), times in the job's time zone. |
+| G3 | Insert marker 1, wait for a log backup, insert marker 2, note the time, insert marker 3, wait for the next log backup. *Restore as a new database* at the noted time. | `<name>` ONLINE with markers 1 and 2, not 3; `DBCC CHECKDB` clean; no staging folder left. |
+| G4 | The same with the slider: drag it, use the jump buttons, *latest*. | The time shown while dragging, the plan below it in local time; *latest* restores markers 1–3. |
+| G5 | Restore into the other VM (G3 with target `bdfu-lab-sql2`). | As G3 on the other VM. |
+| G6 | *Overwrite the original* at the noted time (sysadmin). | Restored as `shop_bdfu_pit` beside it, then the last log backup in single-user mode, swap, online, `MULTI_USER`; markers 1 and 2. The next run sends the queued last log backup, the chain shows a new base (a full) after the next run. |
+| G7 | *Publish* at the noted time. | `shop_published` ONLINE with markers 1 and 2 on the mounted volumes; after *Unpublish* nothing is left (F6). |
+| G8 | Run `BACKUP LOG shop TO DISK = N'C:\Temp\foreign.trn'` in the guest. | The next run warns with the time and the file and takes a full at once; the chain is *intact* again from that full. |
+| G9 | Set the interval to 5 minutes; switch `small` to SIMPLE and back to FULL. | Runs at :00, :05, …; `small` *SIMPLE*, then a full at once after the switch back, with a warning. |
+| G10 | Stop the backup server's service for 30 minutes, start it again. | No runs meanwhile; the next run warns about the RPO; the chain stays *intact* (no gap). |
+| G11 | Kill the agent process during a log backup (e.g. with 5-minute logs, at the full minute), start the service. | The interrupted backup is resolved through `msdb` (sent, or the partial file deleted); no gap, nothing reported that was not backed up. |
+| G12 | Stop the agent service until a run is due. | The run warns that the agent in `<host> (<ip>)` is offline; the next run with the agent catches up. |
+| G13 | An image backup of the job while log backups run (SQL Server snapshot). | The suspend waits for a running log backup and vice versa; both succeed. |
+| G14 | On a VM with SQL Server 2019 (or a VSS-mode job): turn on the backups. | A native full first (no snapshot base), then log backups; G3 with the native full as the base (downloaded into the staging folder). *Publish* is offered only with a restore point as the base. The full is downloadable as `.bak` on the database's page. |
+
 ## Results
 
 | Check | Date | Server / agent version | Result | Notes |
@@ -140,3 +161,5 @@ Two Windows VMs with SQL Server and the agent (the lab's `bdfu-lab-sql1` and `bd
 | F1 | 2026-11-05 | 0.3.0 (`5de3e8e`) | passed | Both VMs; warning for `shop`, `shop_restored`; `last_log_backup_lsn` set. |
 | F5/F7 (other VM, SQL login), F8, F9 | 2026-11-05 | 0.3.0 (`df1b4cb`) | passed | Agent crash: logout from the dead target 68 s, then the server removed the database. VM reboot: SQL Server Express refused connections for about 2 minutes after the boot. |
 | F10 (other VM, SQL login) | 2026-11-05 | 0.3.0 (`df1b4cb`) | passed, fixed | The dbcreator login could not open the database it attached (dbo kept `sa`); since `a6c453b` the log says why, and export needs sysadmin. |
+| G1, G2, G8 | 2026-11-05 | 0.3.0 (`1cd0eb8`, `75ac9cc`) | passed, fixed | bdfu-lab-sql1/-sql2, hourly then 15-minute logs. The day session was sorted by its creation and summarised in UTC; since `75ac9cc` it moves to the top with each run and uses the job's time zone. A manual `BACKUP LOG` in sql1 → warning with time and path, a full at once, chain intact. |
+| G3 | 2026-11-05 | 0.3.0 (`5d042fa`) | passed | `shop_restored_pit` on bdfu-lab-sql1 at 22:10:14 local time: markers 1 and 2, not 3; ONLINE, `CHECKDB` clean, staging empty. |

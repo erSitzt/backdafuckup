@@ -337,7 +337,55 @@ Restore points show their consistency ("application", or "crash" plus the reason
 
 **What an attach changes** (publish, restore as a new database): the attaching account becomes the owner, TRUSTWORTHY is off, Service Broker is off. Database users whose login does not exist on the target instance are listed in the session log, with the `ALTER USER … WITH LOGIN` to fix them. SQL Server sets the files' permissions itself (its service, Administrators).
 
-**Not yet:** system databases (restore them with the VM), In-Memory OLTP and FILESTREAM databases, point-in-time restore with log backups.
+**Not yet:** restore of system databases (restore them with the VM, or from their `.bak`), In-Memory OLTP and FILESTREAM databases.
+
+### Log backups and point-in-time restore
+
+A job backs up the transaction logs of the SQL Server databases in its VMs when *SQL Server backups* is on in its guest processing settings. The backup server runs the backups: at each due time it sends the agent a job with the job's account. The agent runs `BACKUP LOG` (or `BACKUP DATABASE`), sends the files to the repository (deduplicated and compressed like disk data) and deletes them in the VM once the server has committed them. No password is stored in the VM.
+
+**Settings** (job → guest processing → *SQL Server backups*)
+- *Log backups every* 5, 15, 30 or 60 minutes, or longer (60–1440 minutes). The times are counted from midnight in the job's time zone: every 15 minutes means :00, :15, :30, :45.
+- *Full backups:* native full backups (`BACKUP DATABASE … WITH CHECKSUM`, verified with `RESTORE VERIFYONLY`) on a schedule (daily, or weekly with days and a time). By default only for databases that have no other base: SQL Server before 2022, or jobs with VSS instead of the SQL Server snapshot. *Also for databases whose base is the SQL Server snapshot* takes them for all databases.
+- *Start a missing or broken log chain with a full backup at once* (default on): a new database, a database switched from SIMPLE to FULL, or a broken chain gets a full in the same run, plus a warning.
+- *System databases:* full backups of `master`, `msdb` and `model` (default daily).
+- *Leave out databases*, and the *folder in the VM* for the files until they are sent (default: the instance's backup folder, subfolder `backdafuckup`).
+- The account must be `sysadmin` on the instances. It is needed in VSS mode too once SQL Server backups are on.
+
+**What is backed up**
+- Databases in FULL or BULK_LOGGED recovery with a log chain get a log backup. The base of the chain is the SQL Server snapshot of the image backup (SQL Server 2022 and later, method *SQL Server snapshot*, backup type *full*), or a native full.
+- SIMPLE databases are noted: they can only be restored to the times of their full backups.
+- Left out: database snapshots, read-only, offline and restoring databases, and availability group replicas.
+- Compression: `COMPRESSION` except on Express, where the repository compresses instead.
+
+**Sessions:** one session per job and day, *SQL Server backups – <job> – <date>*, with one task per VM. Each run adds to it; the session shows the worst result of the day and the summary of the last run. It does not wait for image backups or maintenance, and it has no Stop button. While an image backup suspends SQL Server for its snapshot, a log backup waits (up to 30 minutes, `Agent:SqlSnapshotLockWait`); a suspend also waits for a running log backup.
+
+**The log chain** (page *SQL Server*, chip per database)
+- *intact:* a base and an unbroken chain of log backups since then.
+- *no full backup:* no base yet. The next run takes a full if *Start … with a full backup at once* is on.
+- *broken:* a gap. The reason names it: another tool's log backup (with its time and file), a switch to SIMPLE, a new fork (a restore over the database), or a log backup the repository no longer has.
+- Warnings in the day session: another tool's full or log backup (named with time and device; copy-only backups do not count), the last log backup older than twice the interval (RPO), an agent offline or too old at a due run.
+- **Exactly one tool may take log backups.** Turn off the log backups of maintenance plans, Ola Hallengren jobs and other backup products, including log truncation in other image backup products (e.g. "truncate logs" in a Veeam job). Their full backups do no harm, as long as they are copy-only.
+
+**Interruptions:** while the backup server is down, no log backups run; the log grows in the VM, and the chain stays intact (the next run catches up and warns about the RPO). Files whose upload fails stay in the VM (`sql-backups\queue.json` in the agent folder) and are sent first with the next run. A backup interrupted by an agent restart is resolved through `msdb`: a finished one is sent, a partial file is deleted; nothing is reported as backed up that was not.
+
+**Retention:** the point-in-time window of a VM is the window of its restore points. Kept are native and system fulls back to the oldest restore point the job keeps (plus the newest one before it), and log backups back to the oldest kept base. Retention runs once a day per VM; backups in use by a running restore stay until the next run.
+
+**Restore to a point in time** (*SQL Server* → database)
+- The timeline shows what the backups cover (green), gaps (with their reason) and the restore points, full and log backups. Choose *latest*, drag the slider, use the jump buttons, or type a time to the second (local time of the browser). The plan below says which base and how many log backups the restore uses, and the time it reaches.
+- STOPAT is in SQL Server's local time; the server converts with the time zone SQL Server stores with each backup.
+- **Restore as a new database:** the base (the snapshot's files from the restore point, or the native full downloaded into the staging folder), then each log backup, the last one with `STOPAT`, then RECOVERY. Downloads are checked with SHA-256 and deleted after use.
+- **Overwrite the original:**
+  1. The database is restored under the name `<name>_bdfu_pit` into `*.bdfu-new` beside its own files, then detached.
+  2. If the job backs up its logs: the database goes to `SINGLE_USER WITH ROLLBACK IMMEDIATE` and gets a last log backup, so everything up to the swap stays restorable. That backup is sent with the next run.
+  3. The existing swap (offline, files exchanged, online), then `MULTI_USER` again.
+
+  The log chain starts anew afterwards; the next run takes a full.
+- **Publish:** only when the base is a restore point. The volumes are mounted as in a normal publish, the database is restored from the `.bkm` onto the mounted files and the log backups are applied; everything goes to the overlay and is discarded with *Unpublish*. With a native full as the base, restore it as a new database instead.
+- A restore fails before it starts if the time lies in a gap or before the oldest base; the message names the nearest times it can restore to.
+
+**Full backups as .bak:** the database's page lists the native and system database fulls the agent took, newest first, with *Download*. The file comes straight from the repository through a link that works once, for a minute. Restore it anywhere with `RESTORE DATABASE … FROM DISK = N'…' WITH MOVE …`; `RESTORE FILELISTONLY` lists the logical names. System databases (`master`, `msdb`, `model`) are restored this way, by hand (`master` in single-user mode).
+
+**Limits:** no differential backups, no availability groups or failover cluster instances, no resume of a large upload (it starts again), and one SQL backup object per run and instance in the repository (288 per VM and day at 5 minutes).
 
 ## Data and backups of the server itself
 
