@@ -163,6 +163,34 @@ public static class Fmt
         return span.TotalHours >= 1 ? $"{(int)span.TotalHours}:{span.Minutes:00}:{span.Seconds:00}" : $"{span.Minutes:00}:{span.Seconds:00}";
     }
 
+    /// <summary>The icon of a state (see <see cref="StateColor"/>).</summary>
+    public static string StateIcon(string? state) => state switch
+    {
+        "Succeeded" or "Success" or "Available" or "Online" or "Connected" => MudBlazor.Icons.Material.Filled.CheckCircle,
+        "Warning" => MudBlazor.Icons.Material.Filled.Warning,
+        "Failed" or "Error" or "Offline" => MudBlazor.Icons.Material.Filled.Error,
+        "Running" or "Stopping" => MudBlazor.Icons.Material.Filled.Sync,
+        "Queued" => MudBlazor.Icons.Material.Filled.Schedule,
+        _ => MudBlazor.Icons.Material.Filled.Circle,
+    };
+
+    /// <summary>A session kind as people say it ("SqlRestore" → "SQL restore").</summary>
+    public static string Kind(string? kind) => kind switch
+    {
+        "Backup" => "Backup",
+        "Restore" => "VM restore",
+        "RepositoryMaintenance" => "Maintenance",
+        "AgentDeployment" => "Agent installation",
+        "FileBrowse" => "File browser",
+        "FileRestore" => "File restore",
+        "SqlPublish" => "SQL publish",
+        "SqlRestore" => "SQL restore",
+        "SqlExport" => "SQL export",
+        "SqlBackup" => "SQL Server backups",
+        null => string.Empty,
+        _ => kind,
+    };
+
     public static MudBlazor.Color StateColor(string? state) => state switch
     {
         "Succeeded" or "Success" or "Available" or "Online" or "Connected" => MudBlazor.Color.Success,

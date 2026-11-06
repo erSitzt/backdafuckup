@@ -5,17 +5,12 @@
 @inject NavigationManager Navigation
 
 <PageTitle>Guest agents – backdafuckup</PageTitle>
-<div class="d-flex align-center mb-2">
-    <MudText Typo="Typo.h4">Guest Agents</MudText>
-    <MudSpacer />
-    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Download" Href="api/agents/package" Target="_blank" Disabled="@(_settings?.ServerUrl is null || _settings.Builds.Count == 0)">Download setup</MudButton>
-</div>
-<MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
-    The backdafuckup agent in a Windows VM freezes the applications through VSS while the VM snapshot is taken, so backups
-    are application-consistent (SQL Server, Active Directory, Exchange …). It only connects outbound to this server;
-    no port has to be opened in the VM. Install it here over SMB (port 445, Windows administrator credentials) or with the
-    setup package by group policy or software distribution.
-</MudText>
+<PageHeader Title="Guest Agents"
+            Description="The backdafuckup agent in a Windows VM freezes the applications through VSS while the VM snapshot is taken, so backups are application-consistent (SQL Server, Active Directory, Exchange …). It only connects outbound to this server; no port has to be opened in the VM. Install it here over SMB (port 445, Windows administrator credentials) or with the setup package by group policy or software distribution.">
+    <Actions>
+        <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Download" Href="api/agents/package" Target="_blank" Disabled="@(_settings?.ServerUrl is null || _settings.Builds.Count == 0)">Download setup</MudButton>
+    </Actions>
+</PageHeader>
 
 @if (_settings is not null)
 {

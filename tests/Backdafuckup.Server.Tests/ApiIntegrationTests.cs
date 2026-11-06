@@ -1409,7 +1409,51 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
                 await service.WaitIdleAsync();
             }
 
-            CopyDirectory(Path.Combine(_root, "repo"), keep!);
+            // More to look at: a nightly job over two VMs with a few runs, a job whose VM is gone, and SQL restores
+            // (one succeeds, one fails).
+            var connection = (await client.GetFromJsonAsync<List<ConnectionDto>>("/api/connections", Ct))![0];
+            var repository = (await client.GetFromJsonAsync<List<RepositoryDto>>("/api/repositories", Ct))![0];
+            var others = new List<JobObjectDto>();
+            foreach (var name in new[] { "web01", "fileserver" })
+            {
+                var (uuid, disks) = _pool.AddVm(name, image.LongLength);
+                _pool.WriteDisk(disks[0], 0, image);
+                others.Add(new JobObjectDto(uuid, name));
+            }
+
+            SaveJobDto Job(string name, List<JobObjectDto> objects) => new()
+            {
+                Name = name, ConnectionId = connection.Id, RepositoryId = repository.Id, RetentionPoints = 14,
+                Schedule = new ScheduleDto("Daily", "22:00", [], "Europe/Berlin"), Objects = objects, RetryCount = 0,
+            };
+            var nightly = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", Job("Nightly servers", others), Ct));
+            for (var run = 0; run < 3; run++)
+            {
+                await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{nightly.Id}/run", new RunJobDto(), Ct))).SessionId);
+            }
+
+            var gone = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", Job("Old application server", [new JobObjectDto(Guid.NewGuid().ToString(), "app-old")]), Ct));
+            await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{gone.Id}/run", new RunJobDto(), Ct))).SessionId);
+
+            Guid shopId;
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                shopId = (await db.SqlDatabases.SingleAsync(d => d.Name == "shop", Ct)).Id;
+            }
+
+            var vm = (await client.GetFromJsonAsync<List<RestorePointDto>>("/api/restore-points", Ct))!.First(p => p.VmName == "sql-ui").VmNativeId;
+            foreach (var name in new[] { "shop_restored", "shop" })
+            {
+                var restore = new SqlRestoreRequestDto(Guid.Empty, "SQLEXPRESS", "shop", vm, "SQLEXPRESS", login.Id, name, SqlRestoreFiles.Original, null, null, SqlDatabaseId: shopId);
+                await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync("/api/sql/restores", restore, Ct))).SessionId);
+            }
+
+            CopyDirectory(Path.Combine(_root, "repo"), Path.Combine(keep!, "repo"));
+
+            // The catalog too, for a console with this data (pg_restore into its own database).
+            var dump = await _postgres.ExecAsync(["pg_dump", "-U", "postgres", "-d", "postgres", "--no-owner", "-Fc", "-f", "/tmp/ui.dump"], Ct);
+            Assert.True(dump.ExitCode == 0, dump.Stderr);
+            await File.WriteAllBytesAsync(Path.Combine(keep!, "catalog.dump"), await _postgres.ReadFileAsync("/tmp/ui.dump", Ct), Ct);
         }
         finally
         {

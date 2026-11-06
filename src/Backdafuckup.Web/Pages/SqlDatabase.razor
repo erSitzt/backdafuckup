@@ -18,22 +18,19 @@ else if (_detail is null)
 else
 {
     var d = _detail.Database;
-    <div class="d-flex align-center mb-1">
-        <MudIconButton Icon="@Icons.Material.Filled.ArrowBack" Href="/sql/databases" />
-        <MudText Typo="Typo.h4">@d.Name</MudText>
-        <MudChip T="string" Class="ml-3" Color="@SqlDatabases.ChainColor(d.ChainState)">@SqlDatabases.ChainLabel(d.ChainState)</MudChip>
-    </div>
-    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-3">
-        @d.Instance on @d.VmName · @(d.RecoveryModel ?? "recovery model unknown") · @(d.ProductVersion is null ? "" : $"SQL Server {d.ProductVersion} · ")
-        last log backup @Fmt.Time(d.LastLogUtc) · last full backup @Fmt.Time(d.LastFullUtc)
-    </MudText>
+    <PageHeader Title="@d.Name" Back="/sql/databases"
+                Description="@($"{d.Instance} on {d.VmName} · {d.RecoveryModel ?? "recovery model unknown"} · {(d.ProductVersion is null ? "" : $"SQL Server {d.ProductVersion} · ")}last log backup {Fmt.Time(d.LastLogUtc)} · last full backup {Fmt.Time(d.LastFullUtc)}")">
+        <TitleContent>
+            <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@SqlDatabases.ChainColor(d.ChainState)" Icon="@SqlDatabases.ChainIcon(d.ChainState)">@SqlDatabases.ChainLabel(d.ChainState)</MudChip>
+        </TitleContent>
+    </PageHeader>
     @if (d.ChainReason is not null)
     {
         <MudAlert Severity="@(d.ChainState == "Simple" ? Severity.Info : Severity.Warning)" Dense="true" Class="mb-3">@d.ChainReason</MudAlert>
     }
 
     <MudPaper Class="pa-3" Elevation="1">
-        <MudText Typo="Typo.h6" Class="mb-2">Restore to a point in time</MudText>
+        <MudText Typo="Typo.h6" Class="section-title mb-2">Restore to a point in time</MudText>
         @if (_detail.Spans.Count == 0)
         {
             <MudText Typo="Typo.body2">No backup of this database can be restored yet (no full backup it could start from).</MudText>
@@ -118,7 +115,7 @@ else
     @if (_detail.Fulls.Count > 0)
     {
         <MudPaper Class="pa-3 mt-4" Elevation="1">
-            <MudText Typo="Typo.h6">Full backups (.bak)</MudText>
+            <MudText Typo="Typo.h6" Class="section-title">Full backups (.bak)</MudText>
             <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
                 The full backups the agent took, read straight from the repository. Restore one anywhere with
                 <span class="mono">RESTORE DATABASE … FROM DISK = N'…' WITH MOVE …</span> (<span class="mono">RESTORE FILELISTONLY</span> lists the files).

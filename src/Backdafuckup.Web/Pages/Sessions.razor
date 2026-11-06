@@ -4,10 +4,9 @@
 @inject LiveConnection Live
 
 <PageTitle>History – backdafuckup</PageTitle>
-<div class="d-flex align-center mb-4">
-    <MudText Typo="Typo.h4">History</MudText>
-    <MudSpacer />
-    <MudSelect T="string" Value="_kind" ValueChanged="OnKindChangedAsync" Label="Type" Dense="true" Variant="Variant.Outlined" Style="max-width:220px">
+<PageHeader Title="History" Description="Every backup, restore and maintenance session, newest first. Open one for its details and log.">
+    <Actions>
+    <MudSelect T="string" Value="_kind" ValueChanged="OnKindChangedAsync" Label="Type" Dense="true" Margin="Margin.Dense" Variant="Variant.Outlined" Style="width:220px">
         <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
         <MudSelectItem T="string" Value="@("Backup")">Backup</MudSelectItem>
         <MudSelectItem T="string" Value="@("Restore")">Restore</MudSelectItem>
@@ -18,7 +17,8 @@
         <MudSelectItem T="string" Value="@("SqlBackup")">SQL Server backups</MudSelectItem>
         <MudSelectItem T="string" Value="@("RepositoryMaintenance")">Maintenance</MudSelectItem>
     </MudSelect>
-</div>
+    </Actions>
+</PageHeader>
 
 @if (_sessions is null)
 {

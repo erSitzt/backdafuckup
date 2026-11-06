@@ -1,37 +1,57 @@
-<MudSimpleTable Dense="true" Hover="true" Elevation="0">
-    <thead>
-        <tr>
-            <th>Session</th><th>Type</th><th>State</th><th>Started</th><th>Duration</th>
-            <th>Processed</th><th>Read</th><th>Transferred</th><th>Rate</th><th>Dedupe</th><th>Compression</th>
-        </tr>
-    </thead>
-    <tbody>
-        @foreach (var s in Sessions)
-        {
-            var m = s.Metrics;
+@* Sessions as a table that fits its box: the less important columns go when it is narrow (see .cq in app.css). *@
+<div class="cq">
+    <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+        <thead>
             <tr>
-                <td><MudLink Href="@($"/sessions/{s.Id}")">@s.Name</MudLink></td>
-                <td>@s.Kind</td>
-                <td><MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(s.State)">@s.State</MudChip></td>
-                <td>
-                    @Fmt.Time(s.StartedUtc ?? s.CreatedUtc)
-                    @if (s.Kind == "SqlBackup")
-                    {
-                        <br /><MudText Typo="Typo.caption">@(s.State == "Running" ? "running now" : $"last run {Fmt.Time(s.EndedUtc)}")</MudText>
-                    }
-                </td>
-                @* A day session of SQL Server backups spans the day's runs: its "duration" would only mislead. *@
-                <td>@(s.Kind == "SqlBackup" ? "–" : Fmt.Duration(s.StartedUtc, s.EndedUtc))</td>
-                <td>@Fmt.Bytes(m?.ProcessedBytes)</td>
-                <td>@Fmt.Bytes(s.ReadBytes)</td>
-                <td>@Fmt.Bytes(s.TransferredBytes)</td>
-                <td>@Fmt.Rate(m?.ProcessingRate)</td>
-                <td>@Fmt.Ratio(m?.DedupeRatio)</td>
-                <td>@Fmt.Ratio(m?.CompressionRatio)</td>
+                <th>Session</th>
+                <th>State</th>
+                <th class="c-560">Started</th>
+                <th class="c-560 num">Duration</th>
+                <th class="c-1100 num">Processed</th>
+                <th class="c-1100 num">Read</th>
+                <th class="c-560 num">Transferred</th>
+                <th class="c-950 num">Rate</th>
+                <th class="c-1100 num">Dedupe</th>
+                <th class="c-1100 num">Compression</th>
             </tr>
-        }
-    </tbody>
-</MudSimpleTable>
+        </thead>
+        <tbody>
+            @if (Sessions.Count == 0)
+            {
+                <tr><td colspan="10"><MudText Typo="Typo.body2" Color="Color.Secondary">No sessions yet.</MudText></td></tr>
+            }
+            @foreach (var s in Sessions)
+            {
+                var m = s.Metrics;
+                var day = s.Kind == "SqlBackup";
+                @* A day session of SQL Server backups spans the day's runs: its last run says more than its start, and a duration would mislead. *@
+                var when = day ? s.EndedUtc ?? s.StartedUtc ?? s.CreatedUtc : s.StartedUtc ?? s.CreatedUtc;
+                var whenText = day ? (s.State == "Running" ? "running now" : "last run") : null;
+                <tr>
+                    <td style="min-width:170px">
+                        <MudLink Href="@($"/sessions/{s.Id}")">@s.Name</MudLink>
+                        <span class="cell-sub">@Fmt.Kind(s.Kind)<span class="n-560"> · @Fmt.Time(when)</span></span>
+                    </td>
+                    <td><StateChip State="@s.State" /></td>
+                    <td class="c-560 nowrap">
+                        @Fmt.Time(when)
+                        @if (whenText is not null)
+                        {
+                            <span class="cell-sub">@whenText</span>
+                        }
+                    </td>
+                    <td class="c-560 num">@(day ? "–" : Fmt.Duration(s.StartedUtc, s.EndedUtc))</td>
+                    <td class="c-1100 num">@Fmt.Bytes(m?.ProcessedBytes)</td>
+                    <td class="c-1100 num">@Fmt.Bytes(s.ReadBytes)</td>
+                    <td class="c-560 num">@Fmt.Bytes(s.TransferredBytes)</td>
+                    <td class="c-950 num">@Fmt.Rate(m?.ProcessingRate)</td>
+                    <td class="c-1100 num">@Fmt.Ratio(m?.DedupeRatio)</td>
+                    <td class="c-1100 num">@Fmt.Ratio(m?.CompressionRatio)</td>
+                </tr>
+            }
+        </tbody>
+    </MudSimpleTable>
+</div>
 
 @code {
     [Parameter] public IReadOnlyList<SessionSummaryDto> Sessions { get; set; } = [];

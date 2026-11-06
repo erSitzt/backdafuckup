@@ -13,10 +13,15 @@
 }
 else
 {
-    <div class="d-flex align-center mb-2">
-        <MudText Typo="Typo.h4">@_session.Name</MudText>
-        <MudChip T="string" Class="ml-3" Color="@Fmt.StateColor(_session.State)">@_session.State</MudChip>
-        <MudSpacer />
+    <PageHeader Title="@_session.Name" Back="/sessions">
+        <TitleContent><StateChip State="@_session.State" /></TitleContent>
+        <DescriptionContent>
+            <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mt-1">
+                @Fmt.Kind(_session.Kind) · started by @_session.TriggeredBy · @Fmt.Time(_session.StartedUtc ?? _session.CreatedUtc)@(_session.Kind == "SqlBackup" ? "" : $" · duration {Fmt.Duration(_session.StartedUtc, _session.EndedUtc)}")
+                @if (_session.Summary is not null) { <span> · @_session.Summary</span> }
+            </MudText>
+        </DescriptionContent>
+        <Actions>
         @if (_session.State is "Running" or "Queued" && _session.Kind != "SqlBackup")
         {
             @if (_session.Kind == "SqlPublish")
@@ -30,11 +35,8 @@ else
                 <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.Stop" OnClick="StopAsync">Stop</MudButton>
             }
         }
-    </div>
-    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-3">
-        @_session.Kind · started by @_session.TriggeredBy · @Fmt.Time(_session.StartedUtc ?? _session.CreatedUtc) · duration @Fmt.Duration(_session.StartedUtc, _session.EndedUtc)
-        @if (_session.Summary is not null) { <span> · @_session.Summary</span> }
-    </MudText>
+        </Actions>
+    </PageHeader>
     var m = _session.Metrics ?? new TransferMetricsDto { ReadBytes = _session.ReadBytes, StoredBytes = _session.TransferredBytes };
     var running = _session.State is "Running" or "Stopping";
     @if (_session.Kind == "SqlExport")
@@ -123,12 +125,13 @@ else
     @if (_tasks.Values.Any(t => t.Metrics?.Disks is { Count: > 0 }))
     {
     <MudPaper Class="pa-3 mb-3" Elevation="1">
-        <MudText Typo="Typo.h6" Class="mb-2">Disks</MudText>
-        <MudSimpleTable Dense="true" Elevation="0" Style="overflow-x:auto">
+        <MudText Typo="Typo.h6" Class="section-title mb-2">Disks</MudText>
+        <div class="cq">
+        <MudSimpleTable Dense="true" Elevation="0">
             <thead>
                 <tr>
-                    <th>Object</th><th>Disk</th><th>State</th><th>Mode</th><th>Transport</th><th>Processed</th><th>Read</th>
-                    <th>New → stored</th><th>Dedupe</th><th>Compression</th><th>Rate</th><th>Duration</th><th>Bottleneck</th>
+                    <th>Object</th><th>Disk</th><th class="c-560">State</th><th class="c-760">Mode</th><th class="c-950">Transport</th><th class="num">Processed</th><th class="c-760 num">Read</th>
+                    <th class="c-560 num">New → stored</th><th class="c-1100 num">Dedupe</th><th class="c-1100 num">Compression</th><th class="c-950 num">Rate</th><th class="c-1100 num">Duration</th><th class="c-1100">Bottleneck</th>
                 </tr>
             </thead>
             <tbody>
@@ -139,23 +142,24 @@ else
                         var dm = d.Metrics;
                         <tr>
                             <td>@t.ObjectName</td>
-                            <td>@d.Name <MudText Typo="Typo.caption" Color="Color.Secondary">@Fmt.Bytes(d.CapacityBytes)</MudText></td>
-                            <td>@d.State</td>
-                            <td title="@d.FullReason">@(d.Mode ?? "–")@(d.Mode == "Full" && d.FullReason is not null ? " *" : "")</td>
-                            <td>@(d.Transport ?? "–")</td>
-                            <td>@Fmt.Bytes(dm.ProcessedBytes)</td>
-                            <td>@Fmt.Bytes(dm.ReadBytes)</td>
-                            <td>@Fmt.Bytes(dm.NewDataBytes) → @Fmt.Bytes(dm.StoredBytes)</td>
-                            <td>@Fmt.Ratio(dm.DedupeRatio)</td>
-                            <td>@Fmt.Ratio(dm.CompressionRatio)</td>
-                            <td>@Fmt.Rate(dm.ProcessingRate)</td>
-                            <td>@(dm.Seconds > 0 ? Fmt.Seconds(dm.Seconds) : "–")</td>
-                            <td>@(dm.Bottleneck is { } b ? $"{b} ({Fmt.Percent(Math.Max(dm.SourceLoad, Math.Max(dm.ProcessingLoad, dm.TargetLoad)))})" : "–")</td>
+                            <td>@d.Name <span class="cell-sub">@Fmt.Bytes(d.CapacityBytes)</span></td>
+                            <td class="c-560">@d.State</td>
+                            <td class="c-760" title="@d.FullReason">@(d.Mode ?? "–")@(d.Mode == "Full" && d.FullReason is not null ? " *" : "")</td>
+                            <td class="c-950">@(d.Transport ?? "–")</td>
+                            <td class="num">@Fmt.Bytes(dm.ProcessedBytes)</td>
+                            <td class="c-760 num">@Fmt.Bytes(dm.ReadBytes)</td>
+                            <td class="c-560 num">@Fmt.Bytes(dm.NewDataBytes) → @Fmt.Bytes(dm.StoredBytes)</td>
+                            <td class="c-1100 num">@Fmt.Ratio(dm.DedupeRatio)</td>
+                            <td class="c-1100 num">@Fmt.Ratio(dm.CompressionRatio)</td>
+                            <td class="c-950 num">@Fmt.Rate(dm.ProcessingRate)</td>
+                            <td class="c-1100 num">@(dm.Seconds > 0 ? Fmt.Seconds(dm.Seconds) : "–")</td>
+                            <td class="c-1100 nowrap">@(dm.Bottleneck is { } b ? $"{b} ({Fmt.Percent(Math.Max(dm.SourceLoad, Math.Max(dm.ProcessingLoad, dm.TargetLoad)))})" : "–")</td>
                         </tr>
                     }
                 }
             </tbody>
         </MudSimpleTable>
+        </div>
         <MudText Typo="Typo.caption" Color="Color.Secondary">* Full read; hover for the reason. Rates refer to the transfer time of the disk.</MudText>
     </MudPaper>
     }
@@ -163,14 +167,14 @@ else
     <MudGrid>
         <MudItem xs="12" md="5">
             <MudPaper Class="pa-3" Elevation="1">
-                <MudText Typo="Typo.h6" Class="mb-2">Objects</MudText>
+                <MudText Typo="Typo.h6" Class="section-title mb-2">Objects</MudText>
                 @foreach (var t in _tasks.Values.OrderBy(t => t.ObjectName))
                 {
                     var tm = t.Metrics;
                     <div class="d-flex align-center">
                         <MudText Typo="Typo.body1">@t.ObjectName</MudText>
                         <MudSpacer />
-                        <MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(t.State)">@t.State</MudChip>
+                        <StateChip State="@t.State" />
                     </div>
                     <MudProgressLinear Value="@t.Progress" Color="@Fmt.StateColor(t.State)" />
                     <MudText Typo="Typo.caption" Class="d-block mb-3">

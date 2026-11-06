@@ -2,9 +2,9 @@
 @inject ApiClient Api
 
 <PageTitle>About – backdafuckup</PageTitle>
-<MudText Typo="Typo.h4" Class="mb-4">About</MudText>
+<PageHeader Title="About" />
 <MudPaper Class="pa-4" Elevation="1">
-    <img src="img/backdafuckup-banner-512x128.png" alt="backdafuckup" width="384" height="96" style="border-radius:8px;display:block" class="mb-3" />
+    <img src="img/backdafuckup-banner-512x128.png" alt="backdafuckup" width="384" height="96" style="border-radius:8px;display:block;max-width:100%;height:auto" class="mb-3" />
     <MudText Typo="Typo.body1" Class="mb-3">Open-source VM backup for XCP-ng / XenServer. Licensed under the GNU Affero General Public License v3.0.</MudText>
     @if (_about is { } about)
     {

@@ -7,11 +7,9 @@
 @inject LiveConnection Live
 
 <PageTitle>Backup jobs – backdafuckup</PageTitle>
-<div class="d-flex align-center mb-4">
-    <MudText Typo="Typo.h4">Backup Jobs</MudText>
-    <MudSpacer />
-    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" Href="/jobs/new">New job</MudButton>
-</div>
+<PageHeader Title="Backup Jobs" Description="What is backed up, where to and when. Run a job now, or pause it.">
+    <Actions><MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" Href="/jobs/new">New job</MudButton></Actions>
+</PageHeader>
 
 @if (_jobs is null)
 {
@@ -19,46 +17,55 @@
 }
 else
 {
-    <MudTable Items="_jobs" Hover="true" Dense="true" Elevation="1">
+    <div class="cq">
+    <MudTable Items="_jobs" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
         <HeaderContent>
-            <MudTh>Name</MudTh><MudTh>VMs</MudTh><MudTh>Repository</MudTh><MudTh>Schedule</MudTh><MudTh>Last result</MudTh><MudTh>Last run</MudTh><MudTh>Next run</MudTh><MudTh></MudTh>
+            <MudTh>Name</MudTh><MudTh Class="c-760 num">VMs</MudTh><MudTh Class="c-950">Repository</MudTh><MudTh Class="c-560">Schedule</MudTh><MudTh>Last result</MudTh><MudTh Class="c-760">Last run</MudTh><MudTh Class="c-560">Next run</MudTh><MudTh></MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd>
                 <MudLink Href="@($"/jobs/{context.Id}")">@context.Name</MudLink>
-                @if (!context.Enabled) { <MudChip T="string" Size="Size.Small">disabled</MudChip> }
+                @if (!context.Enabled) { <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Icon="@Icons.Material.Filled.PauseCircle">disabled</MudChip> }
+                <span class="cell-sub n-560">@Describe(context.Schedule) · next @Fmt.Time(context.NextRunUtc)</span>
             </MudTd>
-            <MudTd>@context.Objects.Count</MudTd>
-            <MudTd>@context.RepositoryName</MudTd>
-            <MudTd>@Describe(context.Schedule)</MudTd>
+            <MudTd Class="c-760 num">@context.Objects.Count</MudTd>
+            <MudTd Class="c-950">@context.RepositoryName</MudTd>
+            <MudTd Class="c-560 nowrap">@Describe(context.Schedule)</MudTd>
             <MudTd>
                 @if (context.IsRunning)
                 {
-                    <MudChip T="string" Size="Size.Small" Color="Color.Info">Running</MudChip>
+                    <StateChip State="Running" />
                 }
                 else if (context.LastResult is not null)
                 {
-                    <MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(context.LastResult)">@context.LastResult</MudChip>
+                    <StateChip State="@context.LastResult" />
                 }
             </MudTd>
-            <MudTd>@Fmt.Time(context.LastRunUtc)</MudTd>
-            <MudTd>@Fmt.Time(context.NextRunUtc)</MudTd>
-            <MudTd Style="text-align:right; white-space:nowrap">
+            <MudTd Class="c-760 nowrap">@Fmt.Time(context.LastRunUtc)</MudTd>
+            <MudTd Class="c-560 nowrap">@Fmt.Time(context.NextRunUtc)</MudTd>
+            <MudTd Style="white-space:nowrap">
+                <div class="d-flex align-center justify-end">
                 @if (context.IsRunning)
                 {
                     <MudTooltip Text="Open running session"><MudIconButton Icon="@Icons.Material.Filled.Visibility" OnClick="@(() => OpenRunningAsync(context))" /></MudTooltip>
                 }
                 else
                 {
-                    <MudTooltip Text="Run now (incremental)"><MudIconButton Icon="@Icons.Material.Filled.PlayArrow" Color="Color.Primary" OnClick="@(() => RunAsync(context, false))" /></MudTooltip>
-                    <MudTooltip Text="Active full"><MudIconButton Icon="@Icons.Material.Filled.FastForward" OnClick="@(() => RunAsync(context, true))" /></MudTooltip>
+                    <MudTooltip Text="Run now (incremental)"><MudIconButton Icon="@Icons.Material.Filled.PlayArrow" Color="Color.Primary" OnClick="@(() => RunAsync(context, false))" aria-label="@($"Run {context.Name} now")" /></MudTooltip>
                 }
-                <MudTooltip Text="@(context.Enabled ? "Disable" : "Enable")"><MudIconButton Icon="@(context.Enabled ? Icons.Material.Filled.PauseCircle : Icons.Material.Filled.PlayCircle)" OnClick="@(() => ToggleAsync(context))" /></MudTooltip>
-                <MudTooltip Text="Delete"><MudIconButton Icon="@Icons.Material.Filled.Delete" Color="Color.Error" Disabled="context.IsRunning" OnClick="@(() => DeleteAsync(context))" /></MudTooltip>
+                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                    <MudMenuItem Icon="@Icons.Material.Filled.FastForward" Disabled="context.IsRunning" OnClick="@(() => RunAsync(context, true))">Run an active full</MudMenuItem>
+                    <MudMenuItem Icon="@Icons.Material.Filled.Edit" Href="@($"/jobs/{context.Id}")">Edit</MudMenuItem>
+                    <MudMenuItem Icon="@(context.Enabled ? Icons.Material.Filled.PauseCircle : Icons.Material.Filled.PlayCircle)" OnClick="@(() => ToggleAsync(context))">@(context.Enabled ? "Disable" : "Enable")</MudMenuItem>
+                    <MudDivider />
+                    <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" Disabled="context.IsRunning" OnClick="@(() => DeleteAsync(context))">Delete</MudMenuItem>
+                </MudMenu>
+                </div>
             </MudTd>
         </RowTemplate>
         <NoRecordsContent><MudText>No backup job yet.</MudText></NoRecordsContent>
     </MudTable>
+    </div>
 }
 
 @code {

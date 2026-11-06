@@ -3,16 +3,13 @@
 @inject NavigationManager Navigation
 
 <PageTitle>SQL Server – backdafuckup</PageTitle>
-<div class="d-flex align-center flex-wrap gap-2 mb-2">
-    <MudText Typo="Typo.h4">SQL Server databases</MudText>
-    <MudSpacer />
-    <MudTextField T="string" @bind-Value="_filter" Placeholder="Filter (VM, instance, database)" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search"
-                  Immediate="true" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:320px;min-width:220px" />
-</div>
-<MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
-    The databases of the backed-up SQL Server instances: what their log chain covers and whether it is intact. Open one to
-    restore it to any second of that time. Jobs back up the logs when their SQL Server backups are turned on (job settings).
-</MudText>
+<PageHeader Title="SQL Server databases"
+            Description="The databases of the backed-up SQL Server instances: what their log chain covers and whether it is intact. Open one to restore it to any second of that time. Jobs back up the logs when their SQL Server backups are turned on (job settings).">
+    <Actions>
+        <MudTextField T="string" @bind-Value="_filter" Placeholder="Filter (VM, instance, database)" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search"
+                      Immediate="true" Variant="Variant.Outlined" Margin="Margin.Dense" Style="width:300px" />
+    </Actions>
+</PageHeader>
 
 @if (_error is not null)
 {
@@ -31,33 +28,35 @@ else if (_databases.Count == 0)
 }
 else
 {
-    <MudTable Items="Filtered()" Dense="true" Hover="true" Elevation="1" OnRowClick="@((TableRowClickEventArgs<SqlCatalogDatabaseDto> e) => Navigation.NavigateTo($"/sql/databases/{e.Item!.Id}"))"
+    <div class="cq">
+    <MudTable Items="Filtered()" Dense="true" Hover="true" Elevation="1" Breakpoint="Breakpoint.None" OnRowClick="@((TableRowClickEventArgs<SqlCatalogDatabaseDto> e) => Navigation.NavigateTo($"/sql/databases/{e.Item!.Id}"))"
               RowStyle="cursor:pointer">
         <HeaderContent>
-            <MudTh>VM</MudTh>
-            <MudTh>Instance</MudTh>
+            <MudTh Class="c-560">VM</MudTh>
+            <MudTh Class="c-760">Instance</MudTh>
             <MudTh>Database</MudTh>
-            <MudTh>Recovery</MudTh>
+            <MudTh Class="c-950">Recovery</MudTh>
             <MudTh>Log chain</MudTh>
-            <MudTh>Last log backup</MudTh>
-            <MudTh>Last full backup</MudTh>
-            <MudTh>Restorable</MudTh>
+            <MudTh Class="c-560">Last log backup</MudTh>
+            <MudTh Class="c-1100">Last full backup</MudTh>
+            <MudTh Class="c-950">Restorable</MudTh>
         </HeaderContent>
         <RowTemplate>
-            <MudTd DataLabel="VM" Style="white-space:nowrap">@context.VmName</MudTd>
-            <MudTd DataLabel="Instance">@context.Instance</MudTd>
-            <MudTd DataLabel="Database"><b>@context.Name</b></MudTd>
-            <MudTd DataLabel="Recovery">@(context.RecoveryModel ?? "–")</MudTd>
+            <MudTd DataLabel="VM" Class="c-560 nowrap">@context.VmName</MudTd>
+            <MudTd DataLabel="Instance" Class="c-760">@context.Instance</MudTd>
+            <MudTd DataLabel="Database"><b>@context.Name</b><span class="cell-sub n-560">@context.Instance on @context.VmName</span></MudTd>
+            <MudTd DataLabel="Recovery" Class="c-950">@(context.RecoveryModel ?? "–")</MudTd>
             <MudTd DataLabel="Log chain">
                 <MudTooltip Text="@(context.ChainReason ?? ChainText(context.ChainState))">
-                    <MudChip T="string" Size="Size.Small" Color="@ChainColor(context.ChainState)">@ChainLabel(context.ChainState)</MudChip>
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@ChainColor(context.ChainState)" Icon="@ChainIcon(context.ChainState)">@ChainLabel(context.ChainState)</MudChip>
                 </MudTooltip>
             </MudTd>
-            <MudTd DataLabel="Last log backup" Style="white-space:nowrap">@Fmt.Time(context.LastLogUtc)</MudTd>
-            <MudTd DataLabel="Last full backup" Style="white-space:nowrap">@Fmt.Time(context.LastFullUtc)</MudTd>
-            <MudTd DataLabel="Restorable">@(context.CoveredFromUtc is { } from ? $"{Fmt.Time(from)} – {Fmt.Time(context.CoveredToUtc)}" : "–")</MudTd>
+            <MudTd DataLabel="Last log backup" Class="c-560 nowrap">@Fmt.Time(context.LastLogUtc)</MudTd>
+            <MudTd DataLabel="Last full backup" Class="c-1100 nowrap">@Fmt.Time(context.LastFullUtc)</MudTd>
+            <MudTd DataLabel="Restorable" Class="c-950">@(context.CoveredFromUtc is { } from ? $"{Fmt.Time(from)} – {Fmt.Time(context.CoveredToUtc)}" : "–")</MudTd>
         </RowTemplate>
     </MudTable>
+    </div>
 }
 
 @code {
@@ -95,6 +94,14 @@ else
         "Ok" => "A full backup and an unbroken chain of log backups since then.",
         "Simple" => "SIMPLE recovery: no log backups; restorable to the times of its full backups only.",
         _ => "No SQL Server backup run has checked the chain yet (new database, or a repository just imported); the next run does.",
+    };
+
+    internal static string ChainIcon(string state) => state switch
+    {
+        "Ok" => Icons.Material.Filled.Link,
+        "Broken" => Icons.Material.Filled.LinkOff,
+        "NoBase" => Icons.Material.Filled.Warning,
+        _ => Icons.Material.Filled.HelpOutline,
     };
 
     internal static Color ChainColor(string state) => state switch

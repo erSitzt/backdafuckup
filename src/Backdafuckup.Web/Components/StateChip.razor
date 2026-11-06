@@ -1,0 +1,12 @@
+@* A state (session, job result, repository, pool) as a tinted chip with an icon: calmer than a filled chip in long lists. *@
+@if (!string.IsNullOrEmpty(State))
+{
+    <MudChip T="string" Size="@Size" Variant="Variant.Text" Color="@Fmt.StateColor(State)" Icon="@Fmt.StateIcon(State)" Class="@("state-chip " + Class)">@(Label ?? State)</MudChip>
+}
+
+@code {
+    [Parameter] public string? State { get; set; }
+    [Parameter] public string? Label { get; set; }
+    [Parameter] public Size Size { get; set; } = Size.Small;
+    [Parameter] public string? Class { get; set; }
+}

@@ -5,7 +5,7 @@
 @inject NavigationManager Navigation
 
 <PageTitle>@(Id is null ? "New job" : "Edit job") – backdafuckup</PageTitle>
-<MudText Typo="Typo.h4" Class="mb-4">@(Id is null ? "New Backup Job" : $"Edit {_name}")</MudText>
+<PageHeader Title="@(Id is null ? "New Backup Job" : $"Edit {_name}")" Back="/jobs" />
 
 @if (_pools is null || _repositories is null)
 {

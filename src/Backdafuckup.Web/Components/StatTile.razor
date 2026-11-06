@@ -1,7 +1,10 @@
-<MudPaper Class="pa-4 d-flex align-center" Elevation="1" Style="height:100%">
-    <MudIcon Icon="@Icon" Color="@Color" Size="Size.Large" Class="mr-4" />
+@{ var tone = Color == MudBlazor.Color.Default ? "text-secondary" : Color.ToString().ToLowerInvariant(); }
+<MudPaper Class="pa-4 d-flex align-center" Elevation="1" Style="height:100%;gap:16px">
+    <div class="stat-icon" style="@($"color:var(--mud-palette-{tone});background:color-mix(in srgb, var(--mud-palette-{tone}) 13%, transparent)")">
+        <MudIcon Icon="@Icon" Style="font-size:28px" />
+    </div>
     <div style="min-width:0">
-        <MudText Typo="Typo.h5">@Value</MudText>
+        <MudText Typo="Typo.h5" Style="font-weight:600;line-height:1.15">@Value</MudText>
         <MudText Typo="Typo.body2" Color="MudBlazor.Color.Secondary">@Title</MudText>
         @if (!string.IsNullOrEmpty(Detail))
         {

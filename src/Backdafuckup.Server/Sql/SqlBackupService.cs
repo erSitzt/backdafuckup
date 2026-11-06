@@ -54,6 +54,9 @@ public sealed class SqlBackupService(
 {
     private readonly ConcurrentDictionary<(Guid Job, string Vm), Task> _running = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _sessionLocks = new();
+
+    /// <summary>Per day session: the runs of all its VMs that started in the same minute, summed for the summary.</summary>
+    private readonly ConcurrentDictionary<Guid, (string Slot, int Vms, int Logs, int Fulls, long Bytes)> _slotTotals = new();
     private readonly ConcurrentDictionary<(Guid Job, string Vm), DateOnly> _retained = new();
     private SemaphoreSlim? _slots;
 
@@ -209,7 +212,7 @@ public sealed class SqlBackupService(
 
             await events.FlushAsync().ConfigureAwait(false);
             await ScheduleNextAsync(job, vm, work, started, run, CancellationToken.None).ConfigureAwait(false);
-            await CloseDayAsync(job, sessionId, taskId, previous, run, CancellationToken.None).ConfigureAwait(false);
+            await CloseDayAsync(job, sessionId, taskId, previous, started, run, CancellationToken.None).ConfigureAwait(false);
         }
 
         if (_retained.TryGetValue((job.Id, vm.NativeId), out var day) && day == DateOnly.FromDateTime(started.UtcDateTime))
@@ -614,7 +617,7 @@ public sealed class SqlBackupService(
         }
     }
 
-    private async Task CloseDayAsync(BackupJob job, Guid sessionId, Guid taskId, SessionState? previous, RunOutcome run, CancellationToken cancellationToken)
+    private async Task CloseDayAsync(BackupJob job, Guid sessionId, Guid taskId, SessionState? previous, DateTimeOffset started, RunOutcome run, CancellationToken cancellationToken)
     {
         var gate = _sessionLocks.GetOrAdd(job.Id, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -632,15 +635,21 @@ public sealed class SqlBackupService(
 
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             var states = await db.SessionTasks.Where(t => t.SessionId == sessionId).Select(t => t.State).ToListAsync(cancellationToken).ConfigureAwait(false);
-            // The job's time zone, as its schedule and the console's log times.
-            var local = TimeZoneInfo.ConvertTime(now, ScheduleCalculator.FindZone(job.Schedule.TimeZoneId)).ToString("HH:mm", CultureInfo.InvariantCulture);
+            // The job's time zone, as its schedule and the console's log times. The VMs of one run (started in the same
+            // minute) are summed, so the summary covers all of them, not only the VM that finished last.
+            var local = TimeZoneInfo.ConvertTime(started, ScheduleCalculator.FindZone(job.Schedule.TimeZoneId)).ToString("HH:mm", CultureInfo.InvariantCulture);
+            (string Slot, int Vms, int Logs, int Fulls, long Bytes) totals = _slotTotals.TryGetValue(sessionId, out var slot) && slot.Slot == local
+                ? (local, slot.Vms + 1, slot.Logs + run.Logs, slot.Fulls + run.Fulls, slot.Bytes + run.Bytes)
+                : (local, 1, run.Logs, run.Fulls, run.Bytes);
+            _slotTotals[sessionId] = totals;
             await tracker.UpdateSessionAsync(sessionId, s =>
             {
                 s.State = Worst(states);
                 s.EndedUtc = s.State == SessionState.Running ? null : now;
                 s.TransferredBytes += run.Bytes;
                 s.Progress = 100;
-                s.Summary = $"Last run {local}: {run.Logs} log backup(s), {run.Fulls} full backup(s), {run.Bytes:N0} bytes" +
+                s.Summary = $"Last run {local}: {totals.Logs} log backup(s), {totals.Fulls} full backup(s), {totals.Bytes:N0} bytes" +
+                    (totals.Vms > 1 ? $" ({totals.Vms} VMs)" : string.Empty) +
                     (run.State == SessionState.Succeeded ? "." : $"; {run.Lines.LastOrDefault(l => l.Severity != LogSeverity.Info).Message}");
             }, cancellationToken).ConfigureAwait(false);
         }

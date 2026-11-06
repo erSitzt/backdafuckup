@@ -5,11 +5,9 @@
 @inject NavigationManager Navigation
 
 <PageTitle>Repositories – backdafuckup</PageTitle>
-<div class="d-flex align-center mb-4">
-    <MudText Typo="Typo.h4">Backup Repositories</MudText>
-    <MudSpacer />
-    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add repository</MudButton>
-</div>
+<PageHeader Title="Backup Repositories" Description="Where the backups are stored: deduplicated and compressed, every restore point complete on its own.">
+    <Actions><MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add repository</MudButton></Actions>
+</PageHeader>
 
 @if (_adding)
 {
@@ -46,25 +44,33 @@
 }
 else
 {
-    <MudTable Items="_items" Hover="true" Dense="true" Elevation="1">
+    <div class="cq">
+    <MudTable Items="_items" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
         <HeaderContent>
-            <MudTh>Name</MudTh><MudTh>Path</MudTh><MudTh>State</MudTh><MudTh>Capacity</MudTh><MudTh>Restore points</MudTh><MudTh>Block size</MudTh><MudTh></MudTh>
+            <MudTh>Name</MudTh><MudTh>State</MudTh><MudTh Class="c-560">Capacity</MudTh><MudTh Class="c-760">Restore points</MudTh><MudTh Class="c-950 num">Block size</MudTh><MudTh></MudTh>
         </HeaderContent>
         <RowTemplate>
-            <MudTd>@context.Name</MudTd>
-            <MudTd><span class="mono">@context.Path</span></MudTd>
-            <MudTd><MudChip T="string" Size="Size.Small" Color="@Fmt.StateColor(context.State)">@context.State</MudChip></MudTd>
-            <MudTd>@Fmt.Bytes(context.FreeBytes) free of @Fmt.Bytes(context.TotalBytes)</MudTd>
-            <MudTd>@context.RestorePoints (@Fmt.Bytes(context.LogicalBytes) of VM disks)</MudTd>
-            <MudTd>@Fmt.Bytes(context.ChunkSize)</MudTd>
+            <MudTd>@context.Name<span class="cell-sub mono">@context.Path</span></MudTd>
+            <MudTd><StateChip State="@context.State" /></MudTd>
+            <MudTd Class="c-560">
+                @{ var used = context.TotalBytes is > 0 && context.FreeBytes is { } free ? 100.0 * (context.TotalBytes.Value - free) / context.TotalBytes.Value : 0; }
+                <MudProgressLinear Value="@used" Rounded="true" Size="Size.Small" Color="@(used > 90 ? Color.Error : used > 75 ? Color.Warning : Color.Primary)" Style="max-width:220px" />
+                <span class="cell-sub nowrap">@Fmt.Bytes(context.FreeBytes) free of @Fmt.Bytes(context.TotalBytes)</span>
+            </MudTd>
+            <MudTd Class="c-760">@context.RestorePoints<span class="cell-sub">@Fmt.Bytes(context.LogicalBytes) of VM disks</span></MudTd>
+            <MudTd Class="c-950 num">@Fmt.Bytes(context.ChunkSize)</MudTd>
             <MudTd Style="text-align:right; white-space:nowrap">
-                <MudTooltip Text="Remove unreferenced data now"><MudIconButton Icon="@Icons.Material.Filled.CleaningServices" OnClick="@(() => CollectGarbageAsync(context))" /></MudTooltip>
-                <MudTooltip Text="Import restore points missing in the catalog"><MudIconButton Icon="@Icons.Material.Filled.Sync" OnClick="@(() => RescanAsync(context))" /></MudTooltip>
-                <MudTooltip Text="Remove from the console (data is kept)"><MudIconButton Icon="@Icons.Material.Filled.Delete" Color="Color.Error" OnClick="@(() => RemoveAsync(context))" /></MudTooltip>
+                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                    <MudMenuItem Icon="@Icons.Material.Filled.CleaningServices" OnClick="@(() => CollectGarbageAsync(context))">Remove unreferenced data now</MudMenuItem>
+                    <MudMenuItem Icon="@Icons.Material.Filled.Sync" OnClick="@(() => RescanAsync(context))">Import restore points missing in the catalog</MudMenuItem>
+                    <MudDivider />
+                    <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => RemoveAsync(context))">Remove from the console (data is kept)</MudMenuItem>
+                </MudMenu>
             </MudTd>
         </RowTemplate>
         <NoRecordsContent><MudText>No repository yet.</MudText></NoRecordsContent>
     </MudTable>
+    </div>
 }
 
 @code {

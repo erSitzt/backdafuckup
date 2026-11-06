@@ -4,7 +4,7 @@
 @inject IDialogService Dialogs
 
 <PageTitle>Backups – backdafuckup</PageTitle>
-<MudText Typo="Typo.h4" Class="mb-4">Backups &amp; Restore</MudText>
+<PageHeader Title="Backups &amp; Restore" Description="The restore points of each VM. Restore the whole VM, single files or SQL Server databases from any of them." />
 
 @if (_points is null)
 {
@@ -16,63 +16,76 @@ else if (_points.Count == 0)
 }
 else
 {
-    <MudTextField @bind-Value="_filter" Placeholder="Filter by VM or job" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Class="mb-3" Style="max-width:400px" />
+    <MudTextField @bind-Value="_filter" Placeholder="Filter by VM or job" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true"
+                  Variant="Variant.Outlined" Margin="Margin.Dense" Class="mb-3" Style="max-width:400px" />
     <MudExpansionPanels MultiExpansion="true">
         @foreach (var vm in _points.Where(Matches).GroupBy(p => (p.VmNativeId, p.VmName)).OrderBy(g => g.Key.VmName))
         {
             var latest = vm.OrderByDescending(p => p.CreatedUtc).First();
             <MudExpansionPanel>
                 <TitleContent>
-                    <div class="d-flex align-center gap-3">
-                        <MudIcon Icon="@Icons.Material.Filled.Computer" />
-                        <MudText Typo="Typo.h6">@vm.Key.VmName</MudText>
+                    <div class="d-flex align-center flex-wrap" style="gap:4px 12px">
+                        <MudIcon Icon="@Icons.Material.Filled.Computer" Color="Color.Secondary" />
+                        <MudText Typo="Typo.subtitle1" Style="font-weight:600">@vm.Key.VmName</MudText>
                         <MudText Typo="Typo.body2" Color="Color.Secondary">@vm.Count() restore point(s) · latest @Fmt.Time(latest.CreatedUtc) · job @latest.JobName</MudText>
                     </div>
                 </TitleContent>
                 <ChildContent>
+                    <div class="cq">
                     <MudSimpleTable Dense="true" Hover="true" Elevation="0">
-                        <thead><tr><th>Created</th><th>Type</th><th>Consistency</th><th>Disks</th><th>New data</th><th>Job</th><th></th></tr></thead>
+                        <thead><tr><th>Created</th><th class="c-560">Type</th><th class="c-420">Consistency</th><th class="c-760 num">Disks</th><th class="c-560 num">New data</th><th class="c-950">Job</th><th></th></tr></thead>
                         <tbody>
                             @foreach (var p in vm.OrderByDescending(p => p.CreatedUtc))
                             {
                                 <tr>
-                                    <td>@Fmt.Time(p.CreatedUtc)</td>
-                                    <td>@p.Kind</td>
-                                    <td>
+                                    <td class="nowrap-wide">@Fmt.Time(p.CreatedUtc)</td>
+                                    <td class="c-560">@p.Kind</td>
+                                    <td class="c-420">
                                         @if (p.Consistency == "application")
                                         {
-                                            <MudChip T="string" Size="Size.Small" Color="Color.Success" Icon="@Icons.Material.Filled.VerifiedUser">application</MudChip>
+                                            <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Success" Icon="@Icons.Material.Filled.VerifiedUser">application</MudChip>
                                         }
                                         else
                                         {
                                             <MudTooltip Text="@(p.ConsistencyReason ?? "Without guest processing: like a power failure; most applications recover by themselves.")">
-                                                <MudChip T="string" Size="Size.Small" Color="@(p.ConsistencyReason is null ? Color.Default : Color.Warning)">crash</MudChip>
+                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@(p.ConsistencyReason is null ? Color.Default : Color.Warning)">crash</MudChip>
                                             </MudTooltip>
                                         }
                                         @if (p.SqlDatabaseCount > 0)
                                         {
                                             <MudTooltip Text="@($"{p.SqlDatabaseCount} SQL Server database(s) in this restore point")">
-                                                <MudChip T="string" Size="Size.Small" Color="Color.Info" Icon="@Icons.Material.Filled.Storage">SQL @p.SqlDatabaseCount</MudChip>
+                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Info" Icon="@Icons.Material.Filled.TableChart">SQL @p.SqlDatabaseCount</MudChip>
                                             </MudTooltip>
                                         }
                                     </td>
-                                    <td>@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))</td>
-                                    <td>@Fmt.Bytes(p.NewStoredBytes)</td>
-                                    <td>@p.JobName</td>
+                                    <td class="c-760 num">@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))</td>
+                                    <td class="c-560 num">@Fmt.Bytes(p.NewStoredBytes)</td>
+                                    <td class="c-950">@p.JobName</td>
                                     <td style="text-align:right;white-space:nowrap">
-                                        <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Restore" Href="@($"/restore/{p.Id}")">Restore VM</MudButton>
-                                        <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.FolderOpen" Href="@($"/files/{p.Id}")" Class="ml-1">Restore files</MudButton>
-                                        @if (p.SqlDatabaseCount > 0)
-                                        {
-                                            <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Storage" Href="@($"/sql/{p.Id}")" Class="ml-1">SQL databases</MudButton>
-                                        }
-                                        <MudTooltip Text="Verify all data"><MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.FactCheck" OnClick="@(() => VerifyAsync(p))" /></MudTooltip>
-                                        <MudTooltip Text="Delete restore point"><MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete" Color="Color.Error" OnClick="@(() => DeleteAsync(p))" /></MudTooltip>
+                                        <MudMenu AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true">
+                                            <ActivatorContent>
+                                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Restore" EndIcon="@Icons.Material.Filled.ArrowDropDown">Restore</MudButton>
+                                            </ActivatorContent>
+                                            <ChildContent>
+                                                <MudMenuItem Icon="@Icons.Material.Filled.Computer" Href="@($"/restore/{p.Id}")">Entire VM</MudMenuItem>
+                                                <MudMenuItem Icon="@Icons.Material.Filled.FolderOpen" Href="@($"/files/{p.Id}")">Files and folders</MudMenuItem>
+                                                @if (p.SqlDatabaseCount > 0)
+                                                {
+                                                    <MudMenuItem Icon="@Icons.Material.Filled.TableChart" Href="@($"/sql/{p.Id}")">SQL Server databases</MudMenuItem>
+                                                }
+                                            </ChildContent>
+                                        </MudMenu>
+                                        <MudMenu Icon="@Icons.Material.Filled.MoreVert" Size="Size.Small" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="More actions">
+                                            <MudMenuItem Icon="@Icons.Material.Filled.FactCheck" OnClick="@(() => VerifyAsync(p))">Verify all data</MudMenuItem>
+                                            <MudDivider />
+                                            <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => DeleteAsync(p))">Delete restore point</MudMenuItem>
+                                        </MudMenu>
                                     </td>
                                 </tr>
                             }
                         </tbody>
                     </MudSimpleTable>
+                    </div>
                 </ChildContent>
             </MudExpansionPanel>
         }
