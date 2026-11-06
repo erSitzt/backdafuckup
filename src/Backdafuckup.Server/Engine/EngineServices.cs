@@ -330,6 +330,11 @@ public sealed class StartupRecovery(
             session.Summary = session.Kind == SessionKind.SqlRestore
                 ? Sql.SqlRestoreRecovery.Summary(session.Parameters)
                 : "The backup service was restarted while this session was running.";
+            if (session.Kind == SessionKind.SqlRestore && Sql.SqlRestoreRecovery.NeedsCleanup(session.Parameters))
+            {
+                // SqlRestoreCleanup checks the target once its agent is back and removes what no database uses.
+                session.Parameters = Sql.SqlRestoreRecovery.WithCleanupPending(session.Parameters, pending: true);
+            }
             foreach (var task in session.Tasks.Where(t => t.State is SessionState.Running or SessionState.Queued))
             {
                 task.State = SessionState.Failed;
@@ -524,6 +529,8 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Sql.SqlExportFiles>();
         services.AddSingleton<Sql.SqlBackupDownloads>();
         services.AddSingleton<Sql.SqlPublishLeftovers>();
+        services.AddSingleton<Sql.SqlRestoreCleanup>();
+        services.AddHostedService(sp => sp.GetRequiredService<Sql.SqlRestoreCleanup>());
         services.AddHostedService<Sql.SqlExportSweeper>();
         services.AddSingleton<Sql.SqlCatalogBackfill>();
         services.AddHostedService(sp => sp.GetRequiredService<Sql.SqlCatalogBackfill>());

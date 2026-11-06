@@ -24,6 +24,14 @@ public sealed class SqlRestoreOptions
     /// <summary>How long a publish session waits for the agent to come back to remove a database the publish left.</summary>
     public TimeSpan LeftoverWaitLimit { get; set; } = TimeSpan.FromMinutes(20);
 
+    /// <summary>
+    /// After a start, how long the clean-up of restores a restart interrupted waits before it looks (the agents' own jobs
+    /// from before end first), and for how long after the restart it keeps trying.
+    /// </summary>
+    public TimeSpan CleanupStartDelay { get; set; } = TimeSpan.FromMinutes(5);
+
+    public TimeSpan CleanupGiveUpAfter { get; set; } = TimeSpan.FromDays(1);
+
     public int MinAutoUnpublishMinutes { get; set; } = 15;
 
     public int MaxAutoUnpublishMinutes { get; set; } = 7 * 24 * 60;

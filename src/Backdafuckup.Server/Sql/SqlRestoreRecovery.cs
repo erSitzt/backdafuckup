@@ -12,6 +12,54 @@ namespace Backdafuckup.Server.Sql;
 public static class SqlRestoreRecovery
 {
     private const string PlannedFiles = "PlannedFiles";
+    private const string CleanupPending = "CleanupPending";
+
+    /// <summary>The marker that <see cref="SqlRestoreCleanup"/> looks for.</summary>
+    public const string CleanupPendingJson = "\"CleanupPending\":true";
+
+    /// <summary>The files the restore planned to write (empty before it wrote any).</summary>
+    public static List<string> Planned(string? parameters)
+    {
+        try
+        {
+            return parameters is not null && JsonNode.Parse(parameters)?[PlannedFiles] is JsonArray planned
+                ? [.. planned.Select(f => f?.GetValue<string>()).OfType<string>()]
+                : [];
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>True for a restore as a new database that wrote files: those are checked and removed after a restart.</summary>
+    public static bool NeedsCleanup(string? parameters)
+    {
+        try
+        {
+            return parameters is not null && JsonSerializer.Deserialize<SqlRestoreRequestDto>(parameters) is { Overwrite: false } && Planned(parameters).Count > 0;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The session parameters with the clean-up marker set or removed.</summary>
+    public static string WithCleanupPending(string? parameters, bool pending)
+    {
+        var node = (parameters is null ? null : JsonNode.Parse(parameters) as JsonObject) ?? new JsonObject();
+        if (pending)
+        {
+            node[CleanupPending] = true;
+        }
+        else
+        {
+            node.Remove(CleanupPending);
+        }
+
+        return node.ToJsonString();
+    }
 
     /// <summary>The session parameters with the files the agent writes (target paths, or the copies beside the database's files).</summary>
     public static string WithPlannedFiles(string? parameters, IReadOnlyList<string> files)
@@ -69,7 +117,8 @@ public static class SqlRestoreRecovery
             ? $"The backup service was restarted during the overwrite of {name} on {where}. If the agent had begun to swap the files, it finished or rolled back " +
               $"the overwrite on its own: check that {name} is online. Restored copies may lie beside its files; delete them once it is online: {string.Join(", ", files)} " +
               $"(and *{SqlReplaceNames.ReplacedSuffix} files, if the overwrite finished)."
-            : $"The backup service was restarted during the restore of {name} to {where}. Check whether {name} is attached there. If it is not, delete the files " +
-              $"this restore wrote (it never replaces existing files): {string.Join(", ", files)}.";
+            : $"The backup service was restarted during the restore of {name} to {where}. Once the agent there is reachable, the backup server checks whether " +
+              $"{name} is attached with the restored files; if not, it deletes the files this restore wrote that no database uses (this session's log says what " +
+              $"happened). The files: {string.Join(", ", files)}.";
     }
 }

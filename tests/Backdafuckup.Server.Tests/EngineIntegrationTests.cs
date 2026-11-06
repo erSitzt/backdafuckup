@@ -736,9 +736,15 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         await Services.GetRequiredService<StartupRecovery>().RunAsync(Ct);
 
         await using var check = await DbAsync();
-        var summary = (await check.Sessions.AsNoTracking().SingleAsync(s => s.Id == planned, Ct)).Summary!;
+        var recovered = await check.Sessions.AsNoTracking().SingleAsync(s => s.Id == planned, Ct);
+        var summary = recovered.Summary!;
         Assert.Contains(string.Join(", ", files), summary, StringComparison.Ordinal);
-        Assert.Contains(overwrite ? "check that [shop] is online" : "Check whether [shop_copy] is attached there", summary, StringComparison.Ordinal);
+        Assert.Contains(overwrite ? "check that [shop] is online" : "the backup server checks whether [shop_copy] is attached with the restored files", summary, StringComparison.Ordinal);
+
+        // Only a restore as a new database that wrote files is checked and cleaned up later (SqlRestoreCleanup); the agent
+        // finishes or rolls back an overwrite on its own.
+        Assert.Equal(!overwrite, recovered.Parameters!.Contains(Backdafuckup.Server.Sql.SqlRestoreRecovery.CleanupPendingJson, StringComparison.Ordinal));
+        Assert.DoesNotContain(Backdafuckup.Server.Sql.SqlRestoreRecovery.CleanupPendingJson, (await check.Sessions.AsNoTracking().SingleAsync(s => s.Id == early, Ct)).Parameters!, StringComparison.Ordinal);
         Assert.Equal(
             $"The backup service was restarted before this restore of [{request.DatabaseName}] to instance SQLEXPRESS of the target VM wrote any file; nothing was changed.",
             (await check.Sessions.AsNoTracking().SingleAsync(s => s.Id == early, Ct)).Summary);

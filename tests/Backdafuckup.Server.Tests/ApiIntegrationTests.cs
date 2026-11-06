@@ -1719,6 +1719,88 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task Restores_a_server_restart_interrupted_are_checked_and_their_files_removed_once_the_agent_is_back()
+    {
+        var lab = await SqlLogChainAsync("sql12", publish: false);
+        var cleanup = _factory!.Services.GetRequiredService<SqlRestoreCleanup>();
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>();
+        try
+        {
+            void Create(params string[] paths)
+            {
+                foreach (var path in paths)
+                {
+                    var local = lab.Fs.Local(path);
+                    Directory.CreateDirectory(Path.GetDirectoryName(local)!);
+                    File.WriteAllText(local, path);
+                }
+            }
+
+            // As the startup recovery leaves them: one restore wrote its files but did not attach (one of them is used by
+            // another database by now), the other had attached before the restart.
+            string[] written = [@"D:\SQL\shop_new.mdf", @"L:\Log\shop_new_log.ldf", @"D:\SQL\shared.ndf"];
+            string[] finished = [@"D:\SQL\shop_done.mdf", @"L:\Log\shop_done_log.ldf"];
+            Create([.. written, .. finished]);
+            lab.Sql.AddDatabase("other", @"D:\SQL\shared.ndf");
+            lab.Sql.AddDatabase("shop_done", finished);
+            async Task<Guid> InterruptedAsync(string name, IReadOnlyList<string> files)
+            {
+                var request = new SqlRestoreRequestDto(lab.Point.Id, "SQLEXPRESS", "shop", lab.Point.VmNativeId, "SQLEXPRESS", lab.Login.Id, name, "Folders", @"D:\SQL", @"L:\Log");
+                var parameters = SqlRestoreRecovery.WithPlannedFiles(System.Text.Json.JsonSerializer.Serialize(request), files);
+                Assert.True(SqlRestoreRecovery.NeedsCleanup(parameters));
+                var session = new Backdafuckup.Server.Data.SessionEntity
+                {
+                    Kind = Backdafuckup.Server.Data.SessionKind.SqlRestore,
+                    Name = $"SQL restore {name}",
+                    TriggeredBy = "admin",
+                    State = Backdafuckup.Server.Data.SessionState.Failed,
+                    CreatedUtc = DateTimeOffset.UtcNow.AddMinutes(-10),
+                    EndedUtc = DateTimeOffset.UtcNow,
+                    Parameters = SqlRestoreRecovery.WithCleanupPending(parameters, pending: true),
+                    Summary = SqlRestoreRecovery.Summary(parameters),
+                };
+                await using var db = await dbFactory.CreateDbContextAsync(Ct);
+                db.Sessions.Add(session);
+                await db.SaveChangesAsync(Ct);
+                return session.Id;
+            }
+
+            var interrupted = await InterruptedAsync("shop_new", written);
+            var done = await InterruptedAsync("shop_done", finished);
+            await cleanup.RunOnceAsync(Ct);
+
+            // Not attached: its files are deleted, except the one another database uses.
+            Assert.False(File.Exists(lab.Fs.Local(written[0])));
+            Assert.False(File.Exists(lab.Fs.Local(written[1])));
+            Assert.True(File.Exists(lab.Fs.Local(written[2])));
+            var first = (await lab.Client.GetFromJsonAsync<SessionDetailDto>($"/api/sessions/{interrupted}", Ct))!.Session;
+            Assert.Equal("Failed", first.State);
+            Assert.Contains("[shop_new] was not attached. The files this restore wrote were deleted again. Kept, since a database uses them: D:\\SQL\\shared.ndf.", first.Summary, StringComparison.Ordinal);
+            Assert.Contains("SQL01 (10.0.0.5), instance SQLEXPRESS", first.Summary, StringComparison.Ordinal);
+
+            // Attached with the restored files: only the session was interrupted, nothing is deleted.
+            Assert.All(finished, f => Assert.True(File.Exists(lab.Fs.Local(f))));
+            var second = (await lab.Client.GetFromJsonAsync<SessionDetailDto>($"/api/sessions/{done}", Ct))!.Session;
+            Assert.Equal("Warning", second.State);
+            Assert.Contains("only the session was interrupted", second.Summary, StringComparison.Ordinal);
+
+            // Each is handled once.
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                Assert.DoesNotContain(await db.Sessions.Where(s => s.Id == interrupted || s.Id == done).Select(s => s.Parameters).ToListAsync(Ct), p => p!.Contains(SqlRestoreRecovery.CleanupPendingJson, StringComparison.Ordinal));
+            }
+
+            File.WriteAllText(lab.Fs.Local(written[0]), "new");
+            await cleanup.RunOnceAsync(Ct);
+            Assert.True(File.Exists(lab.Fs.Local(written[0])));
+        }
+        finally
+        {
+            await lab.DisposeAsync();
+        }
+    }
+
     /// <summary>A VM backed up with the SQL Server snapshot, its agent running, and two log backups of [shop] on top.</summary>
     private sealed class SqlLogChainLab(Func<Task> stop) : IAsyncDisposable
     {
