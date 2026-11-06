@@ -56,6 +56,7 @@ public static class SqlEndpoints
         app.MapGet("/api/sql/databases", ListDatabasesAsync);
         app.MapGet("/api/sql/databases/{id:guid}", DatabaseAsync);
         app.MapGet("/api/sql/databases/{id:guid}/plan", PlanAsync);
+        app.MapGet("/api/sql/backup-days/{sessionId:guid}", BackupDayAsync);
         app.MapPost("/api/sql/exports", StartExportAsync);
 
         // The .bak of a native full or system database backup: a one-time link, then the file from the repository.
@@ -325,6 +326,50 @@ public static class SqlEndpoints
 
         var id = await queue.EnqueueSqlRestoreAsync(request with { DatabaseName = name }, point.RepositoryId, point.VmName, http.User.Identity?.Name ?? "user", ct);
         return Results.Ok(new StartedDto(id));
+    }
+
+    /// <summary>A "SQL Server backups" day session: counts and bytes of its backups, each VM's schedule, the VMs' databases.</summary>
+    private static async Task<IResult> BackupDayAsync(Guid sessionId, AppDbContext db, CancellationToken ct)
+    {
+        var session = await db.Sessions.AsNoTracking().FirstOrDefaultAsync(s => s.Id == sessionId && s.Kind == SessionKind.SqlBackup, ct);
+        if (session?.JobId is not { } jobId)
+        {
+            return Results.NotFound();
+        }
+
+        var current = !await db.Sessions.AnyAsync(s => s.JobId == jobId && s.Kind == SessionKind.SqlBackup && s.CreatedUtc > session.CreatedUtc, ct);
+        var interval = await db.Jobs.AsNoTracking().Where(j => j.Id == jobId).Select(j => (int?)j.SqlBackup.LogIntervalMinutes).FirstOrDefaultAsync(ct);
+        var tasks = await db.SessionTasks.AsNoTracking().Where(t => t.SessionId == sessionId).Select(t => new { t.ObjectNativeId, t.ObjectName }).ToListAsync(ct);
+        var schedules = await db.SqlBackupSchedules.AsNoTracking().Where(s => s.JobId == jobId).ToListAsync(ct);
+        var sets = await db.SqlBackupSets.AsNoTracking().Where(s => s.SessionId == sessionId)
+            .Join(db.SqlDatabases, s => s.SqlDatabaseId, d => d.Id, (s, d) => new { s.Kind, s.Size, d.VmNativeId })
+            .ToListAsync(ct);
+        var stored = await db.SqlBackups.AsNoTracking().Where(b => b.SessionId == sessionId).SumAsync(b => (long?)b.NewStoredBytes, ct) ?? 0;
+
+        // The session's VMs: those with a task (a run that day), then those the job schedules without one yet.
+        var vmIds = tasks.Select(t => t.ObjectNativeId).Concat(schedules.Select(s => s.VmNativeId)).Distinct().ToList();
+        var databases = await db.SqlDatabases.AsNoTracking().Where(d => vmIds.Contains(d.VmNativeId))
+            .OrderBy(d => d.VmName).ThenBy(d => d.Instance).ThenBy(d => d.Name).ToListAsync(ct);
+        var usable = (await SqlRestoreSessionRunner.UsableSetsAsync(db, [.. databases.Select(d => d.Id)], ct)).ToLookup(s => s.SqlDatabaseId);
+        var names = tasks.GroupBy(t => t.ObjectNativeId).ToDictionary(g => g.Key, g => g.First().ObjectName);
+        foreach (var d in databases)
+        {
+            names.TryAdd(d.VmNativeId, d.VmName);
+        }
+
+        var vms = vmIds.Select(vm =>
+        {
+            var schedule = schedules.FirstOrDefault(s => s.VmNativeId == vm);
+            var own = sets.Where(s => s.VmNativeId == vm).ToList();
+            return new SqlBackupDayVmDto(
+                vm, names.GetValueOrDefault(vm, vm), own.Count(s => s.Kind == SqlBackupSetKind.Log), own.Count(s => s.Kind != SqlBackupSetKind.Log), own.Sum(s => s.Size),
+                schedule?.LastRunUtc, schedule?.LastResult?.ToString(), schedule?.LastMessage, schedule?.NextLogUtc, schedule?.NextFullUtc, schedule?.NextSystemUtc);
+        }).OrderBy(v => v.VmName, StringComparer.OrdinalIgnoreCase).ToList();
+
+        return Results.Ok(new SqlBackupDayDto(
+            sets.Count(s => s.Kind == SqlBackupSetKind.Log), sets.Count(s => s.Kind == SqlBackupSetKind.NativeFull), sets.Count(s => s.Kind == SqlBackupSetKind.SystemFull),
+            sets.Sum(s => s.Size), stored, interval ?? 60, current, vms,
+            [.. databases.Select(d => ToDto(d, new SqlChain(usable[d.Id].Select(SqlChainSet.From)).Coverage().Spans))]));
     }
 
     /// <summary>The databases of the SQL catalog with their chain state and the span of time they can be restored to.</summary>

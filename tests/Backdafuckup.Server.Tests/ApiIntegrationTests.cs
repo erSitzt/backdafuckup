@@ -1187,6 +1187,17 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Assert.Contains(log!, l => l.Message.Contains(@"another tool took log backup(s)", StringComparison.Ordinal) && l.Message.Contains(@"\\nas\sql\shop_maintenance.trn", StringComparison.Ordinal));
             Assert.Contains(log!, l => l.Message.Contains("Full backup to restart the log chain: [shop]", StringComparison.Ordinal));
             Assert.Equal([("shop", "L"), ("shop", "L"), ("shop", "D")], sql.LaneBackups.Select(b => (b.Database, b.Type)));
+
+            // The day's tiles: two log backups and the full, per VM with its next run, and the VM's databases.
+            var overview = (await client.GetFromJsonAsync<SqlBackupDayDto>($"/api/sql/backup-days/{day.Id}", Ct))!;
+            Assert.Equal((2, 1, 0, 15, true), (overview.LogBackups, overview.FullBackups, overview.SystemFullBackups, overview.LogIntervalMinutes, overview.Current));
+            Assert.True(overview.Bytes > 0 && overview.NewStoredBytes > 0, $"{overview.Bytes} bytes, {overview.NewStoredBytes} new");
+            var overviewVm = Assert.Single(overview.Vms);
+            Assert.Equal(("sql07", 2, 1, overview.Bytes), (overviewVm.VmName, overviewVm.LogBackups, overviewVm.FullBackups, overviewVm.Bytes));
+            Assert.Equal("Warning", overviewVm.LastResult);
+            Assert.NotNull(overviewVm.NextLogUtc);
+            Assert.Equal(["shop", "simple1"], overview.Databases.Select(d => d.Name).Order(StringComparer.Ordinal));
+            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/sql/backup-days/{Guid.NewGuid()}", Ct)).StatusCode);
             await using (var db = await dbFactory.CreateDbContextAsync(Ct))
             {
                 var shop = await db.SqlDatabases.SingleAsync(d => d.Name == "shop", Ct);

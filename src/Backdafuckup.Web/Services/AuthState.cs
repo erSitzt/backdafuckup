@@ -163,6 +163,13 @@ public static class Fmt
         return span.TotalHours >= 1 ? $"{(int)span.TotalHours}:{span.Minutes:00}:{span.Seconds:00}" : $"{span.Minutes:00}:{span.Seconds:00}";
     }
 
+    /// <summary>A length of time in words: "40 s", "12 min", "3 h 5 min", "2 d 4 h".</summary>
+    public static string Span(TimeSpan span) =>
+        span.TotalMinutes < 1 ? $"{Math.Max(0, (int)span.TotalSeconds)} s"
+        : span.TotalHours < 1 ? $"{(int)span.TotalMinutes} min"
+        : span.TotalDays < 1 ? $"{(int)span.TotalHours} h {span.Minutes} min"
+        : $"{(int)span.TotalDays} d {span.Hours} h";
+
     /// <summary>The icon of a state (see <see cref="StateColor"/>).</summary>
     public static string StateIcon(string? state) => state switch
     {

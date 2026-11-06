@@ -69,6 +69,13 @@ else
             </MudAlert>
         }
     }
+    else if (_session.Kind == "SqlBackup")
+    {
+        @if (running)
+        {
+            <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-4" />
+        }
+    }
     else
     {
         <MudProgressLinear Color="Color.Primary" Value="@_session.Progress" Size="Size.Large" Class="mb-4">@($"{_session.Progress:0}%")</MudProgressLinear>
@@ -76,6 +83,60 @@ else
 
     @if (_session.Kind is "SqlPublish" or "SqlRestore" or "SqlExport")
     {
+    }
+    else if (_session.Kind == "SqlBackup")
+    {
+        @if (_day is { } day)
+        {
+            var (rpoValue, rpoDetail, rpoColor) = Rpo(day);
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="12" sm="6" md="3"><StatTile Title="Log backups" Value="@day.LogBackups.ToString()" Detail="@($"every {day.LogIntervalMinutes} min · last run {LastRun()}")" Icon="@Icons.Material.Filled.History" Color="Color.Primary" /></MudItem>
+                <MudItem xs="12" sm="6" md="3"><StatTile Title="Full backups" Value="@((day.FullBackups + day.SystemFullBackups).ToString())" Detail="@($"databases {day.FullBackups} · system databases {day.SystemFullBackups}")" Icon="@Icons.Material.Filled.Inventory2" Color="Color.Primary" /></MudItem>
+                <MudItem xs="12" sm="6" md="3"><StatTile Title="Backed up" Value="@Fmt.Bytes(day.Bytes)" Detail="@($"{Fmt.Bytes(day.NewStoredBytes)} new in the repository")" Icon="@Icons.Material.Filled.Save" Color="Color.Primary" /></MudItem>
+                @if (day.Current)
+                {
+                    <MudItem xs="12" sm="6" md="3"><StatTile Title="RPO now" Value="@rpoValue" Detail="@rpoDetail" Icon="@Icons.Material.Filled.Timer" Color="@rpoColor" /></MudItem>
+                }
+                else
+                {
+                    <MudItem xs="12" sm="6" md="3"><StatTile Title="Databases" Value="@day.Databases.Count.ToString()" Detail="@($"{day.Databases.Count(d => d.ChainState == "Ok")} with an intact log chain now")" Icon="@Icons.Material.Filled.Storage" Color="Color.Primary" /></MudItem>
+                }
+            </MudGrid>
+
+            @if (day.Databases.Count > 0)
+            {
+                <MudPaper Class="pa-3 mb-3" Elevation="1">
+                    <div class="d-flex align-center mb-2">
+                        <MudText Typo="Typo.h6" Class="section-title">Databases</MudText>
+                        <MudSpacer />
+                        <MudLink Href="/sql/databases" Typo="Typo.body2">All databases</MudLink>
+                    </div>
+                    <div class="cq">
+                    <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+                        <thead>
+                            <tr><th>Database</th><th class="c-760">Recovery</th><th>Log chain</th><th class="c-560">Last log backup</th><th class="c-950">Last full backup</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var d in day.Databases)
+                            {
+                                <tr>
+                                    <td><MudLink Href="@($"/sql/databases/{d.Id}")"><b>@d.Name</b></MudLink><span class="cell-sub">@d.Instance on @d.VmName</span></td>
+                                    <td class="c-760">@(d.RecoveryModel ?? "–")</td>
+                                    <td>
+                                        <MudTooltip Text="@(d.ChainReason ?? SqlDatabases.ChainText(d.ChainState))">
+                                            <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@SqlDatabases.ChainColor(d.ChainState)" Icon="@SqlDatabases.ChainIcon(d.ChainState)">@SqlDatabases.ChainLabel(d.ChainState)</MudChip>
+                                        </MudTooltip>
+                                    </td>
+                                    <td class="c-560 nowrap">@Fmt.Time(d.LastLogUtc)</td>
+                                    <td class="c-950 nowrap">@Fmt.Time(d.LastFullUtc)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                    </div>
+                </MudPaper>
+            }
+        }
     }
     else if (_session.Kind == "Restore")
     {
@@ -167,22 +228,49 @@ else
     <MudGrid>
         <MudItem xs="12" md="5">
             <MudPaper Class="pa-3" Elevation="1">
-                <MudText Typo="Typo.h6" Class="section-title mb-2">Objects</MudText>
-                @foreach (var t in _tasks.Values.OrderBy(t => t.ObjectName))
+                <MudText Typo="Typo.h6" Class="section-title mb-2">@(_session.Kind == "SqlBackup" ? "VMs" : "Objects")</MudText>
+                @if (_session.Kind == "SqlBackup")
                 {
-                    var tm = t.Metrics;
-                    <div class="d-flex align-center">
-                        <MudText Typo="Typo.body1">@t.ObjectName</MudText>
-                        <MudSpacer />
-                        <StateChip State="@t.State" />
-                    </div>
-                    <MudProgressLinear Value="@t.Progress" Color="@Fmt.StateColor(t.State)" />
-                    <MudText Typo="Typo.caption" Class="d-block mb-3">
-                        @Fmt.Bytes(t.ReadBytes) read · @Fmt.Bytes(t.TransferredBytes) transferred · @Fmt.Rate(tm?.ProcessingRate)
-                        @if (t.State == "Running" && tm is not null) { <span> (now @Fmt.Rate(tm.CurrentBytesPerSecond))</span> }
-                        · dedupe @Fmt.Ratio(tm?.DedupeRatio) · compression @Fmt.Ratio(tm?.CompressionRatio) · @Fmt.Duration(t.StartedUtc, t.EndedUtc)
-                        @if (t.Error is not null) { <span style="color:#c62828"> · @t.Error</span> }
-                    </MudText>
+                    @foreach (var t in _tasks.Values.OrderBy(t => t.ObjectName))
+                    {
+                        var vm = _day?.Vms.FirstOrDefault(v => v.VmNativeId == t.ObjectNativeId);
+                        <div class="d-flex align-center">
+                            <MudText Typo="Typo.body1">@t.ObjectName</MudText>
+                            <MudSpacer />
+                            <StateChip State="@t.State" />
+                        </div>
+                        var message = t.Error ?? (_day?.Current == true && vm?.LastResult is "Warning" or "Failed" ? vm?.LastMessage : null);
+                        @if (vm is not null)
+                        {
+                            <MudText Typo="Typo.caption" Class="d-block">
+                                @vm.LogBackups log · @vm.FullBackups full · @Fmt.Bytes(vm.Bytes)@(_day!.Current ? $" · last run {Fmt.Time(vm.LastRunUtc)} · next {Fmt.Time(vm.NextLogUtc)}" : "")
+                            </MudText>
+                        }
+                        @if (message is not null)
+                        {
+                            <MudText Typo="Typo.caption" Class="d-block" Color="@(t.State == "Failed" || vm?.LastResult == "Failed" ? Color.Error : Color.Warning)">@message</MudText>
+                        }
+                        <div class="mb-3"></div>
+                    }
+                }
+                else
+                {
+                    @foreach (var t in _tasks.Values.OrderBy(t => t.ObjectName))
+                    {
+                        var tm = t.Metrics;
+                        <div class="d-flex align-center">
+                            <MudText Typo="Typo.body1">@t.ObjectName</MudText>
+                            <MudSpacer />
+                            <StateChip State="@t.State" />
+                        </div>
+                        <MudProgressLinear Value="@t.Progress" Color="@Fmt.StateColor(t.State)" />
+                        <MudText Typo="Typo.caption" Class="d-block mb-3">
+                            @Fmt.Bytes(t.ReadBytes) read · @Fmt.Bytes(t.TransferredBytes) transferred · @Fmt.Rate(tm?.ProcessingRate)
+                            @if (t.State == "Running" && tm is not null) { <span> (now @Fmt.Rate(tm.CurrentBytesPerSecond))</span> }
+                            · dedupe @Fmt.Ratio(tm?.DedupeRatio) · compression @Fmt.Ratio(tm?.CompressionRatio) · @Fmt.Duration(t.StartedUtc, t.EndedUtc)
+                            @if (t.Error is not null) { <span style="color:#c62828"> · @t.Error</span> }
+                        </MudText>
+                    }
                 }
             </MudPaper>
         </MudItem>
@@ -205,6 +293,7 @@ else
 
     private SessionSummaryDto? _session;
     private SqlExportFileDto? _exportFile;
+    private SqlBackupDayDto? _day;
 
     private static IEnumerable<(string Label, long Bytes, string Css)> Breakdown(TransferMetricsDto m) =>
     [
@@ -243,6 +332,45 @@ else
         }
 
         await LoadExportFileAsync();
+        await LoadDayAsync();
+    }
+
+    /// <summary>What the runs of a "SQL Server backups" day session backed up, per VM, and the databases of its VMs.</summary>
+    private async Task LoadDayAsync()
+    {
+        if (_session?.Kind != "SqlBackup")
+        {
+            return;
+        }
+
+        try
+        {
+            _day = await Api.GetAsync<SqlBackupDayDto>($"api/sql/backup-days/{Id}");
+        }
+        catch (ApiException)
+        {
+            // The tiles stay away; the summary, the tasks and the log still say what happened.
+        }
+    }
+
+    private string LastRun() =>
+        _session is { State: "Running" } ? "running now" : _session?.EndedUtc?.ToLocalTime().ToString("t", System.Globalization.CultureInfo.CurrentCulture) ?? "–";
+
+    /// <summary>How old the oldest last log backup of the databases with a log chain is, against twice the interval.</summary>
+    private static (string Value, string Detail, Color Color) Rpo(SqlBackupDayDto day)
+    {
+        var oldest = day.Databases
+            .Where(d => d.ChainState != "Simple" && d.RecoveryModel is not "SIMPLE" && d.LastLogUtc is not null)
+            .MinBy(d => d.LastLogUtc);
+        if (oldest is null)
+        {
+            return ("–", "no database with log backups yet", Color.Default);
+        }
+
+        var age = DateTimeOffset.UtcNow - oldest.LastLogUtc!.Value;
+        var late = age > TimeSpan.FromMinutes(2 * day.LogIntervalMinutes);
+        return (Fmt.Span(age), $"oldest last log backup: {oldest.Name} on {oldest.VmName}{(late ? $", over 2 × {day.LogIntervalMinutes} min" : string.Empty)}",
+            late ? Color.Warning : Color.Success);
     }
 
     /// <summary>The .bak of a finished export, if it was sent to the backup server and is not older than 24 hours.</summary>
@@ -284,6 +412,7 @@ else
             _ = InvokeAsync(async () =>
             {
                 await LoadExportFileAsync();
+                await LoadDayAsync();
                 StateHasChanged();
             });
         }

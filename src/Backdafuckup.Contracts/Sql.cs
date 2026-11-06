@@ -229,6 +229,33 @@ public static class SqlRestoreFiles
 
 // ---- SQL catalog (log chain, point-in-time restore) ----
 
+/// <summary>A "SQL Server backups" day session: what its runs backed up, each VM's schedule and the databases of its VMs.
+/// <c>Current</c>: the newest day session of the job, the one the schedule and the RPO belong to.</summary>
+public sealed record SqlBackupDayDto(
+    int LogBackups,
+    int FullBackups,
+    int SystemFullBackups,
+    long Bytes,
+    long NewStoredBytes,
+    int LogIntervalMinutes,
+    bool Current,
+    IReadOnlyList<SqlBackupDayVmDto> Vms,
+    IReadOnlyList<SqlCatalogDatabaseDto> Databases);
+
+/// <summary>One VM of a day session: what it backed up that day, its last result and its next runs.</summary>
+public sealed record SqlBackupDayVmDto(
+    string VmNativeId,
+    string VmName,
+    int LogBackups,
+    int FullBackups,
+    long Bytes,
+    DateTimeOffset? LastRunUtc,
+    string? LastResult,
+    string? LastMessage,
+    DateTimeOffset? NextLogUtc,
+    DateTimeOffset? NextFullUtc,
+    DateTimeOffset? NextSystemUtc);
+
 /// <summary>A database of a backed-up SQL Server instance with the state of its log chain.</summary>
 public sealed record SqlCatalogDatabaseDto(
     Guid Id,
