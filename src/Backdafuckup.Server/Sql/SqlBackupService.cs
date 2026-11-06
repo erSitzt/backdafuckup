@@ -193,7 +193,8 @@ public sealed class SqlBackupService(
         }
         catch (SqlJobLostException ex)
         {
-            run.Warn($"The agent restarted during the run ({ex.Message}); backup files it wrote stay queued in the VM and are sent with the next run.");
+            run.Warn($"The agent in {run.Host ?? vm.CachedName} restarted during the {ex.Kind} job (service restart, crash or VM reboot). " +
+                "Backup files it finished stay queued in the VM and are sent first with the next run; a backup it was writing is checked against msdb then.");
         }
         catch (TimeoutException)
         {
@@ -241,6 +242,7 @@ public sealed class SqlBackupService(
         }
 
         var host = $"{agent.HostName} ({agent.IpAddresses ?? agent.RemoteAddress ?? "address unknown"})";
+        run.Host = host;
         if (!agents.IsOnline(agent.Id))
         {
             run.Warn($"The agent in {host} is offline (last contact {agent.LastContactUtc:yyyy-MM-dd HH:mm} UTC): no SQL Server backups now. The log chain stays intact; the next run catches up.");
@@ -448,6 +450,13 @@ public sealed class SqlBackupService(
             switch (outcome.Action)
             {
                 case SqlBackupActions.Skipped when outcome.Reason?.StartsWith("SIMPLE", StringComparison.Ordinal) == true:
+                    if (row.ChainState is SqlChainState.Ok or SqlChainState.Broken or SqlChainState.NoBase)
+                    {
+                        // It had a log chain (FULL or BULK_LOGGED): from now on there is no point-in-time restore.
+                        context.Run.Warn($"{name}: switched to SIMPLE recovery; no more log backups, so it can be restored to a point in time only up to " +
+                            $"{(row.LastLogUtc is { } lastLog ? TimeZoneInfo.ConvertTime(lastLog, ScheduleCalculator.FindZone(context.Job.Schedule.TimeZoneId)).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) : "its last log backup")}. Switch it back to FULL and the next run takes a full backup to start a new chain.");
+                    }
+
                     SetChain(row, SqlChainState.Simple, "SIMPLE recovery: no log backups; it can be restored to the times of its full backups only.");
                     break;
                 case SqlBackupActions.Skipped when outcome.Reason?.StartsWith("no log chain", StringComparison.Ordinal) == true:
@@ -778,6 +787,9 @@ public sealed class SqlBackupService(
         public long Bytes { get; set; }
 
         public bool ForeignChecked { get; set; }
+
+        /// <summary>The agent's host and address once known, for messages.</summary>
+        public string? Host { get; set; }
 
         public void Info(string message) => Lines.Add((LogSeverity.Info, message));
 

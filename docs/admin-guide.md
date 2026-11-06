@@ -120,6 +120,8 @@ Copy-Item deploy\windows\install-service.ps1 publish\win\
 
 Configuration goes in `%ProgramData%\backdafuckup\appsettings.json`.
 
+At its start the server waits up to 3 minutes for the catalog database (for example PostgreSQL still starting at boot) and logs each attempt with host and port; a wrong password or database name stops it at once.
+
 To install or update a Windows server remotely from a Linux machine (SMB + WinRM, PostgreSQL included), see [`scripts/deploy/README.md`](../scripts/deploy/README.md).
 
 ## Guest agent (application-consistent backups)
@@ -362,8 +364,9 @@ A job backs up the transaction logs of the SQL Server databases in its VMs when 
 **The log chain** (page *SQL Server*, chip per database)
 - *intact:* a base and an unbroken chain of log backups since then.
 - *no full backup:* no base yet. The next run takes a full if *Start … with a full backup at once* is on.
-- *broken:* a gap. The reason names it: another tool's log backup (with its time and file), a switch to SIMPLE, a new fork (a restore over the database), or a log backup the repository no longer has.
-- Warnings in the day session: another tool's full or log backup (named with time and device; copy-only backups do not count), the last log backup older than twice the interval (RPO), an agent offline or too old at a due run.
+- *broken:* a gap. The reason names it: another tool's log backup (with its time and file), a new fork (a restore over the database), or a log backup the repository no longer has.
+- *SIMPLE:* no log backups; restorable to the times of its full backups only. Switched back to FULL, the next run takes a full backup (with a warning) and the chain is *intact* again.
+- Warnings in the day session: another tool's full or log backup (named with time and device; copy-only backups do not count), a switch from FULL to SIMPLE (point in time only up to the last log backup), the last log backup older than twice the interval (RPO), an agent offline or too old at a due run, an agent restart during a run (host and IP; its finished files follow with the next run).
 - **Exactly one tool may take log backups.** Turn off the log backups of maintenance plans, Ola Hallengren jobs and other backup products, including log truncation in other image backup products (e.g. "truncate logs" in a Veeam job). Their full backups do no harm, as long as they are copy-only.
 
 **Interruptions:** while the backup server is down, no log backups run; the log grows in the VM, and the chain stays intact (the next run catches up and warns about the RPO). Files whose upload fails stay in the VM (`sql-backups\queue.json` in the agent folder) and are sent first with the next run. A backup interrupted by an agent restart is resolved through `msdb`: a finished one is sent, a partial file is deleted; nothing is reported as backed up that was not.

@@ -1204,6 +1204,22 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
                 Assert.Equal(Backdafuckup.Server.Data.SqlChainState.Ok, shop.ChainState);
                 var sets = await db.SqlBackupSets.Where(s => s.SqlDatabaseId == shop.Id).ToListAsync(Ct);
                 Assert.Equal(Backdafuckup.Server.Data.SqlBackupSetKind.NativeFull, new SqlChain(sets.Select(SqlChainSet.From)).Plan(null).Base.Kind);
+
+                // Due again.
+                (await db.SqlBackupSchedules.SingleAsync(Ct)).NextLogUtc = DateTimeOffset.UtcNow.AddSeconds(-1);
+                await db.SaveChangesAsync(Ct);
+            }
+
+            // Someone switches shop to SIMPLE: no more point-in-time restore, so the run warns once and the chain shows SIMPLE.
+            sql.SimpleRecovery.Add("shop");
+            await service.TickAsync(Ct);
+            await service.WaitIdleAsync();
+            log = await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{day.Id}/log", Ct);
+            Assert.Single(log!, l => l.Message.Contains(@"SQLEXPRESS\shop: switched to SIMPLE recovery", StringComparison.Ordinal));
+            Assert.DoesNotContain(log!, l => l.Message.Contains(@"simple1: switched to SIMPLE", StringComparison.Ordinal));
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                Assert.Equal(Backdafuckup.Server.Data.SqlChainState.Simple, (await db.SqlDatabases.SingleAsync(d => d.Name == "shop", Ct)).ChainState);
             }
         }
         finally
