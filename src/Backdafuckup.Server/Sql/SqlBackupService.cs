@@ -402,6 +402,28 @@ public sealed class SqlBackupService(
         }
     }
 
+    /// <summary>
+    /// Why the newest log backup does not continue the chain, from it and the log backup before it: a restore over the
+    /// database (a new recovery fork, or a log that starts before the previous one ended), or log backups missing in
+    /// between (another tool's, or a switch to SIMPLE and back).
+    /// </summary>
+    internal static string BreakReason(IReadOnlyList<SqlBackupSetEntity> sets, SqlBackupSetEntity newest, TimeZoneInfo zone)
+    {
+        string At(DateTimeOffset t) => TimeZoneInfo.ConvertTime(t, zone).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+        var previous = sets.Where(s => s.Kind == SqlBackupSetKind.Log && s.Id != newest.Id && s.FinishUtc <= newest.FinishUtc).MaxBy(s => s.FinishUtc);
+        if (previous is null)
+        {
+            return "no full backup is continued by the log backups";
+        }
+
+        var newFork = newest.ForkPointLsn is not null
+            || (previous.LastRecoveryForkGuid is { } before && newest.FirstRecoveryForkGuid is { } after && before != after)
+            || newest.FirstLsn < previous.LastLsn;
+        return newFork
+            ? $"the database was restored over after the log backup of {At(previous.FinishUtc)} (a new recovery fork, e.g. an overwrite); the full backup taken now starts a new chain"
+            : $"log backups are missing between {At(previous.FinishUtc)} and {At(newest.StartUtc)} (another tool took a log backup, or the database was switched to SIMPLE and back); the full backup taken now starts a new chain";
+    }
+
     /// <summary>Keeps the run for the run list of its day session (a failure here costs the list entry, not the run).</summary>
     private async Task SaveRunAsync(BackupJob job, BackupJobObject vm, Guid sessionId, DateTimeOffset started, RunOutcome run)
     {
@@ -547,7 +569,7 @@ public sealed class SqlBackupService(
 
                     var reason = foreignLogs.Count > 0
                         ? $"another tool took log backup(s): {string.Join("; ", foreignLogs.Select(f => $"{Local(f.BackupSet.Finish)} to {f.BackupSet.Device ?? "an unknown device"}"))}. Turn those log backups off; only backdafuckup may back up the log"
-                        : chain.Coverage().Gaps.LastOrDefault()?.Reason ?? "no full backup is continued by the log backups";
+                        : newest is null ? "no full backup is continued by the log backups" : BreakReason(sets, newest, ScheduleCalculator.FindZone(context.Job.Schedule.TimeZoneId));
                     SetChain(row, SqlChainState.Broken, $"The log chain broke: {reason}.");
                     context.Run.Warn($"{name}: {row.ChainReason}");
                     broken.Add(outcome.Database);
