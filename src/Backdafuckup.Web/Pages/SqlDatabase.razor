@@ -262,17 +262,17 @@ else
                             </tbody>
                         </MudSimpleTable>
                     }
-                    @foreach (var problem in VolumeProblems())
-                    {
-                        <MudAlert Severity="Severity.Error" Dense="true">@problem</MudAlert>
-                    }
+                }
+                @foreach (var (severity, text) in Checks())
+                {
+                    <MudAlert Severity="@severity" Dense="true">@text</MudAlert>
                 }
             }
         </MudStack>
     </DialogContent>
     <DialogActions>
         <MudButton OnClick="@(() => _open = false)">Cancel</MudButton>
-        <MudButton Variant="Variant.Filled" Color="@(_overwrite ? Color.Error : Color.Primary)" Disabled="@(_target is null || _instance is null || string.IsNullOrWhiteSpace(_name) || _starting || VolumeProblems().Count > 0)"
+        <MudButton Variant="Variant.Filled" Color="@(_overwrite ? Color.Error : Color.Primary)" Disabled="@(_target is null || _instance is null || string.IsNullOrWhiteSpace(_name) || _starting || Checks().Any(c => c.Severity == Severity.Error))"
                    OnClick="StartAsync">@(_overwrite ? "Overwrite" : _publish ? "Publish" : "Restore")</MudButton>
     </DialogActions>
 </MudDialog>
@@ -533,34 +533,57 @@ else
     private string DefaultLocation(string? vm) =>
         string.Equals(vm, _detail?.Database.VmNativeId, StringComparison.OrdinalIgnoreCase) ? SqlRestoreFiles.Original : SqlRestoreFiles.Default;
 
-    /// <summary>
-    /// Drives of the target paths the target VM does not have as local fixed volumes, or without room for the files (512 MB
-    /// stay free), as the server checks them before it writes anything.
-    /// </summary>
-    private List<string> VolumeProblems()
+    /// <summary>What speaks against the start (errors) and what to know (notes), after Connect; the same checks as the SQL browser's.</summary>
+    private List<(Severity Severity, string Text)> Checks()
     {
-        var problems = new List<string>();
-        if (_overwrite || _publish || _target is null || _plan is null || Targets() is not { } paths)
+        var checks = new List<(Severity, string)>();
+        if (_target is not { } target || _detail is null || target.Instances.FirstOrDefault(i => i.Name == _instance) is not { } instance)
         {
-            return problems;
+            return checks;
         }
 
-        var host = _target.Host;
-        foreach (var drive in _plan.Files.Zip(paths).Where(f => f.Second.Length >= 3).GroupBy(f => f.Second[..3], StringComparer.OrdinalIgnoreCase))
+        if (SqlTargetChecks.Connection(target, instance) is { } connection)
         {
-            var needed = drive.Sum(f => f.First.SizeBytes ?? 0);
-            var volume = _target.Volumes.FirstOrDefault(v => string.Equals(v.Root, drive.Key, StringComparison.OrdinalIgnoreCase));
-            if (volume is null)
+            checks.Add((Severity.Error, connection));
+            return checks;
+        }
+
+        var mode = _publish ? SqlTargetMode.Publish : _overwrite ? SqlTargetMode.Overwrite : SqlTargetMode.Restore;
+        checks.AddRange(SqlTargetChecks.Rights(target, instance, mode));
+        var name = _name.Trim();
+        if (_overwrite)
+        {
+            if (!instance.Databases.Any(d => string.Equals(d.Name, _detail.Database.Name, StringComparison.OrdinalIgnoreCase)))
             {
-                problems.Add($"{drive.Key} is not a local fixed volume of {host}: choose the instance's default folders or other folders.");
+                checks.Add((Severity.Error, $"Instance {instance.Name} has no database {_detail.Database.Name} to overwrite; restore it as a new database."));
             }
-            else if (volume.FreeBytes < needed + (512L << 20))
+        }
+        else if (SqlTargetChecks.NewName(instance, name) is { } nameError)
+        {
+            checks.Add((Severity.Error, nameError));
+        }
+
+        if (SqlTargetChecks.Version(null, _detail.Database.ProductVersion, instance, mode) is { } version)
+        {
+            checks.Add(version);
+        }
+
+        if (_plan is { } plan)
+        {
+            if (SqlTargetChecks.ExpressLimit(instance, plan.Files.Where(f => f.Kind == "data").Sum(f => f.SizeBytes ?? 0)) is { } express)
             {
-                problems.Add($"{drive.Key} on {host} has {Fmt.Bytes(volume.FreeBytes)} free; the files need {Fmt.Bytes(needed)} (512 MB stay free).");
+                checks.Add((Severity.Error, express));
+            }
+
+            // The files go to the target paths (a new database) or beside the database's own (an overwrite); a publish writes only its overlay.
+            IReadOnlyList<string>? paths = _publish ? null : _overwrite ? [.. plan.Files.Select(f => f.Path)] : Targets();
+            if (paths is not null)
+            {
+                checks.AddRange(SqlTargetChecks.Volumes(plan.Files.Zip(paths).Select(f => (f.Second, f.First.SizeBytes)), target).Select(v => (Severity.Error, v)));
             }
         }
 
-        return problems;
+        return checks;
     }
 
     private void OnAccountChanged(Guid? account)

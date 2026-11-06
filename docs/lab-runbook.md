@@ -158,6 +158,7 @@ The VMs, accounts and job of section F. In the job's guest processing: *SQL Serv
 | C1 (part) | 2026-11-02 | 0.2.0 (net10) | passed | One file into `C:\TEMP` on app01 with owner and permissions; SHA-256 equal. |
 | F3–F6, F10 (same VM), F11 | 2026-11-04 | 0.3.0 (`ecec970`, net10) | passed | bdfu-lab-sql1; found and fixed: writer files all "other" (`08745ec`), `.\name` accounts (`9b0f875`), an explicit ACE after overwrite (`ecec970`). |
 | F13 (without download) | 2026-11-05 | 0.3.0 (`98708b8`) | passed | 5.6 MB `.bak` on bdfu-lab-sql1, copy-only, checksums, not compressed (Express). Name and file paths inside the `.bak` are the staging ones; dialog and log say so since `5de3e8e`. |
+| F13 (download) | 2026-11-06 | 0.3.0 (`3e04259`) | passed | Through the API: the native full of `shop` (bdfu-lab-sql1, 06.11. 16:45) by its one-time link: 5,990,912 bytes, SHA-256 as in the catalog, MTF header; the link answered 404 on its second use. |
 | F1 | 2026-11-05 | 0.3.0 (`5de3e8e`) | passed | Both VMs; warning for `shop`, `shop_restored`; `last_log_backup_lsn` set. |
 | F5/F7 (other VM, SQL login), F8, F9 | 2026-11-05 | 0.3.0 (`df1b4cb`) | passed | Agent crash: logout from the dead target 68 s, then the server removed the database. VM reboot: SQL Server Express refused connections for about 2 minutes after the boot. |
 | F10 (other VM, SQL login) | 2026-11-05 | 0.3.0 (`df1b4cb`) | passed, fixed | The dbcreator login could not open the database it attached (dbo kept `sa`); since `a6c453b` the log says why, and export needs sysadmin. |

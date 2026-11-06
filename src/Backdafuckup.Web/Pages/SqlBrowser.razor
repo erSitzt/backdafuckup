@@ -528,9 +528,6 @@ else
         _publishName = name;
     }
 
-    private static int? Major(string? version) =>
-        version?.Split('.') is [var first, ..] && int.TryParse(first, out var major) ? major : null;
-
     /// <summary>What speaks against the publish (errors) and what the admin should know (warnings, notes).</summary>
     private List<(Severity Severity, string Text)> PublishChecks()
     {
@@ -540,11 +537,14 @@ else
             return checks;
         }
 
-        if (!target.Connected)
+        if (SqlTargetChecks.Connection(_targetSql, target) is { } connection)
         {
-            checks.Add((Severity.Error, $"{_targetSql.Account} cannot connect to instance {target.Name}: {target.ConnectError ?? "unknown error"}"));
+            checks.Add((Severity.Error, connection));
             return checks;
         }
+
+        var mode = _exportMode ? SqlTargetMode.Export : !_restoreMode ? SqlTargetMode.Publish : _overwrite ? SqlTargetMode.Overwrite : SqlTargetMode.Restore;
+        checks.AddRange(SqlTargetChecks.Rights(_targetSql, target, mode));
 
         var name = _publishName.Trim();
         if (_restoreMode && _overwrite)
@@ -552,11 +552,6 @@ else
             if (_targetVm != _mount?.VmNativeId)
             {
                 checks.Add((Severity.Error, $"Only the original database in {_mount?.VmName} can be overwritten; its agent cannot restore SQL Server databases (yet)."));
-            }
-
-            if (target.IsSysadmin != true)
-            {
-                checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} is not sysadmin on instance {target.Name}; overwriting a database needs sysadmin."));
             }
 
             if (LiveDatabase is not { } live)
@@ -575,13 +570,6 @@ else
         }
         else if (_exportMode)
         {
-            if (target.IsSysadmin != true)
-            {
-                // dbcreator can attach, but the attached database keeps its original owner inside, so it cannot be opened (or backed up) by the account.
-                checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} is not sysadmin on instance {target.Name}: it could attach the database, but not back it up " +
-                    "(SQL Server keeps the database's original owner inside it, so only a sysadmin can open it). Choose a sysadmin account."));
-            }
-
             var exportFolder = _exportFolder?.Trim();
             if (!string.IsNullOrEmpty(exportFolder) && !(exportFolder.Length >= 2 && char.IsAsciiLetter(exportFolder[0]) && exportFolder[1] == ':' && (exportFolder.Length == 2 || exportFolder[2] == '\\')))
             {
@@ -601,53 +589,20 @@ else
                     $"and the .bak contains it under that name. Choose an instance without {db.Name} to keep its name in the .bak."));
             }
         }
-        else
+        else if (SqlTargetChecks.NewName(target, name) is { } nameError)
         {
-            if (target.IsSysadmin != true && target.IsDbCreator != true)
-            {
-                checks.Add((Severity.Error, $"{target.LoginName ?? _targetSql.Account} may not create databases on instance {target.Name}; it needs the server role dbcreator or sysadmin."));
-            }
-            else if (target.IsSysadmin != true)
-            {
-                checks.Add((Severity.Info, $"{target.LoginName ?? _targetSql.Account} is dbcreator, not sysadmin: it attaches the database, but cannot open it afterwards, because SQL Server " +
-                    "keeps the database's original owner inside it. Sysadmins (and the original owner) can; the session log names the ALTER AUTHORIZATION that gives it to this account."));
-            }
-
-            if (name.Length is 0 or > 128)
-            {
-                checks.Add((Severity.Error, "Enter a database name (at most 128 characters)."));
-            }
-            else if (target.Databases.Any(d => string.Equals(d.Name, name, StringComparison.OrdinalIgnoreCase)))
-            {
-                checks.Add((Severity.Error, $"Instance {target.Name} has a database {name} already; choose another name."));
-            }
+            checks.Add((Severity.Error, nameError));
         }
 
         var source = InstanceOf(db.Instance);
-        var sourceMajor = Major(source?.Version);
-        var targetMajor = Major(target.ProductVersion ?? target.SetupVersion);
-        if (sourceMajor is { } from && targetMajor is { } to)
+        if (SqlTargetChecks.Version(source?.Product, source?.Version, target, mode) is { } version)
         {
-            if (to < from)
-            {
-                checks.Add((Severity.Error, $"The database comes from {source?.Product ?? "a newer SQL Server"}; instance {target.Name} is {target.Product ?? "older"}. SQL Server attaches databases only on the same or a newer version."));
-            }
-            else if (to > from)
-            {
-                checks.Add((Severity.Info, _exportMode
-                    ? $"{target.Product} upgrades the database from {source?.Product} when it attaches it: the .bak can then be restored only on {target.Product} or newer. Use an instance of {source?.Product} for a .bak of the original version."
-                    : $"{target.Product} upgrades the database from {source?.Product} when it attaches it; the upgrade lands in the overlay, the backup stays as it is."));
-            }
+            checks.Add(version);
         }
 
-        var dataBytes = db.Files.Where(f => f.Kind == "data").Sum(f => f.SizeBytes ?? 0);
-        if (target.EngineEdition == 4)
+        if (SqlTargetChecks.ExpressLimit(target, db.Files.Where(f => f.Kind == "data").Sum(f => f.SizeBytes ?? 0)) is { } express)
         {
-            var limit = (targetMajor ?? 0) >= 17 ? 50L << 30 : 10L << 30;
-            if (dataBytes > limit)
-            {
-                checks.Add((Severity.Error, $"Instance {target.Name} is SQL Server Express: databases up to {Fmt.Bytes(limit)}; this one has {Fmt.Bytes(dataBytes)} of data files."));
-            }
+            checks.Add((Severity.Error, express));
         }
 
         if (db.Consistency != "application")
@@ -665,19 +620,7 @@ else
             }
             else if (paths is not null)
             {
-                foreach (var drive in RestoreFilesOrdered().Zip(paths).GroupBy(f => f.Second[..3], StringComparer.OrdinalIgnoreCase))
-                {
-                    var needed = drive.Sum(f => f.First.SizeBytes ?? 0);
-                    var volume = _targetSql.Volumes.FirstOrDefault(v => string.Equals(v.Root, drive.Key, StringComparison.OrdinalIgnoreCase));
-                    if (volume is null)
-                    {
-                        checks.Add((Severity.Error, $"{drive.Key} is not a local fixed volume of {host}."));
-                    }
-                    else if (volume.FreeBytes < needed + (512L << 20))
-                    {
-                        checks.Add((Severity.Error, $"{drive.Key} on {host} has {Fmt.Bytes(volume.FreeBytes)} free; the files need {Fmt.Bytes(needed)} (512 MB stay free)."));
-                    }
-                }
+                checks.AddRange(SqlTargetChecks.Volumes(RestoreFilesOrdered().Zip(paths).Select(f => (f.Second, f.First.SizeBytes)), _targetSql).Select(v => (Severity.Error, v)));
             }
 
             checks.Add((Severity.Normal, _overwrite
