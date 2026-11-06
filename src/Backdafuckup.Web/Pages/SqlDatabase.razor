@@ -104,7 +104,7 @@ else
                 <div class="d-flex gap-2 flex-wrap">
                     <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(false))">Restore as a new database</MudButton>
                     <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(true))">Overwrite the original</MudButton>
-                    <MudTooltip Text="@(plan.RestorePointId is null ? "Publishing needs a restore point as the base; this time starts from a full backup. Restore it as a new database instead." : "Attach it in a VM from the backup without copying the files; the log backups are applied in a temporary overlay.")">
+                    <MudTooltip Text="@(plan.RestorePointId is null ? $"Publishing needs a restore point as the base; this time starts from a full backup. {PublishableText()}" : "Attach it in a VM from the backup without copying the files; the log backups are applied in a temporary overlay.")">
                         <MudButton Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Publish" Disabled="@(plan.RestorePointId is null)" OnClick="@(() => OpenAsync(false, true))">Publish</MudButton>
                     </MudTooltip>
                 </div>
@@ -262,13 +262,17 @@ else
                             </tbody>
                         </MudSimpleTable>
                     }
+                    @foreach (var problem in VolumeProblems())
+                    {
+                        <MudAlert Severity="Severity.Error" Dense="true">@problem</MudAlert>
+                    }
                 }
             }
         </MudStack>
     </DialogContent>
     <DialogActions>
         <MudButton OnClick="@(() => _open = false)">Cancel</MudButton>
-        <MudButton Variant="Variant.Filled" Color="@(_overwrite ? Color.Error : Color.Primary)" Disabled="@(_target is null || _instance is null || string.IsNullOrWhiteSpace(_name) || _starting)"
+        <MudButton Variant="Variant.Filled" Color="@(_overwrite ? Color.Error : Color.Primary)" Disabled="@(_target is null || _instance is null || string.IsNullOrWhiteSpace(_name) || _starting || VolumeProblems().Count > 0)"
                    OnClick="StartAsync">@(_overwrite ? "Overwrite" : _publish ? "Publish" : "Restore")</MudButton>
     </DialogActions>
 </MudDialog>
@@ -504,6 +508,7 @@ else
         }
 
         _targetVm = overwrite ? _detail.Database.VmNativeId : _agents.FirstOrDefault(a => a.VmNativeId == _detail.Database.VmNativeId)?.VmNativeId ?? _agents.FirstOrDefault()?.VmNativeId;
+        _fileLocation = DefaultLocation(_targetVm);
         _accountId ??= _accounts.Count == 1 ? _accounts[0].Id : null;
         _open = true;
     }
@@ -512,6 +517,50 @@ else
     {
         _targetVm = vm;
         _target = null;
+        _fileLocation = DefaultLocation(vm);
+    }
+
+    /// <summary>Where a publish is possible (spans whose base is a restore point), or what to do instead.</summary>
+    private string PublishableText()
+    {
+        var spans = _detail?.Spans.Where(s => s.BaseKind == "SnapshotFull").ToList() ?? [];
+        return spans.Count == 0
+            ? "Restore it as a new database instead; publishing becomes possible after the next image backup with the SQL Server snapshot."
+            : $"Publishable: {string.Join(", ", spans.Select(s => $"{Fmt.Time(s.FromUtc)} – {Fmt.Time(s.ToUtc)}"))}. Choose a time there, or restore it as a new database.";
+    }
+
+    /// <summary>The backup's folders on the VM it came from; another VM may not have those drives, so its instance's defaults.</summary>
+    private string DefaultLocation(string? vm) =>
+        string.Equals(vm, _detail?.Database.VmNativeId, StringComparison.OrdinalIgnoreCase) ? SqlRestoreFiles.Original : SqlRestoreFiles.Default;
+
+    /// <summary>
+    /// Drives of the target paths the target VM does not have as local fixed volumes, or without room for the files (512 MB
+    /// stay free), as the server checks them before it writes anything.
+    /// </summary>
+    private List<string> VolumeProblems()
+    {
+        var problems = new List<string>();
+        if (_overwrite || _publish || _target is null || _plan is null || Targets() is not { } paths)
+        {
+            return problems;
+        }
+
+        var host = _target.Host;
+        foreach (var drive in _plan.Files.Zip(paths).Where(f => f.Second.Length >= 3).GroupBy(f => f.Second[..3], StringComparer.OrdinalIgnoreCase))
+        {
+            var needed = drive.Sum(f => f.First.SizeBytes ?? 0);
+            var volume = _target.Volumes.FirstOrDefault(v => string.Equals(v.Root, drive.Key, StringComparison.OrdinalIgnoreCase));
+            if (volume is null)
+            {
+                problems.Add($"{drive.Key} is not a local fixed volume of {host}: choose the instance's default folders or other folders.");
+            }
+            else if (volume.FreeBytes < needed + (512L << 20))
+            {
+                problems.Add($"{drive.Key} on {host} has {Fmt.Bytes(volume.FreeBytes)} free; the files need {Fmt.Bytes(needed)} (512 MB stay free).");
+            }
+        }
+
+        return problems;
     }
 
     private void OnAccountChanged(Guid? account)
