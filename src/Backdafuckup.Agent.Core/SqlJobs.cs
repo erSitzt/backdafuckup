@@ -173,6 +173,9 @@ public sealed class SqlJobRunner
     /// <summary>True if the job did its work.</summary>
     public bool Succeeded { get; private set; }
 
+    /// <summary>The publish folder of a drop-published job once its request is fetched.</summary>
+    public string? PublishFolder { get; private set; }
+
     public async Task RunAsync(CancellationToken stop)
     {
         var result = new SqlJobResult { JobId = _id };
@@ -191,6 +194,7 @@ public sealed class SqlJobRunner
             }
 
             Kind = request.Kind;
+            PublishFolder = request.PublishFolder;
             void Log(string line)
             {
                 _log.Write($"SQL job {_id}: {line}");

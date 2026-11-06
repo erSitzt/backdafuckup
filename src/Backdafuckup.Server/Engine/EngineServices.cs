@@ -284,8 +284,8 @@ public sealed class StartupRecovery(
                 session.State = SessionState.Stopped;
                 session.EndedUtc = time.GetUtcNow();
                 session.Summary = session.Kind == SessionKind.SqlExport
-                    ? "Stopped: the backup service was restarted during the export. The agent in the VM removes the published database and the volumes when it notices (within a minute); a .bak it wrote stays in its folder."
-                    : "Unpublished: the backup service was restarted. The agent in the VM removes the database and the volumes when it notices (within a minute).";
+                    ? "Stopped: the backup service was restarted during the export. The agent in the VM removes the published database and the volumes when it notices (within a minute); a .bak it wrote stays in its folder. A database it cannot remove is removed with this session's account when the agent reports it (noted here)."
+                    : "Unpublished: the backup service was restarted. The agent in the VM removes the database and the volumes when it notices (within a minute). A database it cannot remove is removed with this session's account when the agent reports it (noted here).";
                 foreach (var task in session.Tasks.Where(t => t.State is SessionState.Running or SessionState.Queued))
                 {
                     task.State = SessionState.Stopped;
@@ -523,6 +523,7 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Sql.SqlCatalog>();
         services.AddSingleton<Sql.SqlExportFiles>();
         services.AddSingleton<Sql.SqlBackupDownloads>();
+        services.AddSingleton<Sql.SqlPublishLeftovers>();
         services.AddHostedService<Sql.SqlExportSweeper>();
         services.AddSingleton<Sql.SqlCatalogBackfill>();
         services.AddHostedService(sp => sp.GetRequiredService<Sql.SqlCatalogBackfill>());

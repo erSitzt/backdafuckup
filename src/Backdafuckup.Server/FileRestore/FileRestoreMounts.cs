@@ -190,7 +190,7 @@ public sealed class FileRestoreMounts(
         }
     }
 
-    public async Task CloseAsync(BrowseMount mount, string reason, SessionState state = SessionState.Succeeded)
+    public async Task CloseAsync(BrowseMount mount, string reason, SessionState state = SessionState.Succeeded, bool flushLog = true)
     {
         if (!mount.MarkClosed())
         {
@@ -219,7 +219,11 @@ public sealed class FileRestoreMounts(
 
         var summary = $"{reason}. {mount.Downloads} download(s), {Fmt(mount.DownloadedBytes)}.";
         mount.Log.Info($"File browser closed: {summary}");
-        await events.FlushAsync().ConfigureAwait(false);
+        if (flushLog)
+        {
+            await events.FlushAsync().ConfigureAwait(false);
+        }
+
         await tracker.UpdateSessionAsync(
             mount.SessionId,
             s =>
@@ -242,11 +246,22 @@ public sealed class FileRestoreMounts(
         }
     }
 
+    /// <summary>
+    /// Closes every browser when the service stops. The session log may not be written any more then (its writer can have
+    /// stopped first), so it is not waited for; a browser whose session cannot be updated is ended by the next start.
+    /// </summary>
     public async Task CloseAllAsync(string reason)
     {
         foreach (var mount in _mounts.Values.ToList())
         {
-            await CloseAsync(mount, reason, SessionState.Stopped).ConfigureAwait(false);
+            try
+            {
+                await CloseAsync(mount, reason, SessionState.Stopped, flushLog: false).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is TimeoutException or ObjectDisposedException or InvalidOperationException or DbUpdateException or Npgsql.NpgsqlException)
+            {
+                logger.LogWarning(ex, "Closing the file browser of session {Session} at shutdown did not finish; the next start ends the session.", mount.SessionId);
+            }
         }
     }
 

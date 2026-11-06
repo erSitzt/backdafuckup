@@ -203,6 +203,25 @@ public sealed class AgentPollRequest
     /// restart, crash, VM reboot): the SQL jobs the previous process accepted are gone. Empty from agents before this field.
     /// </summary>
     public Guid RunId { get; set; }
+
+    /// <summary>
+    /// Databases that publishes left attached (from the publish journal; not those of a running publish). The server
+    /// removes them with the account of the publish's session (<see cref="SqlJobKinds.DropPublished"/>). Null when none.
+    /// </summary>
+    public List<LeftoverPublishDatabase>? LeftoverDatabases { get; set; }
+}
+
+/// <summary>A database a publish left attached in the guest.</summary>
+public sealed class LeftoverPublishDatabase
+{
+    /// <summary>The publish's id (for a SQL publish the id of its session).</summary>
+    public Guid PublishId { get; set; }
+
+    /// <summary>Instance and name, <c>instance\name</c>.</summary>
+    public string Database { get; set; } = string.Empty;
+
+    /// <summary>The publish's folder in the guest, below which the database's files are.</summary>
+    public string Folder { get; set; } = string.Empty;
 }
 
 /// <summary>Answer to a poll: a command, or an update offer.</summary>

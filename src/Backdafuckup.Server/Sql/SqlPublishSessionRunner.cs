@@ -113,7 +113,7 @@ public sealed class SqlPublishSessionRunner(
             DiskPublish publish;
             try
             {
-                publish = await publishes.PublishAsync(agent.Id, planned.Info, planned.Disks, line => log.Info(line), options.Value.PublishTimeout, cancellationToken, chainFiles).ConfigureAwait(false);
+                publish = await publishes.PublishAsync(agent.Id, planned.Info, planned.Disks, line => log.Info(line), options.Value.PublishTimeout, cancellationToken, chainFiles, session.Id).ConfigureAwait(false);
             }
             catch (PublishFailedException ex)
             {
@@ -340,7 +340,7 @@ public sealed class SqlPublishSessionRunner(
             DiskPublish publish;
             try
             {
-                publish = await publishes.PublishAsync(agent.Id, planned.Info, planned.Disks, line => log.Info(line), options.Value.PublishTimeout, cancellationToken).ConfigureAwait(false);
+                publish = await publishes.PublishAsync(agent.Id, planned.Info, planned.Disks, line => log.Info(line), options.Value.PublishTimeout, cancellationToken, publishId: session.Id).ConfigureAwait(false);
             }
             catch (PublishFailedException ex)
             {

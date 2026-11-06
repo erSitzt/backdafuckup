@@ -1000,6 +1000,32 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         Assert.Empty(sql.DatabaseFiles("shop_published"));
         Assert.Empty(new PublishJournal(guest.WorkFolder).Read());
 
+        // A database a publish left attached after its session ended (here: the agent restarted while the server was down):
+        // the agent reports it from its journal, the server removes it with the session's account and notes it there.
+        Assert.Equal(published.ToString("N")[..12], Path.GetFileName(folder));
+        var leftFolder = Path.Combine(guest.WorkFolder, published.ToString("N")[..12]);
+        Directory.CreateDirectory(leftFolder);
+        sql.AddDatabase("shop_left", Path.Combine(leftFolder, "D", "SQL", "shop.mdf"), Path.Combine(leftFolder, "L", "Log", "shop_log.ldf"));
+        new PublishJournal(guest.WorkFolder).Add(new PublishJournal.Entry { PublishId = published, Folder = leftFolder, Database = @"SQLEXPRESS\shop_left" });
+        var sweeper = _factory!.Services.GetRequiredService<SqlPublishLeftovers>();
+        for (var i = 0; i < 100 && !(await LogAsync(published)).Contains("[shop_left]", StringComparison.Ordinal); i++)
+        {
+            await Task.Delay(200, Ct);
+            await sweeper.WaitIdleAsync();
+        }
+
+        var publishedLog = await LogAsync(published);
+        Assert.Contains(@"The database [shop_left] that stayed attached to instance SQLEXPRESS after this publish ended was removed now (as bdfu_publish).", publishedLog, StringComparison.Ordinal);
+        Assert.Contains("SQL01 (10.0.0.5)", publishedLog, StringComparison.Ordinal);
+        Assert.Empty(sql.DatabaseFiles("shop_left"));
+        for (var i = 0; i < 50 && new PublishJournal(guest.WorkFolder).Read().Count > 0; i++)
+        {
+            await Task.Delay(100, Ct);
+        }
+
+        Assert.Empty(new PublishJournal(guest.WorkFolder).Read());
+        Assert.False(Directory.Exists(leftFolder));
+
         // The password never reaches the agent's log or the session logs.
         var agentLog = string.Join("\n", Directory.GetFiles(_root, "agent.log", SearchOption.AllDirectories).Select(File.ReadAllText));
         Assert.DoesNotContain("Publish-1", agentLog, StringComparison.Ordinal);

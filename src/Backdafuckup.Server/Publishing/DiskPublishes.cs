@@ -99,7 +99,7 @@ public sealed class DiskPublishes(AgentRegistry registry, IOptions<AgentOptions>
     /// </exception>
     public async Task<DiskPublish> PublishAsync(
         Guid agentId, PublishInfo info, IReadOnlyList<GuestDiskSource> disks, Action<string> log, TimeSpan timeout, CancellationToken cancellationToken,
-        IReadOnlyDictionary<string, Sql.SqlJobFile>? files = null)
+        IReadOnlyDictionary<string, Sql.SqlJobFile>? files = null, Guid? publishId = null)
     {
         ArgumentNullException.ThrowIfNull(info);
         ArgumentNullException.ThrowIfNull(disks);
@@ -108,7 +108,8 @@ public sealed class DiskPublishes(AgentRegistry registry, IOptions<AgentOptions>
             throw new ArgumentException("Every published disk needs its source.", nameof(disks));
         }
 
-        info.PublishId = Guid.NewGuid();
+        // A SQL publish uses its session's id: a database it leaves attached is reported with it later (SqlPublishLeftovers).
+        info.PublishId = publishId ?? Guid.NewGuid();
         var publish = new DiskPublish(agentId, info, disks, log, time, files);
         _publishes[publish.Id] = publish;
         var mounted = false;

@@ -603,6 +603,24 @@ public sealed class PublishJournal
 
     public void Remove(Guid publishId) => Change(list => list.RemoveAll(e => e.PublishId == publishId));
 
+    /// <summary>Notes that the database of the publish with this folder is gone (removed by the server's drop-published).</summary>
+    public void ClearDatabase(string folder) => Change(list =>
+    {
+        foreach (var entry in list.Where(e => string.Equals(e.Folder.TrimEnd('\\', '/'), folder.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase)))
+        {
+            entry.Database = null;
+        }
+    });
+
+    /// <summary>The databases publishes left attached, except those of <paramref name="running"/>.</summary>
+    public List<LeftoverPublishDatabase>? Leftovers(Guid? running)
+    {
+        var list = Read().Where(e => e.Database is not null && e.PublishId != running)
+            .Select(e => new LeftoverPublishDatabase { PublishId = e.PublishId, Database = e.Database!, Folder = e.Folder })
+            .ToList();
+        return list.Count == 0 ? null : list;
+    }
+
     private void Change(Action<List<Entry>> change)
     {
         lock (_lock)
@@ -679,7 +697,7 @@ public sealed class PublishRunner
             if (entry.Database is { } database)
             {
                 // Needs the account, which the agent never stores: the backup server removes it (drop-published).
-                Log($"SQL Server database {database} may still be attached; the backup server removes it with the publish's account.");
+                Log($"SQL Server database {database} may still be attached; the agent reports it, and the backup server removes it with the account of the publish's session.");
             }
 
             var clean = true;

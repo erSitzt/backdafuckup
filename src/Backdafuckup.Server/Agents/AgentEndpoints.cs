@@ -26,7 +26,7 @@ public static class AgentEndpoints
 
         agent.MapPost("/poll", async (
             AgentPollRequest request, AgentService agents, AgentRegistry registry, AgentPackages packages, Sql.SqlJobs sqlJobs, Publishing.DiskPublishes publishes,
-            FileRestore.AgentTransfers transfers, IHostApplicationLifetime lifetime, HttpContext http, CancellationToken ct) =>
+            FileRestore.AgentTransfers transfers, Sql.SqlPublishLeftovers leftovers, IHostApplicationLifetime lifetime, HttpContext http, CancellationToken ct) =>
         {
             if (await agents.AuthenticateAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
             {
@@ -43,6 +43,9 @@ public static class AgentEndpoints
                 publishes.AgentRestarted(agentId);
                 transfers.AgentRestarted(agentId);
             }
+
+            // Databases that publishes left attached after their session ended: removed with the session's account.
+            leftovers.Report(agentId, request.LeftoverDatabases);
 
             // A different set of files on the server (after a server update): offer the update, but never during a backup
             // operation or while commands wait (a restart between freeze and thaw would break the freeze).

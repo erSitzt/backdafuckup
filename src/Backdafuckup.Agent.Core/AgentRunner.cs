@@ -27,6 +27,36 @@ public sealed class AgentRunner
     private readonly IRestoreFileSystem? _restoreFiles;
     private readonly ISqlEnvironment? _sql;
     private readonly IPublishHost? _publish;
+    private volatile object? _runningPublishBox;
+
+    /// <summary>The publish running in the work slot, whose database is not "left over".</summary>
+    private Guid? _runningPublish
+    {
+        get => _runningPublishBox as Guid?;
+        set => _runningPublishBox = value;
+    }
+
+    /// <summary>Databases that publishes left attached, for the server to remove (none without publishing).</summary>
+    private System.Collections.Generic.List<LeftoverPublishDatabase>? LeftoverDatabases()
+    {
+        if (_publish is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return new PublishJournal(_publish.WorkFolder).Leftovers(_runningPublish);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
     private readonly object _workLock = new object();
     private readonly ConcurrentDictionary<Guid, SqlJobRunner> _sqlJobs = new ConcurrentDictionary<Guid, SqlJobRunner>();
     private readonly SqlInstanceLocks _sqlLocks = new SqlInstanceLocks();
@@ -230,7 +260,8 @@ public sealed class AgentRunner
         _log.Write($"Connected to {http.BaseAddress}.");
         while (!stop.IsCancellationRequested)
         {
-            using (var response = await http.PostAsync(AgentProtocol.PollPath, Json(new AgentPollRequest { Host = HostInfo(force: false), Busy = Busy, RunId = RunId }), stop).ConfigureAwait(false))
+            var pollRequest = new AgentPollRequest { Host = HostInfo(force: false), Busy = Busy, RunId = RunId, LeftoverDatabases = LeftoverDatabases() };
+            using (var response = await http.PostAsync(AgentProtocol.PollPath, Json(pollRequest), stop).ConfigureAwait(false))
             {
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
                 {
@@ -372,9 +403,17 @@ public sealed class AgentRunner
         var publish = new PublishRunner(client, command.PublishId, _publish, _log, _sql);
         var busy = await StartWorkAsync($"publish {command.PublishId}", async () =>
         {
-            using (client)
+            _runningPublish = command.PublishId;
+            try
             {
-                await publish.RunAsync(stop).ConfigureAwait(false);
+                using (client)
+                {
+                    await publish.RunAsync(stop).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                _runningPublish = null;
             }
         }, stop).ConfigureAwait(false);
         if (busy is not null)
@@ -423,6 +462,11 @@ public sealed class AgentRunner
             // now instead of at the next start. Only in a free work slot: a running publish has its own journal entry.
             if (job.Succeeded && job.Kind == SqlJobKinds.DropPublished && _publish is { } publishHost && !stop.IsCancellationRequested)
             {
+                if (job.PublishFolder is { } folder)
+                {
+                    new PublishJournal(publishHost.WorkFolder).ClearDatabase(folder);
+                }
+
                 await StartWorkAsync("cleanup of left-over publishes", () => Task.Run(() => PublishRunner.CleanupStale(publishHost, _log)), stop).ConfigureAwait(false);
             }
         });

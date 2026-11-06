@@ -202,15 +202,18 @@ public sealed partial class SshConnector : ISshConnector
 
         public void Upload(string remotePath, Stream content, long length, CancellationToken cancellationToken)
         {
-            ulong uploaded = 0;
-            sftp.UploadFile(content, remotePath, canOverride: false, bytes =>
+            // SSH.NET reads the source on this thread, but reports progress on pool threads, also after UploadFile returned:
+            // a count taken there can miss the last writes, and an exception there would end the process. So cancellation
+            // goes through the source, and the size is what the server has.
+            using (var source = new CancellableReadStream(content, cancellationToken))
             {
-                uploaded = bytes;
-                cancellationToken.ThrowIfCancellationRequested();
-            });
-            if ((long)uploaded != length)
+                sftp.UploadFile(source, remotePath, canOverride: false);
+            }
+
+            var size = sftp.GetAttributes(remotePath).Size;
+            if (size != length)
             {
-                throw new IOException($"{(long)uploaded:N0} bytes were uploaded to {endpoint} instead of {length:N0}.");
+                throw new IOException($"{size:N0} bytes arrived at {endpoint} in {remotePath} instead of {length:N0}.");
             }
         }
 
@@ -392,4 +395,44 @@ public sealed partial class SshConnector : ISshConnector
             }
         }
     }
+}
+
+/// <summary>Reads another stream (left open) and throws once the token is cancelled.</summary>
+internal sealed class CancellableReadStream(Stream inner, CancellationToken cancellationToken) : Stream
+{
+    public override bool CanRead => true;
+
+    public override bool CanSeek => false;
+
+    public override bool CanWrite => false;
+
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return inner.Read(buffer, offset, count);
+    }
+
+    public override int Read(Span<byte> buffer)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return inner.Read(buffer);
+    }
+
+    public override void Flush()
+    {
+    }
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
