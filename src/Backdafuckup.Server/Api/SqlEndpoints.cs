@@ -57,6 +57,10 @@ public static class SqlEndpoints
         app.MapGet("/api/sql/databases/{id:guid}", DatabaseAsync);
         app.MapGet("/api/sql/databases/{id:guid}/plan", PlanAsync);
         app.MapGet("/api/sql/backup-days/{sessionId:guid}", BackupDayAsync);
+        app.MapGet("/api/sql/backup-runs/{id:guid}/lines", async (Guid id, AppDbContext db, CancellationToken ct) =>
+            await db.SqlBackupRuns.AsNoTracking().Where(r => r.Id == id).Select(r => r.Lines).FirstOrDefaultAsync(ct) is { } lines
+                ? Results.Ok(lines.Select(l => new SqlBackupRunLineDto(l.Severity.ToString(), l.Message)).ToList())
+                : Results.NotFound());
         app.MapPost("/api/sql/exports", StartExportAsync);
 
         // The .bak of a native full or system database backup: a one-time link, then the file from the repository.
@@ -366,10 +370,26 @@ public static class SqlEndpoints
                 schedule?.LastRunUtc, schedule?.LastResult?.ToString(), schedule?.LastMessage, schedule?.NextLogUtc, schedule?.NextFullUtc, schedule?.NextSystemUtc);
         }).OrderBy(v => v.VmName, StringComparer.OrdinalIgnoreCase).ToList();
 
+        // The runs without their lines (those come per VM run when opened): VMs started in the same minute form one run.
+        var runs = await db.SqlBackupRuns.AsNoTracking().Where(r => r.SessionId == sessionId).OrderBy(r => r.StartedUtc)
+            .Select(r => new { r.Id, r.VmName, r.StartedUtc, r.EndedUtc, r.State, r.Logs, r.Fulls, r.Bytes, r.NewStoredBytes, r.Message })
+            .ToListAsync(ct);
+        var groups = runs
+            .GroupBy(r => new DateTimeOffset(r.StartedUtc.UtcTicks - r.StartedUtc.UtcTicks % TimeSpan.TicksPerMinute, TimeSpan.Zero))
+            .OrderByDescending(g => g.Key)
+            .Select(g => new SqlBackupRunDto(
+                g.Min(r => r.StartedUtc), g.Max(r => r.EndedUtc), SqlBackupService.Worst(g.Select(r => r.State)).ToString(),
+                g.Sum(r => r.Logs), g.Sum(r => r.Fulls), g.Sum(r => r.Bytes), g.Sum(r => r.NewStoredBytes),
+                [.. g.OrderBy(r => r.VmName, StringComparer.OrdinalIgnoreCase).Select(r => new SqlBackupRunVmDto(r.Id, r.VmName, r.State.ToString(), r.Logs, r.Fulls, r.Bytes, r.NewStoredBytes, r.Message))]))
+            .ToList();
+
         return Results.Ok(new SqlBackupDayDto(
             sets.Count(s => s.Kind == SqlBackupSetKind.Log), sets.Count(s => s.Kind == SqlBackupSetKind.NativeFull), sets.Count(s => s.Kind == SqlBackupSetKind.SystemFull),
             sets.Sum(s => s.Size), stored, interval ?? 60, current, vms,
-            [.. databases.Select(d => ToDto(d, new SqlChain(usable[d.Id].Select(SqlChainSet.From)).Coverage().Spans))]));
+            [.. databases.Select(d => ToDto(d, new SqlChain(usable[d.Id].Select(SqlChainSet.From)).Coverage().Spans))])
+        {
+            Runs = groups,
+        });
     }
 
     /// <summary>The databases of the SQL catalog with their chain state and the span of time they can be restored to.</summary>

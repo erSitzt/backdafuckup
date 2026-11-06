@@ -219,3 +219,45 @@ public sealed class SqlBackupScheduleEntity
 
     public string? LastMessage { get; set; }
 }
+
+/// <summary>
+/// One run of the SQL Server backups of one VM, for the run list of its day session: what it backed up, its result and
+/// all its lines (the agent's per-database lines too; the session log keeps one line per run and the warnings).
+/// </summary>
+public sealed class SqlBackupRunEntity
+{
+    public Guid Id { get; set; } = Guid.CreateVersion7();
+
+    public Guid SessionId { get; set; }
+
+    public Guid JobId { get; set; }
+
+    public required string VmNativeId { get; set; }
+
+    public required string VmName { get; set; }
+
+    public DateTimeOffset StartedUtc { get; set; }
+
+    public DateTimeOffset EndedUtc { get; set; }
+
+    public SessionState State { get; set; }
+
+    public int Logs { get; set; }
+
+    public int Fulls { get; set; }
+
+    public long Bytes { get; set; }
+
+    public long NewStoredBytes { get; set; }
+
+    /// <summary>The last warning or error of the run, for the list.</summary>
+    public string? Message { get; set; }
+
+    public List<SqlBackupRunLine> Lines { get; set; } = [];
+}
+
+/// <summary>A line of a <see cref="SqlBackupRunEntity"/> (the severity stored as its name).</summary>
+public sealed record SqlBackupRunLine(
+    [property: System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter<Backdafuckup.Core.Operations.LogSeverity>))]
+    Backdafuckup.Core.Operations.LogSeverity Severity,
+    string Message);

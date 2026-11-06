@@ -240,7 +240,28 @@ public sealed record SqlBackupDayDto(
     int LogIntervalMinutes,
     bool Current,
     IReadOnlyList<SqlBackupDayVmDto> Vms,
-    IReadOnlyList<SqlCatalogDatabaseDto> Databases);
+    IReadOnlyList<SqlCatalogDatabaseDto> Databases)
+{
+    /// <summary>The runs of the day, newest first: the VMs that started in the same minute form one run.</summary>
+    public IReadOnlyList<SqlBackupRunDto> Runs { get; init; } = [];
+}
+
+/// <summary>A run of a day session: its VMs (in parallel) and their totals.</summary>
+public sealed record SqlBackupRunDto(
+    DateTimeOffset StartedUtc,
+    DateTimeOffset EndedUtc,
+    string State,
+    int LogBackups,
+    int FullBackups,
+    long Bytes,
+    long NewStoredBytes,
+    IReadOnlyList<SqlBackupRunVmDto> Vms);
+
+/// <summary>One VM in a run; its lines come from <c>GET /api/sql/backup-runs/{Id}/lines</c>.</summary>
+public sealed record SqlBackupRunVmDto(Guid Id, string VmName, string State, int LogBackups, int FullBackups, long Bytes, long NewStoredBytes, string? Message);
+
+/// <summary>A line of a VM's run.</summary>
+public sealed record SqlBackupRunLineDto(string Severity, string Message);
 
 /// <summary>One VM of a day session: what it backed up that day, its last result and its next runs.</summary>
 public sealed record SqlBackupDayVmDto(

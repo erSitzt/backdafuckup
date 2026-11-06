@@ -29,6 +29,12 @@ public sealed class SqlBackupOptions
 
     /// <summary>A scheduled full or system backup missed by more than this (server down) waits for its next time.</summary>
     public TimeSpan MisfireGrace { get; set; } = TimeSpan.FromHours(12);
+
+    /// <summary>
+    /// After the server starts, a due run waits this long for its VM's agent to connect again before it reports the agent
+    /// offline (the agents reconnect within seconds; the run that catches up should not find them all "offline").
+    /// </summary>
+    public TimeSpan AgentReconnectGrace { get; set; } = TimeSpan.FromMinutes(2);
 }
 
 /// <summary>
@@ -58,6 +64,7 @@ public sealed class SqlBackupService(
     /// <summary>Per day session: the runs of all its VMs that started in the same minute, summed for the summary.</summary>
     private readonly ConcurrentDictionary<Guid, (string Slot, int Vms, int Logs, int Fulls, long Bytes)> _slotTotals = new();
     private readonly ConcurrentDictionary<(Guid Job, string Vm), DateOnly> _retained = new();
+    private readonly DateTimeOffset _startedUtc = time.GetUtcNow();
     private SemaphoreSlim? _slots;
 
     /// <summary>The worst of the states (Failed over Warning over Succeeded); Running while one still runs.</summary>
@@ -138,6 +145,12 @@ public sealed class SqlBackupService(
                     continue;
                 }
 
+                if (now - _startedUtc < options.Value.AgentReconnectGrace && !await AgentOnlineAsync(vm.NativeId, cancellationToken).ConfigureAwait(false))
+                {
+                    // The server has just started and the agent has not connected again yet: the run stays due.
+                    continue;
+                }
+
                 var key = (job.Id, vm.NativeId);
                 var run = RunGuardedAsync(job, vm, work, cancellationToken);
                 _running[key] = run;
@@ -147,6 +160,9 @@ public sealed class SqlBackupService(
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    private async Task<bool> AgentOnlineAsync(string vmNativeId, CancellationToken cancellationToken) =>
+        await agents.FindForVmAsync(vmNativeId, cancellationToken).ConfigureAwait(false) is { } agent && agents.IsOnline(agent.Id);
 
     /// <summary>A full or system backup missed by more than the grace waits for its next time.</summary>
     private void SkipMissed(BackupJob job, SqlBackupScheduleEntity state, DateTimeOffset now)
@@ -206,12 +222,19 @@ public sealed class SqlBackupService(
         }
         finally
         {
-            foreach (var (severity, message) in run.Lines)
+            // The session log gets one line per run and its warnings; all lines go to the run (the run list shows them).
+            if (run.Compact() is { } line)
+            {
+                log.Write(LogSeverity.Info, line);
+            }
+
+            foreach (var (severity, message) in run.Lines.Where(l => l.Severity != LogSeverity.Info))
             {
                 log.Write(severity, message);
             }
 
             await events.FlushAsync().ConfigureAwait(false);
+            await SaveRunAsync(job, vm, sessionId, started, run).ConfigureAwait(false);
             await ScheduleNextAsync(job, vm, work, started, run, CancellationToken.None).ConfigureAwait(false);
             await CloseDayAsync(job, sessionId, taskId, previous, started, run, CancellationToken.None).ConfigureAwait(false);
         }
@@ -379,6 +402,36 @@ public sealed class SqlBackupService(
         }
     }
 
+    /// <summary>Keeps the run for the run list of its day session (a failure here costs the list entry, not the run).</summary>
+    private async Task SaveRunAsync(BackupJob job, BackupJobObject vm, Guid sessionId, DateTimeOffset started, RunOutcome run)
+    {
+        try
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(CancellationToken.None).ConfigureAwait(false);
+            db.SqlBackupRuns.Add(new SqlBackupRunEntity
+            {
+                SessionId = sessionId,
+                JobId = job.Id,
+                VmNativeId = vm.NativeId,
+                VmName = vm.CachedName,
+                StartedUtc = started,
+                EndedUtc = time.GetUtcNow(),
+                State = run.State,
+                Logs = run.Logs,
+                Fulls = run.Fulls,
+                Bytes = run.Bytes,
+                NewStoredBytes = run.NewStoredBytes,
+                Message = run.Lines.LastOrDefault(l => l.Severity != LogSeverity.Info).Message,
+                Lines = [.. run.Lines.Select(l => new SqlBackupRunLine(l.Severity, l.Message))],
+            });
+            await db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException or Npgsql.NpgsqlException)
+        {
+            logger.LogWarning(ex, "The run of the SQL Server backups of {Vm} in job {Job} could not be kept for its run list.", vm.CachedName, job.Name);
+        }
+    }
+
     /// <summary>The job's result as log lines: what was backed up, skipped or failed, and what waits in the VM.</summary>
     private static void Report(RunContext context, SqlJobResult result, SqlBackupReceiver receiver, string kind)
     {
@@ -408,6 +461,8 @@ public sealed class SqlBackupService(
         run.Logs += receiver.Committed.Count(c => c.Kind == SqlBackupActions.Log);
         run.Fulls += receiver.Committed.Count(c => c.Kind != SqlBackupActions.Log);
         run.Bytes += bytes;
+        run.NewStoredBytes += stored;
+        run.Backups.AddRange(receiver.Committed.Select(c => (c.Kind == SqlBackupActions.Log, $"{c.Instance}\\{c.Database}")));
         if (receiver.Committed.Count > 0)
         {
             var names = receiver.Committed.GroupBy(c => c.Kind).Select(g => $"{g.Count()} {(g.Key == SqlBackupActions.Log ? "log" : g.Key == "system" ? "system database" : "full")} backup(s)");
@@ -475,6 +530,18 @@ public sealed class SqlBackupService(
                     if (newest is not null && chain.Latest is { } latest && latest >= newest.FinishUtc)
                     {
                         SetChain(row, SqlChainState.Ok, null);
+
+                        // Log backups that were too far apart (server or agent away): the chain is intact, the RPO was not met.
+                        if (sets.Where(s => s.FinishUtc < newest.FinishUtc).MaxBy(s => s.FinishUtc) is { Kind: SqlBackupSetKind.Log } before
+                            && newest.FinishUtc - before.FinishUtc > 2 * interval)
+                        {
+                            var zone = ScheduleCalculator.FindZone(context.Job.Schedule.TimeZoneId);
+                            context.Run.Warn(
+                                $"{name}: {(newest.FinishUtc - before.FinishUtc).TotalMinutes:0} minutes without a log backup " +
+                                $"({TimeZoneInfo.ConvertTime(before.FinishUtc, zone):HH:mm} to {TimeZoneInfo.ConvertTime(newest.FinishUtc, zone):HH:mm}), more than twice the interval " +
+                                $"({interval.TotalMinutes:0} min). The log chain is intact; changes in that time were only in the VM.");
+                        }
+
                         break;
                     }
 
@@ -786,12 +853,45 @@ public sealed class SqlBackupService(
 
         public long Bytes { get; set; }
 
+        public long NewStoredBytes { get; set; }
+
+        /// <summary>What was stored: log backup or not, and instance\database.</summary>
+        public List<(bool Log, string Name)> Backups { get; } = [];
+
         public bool ForeignChecked { get; set; }
 
         /// <summary>The agent's host and address once known, for messages.</summary>
         public string? Host { get; set; }
 
         public void Info(string message) => Lines.Add((LogSeverity.Info, message));
+
+        /// <summary>The run in one line for the session log, e.g. "4 log backup(s) (SQLEXPRESS\shop, …): 350.208 bytes, 8.453 bytes new".</summary>
+        public string? Compact()
+        {
+            static string Names(IEnumerable<string> names)
+            {
+                var all = names.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                return all.Count <= 8 ? string.Join(", ", all) : $"{string.Join(", ", all.Take(8))} and {all.Count - 8} more";
+            }
+
+            var parts = new List<string>();
+            if (Backups.Where(b => b.Log).Select(b => b.Name).ToList() is { Count: > 0 } logs)
+            {
+                parts.Add($"{logs.Count} log backup(s) ({Names(logs)})");
+            }
+
+            if (Backups.Where(b => !b.Log).Select(b => b.Name).ToList() is { Count: > 0 } fulls)
+            {
+                parts.Add($"{fulls.Count} full backup(s) ({Names(fulls)})");
+            }
+
+            if (parts.Count > 0)
+            {
+                return $"{string.Join(", ", parts)}: {Bytes:N0} bytes, {NewStoredBytes:N0} bytes new in the repository.";
+            }
+
+            return State == SessionState.Succeeded ? "No database needed a backup in this run." : null;
+        }
 
         public void Warn(string message)
         {

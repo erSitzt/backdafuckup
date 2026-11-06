@@ -51,6 +51,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<SqlBackupScheduleEntity> SqlBackupSchedules => Set<SqlBackupScheduleEntity>();
 
+    public DbSet<SqlBackupRunEntity> SqlBackupRuns => Set<SqlBackupRunEntity>();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
@@ -151,6 +153,21 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.LastResult).HasConversion<string>().HasMaxLength(16);
             e.HasIndex(x => new { x.JobId, x.VmNativeId }).IsUnique();
             e.HasOne<BackupJob>().WithMany().HasForeignKey(x => x.JobId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<SqlBackupRunEntity>(e =>
+        {
+            e.ToTable("sql_backup_runs");
+            e.Property(x => x.State).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.Lines).HasColumnType("jsonb").HasConversion(
+                v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+                v => JsonSerializer.Deserialize<List<SqlBackupRunLine>>(v, JsonSerializerOptions.Default) ?? new List<SqlBackupRunLine>(),
+                new ValueComparer<List<SqlBackupRunLine>>(
+                    (a, b) => JsonSerializer.Serialize(a, JsonSerializerOptions.Default) == JsonSerializer.Serialize(b, JsonSerializerOptions.Default),
+                    v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default).GetHashCode(StringComparison.Ordinal),
+                    v => v.ToList()));
+            e.HasIndex(x => new { x.SessionId, x.StartedUtc });
+            e.HasOne<SessionEntity>().WithMany().HasForeignKey(x => x.SessionId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<SqlBackupSetEntity>(e =>

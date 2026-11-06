@@ -136,6 +136,73 @@ else
                     </div>
                 </MudPaper>
             }
+
+            @if (day.Runs.Count > 0)
+            {
+                <MudPaper Class="pa-3 mb-3" Elevation="1">
+                    <div class="d-flex align-center mb-2">
+                        <MudText Typo="Typo.h6" Class="section-title">Runs</MudText>
+                        <MudSpacer />
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">@day.Runs.Count run(s) · open one for its lines</MudText>
+                    </div>
+                    <div class="cq">
+                    <MudSimpleTable Dense="true" Hover="true" Elevation="0" Class="runs-table">
+                        <thead>
+                            <tr><th>Time</th><th>State</th><th class="c-560">VMs</th><th class="num">Log</th><th class="num">Full</th><th class="num c-560">Data</th><th class="num c-760">New</th><th></th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var r in day.Runs.Take(_runsShown))
+                            {
+                                var open = _openRuns.Contains(r.StartedUtc);
+                                <tr @key="r.StartedUtc" @onclick="() => ToggleRunAsync(r)" style="cursor:pointer">
+                                    <td class="nowrap">@r.StartedUtc.ToLocalTime().ToString("HH:mm:ss")</td>
+                                    <td><StateChip State="@r.State" /></td>
+                                    <td class="c-560">@r.Vms.Count</td>
+                                    <td class="num">@r.LogBackups</td>
+                                    <td class="num">@r.FullBackups</td>
+                                    <td class="num c-560 nowrap">@Fmt.Bytes(r.Bytes)</td>
+                                    <td class="num c-760 nowrap">@Fmt.Bytes(r.NewStoredBytes)</td>
+                                    <td class="num"><MudIcon Icon="@(open ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)" Size="Size.Small" /></td>
+                                </tr>
+                                @if (open)
+                                {
+                                    <tr @key="(r.StartedUtc, true)" class="run-detail">
+                                        <td colspan="8">
+                                            @foreach (var v in r.Vms)
+                                            {
+                                                <div class="d-flex align-center flex-wrap" style="gap:8px">
+                                                    <b>@v.VmName</b>
+                                                    <StateChip State="@v.State" />
+                                                    <span class="cell-sub" style="margin:0">@v.LogBackups log · @v.FullBackups full · @Fmt.Bytes(v.Bytes) · @Fmt.Bytes(v.NewStoredBytes) new</span>
+                                                </div>
+                                                <div class="session-log run-lines mb-2">
+                                                    @if (_runLines.TryGetValue(v.Id, out var lines))
+                                                    {
+                                                        @foreach (var line in lines)
+                                                        {
+                                                            <div class="@line.Severity">@line.Message</div>
+                                                        }
+                                                    }
+                                                    else
+                                                    {
+                                                        <MudProgressLinear Indeterminate="true" Size="Size.Small" />
+                                                    }
+                                                </div>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                    </div>
+                    @if (day.Runs.Count > _runsShown)
+                    {
+                        var rest = day.Runs.Count - _runsShown;
+                        <MudButton Variant="Variant.Text" Size="Size.Small" Class="mt-1" OnClick="() => _runsShown += 24">@(rest <= 24 ? $"Show the other {rest} runs" : $"Show 24 more ({rest} older runs)")</MudButton>
+                    }
+                </MudPaper>
+            }
         }
     }
     else if (_session.Kind == "Restore")
@@ -276,9 +343,18 @@ else
         </MudItem>
         <MudItem xs="12" md="7">
             <MudPaper Class="pa-3" Elevation="1">
-                <MudText Typo="Typo.h6" Class="mb-2">Log</MudText>
+                <div class="d-flex align-center mb-2">
+                    <MudText Typo="Typo.h6">Log</MudText>
+                    <MudSpacer />
+                    @if (_session.Kind == "SqlBackup" && _log.Count > 0)
+                    {
+                        <MudButton Variant="Variant.Text" Size="Size.Small" OnClick="() => _allLines = !_allLines">
+                            @(_allLines ? "Warnings and last run only" : $"Show all {_log.Count} lines")
+                        </MudButton>
+                    }
+                </div>
                 <div class="session-log">
-                    @foreach (var entry in _log.Values.OrderBy(e => e.Id))
+                    @foreach (var entry in VisibleLog())
                     {
                         <div class="@entry.Severity">@entry.TimestampUtc.ToLocalTime().ToString("HH:mm:ss") @entry.Message</div>
                     }
@@ -294,6 +370,42 @@ else
     private SessionSummaryDto? _session;
     private SqlExportFileDto? _exportFile;
     private SqlBackupDayDto? _day;
+    private readonly HashSet<DateTimeOffset> _openRuns = [];
+    private readonly Dictionary<Guid, List<SqlBackupRunLineDto>> _runLines = [];
+    private int _runsShown = 12;
+    private bool _allLines;
+
+    /// <summary>A day session's log: its warnings and the last run, unless all lines are asked for.</summary>
+    private IEnumerable<LogEntryDto> VisibleLog()
+    {
+        var all = _log.Values.OrderBy(e => e.Id);
+        if (_session?.Kind != "SqlBackup" || _allLines || _day?.Runs is not { Count: > 0 } runs)
+        {
+            return all;
+        }
+
+        var last = runs[0].StartedUtc.AddSeconds(-1);
+        return all.Where(e => e.Severity != "Info" || e.TimestampUtc >= last);
+    }
+
+    private async Task ToggleRunAsync(SqlBackupRunDto run)
+    {
+        if (!_openRuns.Remove(run.StartedUtc))
+        {
+            _openRuns.Add(run.StartedUtc);
+            foreach (var vm in run.Vms.Where(v => !_runLines.ContainsKey(v.Id)))
+            {
+                try
+                {
+                    _runLines[vm.Id] = await Api.GetAsync<List<SqlBackupRunLineDto>>($"api/sql/backup-runs/{vm.Id}/lines");
+                }
+                catch (ApiException ex)
+                {
+                    _runLines[vm.Id] = [new SqlBackupRunLineDto("Error", ex.Message)];
+                }
+            }
+        }
+    }
 
     private static IEnumerable<(string Label, long Bytes, string Css)> Breakdown(TransferMetricsDto m) =>
     [

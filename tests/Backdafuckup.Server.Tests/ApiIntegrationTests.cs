@@ -52,6 +52,8 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             builder.UseSetting("SqlRestore:MinAutoUnpublishMinutes", "0");
             // SQL Server backups run when a test calls the scheduler, not on their own.
             builder.UseSetting("SqlBackup:TickInterval", "01:00:00");
+            // Runs do not wait for agents to reconnect after the start (one test turns the wait on).
+            builder.UseSetting("SqlBackup:AgentReconnectGrace", "00:00:00");
             builder.ConfigureTestServices(services =>
             {
                 services.RemoveAll<Backdafuckup.Smb.ISmbShareConnector>();
@@ -1185,7 +1187,8 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Assert.Single((await client.GetFromJsonAsync<List<SessionSummaryDto>>("/api/sessions?kind=SqlBackup", Ct))!, s => s.Kind == "SqlBackup");
             var log = await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{day.Id}/log", Ct);
             Assert.Contains(log!, l => l.Message.Contains(@"another tool took log backup(s)", StringComparison.Ordinal) && l.Message.Contains(@"\\nas\sql\shop_maintenance.trn", StringComparison.Ordinal));
-            Assert.Contains(log!, l => l.Message.Contains("Full backup to restart the log chain: [shop]", StringComparison.Ordinal));
+            Assert.DoesNotContain(log!, l => l.Message.Contains("Full backup to restart the log chain", StringComparison.Ordinal));
+            Assert.Contains(log!, l => l.Message.Contains(@"1 log backup(s) (SQLEXPRESS\shop), 1 full backup(s) (SQLEXPRESS\shop): ", StringComparison.Ordinal));
             Assert.Equal([("shop", "L"), ("shop", "L"), ("shop", "D")], sql.LaneBackups.Select(b => (b.Database, b.Type)));
 
             // The day's tiles: two log backups and the full, per VM with its next run, and the VM's databases.
@@ -1198,6 +1201,15 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Assert.NotNull(overviewVm.NextLogUtc);
             Assert.Equal(["shop", "simple1"], overview.Databases.Select(d => d.Name).Order(StringComparer.Ordinal));
             Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/sql/backup-days/{Guid.NewGuid()}", Ct)).StatusCode);
+
+            // The runs with their lines: the second one has the full and why it was taken.
+            var vmRuns = overview.Runs.SelectMany(r => r.Vms).ToList();
+            Assert.Equal([("Succeeded", 1, 0), ("Warning", 1, 1)], vmRuns.OrderBy(v => v.FullBackups).Select(v => (v.State, v.LogBackups, v.FullBackups)));
+            var fullRun = vmRuns.Single(v => v.FullBackups == 1);
+            var lines = (await client.GetFromJsonAsync<List<SqlBackupRunLineDto>>($"/api/sql/backup-runs/{fullRun.Id}/lines", Ct))!;
+            Assert.Contains(lines, l => l.Message.Contains("Full backup to restart the log chain: [shop]", StringComparison.Ordinal));
+            Assert.Contains(lines, l => l.Severity == "Warning" && l.Message.Contains("another tool took log backup(s)", StringComparison.Ordinal));
+            Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/sql/backup-runs/{Guid.NewGuid()}/lines", Ct)).StatusCode);
             await using (var db = await dbFactory.CreateDbContextAsync(Ct))
             {
                 var shop = await db.SqlDatabases.SingleAsync(d => d.Name == "shop", Ct);
@@ -1599,6 +1611,17 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
                 await db.SqlBackupSchedules.ExecuteUpdateAsync(x => x.SetProperty(y => y.NextLogUtc, DateTimeOffset.UtcNow.AddSeconds(-1)), Ct);
             }
 
+            // Just after a server start the run waits for the agent to connect again instead of reporting it offline.
+            var sqlOptions = _factory!.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<SqlBackupOptions>>().Value;
+            sqlOptions.AgentReconnectGrace = TimeSpan.FromHours(1);
+            var sessionsBefore = await lab.Client.GetFromJsonAsync<List<SessionSummaryDto>>("/api/sessions?kind=SqlBackup", Ct);
+            await service.TickAsync(Ct);
+            await service.WaitIdleAsync();
+            Assert.Equal(
+                sessionsBefore!.Where(x => x.Kind == "SqlBackup").Select(x => (x.Id, x.State, x.Summary)),
+                (await lab.Client.GetFromJsonAsync<List<SessionSummaryDto>>("/api/sessions?kind=SqlBackup", Ct))!.Where(x => x.Kind == "SqlBackup").Select(x => (x.Id, x.State, x.Summary)));
+            sqlOptions.AgentReconnectGrace = TimeSpan.Zero;
+
             await service.TickAsync(Ct);
             await service.WaitIdleAsync();
             var day = Assert.Single((await lab.Client.GetFromJsonAsync<List<SessionSummaryDto>>("/api/sessions?kind=SqlBackup", Ct))!, x => x.Kind == "SqlBackup");
@@ -1611,6 +1634,61 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         finally
         {
             options.OnlineWindow = window;
+            await lab.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Log_backups_too_far_apart_keep_the_chain_and_warn_that_the_rpo_was_missed()
+    {
+        var lab = await SqlLogChainAsync("sql11", publish: false);
+        var service = _factory!.Services.GetRequiredService<SqlBackupService>();
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>();
+        try
+        {
+            // As if the server had been away for 40 minutes since the last log backup.
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                foreach (var set in await db.SqlBackupSets.Where(x => x.SqlDatabaseId == lab.ShopId).ToListAsync(Ct))
+                {
+                    set.StartUtc = set.StartUtc.AddMinutes(-40);
+                    set.FinishUtc = set.FinishUtc.AddMinutes(-40);
+                }
+
+                await db.SaveChangesAsync(Ct);
+                await db.SqlBackupSchedules.ExecuteUpdateAsync(x => x.SetProperty(y => y.NextLogUtc, DateTimeOffset.UtcNow.AddSeconds(-1)), Ct);
+            }
+
+            await service.TickAsync(Ct);
+            await service.WaitIdleAsync();
+
+            var day = Assert.Single((await lab.Client.GetFromJsonAsync<List<SessionSummaryDto>>("/api/sessions?kind=SqlBackup", Ct))!, x => x.Kind == "SqlBackup");
+            var detail = await WaitForSessionAsync(lab.Client, day.Id);
+            Assert.Equal("Warning", detail.Session.State);
+            var log = (await lab.Client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{day.Id}/log", Ct))!;
+            var warning = Assert.Single(log, l => l.Message.Contains("minutes without a log backup", StringComparison.Ordinal));
+            Assert.Contains(@"SQLEXPRESS\shop: 4", warning.Message, StringComparison.Ordinal);
+            Assert.Contains("more than twice the interval (15 min). The log chain is intact", warning.Message, StringComparison.Ordinal);
+
+            // One compact line per run in the session log; the agent's per-database lines only in the runs.
+            Assert.Equal(3, log.Count(l => l.Message.Contains(@"1 log backup(s) (SQLEXPRESS\shop): ", StringComparison.Ordinal)));
+            Assert.DoesNotContain(log, l => l.Message.Contains("LSN ", StringComparison.Ordinal));
+            var overview = (await lab.Client.GetFromJsonAsync<SqlBackupDayDto>($"/api/sql/backup-days/{day.Id}", Ct))!;
+            var runs = overview.Runs.SelectMany(r => r.Vms).ToList();
+            Assert.Equal(3, runs.Count);
+            Assert.All(overview.Runs, r => Assert.True(r.EndedUtc >= r.StartedUtc));
+            var late = Assert.Single(runs, r => r.State == "Warning");
+            Assert.Contains("minutes without a log backup", late.Message, StringComparison.Ordinal);
+            var lines = (await lab.Client.GetFromJsonAsync<List<SqlBackupRunLineDto>>($"/api/sql/backup-runs/{late.Id}/lines", Ct))!;
+            Assert.Contains(lines, l => l.Severity == "Info" && l.Message.Contains("LSN ", StringComparison.Ordinal));
+
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                Assert.Equal(Backdafuckup.Server.Data.SqlChainState.Ok, (await db.SqlDatabases.SingleAsync(d => d.Id == lab.ShopId, Ct)).ChainState);
+            }
+        }
+        finally
+        {
             await lab.DisposeAsync();
         }
     }

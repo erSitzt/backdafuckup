@@ -1217,6 +1217,78 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.ToTable("sql_backups", (string)null);
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.SqlBackupRunEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<long>("Bytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("bytes");
+
+                    b.Property<DateTimeOffset>("EndedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("ended_utc");
+
+                    b.Property<int>("Fulls")
+                        .HasColumnType("integer")
+                        .HasColumnName("fulls");
+
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("job_id");
+
+                    b.Property<string>("Lines")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("lines");
+
+                    b.Property<int>("Logs")
+                        .HasColumnType("integer")
+                        .HasColumnName("logs");
+
+                    b.Property<string>("Message")
+                        .HasColumnType("text")
+                        .HasColumnName("message");
+
+                    b.Property<long>("NewStoredBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("new_stored_bytes");
+
+                    b.Property<Guid>("SessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("session_id");
+
+                    b.Property<DateTimeOffset>("StartedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("started_utc");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("state");
+
+                    b.Property<string>("VmName")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("vm_name");
+
+                    b.Property<string>("VmNativeId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("vm_native_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_sql_backup_runs");
+
+                    b.HasIndex("SessionId", "StartedUtc")
+                        .HasDatabaseName("ix_sql_backup_runs_session_id_started_utc");
+
+                    b.ToTable("sql_backup_runs", (string)null);
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.SqlBackupScheduleEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1966,6 +2038,16 @@ namespace Backdafuckup.Server.Data.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("fk_session_tasks_sessions_session_id");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.SqlBackupRunEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.SessionEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SessionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_sql_backup_runs_sessions_session_id");
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.SqlBackupScheduleEntity", b =>
