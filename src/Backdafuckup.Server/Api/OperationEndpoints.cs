@@ -408,8 +408,9 @@ public sealed class CsrfHeaderMiddleware(RequestDelegate next)
     public Task InvokeAsync(HttpContext context)
     {
         var request = context.Request;
-        // The agent interface (/api/agent/*) authenticates with the agent key, not with a cookie: no CSRF header needed.
-        if (request.Path.StartsWithSegments("/api") && !request.Path.StartsWithSegments("/api/agent")
+        // The agent interface (/api/agent/*) authenticates with the agent key, and scripts with an API token, not with a
+        // cookie a browser sends on its own: no CSRF header needed for them.
+        if (request.Path.StartsWithSegments("/api") && !request.Path.StartsWithSegments("/api/agent") && !context.User.IsTokenRequest()
             && !HttpMethods.IsGet(request.Method) && !HttpMethods.IsHead(request.Method)
             && !request.Headers.ContainsKey(ApiHeaders.Csrf))
         {

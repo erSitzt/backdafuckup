@@ -1,0 +1,191 @@
+@page "/api-tokens"
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+@inject IJSRuntime JS
+@inject NavigationManager Navigation
+
+<PageTitle>API tokens – backdafuckup</PageTitle>
+<PageHeader Title="API tokens"
+            Description="Scripts call the API with a token instead of a password and act as you. Only a hash of each token is stored: copy it when you create it.">
+    <Actions>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="OpenNew">New token</MudButton>
+    </Actions>
+</PageHeader>
+
+@if (_created is { } created)
+{
+    <MudAlert Severity="Severity.Success" Class="mb-3" ShowCloseIcon="true" CloseIconClicked="@(() => _created = null)">
+        <div><b>@created.Info.Name</b>: copy the token now. It is not shown again.</div>
+        <div class="d-flex align-center flex-wrap mt-2" style="gap:8px">
+            <code class="token-value">@created.Token</code>
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="@(() => CopyAsync(created.Token))">Copy</MudButton>
+        </div>
+    </MudAlert>
+}
+
+@if (_error is not null)
+{
+    <MudAlert Severity="Severity.Error" Class="mb-3">@_error</MudAlert>
+}
+else if (_tokens is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else if (_tokens.Count == 0)
+{
+    <MudAlert Severity="Severity.Info" Class="mb-3">No tokens yet. Create one for each script or tool, so you can delete it on its own.</MudAlert>
+}
+else
+{
+    <div class="cq mb-3">
+    <MudTable Items="_tokens" Dense="true" Hover="true" Elevation="1" Breakpoint="Breakpoint.None">
+        <HeaderContent>
+            <MudTh>Name</MudTh>
+            <MudTh Class="c-560">Token</MudTh>
+            <MudTh Class="c-950">Created</MudTh>
+            <MudTh>Expires</MudTh>
+            <MudTh Class="c-760">Last used</MudTh>
+            <MudTh></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd><b>@context.Name</b><span class="cell-sub n-560 mono">@context.Prefix…</span></MudTd>
+            <MudTd Class="c-560 mono nowrap">@context.Prefix…</MudTd>
+            <MudTd Class="c-950 nowrap">@Fmt.Time(context.CreatedUtc)</MudTd>
+            <MudTd Class="nowrap">
+                @if (context.ExpiresUtc is { } expires && expires <= DateTimeOffset.UtcNow)
+                {
+                    <StateChip State="Failed" Label="expired" />
+                }
+                else
+                {
+                    @(context.ExpiresUtc is { } at ? Fmt.Time(at) : "never")
+                }
+            </MudTd>
+            <MudTd Class="c-760">@(context.LastUsedUtc is { } used ? $"{Fmt.Time(used)}{(context.LastUsedFrom is { } from ? $" from {from}" : "")}" : "not yet")</MudTd>
+            <MudTd Style="text-align:right">
+                <MudTooltip Text="Delete: scripts with this token get 401 at once">
+                    <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" OnClick="@(() => DeleteAsync(context))" aria-label="Delete token" />
+                </MudTooltip>
+            </MudTd>
+        </RowTemplate>
+    </MudTable>
+    </div>
+}
+
+<MudPaper Class="pa-3" Elevation="1">
+    <MudText Typo="Typo.h6" Class="section-title mb-1">Using a token</MudText>
+    <MudText Typo="Typo.body2" Class="mb-2">
+        Send it in the Authorization header. Requests with a token need no <code>X-BDFU-Request</code> header. Tokens are created here only, signed in
+        with your password; a token cannot create tokens. The <MudLink Href="/api-docs" Target="_blank">API reference</MudLink> lists the endpoints.
+    </MudText>
+    <pre class="session-log" style="white-space:pre-wrap;margin:0">curl -H "Authorization: Bearer bdfu_…" @(Navigation.BaseUri)api/jobs
+curl -X POST -H "Authorization: Bearer bdfu_…" -H "Content-Type: application/json" -d '{}' @(Navigation.BaseUri)api/jobs/&lt;job id&gt;/run</pre>
+</MudPaper>
+
+<MudDialog @bind-Visible="_newOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Small, FullWidth = true, CloseOnEscapeKey = true })">
+    <TitleContent><MudText Typo="Typo.h6">New API token</MudText></TitleContent>
+    <DialogContent>
+        <MudStack Spacing="2">
+            <MudTextField T="string" @bind-Value="_name" Label="Name" HelperText="What uses it, e.g. lab scripts or monitoring." Variant="Variant.Outlined" Immediate="true" MaxLength="100" />
+            <MudSelect T="int?" @bind-Value="_days" Label="Expires" Variant="Variant.Outlined" Dense="true">
+                <MudSelectItem T="int?" Value="30">after 30 days</MudSelectItem>
+                <MudSelectItem T="int?" Value="90">after 90 days</MudSelectItem>
+                <MudSelectItem T="int?" Value="365">after a year</MudSelectItem>
+                <MudSelectItem T="int?" Value="null">never</MudSelectItem>
+            </MudSelect>
+            <MudText Typo="Typo.caption" Color="Color.Secondary">The token can do everything you can in the console, until it expires or you delete it.</MudText>
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="@(() => _newOpen = false)">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(string.IsNullOrWhiteSpace(_name) || _creating)" OnClick="CreateAsync">Create</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    private List<ApiTokenDto>? _tokens;
+    private CreatedApiTokenDto? _created;
+    private string? _error;
+    private bool _newOpen;
+    private bool _creating;
+    private string _name = string.Empty;
+    private int? _days = 90;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            _tokens = await Api.GetAsync<List<ApiTokenDto>>("api/tokens");
+            _error = null;
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private void OpenNew()
+    {
+        _name = string.Empty;
+        _days = 90;
+        _newOpen = true;
+    }
+
+    private async Task CreateAsync()
+    {
+        _creating = true;
+        try
+        {
+            _created = await Api.PostAsync<CreatedApiTokenDto>("api/tokens", new CreateApiTokenDto(_name.Trim(), _days));
+            _newOpen = false;
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _creating = false;
+        }
+    }
+
+    private async Task CopyAsync(string token)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", token);
+            Snackbar.Add("Copied.", Severity.Success);
+        }
+        catch (JSException)
+        {
+            Snackbar.Add("The browser did not allow copying; select the token and copy it by hand.", Severity.Warning);
+        }
+    }
+
+    private async Task DeleteAsync(ApiTokenDto token)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Delete token", $"Delete {token.Name} ({token.Prefix}…)? Scripts that use it get 401 at once.", yesText: "Delete", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await Api.DeleteAsync($"api/tokens/{token.Id}");
+            if (_created?.Info.Id == token.Id)
+            {
+                _created = null;
+            }
+
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+}

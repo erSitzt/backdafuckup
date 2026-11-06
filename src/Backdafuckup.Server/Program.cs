@@ -50,8 +50,11 @@ try
     builder.Services.AddBackupEngine(builder.Configuration);
     builder.Services.AddSingleton<SetupTokenService>();
 
-    // Authentication: local accounts, cookie; API calls get 401/403 instead of redirects.
-    builder.Services.AddAuthentication(IdentityConstants.ApplicationScheme).AddIdentityCookies();
+    // Authentication: local accounts with the console's cookie, or an API token (Authorization: Bearer bdfu_…) for scripts;
+    // API calls get 401/403 instead of redirects.
+    var authentication = builder.Services.AddAuthentication(ApiTokens.SelectorScheme);
+    authentication.AddIdentityCookies();
+    authentication.AddApiTokens();
     builder.Services.ConfigureApplicationCookie(options =>
     {
         options.Cookie.Name = "bdfu.auth";
@@ -87,7 +90,9 @@ try
     {
         document.Info.Title = "backdafuckup API";
         document.Info.Version = ProductInfo.Current.Version;
-        document.Info.Description = "The API of the backdafuckup web console. Sign in to the console first: requests use its session cookie, and requests that change something need the header X-BDFU-Request: 1.";
+        document.Info.Description = "The API of the backdafuckup web console. Scripts send an API token (created in the console under API tokens) as " +
+            "Authorization: Bearer bdfu_…; they act as the token's user. In the browser, requests use the console's session cookie, and requests that " +
+            "change something need the header X-BDFU-Request: 1 (not needed with a token).";
         return Task.CompletedTask;
     }));
     builder.Services.AddHealthChecks();
@@ -141,6 +146,7 @@ try
         options.CustomCss = ".generate-sdk-button, .selected-client-action { display: none !important; }";
     });
     app.MapAuthEndpoints();
+    app.MapApiTokenEndpoints();
     app.MapInfrastructureEndpoints();
     app.MapOperationEndpoints();
     app.MapAgentEndpoints();

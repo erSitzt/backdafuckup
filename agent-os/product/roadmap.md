@@ -29,6 +29,7 @@
 
 ## Phase 2: Post-Launch
 
+- **Users, roles and audit (user request 2026-11-06):** more than one administrator; roles (e.g. administrator, operator who runs jobs and restores, read-only) checked on every endpoint, also for API tokens (a token acts with its user's roles; scopes per token later); an audit log of who did what (sign-ins, changes to jobs, credentials and repositories, restores, publishes, downloads, token use), kept in the catalog and shown in the console. API tokens (2026-11-06) are the first step: they already act as their user and mark each request as a token request.
 - **Tape out:** move or copy backups to tape on an HPE MSL tape library
 - **Offsite / immutable copy:** backup copies to a secondary site, S3 or immutable storage
 - **SQL Server, follow-ups:** differential backups; automatic restore tests (restore to a point in time into a test instance and `DBCC CHECKDB` on a schedule); mail/webhook alerts for chain breaks and RPO; availability groups and failover cluster instances; streaming fulls without staging space in the VM (VDI); resumable uploads; repository pack files for the many small log backup objects

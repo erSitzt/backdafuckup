@@ -82,6 +82,85 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Api_tokens_act_as_their_user_without_the_csrf_header_until_deleted_or_expired()
+    {
+        var console = await SignedInClientAsync();
+        HttpClient Script(string? token)
+        {
+            var client = _factory!.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = false, BaseAddress = new Uri("https://localhost") });
+            if (token is not null)
+            {
+                client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
+
+            return client;
+        }
+
+        // Created in the console: shown once; the list has its name and prefix, never the token.
+        Assert.Equal(HttpStatusCode.BadRequest, (await console.PostAsJsonAsync("/api/tokens", new CreateApiTokenDto(" ", 30), Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await console.PostAsJsonAsync("/api/tokens", new CreateApiTokenDto("lab", 0), Ct)).StatusCode);
+        var created = await Read<CreatedApiTokenDto>(console.PostAsJsonAsync("/api/tokens", new CreateApiTokenDto("lab scripts", 30), Ct));
+        Assert.StartsWith("bdfu_", created.Token, StringComparison.Ordinal);
+        Assert.True(created.Token.Length > 40);
+        Assert.Equal(created.Token[..13], created.Info.Prefix);
+        Assert.InRange(created.Info.ExpiresUtc!.Value, DateTimeOffset.UtcNow.AddDays(29), DateTimeOffset.UtcNow.AddDays(31));
+        var listed = Assert.Single((await console.GetFromJsonAsync<List<ApiTokenDto>>("/api/tokens", Ct))!);
+        Assert.Equal(("lab scripts", created.Info.Prefix), (listed.Name, listed.Prefix));
+        Assert.DoesNotContain(created.Token[13..], await console.GetStringAsync("/api/tokens", Ct), StringComparison.Ordinal);
+        await using (var db = await _factory!.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>().CreateDbContextAsync(Ct))
+        {
+            var stored = await db.ApiTokens.SingleAsync(Ct);
+            Assert.Equal(ApiTokens.Hash(created.Token), stored.Hash);
+            Assert.DoesNotContain(created.Token[13..], stored.Hash + stored.Prefix + stored.Name, StringComparison.Ordinal);
+        }
+
+        // A script acts as the token's user: reads, and changes without the CSRF header (a browser never sends the token on its own).
+        var script = Script(created.Token);
+        Assert.Equal("admin", (await script.GetFromJsonAsync<CurrentUserDto>("/api/auth/me", Ct))!.UserName);
+        Assert.Contains("Administrator", (await script.GetFromJsonAsync<CurrentUserDto>("/api/auth/me", Ct))!.Roles);
+        Assert.Equal(HttpStatusCode.OK, (await script.GetAsync("/api/jobs", Ct)).StatusCode);
+        var login = await Read<SqlCredentialDto>(script.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("bdfu_token_test", "Token-1", null), Ct));
+        Assert.Equal(HttpStatusCode.NoContent, (await script.DeleteAsync($"/api/credentials/sql/{login.Id}", Ct)).StatusCode);
+        var used = Assert.Single((await console.GetFromJsonAsync<List<ApiTokenDto>>("/api/tokens", Ct))!);
+        Assert.NotNull(used.LastUsedUtc);
+
+        // A token cannot make tokens; the console's cookie still needs the CSRF header.
+        Assert.Equal(HttpStatusCode.Forbidden, (await script.PostAsJsonAsync("/api/tokens", new CreateApiTokenDto("more", null), Ct)).StatusCode);
+        var cookieOnly = _factory!.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true, BaseAddress = new Uri("https://localhost") });
+        cookieOnly.DefaultRequestHeaders.Add(ApiHeaders.Csrf, "1");
+        await Ok(cookieOnly.PostAsJsonAsync("/api/auth/login", new LoginRequestDto("admin", "correct horse battery"), Ct));
+        cookieOnly.DefaultRequestHeaders.Remove(ApiHeaders.Csrf);
+        Assert.Equal(HttpStatusCode.BadRequest, (await cookieOnly.PostAsJsonAsync("/api/credentials/sql", new SaveSqlCredentialDto("x", "y", null), Ct)).StatusCode);
+
+        // Unknown, expired, locked-out or deleted: 401.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Script("bdfu_" + new string('A', 43)).GetAsync("/api/jobs", Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Script(null).GetAsync("/api/jobs", Ct)).StatusCode);
+        var dbFactory = _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>();
+        await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+        {
+            await db.ApiTokens.ExecuteUpdateAsync(s => s.SetProperty(t => t.ExpiresUtc, DateTimeOffset.UtcNow.AddMinutes(-1)), Ct);
+        }
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await script.GetAsync("/api/jobs", Ct)).StatusCode);
+        await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+        {
+            await db.ApiTokens.ExecuteUpdateAsync(s => s.SetProperty(t => t.ExpiresUtc, (DateTimeOffset?)null), Ct);
+            await db.Users.ExecuteUpdateAsync(s => s.SetProperty(u => u.LockoutEnd, DateTimeOffset.UtcNow.AddMinutes(5)), Ct);
+        }
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await script.GetAsync("/api/jobs", Ct)).StatusCode);
+        await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+        {
+            await db.Users.ExecuteUpdateAsync(s => s.SetProperty(u => u.LockoutEnd, (DateTimeOffset?)null), Ct);
+        }
+
+        Assert.Equal(HttpStatusCode.OK, (await script.GetAsync("/api/jobs", Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await console.DeleteAsync($"/api/tokens/{created.Info.Id}", Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await script.GetAsync("/api/jobs", Ct)).StatusCode);
+        Assert.Empty((await console.GetFromJsonAsync<List<ApiTokenDto>>("/api/tokens", Ct))!);
+    }
+
+    [Fact]
     public async Task Complete_workflow_through_the_api()
     {
         var client = _factory!.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true, BaseAddress = new Uri("https://localhost") });

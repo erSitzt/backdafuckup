@@ -15,6 +15,15 @@ public sealed record LoginRequestDto(string UserName, string Password);
 
 public sealed record CurrentUserDto(string UserName, IReadOnlyList<string> Roles);
 
+/// <summary>An API token as listed (never the token itself).</summary>
+public sealed record ApiTokenDto(Guid Id, string Name, string Prefix, DateTimeOffset CreatedUtc, DateTimeOffset? ExpiresUtc, DateTimeOffset? LastUsedUtc, string? LastUsedFrom);
+
+/// <summary>A new API token: a name, and the days until it expires (null: it does not expire).</summary>
+public sealed record CreateApiTokenDto(string Name, int? ExpiresInDays);
+
+/// <summary>The created token: <see cref="Token"/> is shown this once and stored only as a hash.</summary>
+public sealed record CreatedApiTokenDto(ApiTokenDto Info, string Token);
+
 /// <summary>The running server: product version (e.g. 0.3.0), the Git commit it was built from, and when.</summary>
 public sealed record AboutDto(string Version, string? Commit, DateTimeOffset? BuildUtc);
 

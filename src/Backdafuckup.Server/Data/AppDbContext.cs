@@ -53,9 +53,23 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<SqlBackupRunEntity> SqlBackupRuns => Set<SqlBackupRunEntity>();
 
+    public DbSet<ApiTokenEntity> ApiTokens => Set<ApiTokenEntity>();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
+
+        builder.Entity<ApiTokenEntity>(e =>
+        {
+            e.ToTable("api_tokens");
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.Prefix).HasMaxLength(16);
+            e.Property(x => x.Hash).HasMaxLength(64);
+            e.Property(x => x.LastUsedFrom).HasMaxLength(64);
+            e.HasIndex(x => x.Hash).IsUnique();
+            e.HasIndex(x => x.UserId);
+            e.HasOne<AppUser>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
 
         builder.Entity<HypervisorConnection>(e =>
         {

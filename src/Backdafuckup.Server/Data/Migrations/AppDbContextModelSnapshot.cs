@@ -113,6 +113,64 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.ToTable("agents", (string)null);
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.ApiTokenEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<DateTimeOffset?>("ExpiresUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_utc");
+
+                    b.Property<string>("Hash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("hash");
+
+                    b.Property<string>("LastUsedFrom")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("last_used_from");
+
+                    b.Property<DateTimeOffset?>("LastUsedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_used_utc");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("Prefix")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("prefix");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_api_tokens");
+
+                    b.HasIndex("Hash")
+                        .IsUnique()
+                        .HasDatabaseName("ix_api_tokens_hash");
+
+                    b.HasIndex("UserId")
+                        .HasDatabaseName("ix_api_tokens_user_id");
+
+                    b.ToTable("api_tokens", (string)null);
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.AppSetting", b =>
                 {
                     b.Property<string>("Key")
@@ -1789,6 +1847,16 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasName("pk_asp_net_user_tokens");
 
                     b.ToTable("AspNetUserTokens", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.ApiTokenEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.AppUser", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_api_tokens_asp_net_users_user_id");
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.BackupJob", b =>

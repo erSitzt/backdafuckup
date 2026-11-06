@@ -391,6 +391,16 @@ A job backs up the transaction logs of the SQL Server databases in its VMs when 
 
 **Limits:** no differential backups, no availability groups or failover cluster instances, no resume of a large upload (it starts again), and one SQL backup object per run and instance in the repository (288 per VM and day at 5 minutes).
 
+## API and API tokens
+
+The console's API is described under *API reference* (`/api-docs`). Scripts and tools use an **API token** instead of a password:
+
+- **Create** one under *API tokens*, signed in with your password: a name (what uses it) and when it expires (30 or 90 days, a year, or never). The token (`bdfu_…`) is shown once; the server keeps only its SHA-256, so copy it then.
+- **Use** it as `Authorization: Bearer bdfu_…`. The request acts as the token's user, with that user's rights. Requests with a token need no `X-BDFU-Request` header (that header protects the console's cookie, which a browser sends on its own; a token it never sends on its own).
+- **Limits:** a token cannot create tokens. A deleted or expired token, or one whose user is locked out, gets 401 at once. The list shows when and from which address each token was used last.
+- **Example:** `curl -X POST -H "Authorization: Bearer bdfu_…" -H "Content-Type: application/json" -d '{}' https://<server>:9555/api/jobs/<job id>/run` starts a job.
+- Creating and deleting a token is noted in the server log (name, prefix, user).
+
 ## Data and backups of the server itself
 
 | Path (Linux / Windows) | Content |

@@ -12,6 +12,35 @@ public sealed class AppUser : IdentityUser<Guid>
     public string? DisplayName { get; set; }
 }
 
+/// <summary>
+/// An API token of a user: scripts send it as <c>Authorization: Bearer bdfu_…</c> and act as that user. Only the
+/// SHA-256 of the token is stored; the token itself is shown once when it is created.
+/// </summary>
+public sealed class ApiTokenEntity
+{
+    public Guid Id { get; set; } = Guid.CreateVersion7();
+
+    public Guid UserId { get; set; }
+
+    public required string Name { get; set; }
+
+    /// <summary>The token's first characters (<c>bdfu_</c> and 8 more), to tell tokens apart in the list.</summary>
+    public required string Prefix { get; set; }
+
+    /// <summary>SHA-256 of the whole token, lowercase hex.</summary>
+    public required string Hash { get; set; }
+
+    public DateTimeOffset CreatedUtc { get; set; }
+
+    /// <summary>After this the token is refused; null: it does not expire.</summary>
+    public DateTimeOffset? ExpiresUtc { get; set; }
+
+    public DateTimeOffset? LastUsedUtc { get; set; }
+
+    /// <summary>The address of the last request with the token.</summary>
+    public string? LastUsedFrom { get; set; }
+}
+
 public enum ConnectionStatus
 {
     Unknown,
