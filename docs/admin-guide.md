@@ -107,7 +107,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now backdafuckup
 sudo journalctl -u backdafuckup | grep "setup token"
 ```
 
-Then open `https://<server>:9555`, enter the setup token and create the administrator. The server uses a self-signed certificate. To use your own, configure `Kestrel:Certificates:Default` or a full `Kestrel:Endpoints` section.
+Then open `https://<server>:9555`, enter the setup token and create the administrator. The server uses a self-signed certificate for its host name, its fully qualified name, `localhost` and its addresses. It is issued again with the same key before it expires and when the host's name changes (for example a data folder taken over from another server), so the agents, which pin its key, keep trusting it. To use your own, configure `Kestrel:Certificates:Default` or a full `Kestrel:Endpoints` section.
 
 ## Installation (Windows)
 
@@ -185,7 +185,7 @@ Restore points show their consistency ("application", or "crash" plus the reason
 
 **Setup**
 1. *Guest Agents → Settings*: enter the address under which the VMs reach the server, e.g. `https://backup.example.local:9555/`.
-   - The agents pin the server's own certificate (SPKI SHA-256), so the self-signed certificate works.
+   - The agents pin the server's own certificate (SPKI SHA-256, the hash of its public key), so the self-signed certificate works, also after it was issued again with the same key.
    - With a certificate from `Kestrel:Endpoints`, Windows certificate validation applies. You can also configure pins with `Agent:ServerPins`.
 2. **Push installation:** add an administrator account under *Windows Credentials*, select the VMs under *Guest Agents* and choose *Install agent*.
    - The server connects over **SMB 445** with NTLMv2 to the first reachable IP address of the VM.
