@@ -719,6 +719,9 @@ public sealed class SqlJobSignal
 public sealed class SqlSnapshotProgress
 {
     public List<SqlSnapshotInstance> Instances { get; set; } = new List<SqlSnapshotInstance>();
+
+    /// <summary>How long the suspend waited for a running log or full backup of the instances before it began (ms).</summary>
+    public long WaitedMs { get; set; }
 }
 
 /// <summary>One SQL Server instance in a <see cref="SqlJobKinds.SnapshotSuspend"/> job.</summary>

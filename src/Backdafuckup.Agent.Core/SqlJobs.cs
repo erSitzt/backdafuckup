@@ -363,10 +363,13 @@ public sealed class SqlJobRunner
     private async Task SnapshotAsync(SqlJobRequest request, SqlJobResult result, Action<string> log, CancellationToken stop)
     {
         var limit = TimeSpan.FromMilliseconds(request.HoldLimitMs > 0 ? request.HoldLimitMs : 120000);
+        var waiting = System.Diagnostics.Stopwatch.StartNew();
         using (var held = HoldInstances(request, log, stop))
         using (var suspend = new SqlSnapshotSuspend(_sql, request.Account!, log, copyOnly: request.CopyOnly ?? true))
         {
+            var waited = waiting.ElapsedMilliseconds;
             var progress = suspend.Suspend(_sql.Instances(), request.Instance);
+            progress.WaitedMs = waited;
             var watch = System.Diagnostics.Stopwatch.StartNew();
             await PostJsonAsync(Base + "/progress", progress, stop).ConfigureAwait(false);
             string? signal = null;

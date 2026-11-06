@@ -61,6 +61,10 @@ public static class SqlReplace
                     throw new InvalidOperationException($"The restored file {file + NewSuffix} is missing; nothing was changed.");
                 }
 
+                // SQL Server's detach of the staging database left its files to the detaching login only: without this the
+                // agent (Local System) could not rename them into place. Done before the database is touched.
+                fs.TakeOver(file + NewSuffix);
+
                 if (fs.Probe(file + ReplacedSuffix) != RestorePathKind.Missing)
                 {
                     throw new InvalidOperationException($"{file + ReplacedSuffix} exists (kept by an earlier overwrite); move or delete it first. Nothing was changed.");

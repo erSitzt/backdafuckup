@@ -158,7 +158,11 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
                 return null;
             }
 
-            log.Info($"Guest processing: the {agentName} suspended the writes of {suspended} SQL Server database(s) in {Seconds1(watch.Elapsed)} " +
+            // The time it waited for a running log or full backup (the instance lock) is not time the writes were suspended.
+            var waited = TimeSpan.FromMilliseconds(Math.Clamp(progress.WaitedMs, 0, (long)watch.Elapsed.TotalMilliseconds));
+            log.Info($"Guest processing: the {agentName} " +
+                (waited >= TimeSpan.FromSeconds(1) ? $"waited {Seconds1(waited)} for a running SQL Server log or full backup, then " : string.Empty) +
+                $"suspended the writes of {suspended} SQL Server database(s) in {Seconds1(watch.Elapsed - waited)} " +
                 $"(reads go on; no VSS freeze): {DescribeSuspended(progress.Instances)}.");
             if (DescribeProblems(progress.Instances) is { Length: > 0 } problems)
             {

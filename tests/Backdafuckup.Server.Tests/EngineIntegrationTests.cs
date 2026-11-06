@@ -407,7 +407,7 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
         await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
         await EnableSqlSnapshotAsync(jobId, "bdfu_backup", "Sql-Secret-1");
-        await using var agent = new FakeGuestAgent(Services, vmUuid) { IncludeUnselectedDatabase = true, SqlSnapshotCapable = true };
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { IncludeUnselectedDatabase = true, SqlSnapshotCapable = true, SqlSnapshotWait = TimeSpan.FromSeconds(1.5) };
         await agent.StartAsync(Ct);
         var suspendedAtSnapshot = false;
         _pool.OnSnapshot = _ => suspendedAtSnapshot = agent.SqlSuspended;
@@ -444,6 +444,8 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
 
         await using var db = await DbAsync();
         var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
+        // The wait for a running log backup is named apart from the time the writes were suspended.
+        Assert.Contains(log, m => m.Contains("waited 1.", StringComparison.Ordinal) && m.Contains(" s for a running SQL Server log or full backup, then suspended the writes of 2", StringComparison.Ordinal));
         Assert.Contains(log, m => m.Contains("suspended the writes of 2 SQL Server database(s)", StringComparison.Ordinal) && m.Contains("MSSQLSERVER (16.0.4135.4): shop, notselected", StringComparison.Ordinal));
         Assert.Contains(log, m => m.Contains("Guest processing (SQL Server snapshot): 2 database(s) recorded in msdb as full snapshot backups (in the backup chain)", StringComparison.Ordinal) && m.Contains("Writes were suspended for 2.5 s", StringComparison.Ordinal));
         Assert.DoesNotContain(log, m => m.Contains("Sql-Secret-1", StringComparison.Ordinal));

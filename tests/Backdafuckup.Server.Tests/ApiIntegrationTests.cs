@@ -2283,6 +2283,9 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             Assert.Contains("the previous files were deleted", done.Session.Summary, StringComparison.Ordinal);
             Assert.Equal(files.Select(f => $@"{f} NT SERVICE\MSSQL$SQLEXPRESS"), fs.Grants.Skip(fs.Grants.Count - 3));
 
+            // The restored files were taken over before the swap (SQL Server's detach leaves them to one login only).
+            Assert.Equal(files.Select(f => f + ".bdfu-new"), fs.TakenOver.Skip(fs.TakenOver.Count - 3));
+
             // Keep the previous files: they stay beside the database's files.
             Live(0xB0);
             var kept = await RestoreAsync(Request(keep: true));
@@ -2704,7 +2707,20 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         /// <summary>The ACEs the agent added: "path account".</summary>
         public List<string> Grants { get; } = [];
 
+        /// <summary>The files the agent took over (on Windows: owner and full control for the Administrators group).</summary>
+        public List<string> TakenOver { get; } = [];
+
         public override string? CheckRoot(string path) => null;
+
+        public override void TakeOver(string path)
+        {
+            Guard(path);
+            Assert.True(File.Exists(Map(path)), path);
+            lock (TakenOver)
+            {
+                TakenOver.Add(path);
+            }
+        }
 
         public override void GrantFullControl(string path, string account)
         {

@@ -41,6 +41,9 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
     /// <summary>The agent can suspend SQL Server for a snapshot (and runs snapshot-suspend jobs).</summary>
     public bool SqlSnapshotCapable { get; set; }
 
+    /// <summary>The suspend first waits this long, as for a running log backup (the instance lock), and reports it.</summary>
+    public TimeSpan SqlSnapshotWait { get; set; }
+
     /// <summary>SQL Server snapshot: true while the simulated databases' writes are suspended.</summary>
     public bool SqlSuspended { get; private set; }
 
@@ -206,8 +209,9 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
             (database.RecoveryModel, database.HadLogChain, database.LogBackupAgeMinutes) = SqlLogFacts;
         }
 
+        await Task.Delay(SqlSnapshotWait);
         SqlSuspended = true;
-        jobs.Progress(jobId, AgentId, new SqlSnapshotProgress { Instances = [instance] });
+        jobs.Progress(jobId, AgentId, new SqlSnapshotProgress { Instances = [instance], WaitedMs = (long)SqlSnapshotWait.TotalMilliseconds });
         string? signal;
         while ((signal = jobs.Signal(jobId, AgentId)) == SqlJobSignals.Wait)
         {

@@ -90,6 +90,59 @@ internal sealed class WindowsRestoreFileSystem : PortableRestoreFileSystem
             : (System.Security.Principal.SecurityIdentifier)new System.Security.Principal.NTAccount(AccountNames.Qualify(account, Environment.MachineName)).Translate(typeof(System.Security.Principal.SecurityIdentifier));
         var rule = new FileSystemAccessRule(identity, FileSystemRights.FullControl, AccessControlType.Allow);
         var mapped = Map(path);
+        try
+        {
+            AddRule(mapped, rule);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // A file SQL Server secured for one account: its detach leaves full control to the detaching login only, so
+            // the agent (Local System) may neither read nor change the permissions. It takes ownership for the
+            // Administrators group (SeTakeOwnershipPrivilege/SeRestorePrivilege); as owner it may change them.
+            EnablePrivileges();
+            try
+            {
+                SetOwnerAdministrators(mapped);
+                AddRule(mapped, rule);
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException || ex is InvalidOperationException)
+            {
+                throw new UnauthorizedAccessException($"{path}: granting {account} full control failed, also after taking ownership for the Administrators group: {ex.Message}", ex);
+            }
+        }
+    }
+
+    public override void TakeOver(string path)
+    {
+        Guard(path);
+        EnablePrivileges();
+        var mapped = Map(path);
+        try
+        {
+            SetOwnerAdministrators(mapped);
+            AddRule(mapped, new FileSystemAccessRule(new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null), FileSystemRights.FullControl, AccessControlType.Allow));
+            AddRule(mapped, new FileSystemAccessRule(new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.LocalSystemSid, null), FileSystemRights.FullControl, AccessControlType.Allow));
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException || ex is IOException || ex is InvalidOperationException)
+        {
+            throw new UnauthorizedAccessException($"{path}: taking it over for the Administrators group failed (the agent needs Local System's SeTakeOwnershipPrivilege and SeRestorePrivilege): {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>The Administrators group as owner (SeTakeOwnershipPrivilege/SeRestorePrivilege): owners may change the permissions.</summary>
+    private static void SetOwnerAdministrators(string mapped)
+    {
+        var owner = new FileSecurity();
+        owner.SetOwner(new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null));
+#if NET48
+        File.SetAccessControl(mapped, owner);
+#else
+        new FileInfo(mapped).SetAccessControl(owner);
+#endif
+    }
+
+    private static void AddRule(string mapped, FileSystemAccessRule rule)
+    {
 #if NET48
         var security = File.GetAccessControl(mapped, AccessControlSections.Access);
         security.AddAccessRule(rule);

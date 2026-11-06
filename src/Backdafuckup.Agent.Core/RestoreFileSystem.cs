@@ -61,6 +61,13 @@ public interface IRestoreFileSystem
     /// or a SID) to the file's DACL; the other entries stay.
     /// </summary>
     void GrantFullControl(string path, string account);
+
+    /// <summary>
+    /// Makes sure the agent may rename and delete the file although another account owns it: SQL Server's detach leaves a
+    /// database file to the detaching Windows login only. On Windows the Administrators group becomes its owner and gets
+    /// full control, as does Local System; the other entries stay. Elsewhere there is nothing to do.
+    /// </summary>
+    void TakeOver(string path);
 }
 
 /// <summary>
@@ -220,6 +227,10 @@ public abstract class PortableRestoreFileSystem : IRestoreFileSystem
 
     public virtual void GrantFullControl(string path, string account) =>
         throw new PlatformNotSupportedException("permissions can only be set on Windows");
+
+    public virtual void TakeOver(string path)
+    {
+    }
 
     /// <summary>The same path guard as for restored items: never the agent's own folder.</summary>
     protected void Guard(string path)
