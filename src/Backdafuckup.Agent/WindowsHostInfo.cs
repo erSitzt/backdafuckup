@@ -50,7 +50,7 @@ internal sealed class WindowsHostInfo : IHostInfoSource
             VssProvider = _vssProviderState(),
             DomainRole = WmiInt("SELECT DomainRole FROM Win32_ComputerSystem", "DomainRole"),
             Domain = Wmi("SELECT Domain FROM Win32_ComputerSystem", "Domain"),
-            Capabilities = new List<string> { AgentProtocol.CapabilityAdBackup },
+            Capabilities = new List<string> { AgentProtocol.CapabilityAdBackup, AgentProtocol.CapabilityAdIfm },
         };
     }
 

@@ -213,6 +213,18 @@ public sealed class StoredAdDatabase
     /// <summary>What the agent could not read at backup time.</summary>
     public string? Error { get; set; }
 
+    /// <summary>The folder in the guest with the consistent copy made with <c>ntdsutil … ifm create full</c> before the snapshot.</summary>
+    public string? IfmPath { get; set; }
+
+    public DateTime? IfmCreatedUtc { get; set; }
+
+    public double? IfmSeconds { get; set; }
+
+    public long? IfmBytes { get; set; }
+
+    /// <summary>Why no IFM copy was made.</summary>
+    public string? IfmError { get; set; }
+
     /// <summary>"application" or "crash".</summary>
     public string Consistency { get; set; } = "crash";
 
@@ -236,8 +248,15 @@ public sealed class StoredAdDatabase
         TombstoneLifetimeDays = ad.TombstoneLifetimeDays,
         DeletedObjectLifetimeDays = ad.DeletedObjectLifetimeDays,
         Error = ad.Error,
-        Consistency = consistency.Consistency,
-        ConsistencyReason = consistency.Reason,
+        IfmPath = ad.IfmPath,
+        IfmCreatedUtc = ad.IfmCreatedUtc,
+        IfmSeconds = ad.IfmSeconds,
+        IfmBytes = ad.IfmBytes,
+        IfmError = ad.IfmError,
+        Consistency = ad.IfmPath is not null && ad.IfmError is null ? "application" : consistency.Consistency,
+        ConsistencyReason = ad.IfmPath is not null && ad.IfmError is null
+            ? consistency.Consistency == "application" ? null : $"the copy made with ntdsutil IFM before the snapshot is consistent ({consistency.Reason})"
+            : consistency.Reason,
     };
 }
 

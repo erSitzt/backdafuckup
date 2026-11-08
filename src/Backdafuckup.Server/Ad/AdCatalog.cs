@@ -27,6 +27,20 @@ public static class AdCatalog
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(notes);
+
+        // The copy that ntdsutil IFM made before the snapshot: consistent by itself (clean shutdown), no logs needed.
+        if (stored?.ActiveDirectory is { IfmPath: { Length: > 0 } ifm, IfmError: null } withIfm)
+        {
+            var copy = ifm.TrimEnd('\\') + @"\Active Directory\ntds.dit";
+            if (File(image, copy) is { } found)
+            {
+                notes.Add($"Directory database {copy}: the consistent copy made with ntdsutil IFM{(withIfm.IfmCreatedUtc is { } at ? $" at {at.ToLocalTime():g}" : string.Empty)} before the snapshot.");
+                return [found];
+            }
+
+            notes.Add($"The copy made with ntdsutil IFM ({copy}) is not in the restore point; using the live database files instead.");
+        }
+
         var (dit, logs, source) = stored?.ActiveDirectory is { DitPath: { Length: > 0 } ditPath } ad
             ? (ditPath, ad.LogPath is { Length: > 0 } logPath ? logPath : Folder(ditPath), "the guest metadata")
             : ReadRegistry(image) is { } fromRegistry

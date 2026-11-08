@@ -23,7 +23,12 @@ public sealed record SqlSnapshotSettings(Sql.SqlJobs Jobs, SqlAccount Account, s
 /// <param name="vssFull">
 /// A VSS full backup (VSS_BT_FULL) instead of copy-only: the writers record it (a domain controller's "last backup" in AD).
 /// </param>
-public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, Guid agentId, string agentName, SqlSnapshotSettings? sql = null, bool vssFull = false) : IGuestQuiescer
+/// <param name="domainController">
+/// The guest is a domain controller: its prepare also copies the directory with ntdsutil (IFM, longer timeout), and after
+/// the VM snapshot the agent deletes that copy again.
+/// </param>
+public sealed class AgentQuiescer(
+    AgentRegistry registry, AgentOptions options, Guid agentId, string agentName, SqlSnapshotSettings? sql = null, bool vssFull = false, bool domainController = false) : IGuestQuiescer
 {
     private readonly Guid _operation = Guid.NewGuid();
     private IDisposable? _reservation;
@@ -31,6 +36,8 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
     private TimeSpan ThawTimeout => options.ThawTimeout;
 
     private TimeSpan SqlHoldLimit => options.SqlSnapshotHoldLimit;
+
+    private TimeSpan PrepareTimeout => domainController ? Max(options.PrepareTimeout, options.DomainControllerPrepareTimeout) : options.PrepareTimeout;
 
     private string AgentName => agentName;
 
@@ -56,7 +63,7 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
         AgentCommandResult prepare;
         try
         {
-            prepare = await SendAsync(AgentCommandKinds.PrepareBackup, options.PrepareTimeout, "preparing VSS", cancellationToken).ConfigureAwait(false);
+            prepare = await SendAsync(AgentCommandKinds.PrepareBackup, PrepareTimeout, "preparing VSS", cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -82,7 +89,7 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
                 // The SQL path ended the VSS backup: prepare it again for the VSS freeze.
                 try
                 {
-                    prepare = await SendAsync(AgentCommandKinds.PrepareBackup, options.PrepareTimeout, "preparing VSS", cancellationToken).ConfigureAwait(false);
+                    prepare = await SendAsync(AgentCommandKinds.PrepareBackup, PrepareTimeout, "preparing VSS", cancellationToken).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -312,6 +319,32 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
     {
         _reservation?.Dispose();
         _reservation = null;
+    }
+
+    private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
+
+    /// <summary>
+    /// Called once the VM snapshot exists (or its creation failed): the agent of a domain controller deletes the directory
+    /// copy it made for the snapshot. In the background; the agent also deletes it at its next start.
+    /// </summary>
+    public void CleanupAfterSnapshot()
+    {
+        if (!domainController || !registry.HasCapability(agentId, AgentProtocol.CapabilityAdIfm))
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await registry.SendAsync(agentId, new AgentCommand { Id = Guid.NewGuid(), Kind = AgentCommandKinds.Cleanup, OperationId = _operation }, TimeSpan.FromMinutes(2), CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is TimeoutException or InvalidOperationException or OperationCanceledException)
+            {
+                // The agent deletes the copy at its next start.
+            }
+        });
     }
 
     private static string Describe(GuestBackupInfo info)

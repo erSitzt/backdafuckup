@@ -137,6 +137,51 @@ public sealed partial class ApiIntegrationTests
     }
 
     [Fact]
+    public async Task An_ad_explore_takes_the_ifm_copy_of_the_restore_point_and_the_dc_deletes_it_after_the_snapshot()
+    {
+        var client = await SignedInClientAsync();
+        var ifmDit = Pattern(2 << 20, 0x77);
+        var image = WindowsTestDisk.Create(
+        [
+            new WindowsTestDisk.Volume('C', 16, new Dictionary<string, byte[]>
+            {
+                ["Windows/NTDS/ntds.dit"] = Pattern(1 << 20, 0x5a),
+                ["Windows/NTDS/edb.log"] = Pattern(1 << 20, 0x11),
+                ["ProgramData/backdafuckup/ad-ifm/Active Directory/ntds.dit"] = ifmDit,
+                ["ProgramData/backdafuckup/ad-ifm/registry/SYSTEM"] = Pattern(65536, 0x33),
+            }),
+        ]);
+        var sandbox = Path.Combine(_root, "dc5-sandbox");
+        var (backup, live) = AdDirectories();
+        var env = new FakeAdEnvironment(sandbox, backup, live, windowsSandbox: true);
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? dc = null;
+        var point = await BackUpImageAsync(client, "dc5", image, async vm => dc = await StartAgentAsync(vm, new SandboxRestoreFileSystem(sandbox), ad: env, ifm: true));
+        var vss = _lastVss!;
+        for (var i = 0; i < 50 && !vss.Calls.Contains("cleanup"); i++)
+        {
+            await Task.Delay(100, Ct);
+        }
+
+        Assert.Contains("cleanup", vss.Calls);
+        Assert.True(vss.Calls.IndexOf("cleanup") > vss.Calls.IndexOf("freeze"));
+        var account = await Read<WindowsCredentialDto>(client.PostAsJsonAsync("/api/credentials", new SaveWindowsCredentialDto(@"BDFU-LAB\Administrator", "secret", null), Ct));
+
+        var opened = await Read<AdExploreDto>(client.PostAsJsonAsync("/api/ad/explores", new OpenAdExploreDto(point.Id, dc!.Value.Agent.Id, account.Id), Ct));
+        var explore = await WaitForExploreAsync(client, opened.Id);
+
+        Assert.True(explore.State == AdExploreStates.Ready, explore.Error);
+        var folder = Path.Combine(sandbox, "C", "ProgramData", "backdafuckup", "ad", explore.Id.ToString("D"));
+        Assert.Equal(["ntds.dit"], Directory.GetFiles(folder).Select(Path.GetFileName));
+        Assert.Equal(ifmDit, await File.ReadAllBytesAsync(Path.Combine(folder, "ntds.dit"), Ct));
+        await Ok(client.DeleteAsync($"/api/ad/explores/{explore.Id}", Ct));
+        var log = (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{explore.SessionId}/log", Ct))!.Select(l => l.Message).ToList();
+        Assert.Contains(log, m => m.Contains(@"Directory database C:\ProgramData\backdafuckup\ad-ifm\Active Directory\ntds.dit: the consistent copy made with ntdsutil IFM", StringComparison.Ordinal));
+        Assert.DoesNotContain(log, m => m.Contains("crash-consistent", StringComparison.Ordinal));
+        await dc.Value.Stop.CancelAsync();
+        await dc.Value.Running;
+    }
+
+    [Fact]
     public async Task An_ad_explore_is_refused_for_another_domain_and_a_failed_open_leaves_nothing_on_the_dc()
     {
         var client = await SignedInClientAsync();

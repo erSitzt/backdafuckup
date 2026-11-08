@@ -227,8 +227,19 @@ internal sealed class VmBackupTask(
             var ledger = new DbArtifactLedger(dbFactory, job.ConnectionId, session.Id, restorePointId, time);
             await using var writer = repository.BeginWrite(restorePointId, vm.NativeId, basePin);
             var snapshotName = $"{vm.CachedName} backdafuckup {time.GetUtcNow().ToLocalTime():yyyy-MM-dd HH:mm}";
-            await using var backup = await hypervisor.BeginBackupAsync(
-                new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer), _log, ledger, cancellationToken).ConfigureAwait(false);
+            IVmBackupSession started;
+            try
+            {
+                started = await hypervisor.BeginBackupAsync(
+                    new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer), _log, ledger, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                // The snapshot holds what the guest prepared for it (a domain controller's directory copy): it goes from the guest.
+                guest?.Quiescer?.CleanupAfterSnapshot();
+            }
+
+            await using var backup = started;
             var (consistency, consistencyReason, consistencyWarning) = CheckConsistency(guest, backup.GuestFreeze);
 
             _totalBytes = Math.Max(1, backup.Disks.Sum(d => d.CapacityBytes));
@@ -259,6 +270,17 @@ internal sealed class VmBackupTask(
                 if (directory is { Consistency: not "application" } && consistency == "application")
                 {
                     _log.Warning($"The Active Directory database of domain {directory.DomainDns ?? "(unknown)"} is only crash-consistent: {directory.ConsistencyReason}.");
+                    warnings = true;
+                }
+
+                if (directory is { IfmPath: not null, IfmError: null })
+                {
+                    _log.Info($"Active Directory: a consistent copy of the database ({VmBackupTask.Format(directory.IfmBytes ?? 0)}) was made with ntdsutil IFM " +
+                        $"in {directory.IfmSeconds:0.0} s before the snapshot; AD records it as a backup.");
+                }
+                else if (directory?.IfmError is { } ifmError)
+                {
+                    _log.Warning($"Active Directory: no consistent copy with ntdsutil IFM ({ifmError}); the directory is only as consistent as the snapshot.");
                     warnings = true;
                 }
 

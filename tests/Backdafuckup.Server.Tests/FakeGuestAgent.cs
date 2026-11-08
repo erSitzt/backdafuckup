@@ -65,6 +65,9 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
     /// <summary>The guest is a domain controller of bdfu-lab.local: domain role 5, the NTDS writer and the directory facts.</summary>
     public bool DomainController { get; set; }
 
+    /// <summary>The DC's prepare could not copy its directory with ntdsutil (IFM), for this reason.</summary>
+    public string? IfmError { get; set; }
+
     /// <summary>The CopyOnly the server sent with the last VSS prepare.</summary>
     public bool? LastPrepareCopyOnly { get; private set; }
 
@@ -96,9 +99,20 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
             cancellationToken) ?? throw new InvalidOperationException("Enrollment failed.");
         AgentId = enrolled.AgentId;
         var registry = _services.GetRequiredService<AgentRegistry>();
+        var capabilities = new List<string>();
         if (SqlSnapshotCapable)
         {
-            registry.SetCapabilities(AgentId, [AgentProtocol.CapabilitySqlSnapshot]);
+            capabilities.Add(AgentProtocol.CapabilitySqlSnapshot);
+        }
+
+        if (DomainController)
+        {
+            capabilities.Add(AgentProtocol.CapabilityAdIfm);
+        }
+
+        if (capabilities.Count > 0)
+        {
+            registry.SetCapabilities(AgentId, capabilities);
         }
 
         _loop = Task.Run(async () =>
@@ -172,6 +186,11 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
                         RecycleBin = true,
                         TombstoneLifetimeDays = 180,
                         DeletedObjectLifetimeDays = 180,
+                        IfmPath = IfmError is null ? @"C:\ProgramData\backdafuckup\ad-ifm" : null,
+                        IfmCreatedUtc = IfmError is null ? DateTime.UtcNow : null,
+                        IfmSeconds = IfmError is null ? 2.5 : null,
+                        IfmBytes = IfmError is null ? 96L << 20 : null,
+                        IfmError = IfmError,
                     };
                 }
 

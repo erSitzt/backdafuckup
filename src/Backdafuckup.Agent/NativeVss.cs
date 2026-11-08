@@ -18,6 +18,11 @@ internal sealed class NativeVss : IVssBridge
 {
     private const string Dll = AgentProtocol.VssDllName;
 
+    private readonly AgentLog? _log;
+
+    /// <param name="log">The agent log (null: only the provider state is read).</param>
+    public NativeVss(AgentLog? log = null) => _log = log;
+
     public string ProviderState
     {
         get
@@ -37,11 +42,20 @@ internal sealed class NativeVss : IVssBridge
 
     public GuestBackupInfo Prepare(bool copyOnly)
     {
+        // A domain controller: the consistent copy of its directory first, with ntdsutil's own shadow copy (it must not
+        // overlap with ours, and it does not depend on our 10 s freeze).
+        GuestAdDatabase? ifm = null;
+        if (_log is not null && WindowsHostInfo.WmiInt("SELECT DomainRole FROM Win32_ComputerSystem", "DomainRole") is 4 or 5)
+        {
+            ifm = new GuestAdDatabase();
+            WindowsAdIfm.Create(ifm, _log);
+        }
+
         var hr = bdfu_vss_prepare(copyOnly ? 1 : 0, out var json);
         var text = Take(json);
         Check(hr, text, "Preparing the VSS backup");
         var native = JsonSerializer.Deserialize<NativePrepare>(text ?? "{}", AgentJson.Options) ?? new NativePrepare();
-        return new GuestBackupInfo
+        var info = new GuestBackupInfo
         {
             Volumes = WindowsHostInfo.Volumes(),
             Writers = native.Writers.Select(w => w.ToWriter()).ToList(),
@@ -67,6 +81,17 @@ internal sealed class NativeVss : IVssBridge
                 ? WindowsAdFacts.Read(ntds.Components.SelectMany(c => c.DataFiles).ToList(), ntds.Components.SelectMany(c => c.LogFiles).ToList())
                 : null,
         };
+        if (ifm is not null)
+        {
+            info.ActiveDirectory ??= new GuestAdDatabase { Error = "the NTDS writer did not report" };
+            info.ActiveDirectory.IfmPath = ifm.IfmPath;
+            info.ActiveDirectory.IfmCreatedUtc = ifm.IfmCreatedUtc;
+            info.ActiveDirectory.IfmSeconds = ifm.IfmSeconds;
+            info.ActiveDirectory.IfmBytes = ifm.IfmBytes;
+            info.ActiveDirectory.IfmError = ifm.IfmError;
+        }
+
+        return info;
     }
 
     public FreezeReport Freeze(int holdTimeoutMs)
@@ -94,6 +119,15 @@ internal sealed class NativeVss : IVssBridge
     }
 
     public void Abort() => bdfu_vss_abort();
+
+    /// <summary>After the VM snapshot: the copy of the directory is in the snapshot and goes from the disk.</summary>
+    public void Cleanup()
+    {
+        if (_log is not null)
+        {
+            WindowsAdIfm.Delete(_log);
+        }
+    }
 
     private static bool IsSqlWriter(string name) => string.Equals(name, "SqlServerWriter", StringComparison.OrdinalIgnoreCase);
 

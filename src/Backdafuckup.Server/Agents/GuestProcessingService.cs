@@ -109,7 +109,7 @@ public sealed class GuestProcessingService(
             }
         }
 
-        return new(new AgentQuiescer(registry, options.Value, agent.Id, name, sql, vssFull), null, warning);
+        return new(new AgentQuiescer(registry, options.Value, agent.Id, name, sql, vssFull, domainController: agent.DomainRole is 4 or 5), null, warning);
     }
 
     /// <summary>Whether the VM's latest restore point holds SQL Server databases (true if that cannot be checked).</summary>

@@ -327,6 +327,60 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_domain_controller_whose_freeze_runs_out_keeps_a_consistent_directory_through_its_ifm_copy()
+    {
+        var (vmUuid, _) = _pool.AddVm("dc03", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 3);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { DomainController = true, SqlDatabases = [], ThawVssResult = unchecked((int)0x80042314) };
+        await agent.StartAsync(Ct);
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        // The VM snapshot outlasted the 10 s of VSS: the restore point is crash-consistent, its directory is not.
+        Assert.Equal(SessionState.Warning, session.State);
+        var point = await LatestRestorePointAsync();
+        Assert.Equal("crash", point.Consistency);
+        var repository = await Services.GetRequiredService<RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+        await using (var reader = await repository.OpenRestorePointAsync(point.Id, Ct))
+        {
+            var ad = (await StoredGuestMetadata.ReadAsync(reader, Ct))!.ActiveDirectory!;
+            Assert.Equal("application", ad.Consistency);
+            Assert.Contains("the copy made with ntdsutil IFM before the snapshot is consistent (Windows released the writes", ad.ConsistencyReason, StringComparison.Ordinal);
+            Assert.Equal(@"C:\ProgramData\backdafuckup\ad-ifm", ad.IfmPath);
+        }
+
+        await using var db = await DbAsync();
+        var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("a consistent copy of the database (96.0 MB) was made with ntdsutil IFM in 2.5 s before the snapshot; AD records it as a backup", StringComparison.Ordinal));
+
+        // After the snapshot the agent deletes the copy again.
+        for (var i = 0; i < 50 && !agent.Commands.Contains(AgentCommandKinds.Cleanup); i++)
+        {
+            await Task.Delay(100, Ct);
+        }
+
+        Assert.Contains(AgentCommandKinds.Cleanup, agent.Commands);
+    }
+
+    [Fact]
+    public async Task A_domain_controller_without_an_ifm_copy_warns()
+    {
+        var (vmUuid, _) = _pool.AddVm("dc04", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 3);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { DomainController = true, SqlDatabases = [], IfmError = "not enough free space on C:\\ for the copy of the directory" };
+        await agent.StartAsync(Ct);
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Warning, session.State);
+        await using var db = await DbAsync();
+        var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("Active Directory: no consistent copy with ntdsutil IFM (not enough free space", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task A_domain_controller_with_sql_log_backups_stays_copy_only_with_a_warning()
     {
         var (vmUuid, _) = _pool.AddVm("dc02", DiskSize);

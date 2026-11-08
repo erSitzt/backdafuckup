@@ -121,6 +121,12 @@ public static class AgentProtocol
     public const string CapabilityAdExplore = "ad-explore-v1";
 
     /// <summary>
+    /// On a domain controller the prepare makes a consistent copy of the directory with <c>ntdsutil … ifm create full</c>
+    /// (<see cref="GuestAdDatabase.IfmPath"/>), and the agent understands <see cref="AgentCommandKinds.Cleanup"/>.
+    /// </summary>
+    public const string CapabilityAdIfm = "ad-ifm-v1";
+
+    /// <summary>
     /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
     /// <see cref="PublishInfo.BlockSize"/> bytes), <c>POST {id}/status</c> (heartbeat; the answer says whether to stop).
     /// </summary>
@@ -274,6 +280,12 @@ public static class AgentCommandKinds
     public const string Abort = "Abort";
 
     /// <summary>
+    /// After the VM snapshot (thawed, SQL Server snapshot recorded, or the backup failed): removes what the prepare left
+    /// in the guest for the snapshot, i.e. a domain controller's database copy (<see cref="GuestAdDatabase.IfmPath"/>).
+    /// </summary>
+    public const string Cleanup = "Cleanup";
+
+    /// <summary>
     /// Start restoring the files of transfer <see cref="AgentCommand.TransferId"/>. Answered at once; the agent then fetches
     /// the items and reports through <see cref="AgentProtocol.TransfersPath"/>.
     /// </summary>
@@ -410,6 +422,23 @@ public sealed class GuestAdDatabase
 
     /// <summary>Why some facts are missing (e.g. LDAP to the DC failed); the backup goes on without them.</summary>
     public string? Error { get; set; }
+
+    /// <summary>
+    /// The folder with the consistent copy of the directory that <c>ntdsutil … ifm create full</c> made right before the
+    /// snapshot (<c>Active Directory\ntds.dit</c> in clean shutdown state, and <c>registry</c>); null if none was made.
+    /// It does not depend on the VSS freeze of the VM snapshot, and AD records it as a backup.
+    /// </summary>
+    public string? IfmPath { get; set; }
+
+    public DateTime? IfmCreatedUtc { get; set; }
+
+    public double? IfmSeconds { get; set; }
+
+    /// <summary>Size of the copied ntds.dit.</summary>
+    public long? IfmBytes { get; set; }
+
+    /// <summary>Why no copy was made (ntdsutil failed, not enough space); the backup goes on without it.</summary>
+    public string? IfmError { get; set; }
 }
 
 public sealed class GuestVolume

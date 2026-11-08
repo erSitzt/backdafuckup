@@ -397,11 +397,17 @@ For domain controllers backed up with guest processing. AD records each backup, 
 
 **Backing up a domain controller**
 - **Method:** guest processing with **VSS**. With the method *SQL Server snapshot* the directory is only crash-consistent (the snapshot suspends SQL Server only), and the session warns.
-- **VSS full:** the agent reports the domain role, and a domain controller gets a VSS full backup (`VSS_BT_FULL`). The NTDS writer then records the backup in AD: `repadmin /showbackup` shows its time, and event 2089 ("not backed up") stops. All other VMs stay copy-only.
+- **A consistent copy of the directory first (IFM):**
+  - Before the VM snapshot, the agent copies the directory with Windows' own `ntdsutil "activate instance ntds" "ifm" "create full …"`. This takes seconds for a small directory.
+  - The copy is `ntds.dit` in clean shutdown state plus the registry hives, in `%ProgramData%\backdafuckup\ad-ifm` (only SYSTEM and Administrators).
+  - ntdsutil takes its own shadow copy, so the copy is consistent even when the VSS freeze of the VM snapshot runs out (slow storage, 10 s limit), and AD records it as a backup: `repadmin /showbackup` shows its time, event 1917, no more event 2089.
+  - After the VM snapshot the agent deletes the folder; the copy lives on in the restore point. If the agent stops in between, it deletes the folder at its next start.
+  - Needs free space for one more copy of `ntds.dit` plus 1 GiB on the system volume, else the backup goes on without it, with a warning.
+- **VSS full:** the agent reports the domain role, and a domain controller gets a VSS full backup (`VSS_BT_FULL`), which the NTDS writer records too when the freeze holds. All other VMs stay copy-only.
   - Exception: a domain controller with SQL Server databases in a job with SQL Server log backups stays copy-only, with a warning (SQL Server would record a VSS full as a full backup of every database). Back such a VM up in a job without log backups.
 - **The restore point:**
   - It carries an *AD* chip and the facts at backup time: domain, paths of `ntds.dit`, its logs and SYSVOL, invocation id, USN, functional levels, Recycle Bin, tombstone and deleted-object lifetimes.
-  - The directory has its own consistency, from the NTDS writer. A crash-consistent directory is a warning; the recovery on the domain controller replays its logs.
+  - The directory has its own consistency: application-consistent with the IFM copy (also in a crash-consistent restore point), otherwise from the NTDS writer. A crash-consistent directory is a warning; the recovery on the domain controller replays its logs.
   - Restore points from before this version are marked by the server when it starts, from their guest metadata.
 
 **Opening a backup's directory** (*Backups & Restore → Restore → Active Directory objects*)
@@ -409,7 +415,7 @@ For domain controllers backed up with guest processing. AD records each backup, 
   - a domain controller of the same domain with the agent, online and with the AD DS tools (`dsamain.exe`);
   - a Windows account of the domain (under *Credentials*).
 - **The database and its logs are copied into a work folder on that DC:**
-  - `ntds.dit`, `edb.chk` and `edb*.log` go into `%ProgramData%\backdafuckup\ad\<session>`. Only SYSTEM and Administrators can open the folder.
+  - The IFM copy's `ntds.dit` if the restore point has one, else the live `ntds.dit` with `edb.chk` and `edb*.log`, go into `%ProgramData%\backdafuckup\ad\<session>`. Only SYSTEM and Administrators can open the folder.
   - The copy goes through the agent, each file checked with SHA-256.
   - Free space needed: the files plus 10 %, at least 1 GiB more.
 - **The copy is served there:**

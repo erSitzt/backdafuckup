@@ -105,7 +105,10 @@ internal static class AgentHost
             log.Write("The folder permissions could not be set: " + ex.Message);
         }
 
-        var vss = new NativeVss();
+        var vss = new NativeVss(log);
+
+        // A domain controller's directory copy from a backup that the agent did not see to its end.
+        WindowsAdIfm.Delete(log);
         var dll = Path.Combine(baseDirectory, AgentProtocol.VssDllName);
         var dllHash = File.Exists(dll) ? AgentFiles.Sha256Of(dll) : string.Empty;
         if (vss.ProviderState != "registered" || RegisteredDllHash() != dllHash)

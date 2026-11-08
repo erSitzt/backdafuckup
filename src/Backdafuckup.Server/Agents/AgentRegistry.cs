@@ -16,6 +16,9 @@ public sealed class AgentOptions
     /// <summary>Gathering the VSS writer metadata can take a while on servers with many databases.</summary>
     public TimeSpan PrepareTimeout { get; set; } = TimeSpan.FromMinutes(3);
 
+    /// <summary>A domain controller's prepare also copies its directory with ntdsutil (IFM), which takes longer with a large database.</summary>
+    public TimeSpan DomainControllerPrepareTimeout { get; set; } = TimeSpan.FromMinutes(30);
+
     /// <summary>Until our VSS provider holds the writes (writers flush first; VSS allows them 60 s).</summary>
     public TimeSpan FreezeTimeout { get; set; } = TimeSpan.FromSeconds(90);
 

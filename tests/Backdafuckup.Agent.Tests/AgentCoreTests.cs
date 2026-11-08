@@ -153,6 +153,18 @@ public sealed class AgentCoreTests : IDisposable
     }
 
     [Fact]
+    public void The_cleanup_after_the_snapshot_reaches_the_vss_bridge()
+    {
+        var vss = new FakeVss();
+        var executor = new CommandExecutor(vss, new FakeHost(), new AgentLog(Path.Combine(_root, "agent.log")));
+
+        var result = executor.Execute(new AgentCommand { Id = Guid.NewGuid(), Kind = AgentCommandKinds.Cleanup, OperationId = Guid.NewGuid() });
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal(1, vss.Cleanups);
+    }
+
+    [Fact]
     public async Task A_self_update_swaps_in_verified_files_and_requests_a_restart()
     {
         var paths = await InstalledAgentAsync();
@@ -273,6 +285,10 @@ public sealed class AgentCoreTests : IDisposable
         }
 
         public void Abort() => Calls.Add("abort");
+
+        public int Cleanups { get; private set; }
+
+        public void Cleanup() => Cleanups++;
     }
 
     private sealed class FakeHost : IHostInfoSource

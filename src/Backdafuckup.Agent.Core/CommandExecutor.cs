@@ -20,6 +20,9 @@ public interface IVssBridge
 
     /// <summary>Abandons the backup (also while frozen).</summary>
     void Abort();
+
+    /// <summary>Removes what the prepare left for the snapshot (a domain controller's database copy).</summary>
+    void Cleanup();
 }
 
 /// <summary>Facts about the machine for the server: names, BIOS serial (= VM UUID on XCP-ng), OS, addresses.</summary>
@@ -70,6 +73,9 @@ public sealed class CommandExecutor
                     break;
                 case AgentCommandKinds.Abort:
                     Abort("server request");
+                    break;
+                case AgentCommandKinds.Cleanup:
+                    _vss.Cleanup();
                     break;
                 case AgentCommandKinds.PrepareBackup:
                     lock (_lock)

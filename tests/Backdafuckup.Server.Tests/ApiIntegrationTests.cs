@@ -813,7 +813,7 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     /// <param name="directory">The agent's folder: a new one, or an earlier agent's (an agent restart: same key, journals, new process).</param>
     private async Task<(Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)> StartAgentAsync(
         string vmNativeId, IRestoreFileSystem? fs, ISqlEnvironment? sql = null, Func<string, IPublishHost>? publish = null, List<GuestSqlDatabase>? sqlDatabases = null,
-        string? directory = null, IAdEnvironment? ad = null)
+        string? directory = null, IAdEnvironment? ad = null, bool ifm = false)
     {
         var restart = directory is not null;
         directory ??= Path.Combine(_root, "agent-" + Guid.NewGuid().ToString("N")[..8]);
@@ -825,7 +825,9 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
             await File.WriteAllTextAsync(paths.ConfigFile, System.Text.Json.JsonSerializer.Serialize(
                 new AgentConfig { ServerUrl = "https://localhost/", EnrollmentSecret = secret }, Backdafuckup.Agent.Core.AgentJson.Options), Ct);
         }
-        var runner = new AgentRunner(paths, new SimulatedHost(vmNativeId, ad is not null), new SimulatedVss(sqlDatabases, ad is not null), new AgentLog(paths.LogFile),
+        var vssBridge = new SimulatedVss(sqlDatabases, ad is not null, ifm);
+        _lastVss = vssBridge;
+        var runner = new AgentRunner(paths, new SimulatedHost(vmNativeId, ad is not null), vssBridge, new AgentLog(paths.LogFile),
             _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200), fs, sql, publish?.Invoke(directory), ad);
         var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var running = Task.Run(() => runner.RunAsync(stop.Token), Ct);
@@ -2873,7 +2875,11 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     }
 
     /// <param name="domainController">A DC of bdfu-lab.local: the NTDS writer and the directory facts, and a VSS full backup.</param>
-    private sealed class SimulatedVss(List<GuestSqlDatabase>? sqlDatabases = null, bool domainController = false) : IVssBridge
+    /// <param name="ifm">The DC's prepare reports a copy made with ntdsutil IFM (in the guest's image under ProgramData).</param>
+    /// <summary>The VSS bridge of the agent <see cref="StartAgentAsync"/> started last.</summary>
+    private SimulatedVss? _lastVss;
+
+    private sealed class SimulatedVss(List<GuestSqlDatabase>? sqlDatabases = null, bool domainController = false, bool ifm = false) : IVssBridge
     {
         public List<string> Calls { get; } = [];
 
@@ -2894,6 +2900,10 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
                     {
                         DitPath = @"C:\Windows\NTDS\ntds.dit", LogPath = @"C:\Windows\NTDS", DomainDns = "bdfu-lab.local", DomainNetbios = "BDFU-LAB",
                         DomainDn = "DC=bdfu-lab,DC=local", RecycleBin = false, TombstoneLifetimeDays = 180,
+                        IfmPath = ifm ? @"C:\ProgramData\backdafuckup\ad-ifm" : null,
+                        IfmCreatedUtc = ifm ? DateTime.UtcNow : null,
+                        IfmSeconds = ifm ? 2.5 : null,
+                        IfmBytes = ifm ? 1L << 20 : null,
                     },
                 };
             }
@@ -2924,12 +2934,18 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
             Calls.Add("abort");
             Frozen = false;
         }
+
+        public void Cleanup() => Calls.Add("cleanup");
     }
 
     private sealed class SimulatedHost(string vmUuid, bool domainController = false) : IHostInfoSource
     {
         public AgentHostInfo Collect() => domainController
-            ? new() { HostName = "DC1", BiosSerial = vmUuid, Build = AgentProtocol.BuildNet10, AgentVersion = "test", IpAddresses = ["10.0.0.10"], DomainRole = 5, Domain = "bdfu-lab.local" }
+            ? new()
+            {
+                HostName = "DC1", BiosSerial = vmUuid, Build = AgentProtocol.BuildNet10, AgentVersion = "test", IpAddresses = ["10.0.0.10"], DomainRole = 5, Domain = "bdfu-lab.local",
+                Capabilities = [AgentProtocol.CapabilityAdBackup, AgentProtocol.CapabilityAdIfm],
+            }
             : new() { HostName = "SQL01", BiosSerial = vmUuid, Build = AgentProtocol.BuildNet10, AgentVersion = "test", IpAddresses = ["10.0.0.5"] };
     }
 
