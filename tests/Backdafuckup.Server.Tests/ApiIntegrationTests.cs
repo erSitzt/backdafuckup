@@ -26,7 +26,7 @@ namespace Backdafuckup.Server.Tests;
 
 /// <summary>The REST API end to end: setup, login, CSRF, pool, repository, job, backup and restore.</summary>
 [Trait("Category", "Integration")]
-public sealed class ApiIntegrationTests : IAsyncLifetime
+public sealed partial class ApiIntegrationTests : IAsyncLifetime
 {
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17").Build();
     private readonly string _root = Path.Combine(Path.GetTempPath(), "bdfu-api-tests", Guid.NewGuid().ToString("N"));
@@ -813,7 +813,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
     /// <param name="directory">The agent's folder: a new one, or an earlier agent's (an agent restart: same key, journals, new process).</param>
     private async Task<(Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)> StartAgentAsync(
         string vmNativeId, IRestoreFileSystem? fs, ISqlEnvironment? sql = null, Func<string, IPublishHost>? publish = null, List<GuestSqlDatabase>? sqlDatabases = null,
-        string? directory = null)
+        string? directory = null, IAdEnvironment? ad = null)
     {
         var restart = directory is not null;
         directory ??= Path.Combine(_root, "agent-" + Guid.NewGuid().ToString("N")[..8]);
@@ -825,13 +825,15 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
             await File.WriteAllTextAsync(paths.ConfigFile, System.Text.Json.JsonSerializer.Serialize(
                 new AgentConfig { ServerUrl = "https://localhost/", EnrollmentSecret = secret }, Backdafuckup.Agent.Core.AgentJson.Options), Ct);
         }
-        var runner = new AgentRunner(paths, new SimulatedHost(vmNativeId), new SimulatedVss(sqlDatabases), new AgentLog(paths.LogFile), _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200), fs, sql, publish?.Invoke(directory));
+        var runner = new AgentRunner(paths, new SimulatedHost(vmNativeId, ad is not null), new SimulatedVss(sqlDatabases, ad is not null), new AgentLog(paths.LogFile),
+            _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200), fs, sql, publish?.Invoke(directory), ad);
         var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var running = Task.Run(() => runner.RunAsync(stop.Token), Ct);
         var agent = await _factory.Services.GetRequiredService<AgentService>().WaitForVmAsync(vmNativeId, TimeSpan.FromSeconds(30), Ct)
             ?? throw new TimeoutException("The agent did not come online.");
         var registry = _factory.Services.GetRequiredService<AgentRegistry>();
-        var capability = publish is not null ? (sql is not null ? AgentProtocol.CapabilitySqlPublish : AgentProtocol.CapabilityPublish)
+        var capability = ad is not null ? AgentProtocol.CapabilityAdExplore
+            : publish is not null ? (sql is not null ? AgentProtocol.CapabilitySqlPublish : AgentProtocol.CapabilityPublish)
             : fs is null ? AgentProtocol.CapabilitySqlRestore
             : sql is not null ? AgentProtocol.CapabilitySqlAttachFiles : AgentProtocol.CapabilityRestoreFilesV2;
         for (var i = 0; i < 100 && !registry.HasCapability(agent.Id, capability); i++)
@@ -2849,7 +2851,8 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         }
     }
 
-    private sealed class SimulatedVss(List<GuestSqlDatabase>? sqlDatabases = null) : IVssBridge
+    /// <param name="domainController">A DC of bdfu-lab.local: the NTDS writer and the directory facts, and a VSS full backup.</param>
+    private sealed class SimulatedVss(List<GuestSqlDatabase>? sqlDatabases = null, bool domainController = false) : IVssBridge
     {
         public List<string> Calls { get; } = [];
 
@@ -2860,7 +2863,20 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         public GuestBackupInfo Prepare(bool copyOnly)
         {
             Calls.Add("prepare");
-            Assert.True(copyOnly);
+            Assert.Equal(!domainController, copyOnly);
+            if (domainController)
+            {
+                return new GuestBackupInfo
+                {
+                    Writers = [new GuestWriter { Name = "NTDS", State = "Stable" }],
+                    ActiveDirectory = new GuestAdDatabase
+                    {
+                        DitPath = @"C:\Windows\NTDS\ntds.dit", LogPath = @"C:\Windows\NTDS", DomainDns = "bdfu-lab.local", DomainNetbios = "BDFU-LAB",
+                        DomainDn = "DC=bdfu-lab,DC=local", RecycleBin = false, TombstoneLifetimeDays = 180,
+                    },
+                };
+            }
+
             return new GuestBackupInfo
             {
                 Writers = [new GuestWriter { Name = "SqlServerWriter", State = "Stable" }],
@@ -2879,7 +2895,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         {
             Calls.Add("thaw");
             Frozen = false;
-            return new ThawReport { Consistent = true, HeldMs = 1200, Writers = [new GuestWriter { Name = "SqlServerWriter", State = "Stable" }] };
+            return new ThawReport { Consistent = true, HeldMs = 1200, Writers = [new GuestWriter { Name = domainController ? "NTDS" : "SqlServerWriter", State = "Stable" }] };
         }
 
         public void Abort()
@@ -2889,9 +2905,11 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         }
     }
 
-    private sealed class SimulatedHost(string vmUuid) : IHostInfoSource
+    private sealed class SimulatedHost(string vmUuid, bool domainController = false) : IHostInfoSource
     {
-        public AgentHostInfo Collect() => new() { HostName = "SQL01", BiosSerial = vmUuid, Build = AgentProtocol.BuildNet10, AgentVersion = "test", IpAddresses = ["10.0.0.5"] };
+        public AgentHostInfo Collect() => domainController
+            ? new() { HostName = "DC1", BiosSerial = vmUuid, Build = AgentProtocol.BuildNet10, AgentVersion = "test", IpAddresses = ["10.0.0.10"], DomainRole = 5, Domain = "bdfu-lab.local" }
+            : new() { HostName = "SQL01", BiosSerial = vmUuid, Build = AgentProtocol.BuildNet10, AgentVersion = "test", IpAddresses = ["10.0.0.5"] };
     }
 
     private sealed class ListLog(List<string> lines) : Backdafuckup.Core.Operations.IOperationLog

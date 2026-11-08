@@ -153,6 +153,7 @@ try
     app.MapFileRestoreEndpoints();
     app.MapLinuxCredentialEndpoints();
     app.MapSqlEndpoints();
+    app.MapAdEndpoints();
     app.MapHub<LiveHub>("/hubs/live");
     app.MapFallbackToFile("index.html").AllowAnonymous();
 

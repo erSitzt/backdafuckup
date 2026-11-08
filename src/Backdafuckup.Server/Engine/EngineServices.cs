@@ -315,6 +315,17 @@ public sealed class StartupRecovery(
                 continue;
             }
 
+            if (session.Kind == SessionKind.AdExplore)
+            {
+                // The DC's agent deletes the copy of the directory: the sweeper asks it once it is online, and the agent
+                // itself after its idle time.
+                session.State = SessionState.Stopped;
+                session.EndedUtc = time.GetUtcNow();
+                session.Summary = "Closed: the backup service was restarted. The domain controller removes the backup's directory when its agent is reachable.";
+                db.SessionLog.Add(new SessionLogEntry { SessionId = session.Id, TimestampUtc = time.GetUtcNow(), Severity = LogSeverity.Info, Message = session.Summary });
+                continue;
+            }
+
             if (session.Kind == SessionKind.FileBrowse)
             {
                 // A file browser only reads; it simply ends with the service.
@@ -515,6 +526,10 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<FileRestore.FileRestoreSessionRunner>();
         services.AddSingleton<FileRestore.AgentTransfers>();
         services.AddSingleton<Sql.SqlJobs>();
+        services.AddSingleton<Ad.AdJobs>();
+        services.Configure<Ad.AdExploreOptions>(configuration.GetSection("AdExplore"));
+        services.AddSingleton<Ad.AdExplores>();
+        services.AddHostedService<Ad.AdExploreSweeper>();
         services.Configure<Sql.SqlBackupOptions>(configuration.GetSection("SqlBackup"));
         services.AddSingleton<Sql.SqlBackupService>();
         services.AddHostedService(sp => sp.GetRequiredService<Sql.SqlBackupService>());

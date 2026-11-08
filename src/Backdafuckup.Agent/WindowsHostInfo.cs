@@ -55,7 +55,7 @@ internal sealed class WindowsHostInfo : IHostInfoSource
     }
 
     /// <summary>A numeric WMI property (e.g. <c>DomainRole</c>, a uint16), or null.</summary>
-    private static int? WmiInt(string query, string property)
+    internal static int? WmiInt(string query, string property)
     {
         try
         {

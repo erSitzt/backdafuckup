@@ -53,6 +53,9 @@ public static class AgentProtocol
     /// </summary>
     public const string SqlJobsPath = "api/agent/sql-jobs";
 
+    /// <summary>Active Directory jobs: <c>GET {id}</c> (the request, with the account), <c>POST {id}/result</c>.</summary>
+    public const string AdJobsPath = "api/agent/ad-jobs";
+
     /// <summary>Header of a SQL backup file upload: the <see cref="SqlBackupUpload"/> as base64 JSON.</summary>
     public const string BackupUploadHeader = "X-Bdfu-Backup";
 
@@ -110,6 +113,12 @@ public static class AgentProtocol
     /// (<see cref="GuestBackupInfo.ActiveDirectory"/>) and its domain role with every poll.
     /// </summary>
     public const string CapabilityAdBackup = "ad-backup-v1";
+
+    /// <summary>
+    /// The agent runs on a domain controller and can open a backup's directory with the AD Database Mounting Tool
+    /// (dsamain) and compare it with the live directory (<see cref="AgentCommandKinds.AdJob"/>).
+    /// </summary>
+    public const string CapabilityAdExplore = "ad-explore-v1";
 
     /// <summary>
     /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
@@ -275,6 +284,12 @@ public static class AgentCommandKinds
     /// the result through <see cref="AgentProtocol.SqlJobsPath"/>.
     /// </summary>
     public const string SqlJob = "SqlJob";
+
+    /// <summary>
+    /// Run Active Directory job <see cref="AgentCommand.JobId"/>. Answered at once; the agent then fetches the request and
+    /// posts the result through <see cref="AgentProtocol.AdJobsPath"/>.
+    /// </summary>
+    public const string AdJob = "AdJob";
 
     /// <summary>
     /// Publish <see cref="AgentCommand.PublishId"/>: serve the restore point's disks to the guest's iSCSI initiator over

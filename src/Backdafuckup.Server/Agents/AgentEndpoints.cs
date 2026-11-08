@@ -25,7 +25,7 @@ public static class AgentEndpoints
                 : Results.Problem("The enrollment secret is not valid (renewed in the console?).", statusCode: StatusCodes.Status403Forbidden));
 
         agent.MapPost("/poll", async (
-            AgentPollRequest request, AgentService agents, AgentRegistry registry, AgentPackages packages, Sql.SqlJobs sqlJobs, Publishing.DiskPublishes publishes,
+            AgentPollRequest request, AgentService agents, AgentRegistry registry, AgentPackages packages, Sql.SqlJobs sqlJobs, Ad.AdJobs adJobs, Publishing.DiskPublishes publishes,
             FileRestore.AgentTransfers transfers, Sql.SqlPublishLeftovers leftovers, IHostApplicationLifetime lifetime, HttpContext http, CancellationToken ct) =>
         {
             if (await agents.AuthenticateAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
@@ -40,6 +40,7 @@ public static class AgentEndpoints
             {
                 // A new process: what the previous one ran is gone (its journals clean up the guest at its start).
                 sqlJobs.AgentRestarted(agentId);
+                adJobs.AgentRestarted(agentId);
                 publishes.AgentRestarted(agentId);
                 transfers.AgentRestarted(agentId);
             }
@@ -450,6 +451,29 @@ public static class AgentEndpoints
             }
 
             return jobs.Complete(id, agentId, result) ? Results.NoContent() : Results.Problem("The SQL job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
+        });
+
+        // AD jobs: like SQL jobs (the request carries the account's password; 404 after the job ended or a server restart).
+        agent.MapGet("/ad-jobs/{id:guid}", async (Guid id, AgentService agents, Ad.AdJobs jobs, HttpContext http, CancellationToken ct) =>
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return Results.Unauthorized();
+            }
+
+            return jobs.Get(id, agentId) is { } request
+                ? Results.Json(request, AgentJson.Options)
+                : Results.Problem("The Active Directory job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
+        });
+
+        agent.MapPost("/ad-jobs/{id:guid}/result", async (Guid id, AdJobResult result, AgentService agents, Ad.AdJobs jobs, HttpContext http, CancellationToken ct) =>
+        {
+            if (await agents.AuthenticateCachedAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
+            {
+                return Results.Unauthorized();
+            }
+
+            return jobs.Complete(id, agentId, result) ? Results.NoContent() : Results.Problem("The Active Directory job is not running (any more).", statusCode: StatusCodes.Status404NotFound);
         });
 
         agent.MapGet("/transfers/{id:guid}", async (Guid id, AgentService agents, FileRestore.AgentTransfers transfers, HttpContext http, CancellationToken ct) =>

@@ -538,6 +538,12 @@ public enum SessionKind
     /// the day reopens it, and its state is the worst of the day.
     /// </summary>
     SqlBackup,
+
+    /// <summary>
+    /// A restore point's AD database opened on a live domain controller (dsamain) for browsing and comparing; not queued,
+    /// its log is the audit trail.
+    /// </summary>
+    AdExplore,
 }
 
 public enum GuestProcessingMode

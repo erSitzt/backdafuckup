@@ -27,6 +27,7 @@ public sealed class AgentRunner
     private readonly IRestoreFileSystem? _restoreFiles;
     private readonly ISqlEnvironment? _sql;
     private readonly IPublishHost? _publish;
+    private readonly AdMounts? _ad;
     private volatile object? _runningPublishBox;
 
     /// <summary>The publish running in the work slot, whose database is not "left over".</summary>
@@ -71,10 +72,12 @@ public sealed class AgentRunner
     /// <param name="restoreFiles">File operations for file-level restores into this guest; null: the agent cannot restore files.</param>
     /// <param name="sql">The local SQL Server installation; null: the agent runs no SQL jobs.</param>
     /// <param name="publish">The guest's iSCSI initiator and disk management; null: the agent publishes nothing.</param>
+    /// <param name="ad">The domain controller's AD tools (dsamain, LDAP); null: not a domain controller.</param>
     public AgentRunner(
         AgentPaths paths, IHostInfoSource host, IVssBridge vss, AgentLog log, Func<AgentConfig, HttpMessageHandler>? handlerFactory = null, TimeSpan? retryDelay = null,
-        IRestoreFileSystem? restoreFiles = null, ISqlEnvironment? sql = null, IPublishHost? publish = null)
+        IRestoreFileSystem? restoreFiles = null, ISqlEnvironment? sql = null, IPublishHost? publish = null, IAdEnvironment? ad = null)
     {
+        _ad = ad is null ? null : new AdMounts(ad, log, paths.BaseDirectory);
         _restoreFiles = restoreFiles;
         _sql = sql;
         _publish = publish;
@@ -154,6 +157,19 @@ public sealed class AgentRunner
             catch (Exception ex) when (!(ex is OutOfMemoryException))
             {
                 _log.Write($"Deleting the temporary files of an interrupted restore failed: {ex.Message}");
+            }
+        }
+
+        if (_ad is not null)
+        {
+            try
+            {
+                // The backups' directories of explore sessions from before the restart: they hold password hashes.
+                _ad.SweepAtStart();
+            }
+            catch (Exception ex) when (!(ex is OutOfMemoryException))
+            {
+                _log.Write($"Cleaning up AD explore sessions from before the restart failed: {ex.Message}");
             }
         }
 
@@ -260,6 +276,7 @@ public sealed class AgentRunner
         _log.Write($"Connected to {http.BaseAddress}.");
         while (!stop.IsCancellationRequested)
         {
+            _ad?.SweepIdle();
             var pollRequest = new AgentPollRequest { Host = HostInfo(force: false), Busy = Busy, RunId = RunId, LeftoverDatabases = LeftoverDatabases() };
             using (var response = await http.PostAsync(AgentProtocol.PollPath, Json(pollRequest), stop).ConfigureAwait(false))
             {
@@ -282,7 +299,7 @@ public sealed class AgentRunner
                 }
 
                 var poll = JsonSerializer.Deserialize<AgentPollResponse>(await response.Content.ReadAsStringAsync().ConfigureAwait(false), AgentJson.Options);
-                if (poll?.Update is { } update && (Busy ?? BackupLane) is { } busy)
+                if (poll?.Update is { } update && (Busy ?? BackupLane ?? _ad?.Active) is { } busy)
                 {
                     // A server that does not know about the work (e.g. restarted meanwhile) offered an update: it waits.
                     if (_postponedUpdate != update.FilesHash)
@@ -324,6 +341,7 @@ public sealed class AgentRunner
         {
             AgentCommandKinds.RestoreFiles => await StartTransferAsync(http, command, stop).ConfigureAwait(false),
             AgentCommandKinds.SqlJob => StartSqlJob(http, command, stop),
+            AgentCommandKinds.AdJob => StartAdJob(http, command, stop),
             AgentCommandKinds.Publish => await StartPublishAsync(http, command, stop).ConfigureAwait(false),
             _ => _executor.Execute(command),
         };
@@ -431,6 +449,29 @@ public sealed class AgentRunner
     /// Accepts a SQL job and runs it in the background on its own connection. Jobs that only read (the inventory) run
     /// beside other work; jobs that change the guest will take the work slot.
     /// </summary>
+    private AgentCommandResult StartAdJob(HttpClient http, AgentCommand command, CancellationToken stop)
+    {
+        var result = new AgentCommandResult { CommandId = command.Id };
+        if (_ad is null || _config is null)
+        {
+            result.Error = "This agent does not run on a domain controller (or its AD tools are missing), so it runs no Active Directory jobs.";
+            return result;
+        }
+
+        var client = new HttpClient(_handlerFactory(_config)) { BaseAddress = http.BaseAddress, Timeout = Timeout.InfiniteTimeSpan };
+        client.DefaultRequestHeaders.Add(AgentProtocol.KeyHeader, http.DefaultRequestHeaders.GetValues(AgentProtocol.KeyHeader));
+        var job = new AdJobRunner(client, command.JobId, _ad, _log);
+        _ = Task.Run(async () =>
+        {
+            using (client)
+            {
+                await job.RunAsync(stop).ConfigureAwait(false);
+            }
+        });
+        result.Success = true;
+        return result;
+    }
+
     private AgentCommandResult StartSqlJob(HttpClient http, AgentCommand command, CancellationToken stop)
     {
         var result = new AgentCommandResult { CommandId = command.Id };
@@ -582,6 +623,11 @@ public sealed class AgentRunner
         if (force || _hostInfo is null || DateTime.UtcNow - _hostInfoAt > TimeSpan.FromMinutes(10))
         {
             _hostInfo = _host.Collect();
+            if (_ad is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilityAdExplore))
+            {
+                _hostInfo.Capabilities.Add(AgentProtocol.CapabilityAdExplore);
+            }
+
             if (_sql is not null && !_hostInfo.Capabilities.Contains(AgentProtocol.CapabilitySqlRestore))
             {
                 _hostInfo.Capabilities.Add(AgentProtocol.CapabilitySqlRestore);

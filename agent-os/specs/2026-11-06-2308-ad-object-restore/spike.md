@@ -20,6 +20,9 @@ The lab forest `bdfu-lab.local` (deploy/lab: `dc1` with `ad_forest`, later `dc2`
 5. Bind as a domain admin and as a normal user: who may read what?
 6. The free port: what happens if 51389 is taken?
 7. Stop dsamain (Ctrl+C / process stop) and delete the folder: are any files still locked?
+8. The agent's command lines (`WindowsAdEnvironment`): `esentutl /r edb /l <f> /s <f> /d <f> /o` on the copy, then `dsamain /dbpath <f>\ntds.dit /logpath <f> /ldapport p /sslport p+1 /gcport p+2 /gcsslport p+3 /allowUpgrade`. Are `/logpath` and `/allowUpgrade` accepted, is the recovery needed at all, and does dsamain open a database from a VSS snapshot without it?
+9. dsamain listens on all interfaces: is the port reachable from another machine (Windows Firewall on the DC)? If yes, a firewall rule for the session or a note in the docs.
+10. Kerberos vs. NTLM: the agent connects to `<dc fqdn>:<port>` with Negotiate; which one is used (event 4624 logon process), and does sealing work with both?
 
 ## S3 — Reanimation over LDAP
 

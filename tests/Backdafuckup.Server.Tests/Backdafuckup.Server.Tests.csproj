@@ -21,4 +21,8 @@
   <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- The in-memory directories and dsamain of the agent's AD tests, for the API tests with the real agent runner. -->
+    <Compile Include="..\Backdafuckup.Agent.Tests\InMemoryAd.cs" Link="InMemoryAd.cs" />
+  </ItemGroup>
 </Project>
