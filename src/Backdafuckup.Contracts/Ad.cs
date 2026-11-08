@@ -89,8 +89,14 @@ public sealed record AdRestoreObjectDto(Guid Guid, List<string>? Attributes = nu
 /// <param name="TargetParentDn">Where objects go whose container is not in the live directory; null: they are skipped.</param>
 /// <param name="NewPassword">For accounts that come back without a password; null: they stay disabled (change at next logon). Never stored.</param>
 /// <param name="ConfirmDomain">Restore only: the live domain's DNS name, typed by the user as confirmation.</param>
+/// <param name="Gpos">Group policies: their files (GPT) and container (GPC), versions raised, links optional.</param>
 public sealed record AdRestoreRequestDto(
-    List<AdRestoreObjectDto> Objects, bool Recreate = false, string? TargetParentDn = null, string? NewPassword = null, string? ConfirmDomain = null);
+    List<AdRestoreObjectDto> Objects, bool Recreate = false, string? TargetParentDn = null, string? NewPassword = null, string? ConfirmDomain = null,
+    List<AdGpoRestoreDto>? Gpos = null);
+
+/// <param name="Guid">The objectGUID of the groupPolicyContainer in the backup.</param>
+/// <param name="Links">Add back the links (gPLink of the domain and OUs) the backup had.</param>
+public sealed record AdGpoRestoreDto(Guid Guid, bool Links = true);
 
 public sealed record AdRestoreStepDto(string Operation, string Target, string Text, bool Done);
 

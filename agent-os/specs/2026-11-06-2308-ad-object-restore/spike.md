@@ -47,6 +47,9 @@ The lab forest `bdfu-lab.local` (deploy/lab: `dc1` with `ad_forest`, later `dc2`
 
 1. Change "Lab Policy A" (registry marker), restore the old GPT folder by hand, raise `versionNumber` (GPC) and `Version` (GPT.INI) to max + 1.
 2. dc2 (after `ad_replica`): does DFS-R replicate the folder? `gpresult /r` on a member: the old setting is back.
+3. The product's swap: the staging folder `{GUID}.bdfu-new` in SYSVOL replicates to dc2 for a moment, then the renames and the delete of `{GUID}.bdfu-replaced`: does DFS-R handle the renames cleanly (no `{GUID}` conflict folders, event log DFS Replication)?
+4. The DACL written to the GPC with the SD flags control (DACL only): GPMC shows the delegation as in the backup, and `gpresult` on a member applies the policy.
+5. Re-created GPC (policy gone): GPMC shows the policy with its name and settings; "Lab Policy C" (unlinked) and the links of A and B.
 
 ## Results
 

@@ -2719,6 +2719,27 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
         /// <summary>The files the agent took over (on Windows: owner and full control for the Administrators group).</summary>
         public List<string> TakenOver { get; } = [];
 
+        /// <summary>The paths whose permissions the agent set from the backup (with <see cref="RecordPermissions"/>).</summary>
+        public List<string> Secured { get; } = [];
+
+        /// <summary>Permissions are recorded instead of failing as on any non-Windows file system.</summary>
+        public bool RecordPermissions { get; init; }
+
+        public override void SetSecurity(string path, bool isDirectory, byte[] descriptor)
+        {
+            if (!RecordPermissions)
+            {
+                base.SetSecurity(path, isDirectory, descriptor);
+                return;
+            }
+
+            Assert.True(isDirectory ? Directory.Exists(Map(path)) : File.Exists(Map(path)), path);
+            lock (Secured)
+            {
+                Secured.Add(path);
+            }
+        }
+
         public override string? CheckRoot(string path) => null;
 
         public override void TakeOver(string path)

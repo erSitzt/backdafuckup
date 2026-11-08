@@ -286,9 +286,9 @@ public sealed class AdExplores(
     public async Task<Guid> RestoreAsync(AdExplore explore, AdRestoreRequestDto request, string user, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Objects.Count is 0 or > 1000)
+        if (request.Objects.Count + (request.Gpos?.Count ?? 0) is 0 or > 1000)
         {
-            throw new ArgumentException("Choose 1 to 1,000 objects to restore.");
+            throw new ArgumentException("Choose 1 to 1,000 objects and group policies to restore.");
         }
 
         var domain = LiveDomain(explore);
@@ -322,6 +322,7 @@ public sealed class AdExplores(
                     explore.Point.Id,
                     AgentId = explore.Agent.Id,
                     request.Objects,
+                    request.Gpos,
                     request.Recreate,
                     request.TargetParentDn,
                     PasswordEntered = !string.IsNullOrEmpty(request.NewPassword),
@@ -333,7 +334,7 @@ public sealed class AdExplores(
             sessionId = session.Id;
         }
 
-        explore.Log.Info($"{user} started restoring {request.Objects.Count} object(s) into {explore.Host} (session {sessionId}).");
+        explore.Log.Info($"{user} started restoring {request.Objects.Count} object(s){(request.Gpos is { Count: > 0 } g ? $" and {g.Count} group policy(ies)" : string.Empty)} into {explore.Host} (session {sessionId}).");
         Interlocked.Increment(ref explore.Queries);
         _ = Task.Run(async () =>
         {
@@ -354,7 +355,7 @@ public sealed class AdExplores(
     {
         var log = events.CreateLog(sessionId, null);
         var point = explore.Point;
-        log.Info($"Restoring {request.Objects.Count} object(s) of {point.VmName} from the restore point of {point.CreatedUtc.ToLocalTime():g} into {LiveDomain(explore)} " +
+        log.Info($"Restoring {request.Objects.Count} object(s){(request.Gpos is { Count: > 0 } gpos ? $" and {gpos.Count} group policy(ies)" : string.Empty)} of {point.VmName} from the restore point of {point.CreatedUtc.ToLocalTime():g} into {LiveDomain(explore)} " +
             $"on {explore.Host}, started by {user}, written as {explore.Account.UserName}." +
             (request.Recreate ? " Objects that are gone are re-created with a new SID." : string.Empty) +
             (string.IsNullOrEmpty(request.NewPassword) ? " Accounts without a password stay disabled." : " Accounts without a password get the password entered for the restore."));
@@ -362,6 +363,11 @@ public sealed class AdExplores(
         string summary;
         try
         {
+            if (request.Gpos is { Count: > 0 })
+            {
+                await StageGposAsync(explore, request, log).ConfigureAwait(false);
+            }
+
             var job = Job(request, AdJobKinds.Restore);
             job.Account = explore.Account;
             job.MountId = explore.Id;
@@ -392,6 +398,7 @@ public sealed class AdExplores(
                 {
                     AdRestoreActions.Reanimate => "reanimated",
                     AdRestoreActions.Recreate => "re-created",
+                    AdRestoreActions.Gpo => "group policy restored (files, container, version" + (item.Steps.Any(s => s.Operation == "link") ? ", links)" : ")") + ",",
                     _ => "restored",
                 };
                 var text = item.Outcome switch
@@ -451,9 +458,55 @@ public sealed class AdExplores(
         }, CancellationToken.None).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The files of the group policies: the agent creates a staging folder in SYSVOL for each, the server copies the GPT
+    /// from the restore point into it with the backup's permissions (each file checked with SHA-256).
+    /// </summary>
+    private async Task StageGposAsync(AdExplore explore, AdRestoreRequestDto request, IOperationLog log)
+    {
+        var prepare = Job(request, AdJobKinds.GpoPrepare);
+        prepare.Account = explore.Account;
+        var staged = await RunAsync(explore, prepare, TimeSpan.FromMinutes(2), CancellationToken.None).ConfigureAwait(false);
+        foreach (var line in staged.Log)
+        {
+            log.Info(line);
+        }
+
+        var point = explore.Point;
+        var domain = LiveDomain(explore) ?? throw new InvalidOperationException("The live domain is unknown.");
+        var repository = await repositories.GetAsync(point.RepositoryId, CancellationToken.None).ConfigureAwait(false);
+        using var pin = repository.Pin(point.Id);
+        await using var reader = await repository.OpenRestorePointAsync(point.Id, CancellationToken.None).ConfigureAwait(false);
+        var disks = await FileRestoreMounts.OpenDisksAsync(reader, cache, CancellationToken.None).ConfigureAwait(false);
+        var stored = await StoredGuestMetadata.ReadAsync(reader, CancellationToken.None).ConfigureAwait(false);
+        foreach (var gpo in staged.GpoStaging)
+        {
+            AgentTransferPlan? plan = null;
+            string? source = null;
+            string? volume = null;
+            await FileLevelWorkers.RunDedicated(
+                () =>
+                {
+                    using var image = GuestImage.Open(disks);
+                    var located = AdCatalog.LocatePolicy(image, stored, domain, gpo.Name)
+                        ?? throw new InvalidOperationException($"The restore point has no folder for the group policy {gpo.DisplayName ?? gpo.Name} ({gpo.Name}) in SYSVOL.");
+                    (volume, var root, source) = located;
+                    var fs = image.OpenFileSystem(volume);
+                    string Target(GuestPath path) => gpo.Folder + string.Concat(path.Components.Skip(root.Components.Count).Select(c => "\\" + c));
+                    string Describe(GuestPath path) => source + string.Concat(path.Components.Skip(root.Components.Count).Select(c => "\\" + c));
+                    plan = AgentTargetPaths.Plan(fs, [root], Target, permissions: true, Describe, new Quiet(), 10_000, CancellationToken.None);
+                },
+                "ad-gpo-plan").ConfigureAwait(false);
+            await TransferAsync(explore, disks, plan!, gpo.Folder, volume!, permissions: true, new Quiet(), CancellationToken.None).ConfigureAwait(false);
+            log.Info($"Copied the files of the group policy {gpo.DisplayName ?? gpo.Name} ({plan!.Files} file(s), {VmBackupTask.Format(plan.Bytes)}) from {source} " +
+                $"in the restore point into {gpo.Folder} on {explore.Host}, with their permissions; each file checked with SHA-256.");
+        }
+    }
+
     private static AdJobRequest Job(AdRestoreRequestDto request, string kind) => new()
     {
         Kind = kind,
+        Gpos = [.. (request.Gpos ?? []).Select(g => new AdGpoChoice { Guid = g.Guid, Links = g.Links })],
         Objects = [.. request.Objects.Select(o => new AdRestoreObject { Guid = o.Guid, Attributes = o.Attributes, MoveBack = o.MoveBack, Memberships = o.Memberships })],
         Recreate = request.Recreate,
         TargetParentDn = string.IsNullOrWhiteSpace(request.TargetParentDn) ? null : request.TargetParentDn.Trim(),
@@ -669,7 +722,8 @@ public sealed class AdExplores(
                     "ad-explore-plan").ConfigureAwait(false);
 
                 explore.Step = "Copying the directory database to the domain controller";
-                await TransferAsync(explore, disks, files, plan!, folder, stop).ConfigureAwait(false);
+                await TransferAsync(explore, disks, plan!, folder, files[0].Volume, permissions: false, new Progress(explore), stop).ConfigureAwait(false);
+                explore.Log.Info($"Copied {files.Count} file(s), {VmBackupTask.Format(plan!.Bytes)}, into {folder} on {explore.Host}; each checked with SHA-256.");
             }
 
             // dsamain: recovery of the copy and the start may take a while on a large directory.
@@ -708,21 +762,28 @@ public sealed class AdExplores(
         }
     }
 
-    private async Task TransferAsync(AdExplore explore, IReadOnlyList<GuestDiskSource> disks, List<AdDatabaseFile> files, AgentTransferPlan plan, string folder, CancellationToken stop)
+    /// <summary>Copies the planned files into <paramref name="folder"/> on the DC through the agent; every file checked with SHA-256.</summary>
+    private async Task TransferAsync(
+        AdExplore explore, IReadOnlyList<GuestDiskSource> disks, AgentTransferPlan plan, string folder, string volume, bool permissions, IFileRestoreObserver observer, CancellationToken stop)
     {
+        if (plan.Failed > 0 || plan.Skipped > 0)
+        {
+            throw new InvalidOperationException($"{plan.Failed + plan.Skipped} item(s) for {folder} cannot be read from the restore point (links, junctions or damaged entries).");
+        }
+
         var info = new FileTransferInfo
         {
             TransferId = Guid.NewGuid(),
             Roots = [folder],
             Overwrite = false,
             IfExists = FileTransferIfExists.Fail,
-            RestorePermissions = false,
+            RestorePermissions = permissions,
             ItemCount = plan.Items.Count,
             TotalBytes = plan.Bytes,
         };
         using var reservation = await FileRestoreSessionRunner.ReserveAgentAsync(
             registry, explore.Agent.Id, explore.Host, explore.Log, agentOptions.Value.WorkWaitLimit, time, stop).ConfigureAwait(false);
-        using var transfer = new AgentTransfer(explore.Agent.Id, info, plan, disks, files[0].Volume, new Progress(explore), time);
+        using var transfer = new AgentTransfer(explore.Agent.Id, info, plan, disks, volume, observer, time);
         transfers.Add(transfer);
         FileTransferProgress? report;
         try
@@ -745,14 +806,12 @@ public sealed class AdExplores(
         }
 
         stop.ThrowIfCancellationRequested();
-        if (!transfer.Verified.All(v => v))
+        List<string> missing = [.. Enumerable.Range(0, plan.Items.Count).Where(i => plan.Sources[i] is not null && !transfer.Verified[i]).Select(i => plan.Descriptions[i])];
+        if (missing.Count > 0 || report?.Error is not null)
         {
-            var missing = files.Where((_, i) => !transfer.Verified[i]).Select(f => f.Name).ToList();
             throw new InvalidOperationException(
-                $"Copying to {explore.Host} failed ({report?.Error ?? $"{missing.Count} of {files.Count} file(s) not written or not as in the backup: {string.Join(", ", missing)}"}).");
+                $"Copying to {folder} on {explore.Host} failed ({report?.Error ?? $"{missing.Count} file(s) not written or not as in the backup: {string.Join(", ", missing.Take(5))}"}).");
         }
-
-        explore.Log.Info($"Copied {files.Count} file(s), {VmBackupTask.Format(plan.Bytes)}, into {folder} on {explore.Host}; each checked with SHA-256.");
     }
 
     private async Task<FileTransferProgress?> WaitAsync(AgentTransfer transfer, string host, CancellationToken stop)
@@ -907,6 +966,33 @@ public sealed class AdExplores(
         new(e.Guid, e.Dn, e.LiveDn, e.Name, e.ObjectClass, e.State, e.SamAccountName, e.Description, e.Container, e.ChangedInBackup, e.ChangedLive);
 
     private static AdValueDto ToDto(AdValue v) => new(v.Text, v.Guid);
+
+    private sealed class Quiet : IFileRestoreObserver
+    {
+        public void Counting(long files, long bytes)
+        {
+        }
+
+        public void Planned(long files, long directories, long bytes)
+        {
+        }
+
+        public void Copied(long bytes)
+        {
+        }
+
+        public void FileRestored(long files)
+        {
+        }
+
+        public void Renamed(string source, string target)
+        {
+        }
+
+        public void Problem(FileRestoreProblem problem)
+        {
+        }
+    }
 
     private sealed class Progress(AdExplore explore) : IFileRestoreObserver
     {

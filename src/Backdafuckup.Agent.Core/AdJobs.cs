@@ -321,7 +321,7 @@ public sealed class AdMounts
             mount.Info = null;
         }
 
-        Remove(new JournalEntry { MountId = mount.Id, Folder = mount.Folder, ProcessId = mount.ProcessId, Port = mount.Port }, reason);
+        Remove(new JournalEntry { MountId = mount.Id, Folder = mount.Folder, ProcessId = mount.ProcessId, Port = mount.Port, PolicyFolders = mount.PolicyFolders.ToList() }, reason);
         lock (_lock)
         {
             _mounts.Remove(mountId);
@@ -368,8 +368,63 @@ public sealed class AdMounts
         }
     }
 
+    /// <summary>Notes a GPO folder in SYSVOL that the restore created or set aside (cleaned up at unmount and agent start).</summary>
+    public void TrackPolicyFolder(Guid mountId, string folder, bool add)
+    {
+        lock (_lock)
+        {
+            if (!_mounts.TryGetValue(mountId, out var mount))
+            {
+                return;
+            }
+
+            mount.PolicyFolders.RemoveAll(f => string.Equals(f, folder, StringComparison.OrdinalIgnoreCase));
+            if (add)
+            {
+                mount.PolicyFolders.Add(folder);
+            }
+
+            WriteJournal();
+        }
+    }
+
+    /// <summary>
+    /// GPO folders of an interrupted restore: a staging folder is deleted; a set-aside folder goes back if the policy has
+    /// no folder now, else it stays (named in the log) for the admin to check, as it holds a policy's earlier files.
+    /// </summary>
+    private void RemovePolicyFolders(JournalEntry entry, string reason)
+    {
+        foreach (var folder in entry.PolicyFolders)
+        {
+            if (!_env.FolderExists(folder))
+            {
+                continue;
+            }
+
+            if (folder.EndsWith(".bdfu-new", StringComparison.OrdinalIgnoreCase))
+            {
+                _env.DeletePolicyFolder(folder);
+                _log.Write($"Deleted the GPO staging folder {folder} ({reason}).");
+            }
+            else if (folder.EndsWith(".bdfu-replaced", StringComparison.OrdinalIgnoreCase))
+            {
+                var original = folder.Substring(0, folder.Length - ".bdfu-replaced".Length);
+                if (!_env.FolderExists(original))
+                {
+                    _env.MovePolicyFolder(folder, original);
+                    _log.Write($"Moved the policy's previous files back from {folder} to {original} ({reason}).");
+                }
+                else
+                {
+                    _log.Write($"Warning: {folder} holds a policy's previous files from an interrupted restore; {original} exists. Check both and delete one by hand.");
+                }
+            }
+        }
+    }
+
     private void Remove(JournalEntry entry, string reason)
     {
+        RemovePolicyFolders(entry, reason);
         if (entry.ProcessId != 0 && _env.IsServer(entry.ProcessId))
         {
             _env.StopServer(entry.ProcessId);
@@ -419,7 +474,9 @@ public sealed class AdMounts
 
     private void WriteJournal()
     {
-        var entries = _mounts.Values.Select(m => new JournalEntry { MountId = m.Id, Folder = m.Folder, ProcessId = m.ProcessId, Port = m.Port }).Concat(_stale).ToList();
+        var entries = _mounts.Values
+            .Select(m => new JournalEntry { MountId = m.Id, Folder = m.Folder, ProcessId = m.ProcessId, Port = m.Port, PolicyFolders = m.PolicyFolders.ToList() })
+            .Concat(_stale).ToList();
         if (entries.Count == 0)
         {
             if (File.Exists(_journalFile))
@@ -457,6 +514,9 @@ public sealed class AdMounts
         public int ProcessId { get; set; }
 
         public int Port { get; set; }
+
+        /// <summary>GPO staging (<c>.bdfu-new</c>) and replaced (<c>.bdfu-replaced</c>) folders in SYSVOL of a restore in progress.</summary>
+        public List<string> PolicyFolders { get; set; } = new List<string>();
     }
 
     private sealed class MountState
@@ -482,6 +542,8 @@ public sealed class AdMounts
         public AdMountInfo? Info { get; set; }
 
         public AdSchema? Schema { get; set; }
+
+        public List<string> PolicyFolders { get; } = new List<string>();
     }
 }
 
@@ -544,7 +606,7 @@ public sealed class AdJobRunner
                 result.Log.Add(line);
             }
 
-            if (request.Kind != AdJobKinds.Search && request.Kind != AdJobKinds.Tree && request.Kind != AdJobKinds.Object && request.Kind != AdJobKinds.Plan)
+            if (request.Kind is not (AdJobKinds.Search or AdJobKinds.Tree or AdJobKinds.Object or AdJobKinds.Plan))
             {
                 _log.Write($"AD job {_id}: {request.Kind} of explore session {request.MountId}{(request.Account is { } account ? $" as {account.UserName}" : string.Empty)}.");
             }
@@ -595,6 +657,9 @@ public sealed class AdJobRunner
         using (var backup = _mounts.Environment.Connect(info.Port, account))
         using (var live = _mounts.Environment.Connect(389, account))
         {
+            AdGpoRestorer Gpos() => new AdGpoRestorer(_mounts.Environment, backup, live, info.LiveDomainDn ?? info.BackupDomainDn ?? string.Empty, Schema(), info.RecycleBin,
+                (folder, add) => _mounts.TrackPolicyFolder(request.MountId, folder, add));
+
             AdSchema Schema()
             {
                 if (schema is null)
@@ -621,16 +686,25 @@ public sealed class AdJobRunner
                 case AdJobKinds.Object:
                     result.Object = queries.Object(request.ObjectGuid, Schema());
                     break;
+                case AdJobKinds.GpoPrepare:
+                    result.GpoStaging = Gpos().Prepare(request.Gpos, log);
+                    break;
                 case AdJobKinds.Plan:
                 case AdJobKinds.Restore:
                     var write = request.Kind == AdJobKinds.Restore;
                     if (write)
                     {
-                        log($"Restoring {request.Objects.Count} object(s) into {live.Endpoint} as {account.UserName}{(string.IsNullOrEmpty(request.NewPassword) ? string.Empty : " (with a password entered for accounts without one)")}.");
+                        log($"Restoring {request.Objects.Count} object(s){(request.Gpos.Count > 0 ? $" and {request.Gpos.Count} group policy(ies)" : string.Empty)} into {live.Endpoint} as {account.UserName}" +
+                            $"{(string.IsNullOrEmpty(request.NewPassword) ? string.Empty : " (with a password entered for accounts without one)")}.");
                     }
 
                     var restorer = new AdRestorer(backup, live, info.LiveDomainDn ?? info.BackupDomainDn ?? string.Empty, Schema(), info.RecycleBin);
-                    result.Restore = restorer.Run(request, write, log);
+                    result.Restore = request.Objects.Count > 0 ? restorer.Run(request, write, log) : new List<AdRestoreItem>();
+                    if (request.Gpos.Count > 0)
+                    {
+                        result.Restore.AddRange(Gpos().Run(request, write, log));
+                    }
+
                     break;
                 default:
                     throw new InvalidOperationException($"Unknown AD job kind '{request.Kind}'.");

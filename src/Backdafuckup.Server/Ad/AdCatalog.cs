@@ -70,6 +70,44 @@ public static class AdCatalog
         return files;
     }
 
+    /// <summary>
+    /// A group policy's folder (GPT) in the restore point: <c>SYSVOL\domain\Policies\{GUID}</c> (the
+    /// <c>sysvol\{domain}</c> share folder is a junction to it), from the guest metadata's SYSVOL path or the default.
+    /// </summary>
+    public static (string Volume, GuestPath Path, string WindowsPath)? LocatePolicy(GuestImage image, StoredGuestMetadata? stored, string domainDns, string name)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        var candidates = new List<string>();
+        if (stored?.ActiveDirectory?.SysvolPath is { Length: > 0 } sysvol)
+        {
+            candidates.Add(Folder(sysvol.TrimEnd('\\')) + @"\domain\Policies\" + name);
+            candidates.Add(sysvol.TrimEnd('\\') + "\\" + domainDns + @"\Policies\" + name);
+        }
+
+        candidates.Add(@"C:\Windows\SYSVOL\domain\Policies\" + name);
+        foreach (var candidate in candidates)
+        {
+            var (volume, path) = Resolve(image, candidate);
+            if (volume is null || path is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (image.OpenFileSystem(volume.Id).Stat(path).Kind == GuestEntryKind.Directory)
+                {
+                    return (volume.Id, path, candidate);
+                }
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException or IOException or InvalidDataException or UnauthorizedAccessException or NotSupportedException)
+            {
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>edb.chk and the logs edb*.log (also edbtmp.log); not the reserve logs or temp.edb.</summary>
     internal static bool IsLog(string name) =>
         string.Equals(name, "edb.chk", StringComparison.OrdinalIgnoreCase)

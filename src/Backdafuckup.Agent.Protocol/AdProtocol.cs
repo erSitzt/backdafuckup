@@ -29,6 +29,36 @@ public static class AdJobKinds
 
     /// <summary>Restores <see cref="AdJobRequest.Objects"/> into the live directory (reanimate, re-create, write attributes).</summary>
     public const string Restore = "restore";
+
+    /// <summary>
+    /// Creates an empty staging folder <c>Policies\{GPO}.bdfu-new</c> in this DC's SYSVOL for each of
+    /// <see cref="AdJobRequest.Gpos"/>; the server copies the backup's GPT into it, the restore swaps it in.
+    /// </summary>
+    public const string GpoPrepare = "gpo-prepare";
+}
+
+/// <summary>A group policy to restore: its container (GPC) by objectGUID in the backup, its files (GPT) from the backup's SYSVOL.</summary>
+public sealed class AdGpoChoice
+{
+    /// <summary>The objectGUID of the groupPolicyContainer in the backup.</summary>
+    public Guid Guid { get; set; }
+
+    /// <summary>The links (gPLink of the domain and the OUs) that the backup had and the live directory lacks are added back.</summary>
+    public bool Links { get; set; } = true;
+}
+
+/// <summary>Where the server copies a GPO's files to.</summary>
+public sealed class AdGpoStaging
+{
+    public Guid Guid { get; set; }
+
+    /// <summary>The GPO's name in SYSVOL and AD, e.g. <c>{31B2F340-016D-11D2-945F-00C04FB984F9}</c>.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    public string? DisplayName { get; set; }
+
+    /// <summary>The empty staging folder on the DC.</summary>
+    public string Folder { get; set; } = string.Empty;
 }
 
 /// <summary>What a restore does with an object (<see cref="AdRestoreItem.Action"/>).</summary>
@@ -42,6 +72,9 @@ public static class AdRestoreActions
 
     /// <summary>Writes attributes of a live object back (and moves or renames it, if chosen).</summary>
     public const string Modify = "modify";
+
+    /// <summary>A group policy: its files (GPT) swapped in, its container (GPC) restored, versions raised, links added.</summary>
+    public const string Gpo = "gpo";
 
     /// <summary>Nothing to restore.</summary>
     public const string None = "none";
@@ -213,6 +246,9 @@ public sealed class AdJobRequest
     /// disabled and must change the password at the next logon. Never logged or stored.
     /// </summary>
     public string? NewPassword { get; set; }
+
+    /// <summary>Gpo-prepare, plan and restore: the group policies.</summary>
+    public List<AdGpoChoice> Gpos { get; set; } = new List<AdGpoChoice>();
 }
 
 /// <summary>The outcome of an Active Directory job (<c>POST api/agent/ad-jobs/{id}/result</c>).</summary>
@@ -248,6 +284,9 @@ public sealed class AdJobResult
 
     /// <summary>Plan and restore: the objects with their steps and outcomes.</summary>
     public List<AdRestoreItem> Restore { get; set; } = new List<AdRestoreItem>();
+
+    /// <summary>Gpo-prepare: the staging folders.</summary>
+    public List<AdGpoStaging> GpoStaging { get; set; } = new List<AdGpoStaging>();
 }
 
 public sealed class AdPrepareInfo

@@ -24,9 +24,13 @@ internal sealed class WindowsAdEnvironment : IAdEnvironment
     private static readonly string DsaMain = Path.Combine(Environment.SystemDirectory, "dsamain.exe");
     private static readonly string EsentUtl = Path.Combine(Environment.SystemDirectory, "esentutl.exe");
 
-    private WindowsAdEnvironment(string hostName)
+    private static readonly System.Text.RegularExpressions.Regex PolicyFolderName =
+        new System.Text.RegularExpressions.Regex(@"^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}(\.bdfu-new|\.bdfu-replaced)?$");
+
+    private WindowsAdEnvironment(string hostName, string? sysvolRoot)
     {
         HostName = hostName;
+        SysvolRoot = sysvolRoot;
         WorkRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "backdafuckup", "ad");
     }
 
@@ -35,6 +39,61 @@ internal sealed class WindowsAdEnvironment : IAdEnvironment
     public string HostName { get; }
 
     public string Join(string folder, string name) => Path.Combine(folder, name);
+
+    public string? SysvolRoot { get; }
+
+    public void CreatePolicyFolder(string folder)
+    {
+        PolicyFolder(folder, staging: true);
+        Directory.CreateDirectory(folder);
+    }
+
+    public void MovePolicyFolder(string from, string to)
+    {
+        PolicyFolder(from, staging: false);
+        PolicyFolder(to, staging: false);
+        if (!string.Equals(Path.GetDirectoryName(Path.GetFullPath(from)), Path.GetDirectoryName(Path.GetFullPath(to)), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"{from} and {to} are not in the same Policies folder.");
+        }
+
+        Directory.Move(from, to);
+    }
+
+    public void DeletePolicyFolder(string folder)
+    {
+        var name = PolicyFolder(folder, staging: false);
+        if (!name.EndsWith(".bdfu-new", StringComparison.OrdinalIgnoreCase) && !name.EndsWith(".bdfu-replaced", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"{folder} is a policy's own folder; it is never deleted.");
+        }
+
+        try
+        {
+            foreach (var file in Directory.GetFiles(folder, "*", System.IO.SearchOption.AllDirectories))
+            {
+                File.SetAttributes(file, FileAttributes.Normal);
+            }
+
+            Directory.Delete(folder, true);
+        }
+        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+        {
+            throw new IOException($"Deleting {folder} on {HostName} failed: {ex.Message}", ex);
+        }
+    }
+
+    public byte[] ReadFile(string path)
+    {
+        PolicyFolder(Path.GetDirectoryName(path)!, staging: false);
+        return File.ReadAllBytes(path);
+    }
+
+    public void WriteFile(string path, byte[] content)
+    {
+        PolicyFolder(Path.GetDirectoryName(path)!, staging: false);
+        File.WriteAllBytes(path, content);
+    }
 
     /// <summary>The environment on a domain controller with the AD DS tools; null elsewhere (the log says why on a DC).</summary>
     public static WindowsAdEnvironment? TryCreate(AgentLog log)
@@ -52,7 +111,20 @@ internal sealed class WindowsAdEnvironment : IAdEnvironment
 
         var properties = IPGlobalProperties.GetIPGlobalProperties();
         var host = string.IsNullOrEmpty(properties.DomainName) ? properties.HostName : properties.HostName + "." + properties.DomainName;
-        return new WindowsAdEnvironment(host);
+        string? sysvol = null;
+        try
+        {
+            using (var netlogon = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\Netlogon\Parameters"))
+            {
+                sysvol = netlogon?.GetValue("SysVol") as string;
+            }
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException || ex is UnauthorizedAccessException || ex is IOException)
+        {
+            log.Write($"The SYSVOL folder could not be read from the registry ({ex.Message}); group policies cannot be restored on this DC.");
+        }
+
+        return new WindowsAdEnvironment(host, sysvol);
     }
 
     public void CreateWorkFolder(string folder)
@@ -182,6 +254,27 @@ internal sealed class WindowsAdEnvironment : IAdEnvironment
     }
 
     public IAdDirectory Connect(int port, AdAccount account) => new WindowsAdDirectory(HostName, port, account);
+
+    /// <summary>
+    /// Only folders directly in <c>{SysvolRoot}\{domain}\Policies</c> with a GPO name (<c>{GUID}</c>, optionally
+    /// <c>.bdfu-new</c> or <c>.bdfu-replaced</c>); returns the name.
+    /// </summary>
+    private string PolicyFolder(string folder, bool staging)
+    {
+        var root = SysvolRoot ?? throw new InvalidOperationException($"The SYSVOL folder of {HostName} is unknown.");
+        var full = Path.GetFullPath(folder).TrimEnd('\\');
+        var name = Path.GetFileName(full);
+        var policies = Path.GetDirectoryName(full);
+        var domain = policies is null ? null : Path.GetDirectoryName(policies);
+        if (!PolicyFolderName.IsMatch(name) || policies is null || !string.Equals(Path.GetFileName(policies), "Policies", StringComparison.OrdinalIgnoreCase)
+            || domain is null || !string.Equals(Path.GetDirectoryName(domain)?.TrimEnd('\\'), Path.GetFullPath(root).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)
+            || (staging && !name.EndsWith(".bdfu-new", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException($"{folder} is not a group policy folder in {root}\\<domain>\\Policies; not changed.");
+        }
+
+        return name;
+    }
 
     private bool IsWorkFolder(string folder)
     {
@@ -411,6 +504,23 @@ internal sealed class WindowsAdDirectory : IAdDirectory
 
     public void Move(string dn, string newRdn, string newParentDn) =>
         Write(new ModifyDNRequest(dn, newParentDn, newRdn) { DeleteOldRdn = true }, dn, "move");
+
+    public byte[]? ReadSecurityDescriptor(string dn)
+    {
+        var request = new SearchRequest(dn, "(objectClass=*)", SearchScope.Base, "nTSecurityDescriptor");
+        request.Controls.Add(new SecurityDescriptorFlagControl(System.DirectoryServices.Protocols.SecurityMasks.Dacl));
+        var response = Send(request, dn);
+        return response.Entries.Count > 0 && response.Entries[0].Attributes["nTSecurityDescriptor"] is { Count: > 0 } values
+            ? (byte[])values.GetValues(typeof(byte[]))[0]
+            : null;
+    }
+
+    public void WriteSecurityDescriptor(string dn, byte[] descriptor)
+    {
+        var request = new ModifyRequest(dn, DirectoryAttributeOperation.Replace, "nTSecurityDescriptor", descriptor);
+        request.Controls.Add(new SecurityDescriptorFlagControl(System.DirectoryServices.Protocols.SecurityMasks.Dacl));
+        Write(request, dn, "modify (permissions)");
+    }
 
     public void Dispose() => _connection.Dispose();
 

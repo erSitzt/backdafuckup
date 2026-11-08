@@ -97,9 +97,21 @@ internal sealed class InMemoryDirectory(string endpoint, string domainDn) : IAdD
     /// <summary>The DC refuses to reanimate recycled objects (unwillingToPerform), as with the Recycle Bin.</summary>
     public bool RefuseRecycledReanimation { get; set; }
 
+    /// <summary>Writes to these DNs fail with insufficientAccessRights (50).</summary>
+    public Func<string, bool>? FailWrite { get; set; }
+
+    private void Check(string dn, string operation)
+    {
+        if (FailWrite?.Invoke(dn) == true)
+        {
+            throw new AdDirectoryException($"LDAP {operation} of '{dn}' on {Endpoint} failed: InsufficientAccessRights (50)", 50);
+        }
+    }
+
     public void Add(string dn, IReadOnlyDictionary<string, List<object>> attributes)
     {
         Writes.Add($"add {dn}");
+        Check(dn, "add");
         if (Find(dn, true) is not null)
         {
             throw new AdDirectoryException($"LDAP add of '{dn}' on {Endpoint} failed: EntryAlreadyExists (68)", 68);
@@ -120,6 +132,7 @@ internal sealed class InMemoryDirectory(string endpoint, string domainDn) : IAdD
     public void Modify(string dn, IReadOnlyList<AdModification> changes, bool showDeleted = false)
     {
         Writes.Add($"modify {dn}: {string.Join(", ", changes.Select(c => $"{c.Kind.ToString().ToLowerInvariant()} {c.Name}"))}");
+        Check(dn, "modify");
         var record = Find(dn, showDeleted) ?? throw new AdDirectoryException($"LDAP modify of '{dn}' on {Endpoint} failed: NoSuchObject (32)", 32);
         var rest = changes.ToList();
         if (changes.Any(c => c.Kind == AdModificationKind.Delete && c.Name == "isDeleted")
@@ -180,6 +193,15 @@ internal sealed class InMemoryDirectory(string endpoint, string domainDn) : IAdD
         Writes.Add($"move {dn} → {newRdn},{newParentDn}");
         var record = Find(dn, false) ?? throw new AdDirectoryException($"LDAP move of '{dn}' on {Endpoint} failed: NoSuchObject (32)", 32);
         Rename(record, newRdn + "," + newParentDn);
+    }
+
+    public byte[]? ReadSecurityDescriptor(string dn) => Find(dn, true)?.Bytes("nTSecurityDescriptor");
+
+    public void WriteSecurityDescriptor(string dn, byte[] descriptor)
+    {
+        Writes.Add($"acl {dn}");
+        Check(dn, "modify (permissions)");
+        (Find(dn, false) ?? throw new AdDirectoryException($"LDAP modify of '{dn}' on {Endpoint} failed: NoSuchObject (32)", 32)).Attributes["nTSecurityDescriptor"] = [descriptor];
     }
 
     public AdRecord? Find(string dn, bool deletedToo) =>
@@ -350,6 +372,7 @@ internal sealed class FakeAdEnvironment : IAdEnvironment
     {
         _sandbox = windowsSandbox ? root : null;
         WorkRoot = windowsSandbox ? @"C:\ProgramData\backdafuckup\ad" : Path.Combine(root, "ad");
+        SysvolRoot = windowsSandbox ? @"C:\Windows\SYSVOL\sysvol" : Path.Combine(root, "sysvol");
         Backup = backup;
         Live = live;
     }
@@ -363,6 +386,22 @@ internal sealed class FakeAdEnvironment : IAdEnvironment
     public string HostName => "dc1.bdfu-lab.local";
 
     public string Join(string folder, string name) => _sandbox is null ? Path.Combine(folder, name) : folder.TrimEnd('\\') + "\\" + name;
+
+    public string? SysvolRoot { get; set; }
+
+    public void CreatePolicyFolder(string folder) => Directory.CreateDirectory(Map(folder));
+
+    public void MovePolicyFolder(string from, string to) => Directory.Move(Map(from), Map(to));
+
+    public void DeletePolicyFolder(string folder)
+    {
+        Assert.True(folder.EndsWith(".bdfu-new", StringComparison.Ordinal) || folder.EndsWith(".bdfu-replaced", StringComparison.Ordinal), folder);
+        Directory.Delete(Map(folder), true);
+    }
+
+    public byte[] ReadFile(string path) => File.ReadAllBytes(Map(path));
+
+    public void WriteFile(string path, byte[] content) => File.WriteAllBytes(Map(path), content);
 
     public InMemoryDirectory Backup { get; }
 

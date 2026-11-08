@@ -176,6 +176,101 @@ public sealed partial class ApiIntegrationTests
         await dc.Value.Running;
     }
 
+    [Fact]
+    public async Task An_ad_restore_brings_a_group_policy_back_with_its_files_container_version_and_link()
+    {
+        const string gpo = "{6AC1786C-016F-11D2-945F-00C04FB984F9}";
+        var client = await SignedInClientAsync();
+        var image = WindowsTestDisk.Create(
+        [
+            new WindowsTestDisk.Volume('C', 16, new Dictionary<string, byte[]>
+            {
+                ["Windows/NTDS/ntds.dit"] = Pattern(1 << 20, 0x5a),
+                [$"Windows/SYSVOL/domain/Policies/{gpo}/GPT.INI"] = "[General]\r\nVersion=131075\r\ndisplayName=Lab Policy A\r\n"u8.ToArray(),
+                [$"Windows/SYSVOL/domain/Policies/{gpo}/Machine/registry.pol"] = "backup settings"u8.ToArray(),
+                [$"Windows/SYSVOL/domain/Policies/{gpo}/User/Scripts/logon.cmd"] = "echo backup"u8.ToArray(),
+            }),
+        ]);
+        var sandbox = Path.Combine(_root, "dc3-sandbox");
+        var live = Path.Combine(sandbox, "C", "Windows", "SYSVOL", "sysvol", "bdfu-lab.local", "Policies", gpo);
+        Directory.CreateDirectory(Path.Combine(live, "Machine"));
+        await File.WriteAllTextAsync(Path.Combine(live, "GPT.INI"), "[General]\r\nVersion=327681\r\n", Ct);
+        await File.WriteAllTextAsync(Path.Combine(live, "Machine", "registry.pol"), "live settings", Ct);
+        var (backup, liveDirectory) = GpoDirectories(gpo);
+        var env = new FakeAdEnvironment(sandbox, backup, liveDirectory, windowsSandbox: true);
+        var fs = new SandboxRestoreFileSystem(sandbox) { RecordPermissions = true };
+        (Backdafuckup.Server.Data.AgentEntity Agent, CancellationTokenSource Stop, Task Running)? dc = null;
+        var point = await BackUpImageAsync(client, "dc3", image, async vm => dc = await StartAgentAsync(vm, fs, ad: env));
+        var account = await Read<WindowsCredentialDto>(client.PostAsJsonAsync("/api/credentials", new SaveWindowsCredentialDto(@"BDFU-LAB\Administrator", "secret", null), Ct));
+        var opened = await Read<AdExploreDto>(client.PostAsJsonAsync("/api/ad/explores", new OpenAdExploreDto(point.Id, dc!.Value.Agent.Id, account.Id), Ct));
+        var explore = await WaitForExploreAsync(client, opened.Id);
+        Assert.True(explore.State == AdExploreStates.Ready, explore.Error);
+
+        var found = await Read<AdSearchPageDto>(client.PostAsJsonAsync($"/api/ad/explores/{explore.Id}/search", new AdSearchDto(Classes: ["groupPolicyContainer"]), Ct));
+        var policy = Assert.Single(found.Entries);
+        Assert.Equal(AdObjectStates.Changed, policy.State);
+        var request = new AdRestoreRequestDto([], Gpos: [new AdGpoRestoreDto(policy.Guid)], ConfirmDomain: "bdfu-lab.local");
+        var plan = await Read<AdRestorePlanDto>(client.PostAsJsonAsync($"/api/ad/explores/{explore.Id}/restore/plan", request, Ct));
+        var planned = Assert.Single(plan.Items);
+        Assert.Equal("gpo", planned.Action);
+        Assert.Contains(planned.Steps, s => s.Operation == "link" && s.Target == "OU=Lab," + AdDomain);
+        Assert.Equal("live settings", await File.ReadAllTextAsync(Path.Combine(live, "Machine", "registry.pol"), Ct));
+
+        var restore = await Read<StartedDto>(client.PostAsJsonAsync($"/api/ad/explores/{explore.Id}/restore", request, Ct));
+        var session = await WaitForSessionAsync(client, restore.SessionId);
+        var log = (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{restore.SessionId}/log", Ct))!.Select(l => l.Message).ToList();
+        Assert.True(session.Session.State == "Succeeded", string.Join("\n", log));
+
+        // The files of the backup with a higher version; nothing of the staging or the previous files is left.
+        Assert.Equal("backup settings", await File.ReadAllTextAsync(Path.Combine(live, "Machine", "registry.pol"), Ct));
+        Assert.Equal("echo backup", await File.ReadAllTextAsync(Path.Combine(live, "User", "Scripts", "logon.cmd"), Ct));
+        var version = (6 << 16) | 4;
+        Assert.Contains($"Version={version}", await File.ReadAllTextAsync(Path.Combine(live, "GPT.INI"), Ct), StringComparison.Ordinal);
+        Assert.Equal([gpo], Directory.GetDirectories(Path.GetDirectoryName(live)!).Select(Path.GetFileName));
+        Assert.Contains(fs.Secured, p => p.EndsWith(@"\Machine\registry.pol", StringComparison.Ordinal));
+
+        var container = liveDirectory.Find(policy.Guid)!;
+        Assert.Equal("Lab Policy A", container.Text("displayName"));
+        Assert.Equal(version.ToString(System.Globalization.CultureInfo.InvariantCulture), container.Text("versionNumber"));
+        Assert.Contains(gpo, liveDirectory.Find("OU=Lab," + AdDomain, false)!.Text("gPLink"), StringComparison.Ordinal);
+        Assert.Contains(log, m => m.StartsWith($"Copied the files of the group policy Lab Policy A (3 file(s)", StringComparison.Ordinal) && m.Contains("with their permissions", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains("group policy restored (files, container, version, links)", StringComparison.Ordinal));
+
+        await Ok(client.DeleteAsync($"/api/ad/explores/{explore.Id}", Ct));
+        await dc.Value.Stop.CancelAsync();
+        await dc.Value.Running;
+    }
+
+    /// <summary>A policy and its link: changed live (display name, version) and its link on OU=Lab removed.</summary>
+    private static (InMemoryDirectory Backup, InMemoryDirectory Live) GpoDirectories(string gpo)
+    {
+        var backup = new InMemoryDirectory("dc1.bdfu-lab.local:50000", AdDomain);
+        var live = new InMemoryDirectory("dc1.bdfu-lab.local:389", AdDomain);
+        var ids = new Dictionary<string, Guid>();
+        Guid Id(string name) => ids.TryGetValue(name, out var id) ? id : ids[name] = Guid.NewGuid();
+        var policies = "CN=Policies,CN=System," + AdDomain;
+        foreach (var directory in new[] { backup, live })
+        {
+            var isLive = directory == live;
+            directory.Add(AdDomain, Id("domain"), ("objectClass", ["top", "domain", "domainDNS"]));
+            directory.Add("CN=System," + AdDomain, Id("System"), ("objectClass", ["top", "container"]));
+            directory.Add(policies, Id("Policies"), ("objectClass", ["top", "container"]));
+            directory.Add("OU=Lab," + AdDomain, Id("Lab"), ("objectClass", ["top", "organizationalUnit"]),
+                ("gPLink", [isLive ? string.Empty : $"[LDAP://cn={gpo},cn=policies,cn=system,{AdDomain};0]"]));
+            var gpc = directory.Add($"CN={gpo},{policies}", Id(gpo), ("objectClass", ["top", "container", "groupPolicyContainer"]), ("cn", [gpo]),
+                ("displayName", [isLive ? "Lab Policy A (changed)" : "Lab Policy A"]), ("versionNumber", [isLive ? "327681" : "131075"]));
+            directory.Add($"CN=User,{gpc.Dn}", Id("User"), ("objectClass", ["top", "container"]));
+            directory.Add($"CN=Machine,{gpc.Dn}", Id("Machine"), ("objectClass", ["top", "container"]));
+        }
+
+        foreach (var (name, syntax) in new[] { ("displayName", "2.5.5.12"), ("versionNumber", "2.5.5.9"), ("gPLink", "2.5.5.12"), ("objectClass", "2.5.5.2") })
+        {
+            live.Add($"CN={name},{live.SchemaDn}", Guid.NewGuid(), ("objectClass", ["top", "attributeSchema"]), ("lDAPDisplayName", [name]), ("attributeSyntax", [syntax]));
+        }
+
+        return (backup, live);
+    }
+
     private static async Task<AdExploreDto> WaitForExploreAsync(HttpClient client, Guid id)
     {
         for (var i = 0; i < 300; i++)

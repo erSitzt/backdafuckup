@@ -89,6 +89,12 @@ public interface IAdDirectory : IDisposable
 
     /// <summary>Moves and/or renames an object (LDAP modify DN).</summary>
     void Move(string dn, string newRdn, string newParentDn);
+
+    /// <summary>The object's DACL as a self-relative security descriptor (SD flags control: DACL only); null if none.</summary>
+    byte[]? ReadSecurityDescriptor(string dn);
+
+    /// <summary>Writes the object's DACL from a self-relative security descriptor (SD flags control: DACL only).</summary>
+    void WriteSecurityDescriptor(string dn, byte[] descriptor);
 }
 
 public enum AdModificationKind
@@ -191,6 +197,25 @@ public interface IAdEnvironment
 
     /// <summary>LDAP to this DC (<paramref name="port"/> 389) or to dsamain, as <paramref name="account"/>, signed and sealed.</summary>
     IAdDirectory Connect(int port, AdAccount account);
+
+    /// <summary>This DC's SYSVOL share folder (<c>Netlogon\Parameters\SysVol</c>, e.g. <c>C:\Windows\SYSVOL\sysvol</c>); null if unknown.</summary>
+    string? SysvolRoot { get; }
+
+    /// <summary>
+    /// Creates a GPO staging folder in SYSVOL (it inherits SYSVOL's permissions). Only <c>Policies\{GUID}.bdfu-new</c>.
+    /// </summary>
+    void CreatePolicyFolder(string folder);
+
+    /// <summary>Renames a folder in SYSVOL's Policies folder (<c>{GUID}</c> and <c>{GUID}.bdfu-*</c> names only).</summary>
+    void MovePolicyFolder(string from, string to);
+
+    /// <summary>Deletes a GPO staging or replaced folder (<c>{GUID}.bdfu-new</c> or <c>{GUID}.bdfu-replaced</c> only).</summary>
+    void DeletePolicyFolder(string folder);
+
+    byte[] ReadFile(string path);
+
+    /// <summary>Writes a file in a GPO staging folder (GPT.INI).</summary>
+    void WriteFile(string path, byte[] content);
 }
 
 /// <summary>LDAP strings: filter escaping, extended DNs, SIDs and times.</summary>
@@ -284,6 +309,10 @@ public static class AdText
 
         return builder.ToString();
     }
+
+    /// <summary><c>DC=bdfu-lab,DC=local</c> → <c>bdfu-lab.local</c>.</summary>
+    public static string DnsName(string dn) =>
+        string.Join(".", dn.Split(',').Select(p => p.Trim()).Where(p => p.StartsWith("DC=", StringComparison.OrdinalIgnoreCase)).Select(p => p.Substring(3)));
 
     /// <summary>The parent DN (everything after the first unescaped comma); null for a top-level DN.</summary>
     public static string? Parent(string dn)
