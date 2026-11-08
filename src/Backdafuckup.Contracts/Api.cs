@@ -258,7 +258,9 @@ public sealed record RestorePointDto(
     string? Firmware,
     string Consistency = "crash",
     string? ConsistencyReason = null,
-    int? SqlDatabaseCount = null);
+    int? SqlDatabaseCount = null,
+    bool DomainController = false,
+    string? AdDomain = null);
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 
@@ -321,6 +323,12 @@ public sealed record AgentDto
     public DateTimeOffset EnrolledUtc { get; init; }
 
     public DateTimeOffset LastContactUtc { get; init; }
+
+    /// <summary>The agent runs on a domain controller (domain role 4 or 5).</summary>
+    public bool DomainController { get; init; }
+
+    /// <summary>The computer's DNS domain.</summary>
+    public string? Domain { get; init; }
 }
 
 public sealed record AgentBuildDto(string Name, string Version, long SizeBytes, string FilesHash);

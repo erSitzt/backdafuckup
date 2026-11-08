@@ -25,6 +25,14 @@ else
             case 0:
                 <MudText Typo="Typo.h6">@_point.VmName</MudText>
                 <MudText Typo="Typo.body2" Class="mb-3">Restore point from @Fmt.Time(_point.CreatedUtc) (@_point.Kind, job @_point.JobName) · @_point.VCpus vCPU · @Fmt.Bytes(_point.MemoryBytes) RAM · @_point.Firmware</MudText>
+                @if (_point.DomainController)
+                {
+                    <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">
+                        This VM was a domain controller@(string.IsNullOrEmpty(_point.AdDomain) ? string.Empty : $" of {_point.AdDomain}"). The restored VM gets a new VM generation id,
+                        so at its first start Windows restores Active Directory non-authoritatively and takes the newer changes from the other domain controllers.
+                        Objects deleted since the backup do not come back this way.
+                    </MudAlert>
+                }
                 <MudRadioGroup T="RestoreModeDto" @bind-Value="_mode">
                     <MudRadio T="RestoreModeDto" Value="RestoreModeDto.OriginalLocation">Restore to the original location</MudRadio>
                     <MudRadio T="RestoreModeDto" Value="RestoreModeDto.AlternateLocation">Restore to a new location or with different settings</MudRadio>
@@ -87,6 +95,12 @@ else
                     <MudText>The VM keeps its original networks and MAC addresses.</MudText>
                 }
                 <MudCheckBox @bind-Value="_powerOn" Label="Power on the VM after the restore" Class="mt-2" />
+                @if (_point.DomainController && _mode == RestoreModeDto.AlternateLocation && _powerOn)
+                {
+                    <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">
+                        A copy of a domain controller has the same computer name, addresses and computer account as the original. If the original still runs, connect the copy only to an isolated network.
+                    </MudAlert>
+                }
                 break;
 
             default:

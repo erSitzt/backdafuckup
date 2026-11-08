@@ -62,6 +62,12 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
     /// <summary>The simulated databases' recovery model, whether they had a log chain, and the age of their last log backup.</summary>
     public (string Model, bool HadChain, int? LogAgeMinutes) SqlLogFacts { get; set; } = ("SIMPLE", false, null);
 
+    /// <summary>The guest is a domain controller of bdfu-lab.local: domain role 5, the NTDS writer and the directory facts.</summary>
+    public bool DomainController { get; set; }
+
+    /// <summary>The CopyOnly the server sent with the last VSS prepare.</summary>
+    public bool? LastPrepareCopyOnly { get; private set; }
+
     /// <summary>The databases the SQL snapshot fails to suspend (reported as failed).</summary>
     public HashSet<string> SqlDatabasesFailingSuspend { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -75,8 +81,10 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
                 EnrollmentSecret = await settings.GetEnrollmentSecretAsync(cancellationToken),
                 Host = new AgentHostInfo
                 {
-                    HostName = "SQL01",
+                    HostName = DomainController ? "DC01" : "SQL01",
                     BiosSerial = _vmUuid,
+                    DomainRole = DomainController ? 5 : 3,
+                    Domain = DomainController ? "bdfu-lab.local" : "expert.test",
                     Build = AgentProtocol.BuildNet10,
                     AgentVersion = "test",
                     OsName = "Windows Server 2022 Standard",
@@ -143,6 +151,30 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
                     result.Prepare.SqlDatabases = SqlDatabases;
                 }
 
+                LastPrepareCopyOnly = command.CopyOnly;
+                if (DomainController)
+                {
+                    result.Prepare.Writers.Add(new GuestWriter { Name = "NTDS", WriterId = "b2014c9e-8711-4c5c-a5a9-3cf384484757", State = "Stable", Components = ["ntds"] });
+                    result.Prepare.ActiveDirectory = new GuestAdDatabase
+                    {
+                        DitPath = @"C:\Windows\NTDS\ntds.dit",
+                        LogPath = @"C:\Windows\NTDS",
+                        SysvolPath = @"C:\Windows\SYSVOL\sysvol",
+                        DomainDns = "bdfu-lab.local",
+                        DomainNetbios = "BDFU-LAB",
+                        Forest = "bdfu-lab.local",
+                        DomainDn = "DC=bdfu-lab,DC=local",
+                        DsaDn = "CN=NTDS Settings,CN=DC01,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=bdfu-lab,DC=local",
+                        InvocationId = "6f1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+                        HighestCommittedUsn = 20480,
+                        DomainFunctionalLevel = 10,
+                        ForestFunctionalLevel = 10,
+                        RecycleBin = true,
+                        TombstoneLifetimeDays = 180,
+                        DeletedObjectLifetimeDays = 180,
+                    };
+                }
+
                 if (IncludeUnselectedDatabase)
                 {
                     result.Prepare.SqlDatabases.Add(new GuestSqlDatabase
@@ -168,6 +200,11 @@ internal sealed class FakeGuestAgent : IAsyncDisposable
                     Writers = [new GuestWriter { Name = "SqlServerWriter", WriterId = "a65faa63-5ea8-4ebc-9dbd-a0c4db26912a", State = ThawVssResult == 0 ? "Stable" : "FailedAtFreeze" }],
                     BackupComponentsXml = ThawVssResult == 0 ? "<BACKUP_COMPONENTS/>" : null,
                 };
+                if (DomainController)
+                {
+                    result.Thaw.Writers.Add(new GuestWriter { Name = "NTDS", WriterId = "b2014c9e-8711-4c5c-a5a9-3cf384484757", State = ThawVssResult == 0 ? "Stable" : "FailedAtFreeze" });
+                }
+
                 break;
             case AgentCommandKinds.Abort:
                 Frozen = false;

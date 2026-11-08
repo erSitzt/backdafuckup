@@ -88,6 +88,12 @@ public sealed class RestoreSessionRunner(
                 return (SessionState.Failed, validation.Errors[0]);
             }
 
+            var warnings = validation.Warnings.Count > 0;
+            if (manifest.DomainController == true)
+            {
+                warnings |= DomainControllerNotes(manifest, plan, log);
+            }
+
             var total = Math.Max(1, manifest.Disks.Sum(d => d.CapacityBytes));
             long done = 0;
             long transferred = 0;
@@ -141,14 +147,19 @@ public sealed class RestoreSessionRunner(
                 log.Info($"Disk {disk.Name}: created empty ({BackupFormat(disk.CapacityBytes)}); it was left out of the backup.", $"disk-{disk.Key}");
             }
 
-            await restore.CreateVmAsync(mapping, cancellationToken).ConfigureAwait(false);
+            var created = await restore.CreateVmAsync(mapping, cancellationToken).ConfigureAwait(false);
+            if (manifest.DomainController == true)
+            {
+                warnings |= CheckGenerationId(manifest, created, log);
+            }
+
             var restored = await restore.CompleteAsync(cancellationToken).ConfigureAwait(false);
             var final = Metrics(done, transferred) with { CurrentBytesPerSecond = 0 };
             log.Info(
                 $"Restore finished: VM '{restored.Name}' ({restored.VmId}), {VmBackupTask.Format(done)} restored in {MetricsText.Duration(final.Seconds)} " +
                 $"({MetricsText.Rate(final.ProcessingRate)}), {VmBackupTask.Format(transferred)} transferred ({MetricsText.Rate(transferred / Math.Max(0.001, final.Seconds))}).");
             await FinishAsync(task.Id, SessionState.Succeeded, null, done, final).ConfigureAwait(false);
-            return (validation.Warnings.Count > 0 ? SessionState.Warning : SessionState.Succeeded, $"Restored as '{restored.Name}'.");
+            return (warnings ? SessionState.Warning : SessionState.Succeeded, $"Restored as '{restored.Name}'.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -197,6 +208,48 @@ public sealed class RestoreSessionRunner(
         }, CancellationToken.None);
 
     private static string BackupFormat(long bytes) => VmBackupTask.Format(bytes);
+
+    /// <summary>
+    /// A domain controller's VM comes back with a new VM generation id, so Windows restores AD non-authoritatively at its
+    /// first start. A copy beside the original (another location) would meet it on the network with the same name and
+    /// addresses: a warning if it is powered on.
+    /// </summary>
+    private static bool DomainControllerNotes(RestorePointManifest manifest, VmRestorePlan plan, IOperationLog log)
+    {
+        var domain = string.IsNullOrEmpty(manifest.AdDomain) ? "its domain" : $"domain {manifest.AdDomain}";
+        log.Info($"{manifest.Vm.Name} was a domain controller of {domain}. At its first start Windows restores Active Directory non-authoritatively: " +
+            "it takes a new invocation id, drops its RID pool and replicates the newer changes from the other domain controllers. Single objects come back without a VM restore under Restore → Active Directory objects.");
+        if (plan.Mode != RestoreMode.OriginalLocation && plan.PowerOn)
+        {
+            log.Warning($"'{plan.VmName}' is a copy of the domain controller {manifest.Vm.Name} and is powered on: if the original still runs, both have the same computer name, " +
+                "addresses and computer account in the network. Connect the copy only to an isolated network.");
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Without a new VM generation id Windows cannot tell that the DC was restored (risk of a USN rollback).</summary>
+    private static bool CheckGenerationId(RestorePointManifest manifest, RestoredVm created, IOperationLog log)
+    {
+        var before = manifest.Vm.GenerationId;
+        if (string.IsNullOrEmpty(created.GenerationId) || created.GenerationId == "0:0")
+        {
+            log.Warning($"The restored VM {created.Name} ({created.VmId}) has no VM generation id, so Windows cannot tell that this domain controller was restored " +
+                "(risk of a USN rollback). Start it without network and follow \"Restoring a domain controller\" in the admin guide before connecting it.");
+            return true;
+        }
+
+        if (before is not null && string.Equals(before, created.GenerationId, StringComparison.Ordinal))
+        {
+            log.Warning($"The restored VM {created.Name} ({created.VmId}) kept the VM generation id of the backup ({before}), so Windows cannot tell that this domain controller was restored " +
+                "(risk of a USN rollback). Start it without network and follow \"Restoring a domain controller\" in the admin guide before connecting it.");
+            return true;
+        }
+
+        log.Info($"The restored VM {created.Name} has a new VM generation id ({created.GenerationId}{(before is null ? string.Empty : $", backup: {before}")}).");
+        return false;
+    }
 
     /// <summary>
     /// Target storage per disk: the chosen one, else the original storage. Disks that were left out of the backup are

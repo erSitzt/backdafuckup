@@ -130,6 +130,7 @@ internal static class XenInventory
             HasVtpm = vm.Set("VTPMs").Count > 0,
             OsName = vm.Map("other_config").GetValueOrDefault("os_name"),
             Nics = nics.OrderBy(n => n.Device, StringComparer.Ordinal).ToList(),
+            GenerationId = vm.Str("generation_id") is { Length: > 0 } generation ? generation : null,
         };
     }
 }

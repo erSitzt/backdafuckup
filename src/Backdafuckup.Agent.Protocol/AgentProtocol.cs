@@ -106,6 +106,12 @@ public static class AgentProtocol
     public const string CapabilitySqlRestoreChain = "sql-restore-chain-v1";
 
     /// <summary>
+    /// The agent reports a domain controller's Active Directory facts with the VSS prepare
+    /// (<see cref="GuestBackupInfo.ActiveDirectory"/>) and its domain role with every poll.
+    /// </summary>
+    public const string CapabilityAdBackup = "ad-backup-v1";
+
+    /// <summary>
     /// Publishing: <c>GET {id}</c> (what to publish), <c>GET {id}/disks/{n}/blocks/{b}</c> (disk content, one block of
     /// <see cref="PublishInfo.BlockSize"/> bytes), <c>POST {id}/status</c> (heartbeat; the answer says whether to stop).
     /// </summary>
@@ -186,6 +192,15 @@ public sealed class AgentHostInfo
 
     /// <summary>What this agent can do beyond VSS, e.g. <see cref="AgentProtocol.CapabilityRestoreFiles"/>.</summary>
     public List<string> Capabilities { get; set; } = new List<string>();
+
+    /// <summary>
+    /// <c>Win32_ComputerSystem.DomainRole</c>: 0/1 standalone/member workstation, 2/3 standalone/member server, 4 backup and
+    /// 5 primary domain controller. Null from agents before <see cref="AgentProtocol.CapabilityAdBackup"/>.
+    /// </summary>
+    public int? DomainRole { get; set; }
+
+    /// <summary>The DNS name of the computer's domain (<c>Win32_ComputerSystem.Domain</c>), or its workgroup.</summary>
+    public string? Domain { get; set; }
 }
 
 public sealed class AgentPollRequest
@@ -329,6 +344,57 @@ public sealed class GuestBackupInfo
     /// for a later restore through the writer. Null if the guest has no SQL Server writer or the agent is older.
     /// </summary>
     public string? SqlWriterMetadataXml { get; set; }
+
+    /// <summary>On a domain controller: its directory database and the facts a restore needs. Null on other machines.</summary>
+    public GuestAdDatabase? ActiveDirectory { get; set; }
+}
+
+/// <summary>
+/// A domain controller's Active Directory database at backup time: where its files are (from the NTDS writer and the
+/// registry) and what the directory said over LDAP (rootDSE, the optional features, the lifetimes).
+/// </summary>
+public sealed class GuestAdDatabase
+{
+    /// <summary>The database file, e.g. <c>C:\Windows\NTDS\ntds.dit</c>.</summary>
+    public string? DitPath { get; set; }
+
+    /// <summary>The folder of the transaction logs (<c>edb*.log</c>, <c>edb.chk</c>).</summary>
+    public string? LogPath { get; set; }
+
+    /// <summary>The SYSVOL folder (<c>Netlogon\Parameters\SysVol</c>), e.g. <c>C:\Windows\SYSVOL\sysvol</c>.</summary>
+    public string? SysvolPath { get; set; }
+
+    public string? DomainDns { get; set; }
+
+    public string? DomainNetbios { get; set; }
+
+    public string? Forest { get; set; }
+
+    /// <summary>The domain's distinguished name (<c>defaultNamingContext</c>).</summary>
+    public string? DomainDn { get; set; }
+
+    /// <summary>The DC's NTDS settings object (<c>dsServiceName</c>).</summary>
+    public string? DsaDn { get; set; }
+
+    /// <summary>The DC's invocation id at backup time (a restored DC gets a new one).</summary>
+    public string? InvocationId { get; set; }
+
+    public long? HighestCommittedUsn { get; set; }
+
+    public int? DomainFunctionalLevel { get; set; }
+
+    public int? ForestFunctionalLevel { get; set; }
+
+    /// <summary>Whether the AD Recycle Bin is enabled in the forest.</summary>
+    public bool? RecycleBin { get; set; }
+
+    public int? TombstoneLifetimeDays { get; set; }
+
+    /// <summary><c>msDS-DeletedObjectLifetime</c>; with the Recycle Bin the time a deleted object keeps its attributes.</summary>
+    public int? DeletedObjectLifetimeDays { get; set; }
+
+    /// <summary>Why some facts are missing (e.g. LDAP to the DC failed); the backup goes on without them.</summary>
+    public string? Error { get; set; }
 }
 
 public sealed class GuestVolume

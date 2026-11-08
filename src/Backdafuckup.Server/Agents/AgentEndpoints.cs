@@ -612,5 +612,7 @@ public static class AgentEndpoints
         CanRunSql = canRunSql,
         CanPublishSql = canPublishSql,
         CanRestoreSql = canRestoreSql,
+        DomainController = a.DomainRole is 4 or 5,
+        Domain = a.Domain,
     };
 }

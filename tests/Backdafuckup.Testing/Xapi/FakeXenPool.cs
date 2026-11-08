@@ -147,6 +147,7 @@ public sealed class FakeXenPool : IAsyncDisposable
                 ["HVM_boot_params"] = new JsonObject { ["firmware"] = "uefi" },
                 ["platform"] = new JsonObject { ["secureboot"] = "false" },
                 ["VTPMs"] = new JsonArray(),
+                ["generation_id"] = FreshGenerationId(),
             });
             var disks = new List<string>();
             for (var i = 0; i < diskSizes.Length; i++)
@@ -703,6 +704,12 @@ public sealed class FakeXenPool : IAsyncDisposable
         return Encoding.UTF8.GetBytes(export.ToJsonString());
     }
 
+    /// <summary>Simulates a pool whose metadata import keeps the VM generation id (the restore must warn).</summary>
+    public bool ImportKeepsGenerationId { get; set; }
+
+    private static string FreshGenerationId() =>
+        $"{BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)) >> 1}:{BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)) >> 1}";
+
     private string ImportMetadata(byte[] body, bool restore, IReadOnlyDictionary<string, string> vdiMap)
     {
         var export = JsonNode.Parse(body)!.AsObject();
@@ -715,6 +722,13 @@ public sealed class FakeXenPool : IAsyncDisposable
 
         vm["uuid"] = restore ? uuid : Guid.NewGuid().ToString();
         vm["power_state"] = "Halted";
+
+        // Like XAPI: a metadata import (not a live migration) gets a fresh VM generation id, unless it is disabled ("0:0").
+        if (!ImportKeepsGenerationId && vm["generation_id"]?.GetValue<string>() is { Length: > 0 } generation && generation != "0:0")
+        {
+            vm["generation_id"] = FreshGenerationId();
+        }
+
         vm["VBDs"] = new JsonArray();
         vm["VIFs"] = new JsonArray();
         vm["other_config"] = new JsonObject();

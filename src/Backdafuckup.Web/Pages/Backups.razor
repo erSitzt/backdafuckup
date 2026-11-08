@@ -57,6 +57,12 @@ else
                                                 <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Info" Icon="@Icons.Material.Filled.TableChart">SQL @p.SqlDatabaseCount</MudChip>
                                             </MudTooltip>
                                         }
+                                        @if (p.DomainController)
+                                        {
+                                            <MudTooltip Text="@(string.IsNullOrEmpty(p.AdDomain) ? "Domain controller: its Active Directory database is in this restore point" : $"Domain controller of {p.AdDomain}: its Active Directory database is in this restore point")">
+                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Info" Icon="@Icons.Material.Filled.Domain">AD</MudChip>
+                                            </MudTooltip>
+                                        }
                                     </td>
                                     <td class="c-760 num">@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))</td>
                                     <td class="c-560 num">@Fmt.Bytes(p.NewStoredBytes)</td>

@@ -48,7 +48,40 @@ internal sealed class WindowsHostInfo : IHostInfoSource
             AgentVersion = Version,
             FilesHash = AgentFiles.Hash(AgentFiles.List(_paths.BaseDirectory)),
             VssProvider = _vssProviderState(),
+            DomainRole = WmiInt("SELECT DomainRole FROM Win32_ComputerSystem", "DomainRole"),
+            Domain = Wmi("SELECT Domain FROM Win32_ComputerSystem", "Domain"),
+            Capabilities = new List<string> { AgentProtocol.CapabilityAdBackup },
         };
+    }
+
+    /// <summary>A numeric WMI property (e.g. <c>DomainRole</c>, a uint16), or null.</summary>
+    private static int? WmiInt(string query, string property)
+    {
+        try
+        {
+            using (var searcher = new ManagementObjectSearcher(query))
+            using (var results = searcher.Get())
+            {
+                foreach (ManagementBaseObject item in results)
+                {
+                    using (item)
+                    {
+                        if (item[property] is { } value)
+                        {
+                            return Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                    }
+                }
+            }
+        }
+        catch (ManagementException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+
+        return null;
     }
 
     /// <summary>Fixed volumes with their mount points (Win32_Volume).</summary>

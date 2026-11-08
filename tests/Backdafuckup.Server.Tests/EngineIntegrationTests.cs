@@ -209,11 +209,14 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         Assert.True(frozenAtSnapshot);
         Assert.False(agent.Frozen);
         Assert.Equal([AgentCommandKinds.PrepareBackup, AgentCommandKinds.Freeze, AgentCommandKinds.Thaw], agent.Commands);
+        Assert.True(agent.LastPrepareCopyOnly);
         var point = await LatestRestorePointAsync();
         Assert.Equal("application", point.Consistency);
         Assert.Null(point.ConsistencyReason);
         Assert.True(File.Exists(Path.Combine(point.ManifestPath!, "guest-metadata.zst")));
         Assert.Equal(2, point.SqlDatabaseCount);
+        Assert.False(point.DomainController);
+        Assert.Null(point.AdDomain);
 
         // Guest metadata v2: file kinds, writer components kept after the thaw, consistency per database.
         var repository = await Services.GetRequiredService<RepositoryManager>().GetAsync(point.RepositoryId, Ct);
@@ -251,6 +254,112 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         await db.RestorePoints.Where(r => r.Id == point.Id).ExecuteUpdateAsync(s => s.SetProperty(r => r.SqlDatabaseCount, (int?)null), Ct);
         Assert.Equal(1, await Services.GetRequiredService<SqlCatalogBackfill>().RunAsync(Ct));
         Assert.Equal(2, (await LatestRestorePointAsync()).SqlDatabaseCount);
+    }
+
+    [Fact]
+    public async Task A_domain_controller_gets_a_vss_full_backup_and_its_directory_facts_in_the_restore_point()
+    {
+        var (vmUuid, _) = _pool.AddVm("dc01", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 3);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { DomainController = true, SqlDatabases = [] };
+        await agent.StartAsync(Ct);
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Succeeded, session.State);
+        Assert.False(agent.LastPrepareCopyOnly);
+        var point = await LatestRestorePointAsync();
+        Assert.Equal("application", point.Consistency);
+        Assert.True(point.DomainController);
+        Assert.Equal("bdfu-lab.local", point.AdDomain);
+        Assert.Equal(0, point.SqlDatabaseCount);
+
+        var repository = await Services.GetRequiredService<RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+        await using (var reader = await repository.OpenRestorePointAsync(point.Id, Ct))
+        {
+            Assert.True(reader.Manifest.DomainController);
+            Assert.Equal("bdfu-lab.local", reader.Manifest.AdDomain);
+            var ad = (await StoredGuestMetadata.ReadAsync(reader, Ct))!.ActiveDirectory!;
+            Assert.Equal("application", ad.Consistency);
+            Assert.Null(ad.ConsistencyReason);
+            Assert.Equal(@"C:\Windows\NTDS\ntds.dit", ad.DitPath);
+            Assert.Equal("BDFU-LAB", ad.DomainNetbios);
+            Assert.Equal(20480, ad.HighestCommittedUsn);
+            Assert.True(ad.RecycleBin);
+            Assert.Equal(180, ad.TombstoneLifetimeDays);
+        }
+
+        await using var db = await DbAsync();
+        var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("DC01 is a domain controller of domain bdfu-lab.local; VSS full backup", StringComparison.Ordinal));
+
+        // Restore points from before the role was recorded get it from their guest metadata.
+        await db.RestorePoints.Where(r => r.Id == point.Id).ExecuteUpdateAsync(s => s.SetProperty(r => r.DomainController, (bool?)null).SetProperty(r => r.AdDomain, (string?)null), Ct);
+        Assert.Equal(1, await Services.GetRequiredService<SqlCatalogBackfill>().RunAsync(Ct));
+        point = await LatestRestorePointAsync();
+        Assert.True(point.DomainController);
+        Assert.Equal("bdfu-lab.local", point.AdDomain);
+        Assert.Equal(0, point.SqlDatabaseCount);
+
+        // A VM restore gets a new VM generation id: Windows restores AD non-authoritatively.
+        var queue = Services.GetRequiredService<SessionQueue>();
+        var backedUp = _pool.Records("VM").Single(v => v.Str("name_label") == "dc01").Str("generation_id");
+        var restore = await RunAsync(queue.EnqueueRestoreAsync(
+            new RestoreRequestDto { RestorePointId = point.Id, Mode = RestoreModeDto.AlternateLocation, VmName = "dc01-copy", DiskStorage = new Dictionary<string, string>() },
+            "dc01", "test", Ct));
+        Assert.Equal(SessionState.Succeeded, restore.State);
+        var copy = _pool.Records("VM").Single(v => v.Str("name_label") == "dc01-copy");
+        Assert.NotEqual(backedUp, copy.Str("generation_id"));
+        log = await db.SessionLog.Where(l => l.SessionId == restore.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("dc01 was a domain controller of domain bdfu-lab.local", StringComparison.Ordinal) && m.Contains("non-authoritatively", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains($"has a new VM generation id ({copy.Str("generation_id")}, backup: {backedUp})", StringComparison.Ordinal));
+
+        // A pool that keeps the id, and a copy powered on beside the original: warnings.
+        _pool.ImportKeepsGenerationId = true;
+        restore = await RunAsync(queue.EnqueueRestoreAsync(
+            new RestoreRequestDto { RestorePointId = point.Id, Mode = RestoreModeDto.AlternateLocation, VmName = "dc01-copy2", PowerOn = true, DiskStorage = new Dictionary<string, string>() },
+            "dc01", "test", Ct));
+        Assert.Equal(SessionState.Warning, restore.State);
+        log = await db.SessionLog.Where(l => l.SessionId == restore.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains($"kept the VM generation id of the backup ({backedUp})", StringComparison.Ordinal) && m.Contains("USN rollback", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains("'dc01-copy2' is a copy of the domain controller dc01 and is powered on", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_domain_controller_with_sql_log_backups_stays_copy_only_with_a_warning()
+    {
+        var (vmUuid, _) = _pool.AddVm("dc02", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 3);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await using (var db = await DbAsync())
+        {
+            var job = await db.Jobs.SingleAsync(j => j.Id == jobId, Ct);
+            job.SqlBackup.Enabled = true;
+            await db.SaveChangesAsync(Ct);
+        }
+
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { DomainController = true };
+        await agent.StartAsync(Ct);
+        var queue = Services.GetRequiredService<SessionQueue>();
+
+        // No restore point tells yet whether SQL Server runs here: VSS full.
+        var first = await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+        Assert.Equal(SessionState.Succeeded, first.State);
+        Assert.False(agent.LastPrepareCopyOnly);
+        Assert.Equal(1, (await LatestRestorePointAsync()).SqlDatabaseCount);
+
+        // Now its SQL databases are known, and the job takes their log backups: copy-only, so SQL Server records no full.
+        var second = await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+        Assert.Equal(SessionState.Warning, second.State);
+        Assert.True(agent.LastPrepareCopyOnly);
+        Assert.True((await LatestRestorePointAsync()).DomainController);
+        await using (var db = await DbAsync())
+        {
+            var log = await db.SessionLog.Where(l => l.SessionId == second.Id).Select(l => l.Message).ToListAsync(Ct);
+            Assert.Contains(log, m => m.Contains("DC01 is a domain controller of domain bdfu-lab.local and also runs SQL Server databases", StringComparison.Ordinal)
+                && m.Contains("stays copy-only", StringComparison.Ordinal));
+        }
     }
 
     [Fact]
@@ -791,6 +900,7 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
             ["Agent:ServiceStableTime"] = "00:00:00.200",
             ["Agent:ServicePollInterval"] = "00:00:00.050",
             ["Agent:InstallWaitTimeout"] = "00:00:15",
+            ["SqlBackup:TickInterval"] = "01:00:00",
         });
         foreach (var build in new[] { "net10", "net48" })
         {

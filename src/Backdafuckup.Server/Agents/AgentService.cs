@@ -156,6 +156,8 @@ public sealed class AgentService(
         agent.AgentVersion = host.AgentVersion ?? string.Empty;
         agent.FilesHash = host.FilesHash ?? string.Empty;
         agent.VssProvider = host.VssProvider;
+        agent.DomainRole = host.DomainRole ?? agent.DomainRole;
+        agent.Domain = host.Domain ?? agent.Domain;
         agent.IpAddresses = host.IpAddresses is { Count: > 0 } ips ? string.Join(", ", ips) : null;
         agent.RemoteAddress = remoteAddress;
 

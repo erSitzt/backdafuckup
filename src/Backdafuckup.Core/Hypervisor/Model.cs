@@ -99,6 +99,12 @@ public sealed record VmDescriptor
     public string? OsName { get; init; }
 
     public IReadOnlyList<VmNic> Nics { get; init; } = [];
+
+    /// <summary>
+    /// The VM generation id at backup time (Xen: <c>generation_id</c>). Windows compares it at start: a changed id tells a
+    /// domain controller that it was restored (non-authoritative restore instead of a USN rollback).
+    /// </summary>
+    public string? GenerationId { get; init; }
 }
 
 public sealed record VmNic(string Device, string Mac, string NetworkId, string NetworkName, int Mtu);
@@ -171,4 +177,5 @@ public sealed record RestoreValidation(IReadOnlyList<string> Errors, IReadOnlyLi
 
 public sealed record RestoreDiskTarget(string DiskKey, string SourceDiskId, string Name, long CapacityBytes, string StorageId);
 
-public sealed record RestoredVm(string VmId, string Name);
+/// <param name="GenerationId">The VM generation id the hypervisor gave the VM (Xen: <c>generation_id</c>), if known.</param>
+public sealed record RestoredVm(string VmId, string Name, string? GenerationId = null);

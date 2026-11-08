@@ -46,6 +46,12 @@ public sealed record RestorePointManifest
     /// <summary>Number of SQL Server databases in <see cref="Guest"/>; null in manifests written before it was recorded.</summary>
     public int? SqlDatabaseCount { get; init; }
 
+    /// <summary>Whether the VM was a domain controller (its directory facts are in <see cref="Guest"/>); null in older manifests.</summary>
+    public bool? DomainController { get; init; }
+
+    /// <summary>The DNS name of the domain controller's domain ("" if the agent could not read it).</summary>
+    public string? AdDomain { get; init; }
+
     /// <summary>The VSS documents of the guest (SQL Server writer metadata, Backup Components Document), if any.</summary>
     public ManifestBlob? VssDocuments { get; init; }
 

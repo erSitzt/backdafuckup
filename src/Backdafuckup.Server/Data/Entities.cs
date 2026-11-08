@@ -200,6 +200,12 @@ public sealed class AgentEntity
 
     public string? VssProvider { get; set; }
 
+    /// <summary><c>Win32_ComputerSystem.DomainRole</c> (4 and 5: domain controller); null from older agents.</summary>
+    public int? DomainRole { get; set; }
+
+    /// <summary>The computer's DNS domain (or workgroup).</summary>
+    public string? Domain { get; set; }
+
     /// <summary>The guest's own addresses, comma separated.</summary>
     public string? IpAddresses { get; set; }
 
@@ -459,6 +465,12 @@ public sealed class RestorePointEntity
 
     /// <summary>SQL Server databases in the guest metadata; null until known (restore points from before it was recorded).</summary>
     public int? SqlDatabaseCount { get; set; }
+
+    /// <summary>The VM was a domain controller; null until known (older restore points are checked at start).</summary>
+    public bool? DomainController { get; set; }
+
+    /// <summary>The domain controller's DNS domain ("" if unknown).</summary>
+    public string? AdDomain { get; set; }
 
     /// <summary>Whether the snapshot fulls of its SQL Server snapshot are in the SQL catalog; null until checked (older restore points).</summary>
     public bool? SqlBackupSetsRecorded { get; set; }

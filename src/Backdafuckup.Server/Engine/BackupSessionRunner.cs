@@ -250,10 +250,23 @@ internal sealed class VmBackupTask(
             ManifestBlob? vssBlob = null;
             ManifestBlob? sqlSnapshotBlob = null;
             int? sqlDatabases = null;
+            StoredAdDatabase? directory = null;
             if (guest?.Quiescer is { Prepared: { } prepared } quiescer)
             {
                 var stored = StoredGuestMetadata.Build(prepared, quiescer.Thawed, consistency, consistencyReason, quiescer.SqlSnapshot);
                 sqlDatabases = stored.SqlDatabases.Count;
+                directory = stored.ActiveDirectory;
+                if (directory is { Consistency: not "application" } && consistency == "application")
+                {
+                    _log.Warning($"The Active Directory database of domain {directory.DomainDns ?? "(unknown)"} is only crash-consistent: {directory.ConsistencyReason}.");
+                    warnings = true;
+                }
+
+                if (directory?.Error is { } adError)
+                {
+                    _log.Warning($"Domain controller: some Active Directory facts could not be read in the VM ({adError}); object restores do not need them.");
+                }
+
                 guestBlob = await writer.WriteBlobAsync("guest-metadata", StoredGuestMetadata.FormatV2, new MemoryStream(stored.Serialize()), cancellationToken).ConfigureAwait(false);
                 if (quiescer.SqlSnapshot is { Count: > 0 } snapshot)
                 {
@@ -290,6 +303,8 @@ internal sealed class VmBackupTask(
                 ConsistencyReason = consistencyReason,
                 Guest = guestBlob,
                 SqlDatabaseCount = guest?.Quiescer is { Prepared: not null } ? sqlDatabases : 0,
+                DomainController = guest?.Quiescer is { Prepared: not null } ? directory is not null : null,
+                AdDomain = directory is null ? null : directory.DomainDns ?? string.Empty,
                 VssDocuments = vssBlob,
                 SqlSnapshot = sqlSnapshotBlob,
                 Chunking = new ManifestChunking(repository.Info.ChunkSize, repository.Info.Hash, repository.Info.Compression),
@@ -620,6 +635,8 @@ internal sealed class VmBackupTask(
         entity.Consistency = manifest.Consistency;
         entity.ConsistencyReason = manifest.ConsistencyReason;
         entity.SqlDatabaseCount = manifest.SqlDatabaseCount ?? (manifest.Guest is null ? 0 : null);
+        entity.DomainController = manifest.DomainController ?? (manifest.Guest is null ? false : null);
+        entity.AdDomain = manifest.AdDomain;
         entity.SqlBackupSetsRecorded = manifest.SqlSnapshot is null ? true : null;
         entity.LogicalBytes = manifest.Disks.Sum(d => d.CapacityBytes);
         entity.NewStoredBytes = manifest.Disks.Sum(d => d.Stats.NewStoredBytes);

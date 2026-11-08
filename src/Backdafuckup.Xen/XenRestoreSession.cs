@@ -209,7 +209,7 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         var vm = await xapi.GetRecordAsync("VM", _vmRef, cancellationToken).ConfigureAwait(false);
         _vmArtifact = await ledger.RecordAsync(XenArtifactKinds.RestoredVm, vm.Str("uuid"), _vmRef, null, cancellationToken).ConfigureAwait(false);
         log.Info($"Created VM {vm.Str("name_label")} from the backed-up configuration.");
-        return new RestoredVm(vm.Str("uuid"), vm.Str("name_label"));
+        return new RestoredVm(vm.Str("uuid"), vm.Str("name_label"), vm.Str("generation_id"));
     }
 
     public async Task<RestoredVm> CompleteAsync(CancellationToken cancellationToken)

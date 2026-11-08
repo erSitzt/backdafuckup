@@ -48,6 +48,14 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("dns_name");
 
+                    b.Property<string>("Domain")
+                        .HasColumnType("text")
+                        .HasColumnName("domain");
+
+                    b.Property<int?>("DomainRole")
+                        .HasColumnType("integer")
+                        .HasColumnName("domain_role");
+
                     b.Property<DateTimeOffset>("EnrolledUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("enrolled_utc");
@@ -885,6 +893,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<string>("AdDomain")
+                        .HasColumnType("text")
+                        .HasColumnName("ad_domain");
+
                     b.Property<Guid?>("ConnectionId")
                         .HasColumnType("uuid")
                         .HasColumnName("connection_id");
@@ -901,6 +913,10 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<DateTimeOffset>("CreatedUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_utc");
+
+                    b.Property<bool?>("DomainController")
+                        .HasColumnType("boolean")
+                        .HasColumnName("domain_controller");
 
                     b.Property<Guid?>("JobId")
                         .HasColumnType("uuid")

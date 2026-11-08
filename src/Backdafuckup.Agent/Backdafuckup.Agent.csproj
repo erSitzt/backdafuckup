@@ -40,6 +40,7 @@
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" PrivateAssets="all" />
     <Reference Include="System.ServiceProcess" />
     <Reference Include="System.Management" />
+    <Reference Include="System.DirectoryServices.Protocols" />
     <Reference Include="System.Net.Http" />
     <!-- System.Data.SqlClient ships with the .NET Framework: no extra files for the 4.8 build. -->
     <Reference Include="System.Data" />
@@ -47,6 +48,7 @@
 
   <ItemGroup Condition="'$(TargetFramework)' != 'net48'">
     <PackageReference Include="System.Management" />
+    <PackageReference Include="System.DirectoryServices.Protocols" />
     <PackageReference Include="System.ServiceProcess.ServiceController" />
     <PackageReference Include="Microsoft.Data.SqlClient" />
     <PackageReference Include="System.Security.Cryptography.Pkcs" />

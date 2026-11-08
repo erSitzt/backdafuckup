@@ -24,6 +24,11 @@ public sealed class StoredGuestMetadata
 
     public List<GuestWriter> Writers { get; set; } = [];
 
+    /// <summary>On a domain controller: its directory database and facts at backup time, with their consistency.</summary>
+    public StoredAdDatabase? ActiveDirectory { get; set; }
+
+    public const string NtdsWriterName = "NTDS";
+
     /// <summary>
     /// The metadata stored for a backup: the writers keep the components of the prepare step and take the state of the
     /// thaw step; each SQL database gets its own consistency.
@@ -52,10 +57,14 @@ public sealed class StoredGuestMetadata
         }
 
         var sqlWriter = thawed?.Writers.FirstOrDefault(w => string.Equals(w.Name, SqlWriterName, StringComparison.OrdinalIgnoreCase));
+        var ntdsWriter = thawed?.Writers.FirstOrDefault(w => string.Equals(w.Name, NtdsWriterName, StringComparison.OrdinalIgnoreCase));
         return new StoredGuestMetadata
         {
             Volumes = prepared.Volumes,
             Writers = writers,
+            ActiveDirectory = prepared.ActiveDirectory is { } ad
+                ? StoredAdDatabase.From(ad, AdConsistency(ntdsWriter, thawed is not null, sqlSnapshot is not null, pointConsistency, pointReason))
+                : null,
             SqlDatabases = prepared.SqlDatabases.Select(d =>
             {
                 var (consistency, reason) = sqlSnapshot is not null
@@ -90,6 +99,35 @@ public sealed class StoredGuestMetadata
     }
 
     public byte[] Serialize() => JsonSerializer.SerializeToUtf8Bytes(this, AgentJson.Options);
+
+    /// <summary>
+    /// The directory is application-consistent when the NTDS writer took part in the VSS freeze and ended stable.
+    /// The SQL Server snapshot suspends only SQL Server, so the directory is then crash-consistent (ESE recovers it).
+    /// </summary>
+    private static (string Consistency, string? Reason) AdConsistency(GuestWriter? ntds, bool thawed, bool sqlSnapshot, string pointConsistency, string? pointReason)
+    {
+        if (pointConsistency != "application")
+        {
+            return ("crash", pointReason ?? "the VM snapshot is crash-consistent");
+        }
+
+        if (sqlSnapshot)
+        {
+            return ("crash", "the SQL Server snapshot suspends only SQL Server; the directory was not frozen by its writer");
+        }
+
+        if (thawed && ntds is null)
+        {
+            return ("crash", "the NTDS writer reported no state after the snapshot");
+        }
+
+        if (ntds is not null && (ntds.Failure is not null || !string.Equals(ntds.State, "Stable", StringComparison.OrdinalIgnoreCase)))
+        {
+            return ("crash", $"the NTDS writer ended in state {ntds.State}{(ntds.Failure is null ? string.Empty : $" ({ntds.Failure})")}");
+        }
+
+        return ("application", null);
+    }
 
     private static (string Consistency, string? Reason) SnapshotConsistency(GuestSqlDatabase database, IReadOnlyList<SqlSnapshotInstance> instances)
     {
@@ -137,6 +175,70 @@ public sealed class StoredGuestMetadata
 
         return ("application", null);
     }
+}
+
+/// <summary>A domain controller's directory database as stored in the guest metadata (see <see cref="GuestAdDatabase"/>).</summary>
+public sealed class StoredAdDatabase
+{
+    public string? DitPath { get; set; }
+
+    public string? LogPath { get; set; }
+
+    public string? SysvolPath { get; set; }
+
+    public string? DomainDns { get; set; }
+
+    public string? DomainNetbios { get; set; }
+
+    public string? Forest { get; set; }
+
+    public string? DomainDn { get; set; }
+
+    public string? DsaDn { get; set; }
+
+    public string? InvocationId { get; set; }
+
+    public long? HighestCommittedUsn { get; set; }
+
+    public int? DomainFunctionalLevel { get; set; }
+
+    public int? ForestFunctionalLevel { get; set; }
+
+    public bool? RecycleBin { get; set; }
+
+    public int? TombstoneLifetimeDays { get; set; }
+
+    public int? DeletedObjectLifetimeDays { get; set; }
+
+    /// <summary>What the agent could not read at backup time.</summary>
+    public string? Error { get; set; }
+
+    /// <summary>"application" or "crash".</summary>
+    public string Consistency { get; set; } = "crash";
+
+    public string? ConsistencyReason { get; set; }
+
+    public static StoredAdDatabase From(GuestAdDatabase ad, (string Consistency, string? Reason) consistency) => new()
+    {
+        DitPath = ad.DitPath,
+        LogPath = ad.LogPath,
+        SysvolPath = ad.SysvolPath,
+        DomainDns = ad.DomainDns,
+        DomainNetbios = ad.DomainNetbios,
+        Forest = ad.Forest,
+        DomainDn = ad.DomainDn,
+        DsaDn = ad.DsaDn,
+        InvocationId = ad.InvocationId,
+        HighestCommittedUsn = ad.HighestCommittedUsn,
+        DomainFunctionalLevel = ad.DomainFunctionalLevel,
+        ForestFunctionalLevel = ad.ForestFunctionalLevel,
+        RecycleBin = ad.RecycleBin,
+        TombstoneLifetimeDays = ad.TombstoneLifetimeDays,
+        DeletedObjectLifetimeDays = ad.DeletedObjectLifetimeDays,
+        Error = ad.Error,
+        Consistency = consistency.Consistency,
+        ConsistencyReason = consistency.Reason,
+    };
 }
 
 /// <summary>A SQL Server database as stored in the guest metadata.</summary>

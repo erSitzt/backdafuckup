@@ -57,7 +57,7 @@ public sealed class GuestProcessingService(
 
         if (agent is not null && agents.IsOnline(agent.Id))
         {
-            return Use(agent, sql, warning);
+            return await UseAsync(job, vm, agent, sql, warning, log, cancellationToken).ConfigureAwait(false);
         }
 
         var missing = agent is null
@@ -81,11 +81,53 @@ public sealed class GuestProcessingService(
         agent = await agents.WaitForVmAsync(vm.NativeId, options.Value.InstallWaitTimeout, cancellationToken).ConfigureAwait(false);
         return agent is null
             ? new GuestPreparation(null, $"The agent was installed in VM {vm.CachedName}, but did not report to the server within {options.Value.InstallWaitTimeout.TotalMinutes:0} minutes (check the address under Guest agents → Settings and port 9555 from the guest).")
-            : Use(agent, sql, warning);
+            : await UseAsync(job, vm, agent, sql, warning, log, cancellationToken).ConfigureAwait(false);
     }
 
-    private GuestPreparation Use(AgentEntity agent, SqlSnapshotSettings? sql, bool warning) =>
-        new(new AgentQuiescer(registry, options.Value, agent.Id, $"agent on {agent.HostName} ({agent.RemoteAddress ?? agent.IpAddresses ?? "address unknown"})", sql), null, warning);
+    /// <summary>
+    /// A domain controller gets a VSS full backup, so that AD records it (otherwise event 2089 and an unknown backup age).
+    /// If the job also takes our SQL Server log backups of databases in this VM, it stays copy-only: SQL Server would
+    /// record a VSS full as a full backup of every database.
+    /// </summary>
+    private async Task<GuestPreparation> UseAsync(BackupJob job, BackupJobObject vm, AgentEntity agent, SqlSnapshotSettings? sql, bool warning, IOperationLog log, CancellationToken cancellationToken)
+    {
+        var name = $"agent on {agent.HostName} ({agent.RemoteAddress ?? agent.IpAddresses ?? "address unknown"})";
+        var vssFull = false;
+        if (agent.DomainRole is 4 or 5)
+        {
+            var domain = string.IsNullOrEmpty(agent.Domain) ? "its domain" : $"domain {agent.Domain}";
+            if (job.SqlBackup.Enabled && await HasSqlDatabasesAsync(vm.NativeId, cancellationToken).ConfigureAwait(false))
+            {
+                log.Warning($"Guest processing: {agent.HostName} is a domain controller of {domain} and also runs SQL Server databases with the job's log backups, " +
+                    "so the VSS backup stays copy-only and AD does not record it (event 2089). Back up this VM in a job without SQL log backups to record it.");
+                warning = true;
+            }
+            else
+            {
+                vssFull = true;
+                log.Info($"Guest processing: {agent.HostName} is a domain controller of {domain}; VSS full backup, so that AD records the backup.");
+            }
+        }
+
+        return new(new AgentQuiescer(registry, options.Value, agent.Id, name, sql, vssFull), null, warning);
+    }
+
+    /// <summary>Whether the VM's latest restore point holds SQL Server databases (true if that cannot be checked).</summary>
+    private async Task<bool> HasSqlDatabasesAsync(string vmNativeId, CancellationToken cancellationToken)
+    {
+        if (dbFactory is null)
+        {
+            return true;
+        }
+
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var count = await db.RestorePoints.AsNoTracking()
+            .Where(r => r.VmNativeId == vmNativeId && r.SqlDatabaseCount != null)
+            .OrderByDescending(r => r.CreatedUtc)
+            .Select(r => r.SqlDatabaseCount)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        return count > 0;
+    }
 
     /// <summary>The job's SQL account (decrypted only into this in-memory setting, which reaches the agent in the SQL job).</summary>
     private async Task<SqlSnapshotSettings> SqlSettingsAsync(BackupJob job, string backupName, CancellationToken cancellationToken)

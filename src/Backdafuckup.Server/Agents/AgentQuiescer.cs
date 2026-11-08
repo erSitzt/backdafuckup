@@ -20,7 +20,10 @@ public sealed record SqlSnapshotSettings(Sql.SqlJobs Jobs, SqlAccount Account, s
 /// If no database can be suspended (no SQL Server 2022 or later in the VM, an agent without the capability, no rights),
 /// the VM falls back to the VSS freeze.
 /// </summary>
-public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, Guid agentId, string agentName, SqlSnapshotSettings? sql = null) : IGuestQuiescer
+/// <param name="vssFull">
+/// A VSS full backup (VSS_BT_FULL) instead of copy-only: the writers record it (a domain controller's "last backup" in AD).
+/// </param>
+public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, Guid agentId, string agentName, SqlSnapshotSettings? sql = null, bool vssFull = false) : IGuestQuiescer
 {
     private readonly Guid _operation = Guid.NewGuid();
     private IDisposable? _reservation;
@@ -30,6 +33,9 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
     private TimeSpan SqlHoldLimit => options.SqlSnapshotHoldLimit;
 
     private string AgentName => agentName;
+
+    /// <summary>Whether the VSS backup is a full backup that the writers record (domain controllers).</summary>
+    public bool VssFull => vssFull;
 
     /// <summary>What the guest reported while preparing: volumes, VSS writers, SQL databases (stored with the restore point).</summary>
     public GuestBackupInfo? Prepared { get; private set; }
@@ -269,7 +275,7 @@ public sealed class AgentQuiescer(AgentRegistry registry, AgentOptions options, 
             Kind = kind,
             OperationId = _operation,
             TimeoutMs = (int)options.ProviderHoldLimit.TotalMilliseconds,
-            CopyOnly = true,
+            CopyOnly = !vssFull,
         };
         AgentCommandResult result;
         try

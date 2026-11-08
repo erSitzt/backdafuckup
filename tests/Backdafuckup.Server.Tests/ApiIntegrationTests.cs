@@ -270,7 +270,7 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         // The agent interface needs neither a sign-in nor the CSRF header.
         var agentHttp = _factory!.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
         var secret = await _factory.Services.GetRequiredService<AgentSettingsStore>().GetEnrollmentSecretAsync(Ct);
-        var host = new AgentHostInfo { HostName = "SQL01", BiosSerial = Guid.NewGuid().ToString(), Build = AgentProtocol.BuildNet10 };
+        var host = new AgentHostInfo { HostName = "SQL01", BiosSerial = Guid.NewGuid().ToString(), Build = AgentProtocol.BuildNet10, DomainRole = 3, Domain = "bdfu-lab.local" };
         Assert.Equal(HttpStatusCode.Forbidden, (await agentHttp.PostAsJsonAsync("/api/agent/enroll", new AgentEnrollRequest { EnrollmentSecret = "wrong", Host = host }, Ct)).StatusCode);
         var enrolled = await Read<AgentEnrollResponse>(agentHttp.PostAsJsonAsync("/api/agent/enroll", new AgentEnrollRequest { EnrollmentSecret = secret, Host = host }, Ct));
         Assert.Equal(64, enrolled.AgentKey.Length);
@@ -294,6 +294,13 @@ public sealed class ApiIntegrationTests : IAsyncLifetime
         Assert.Equal("SQL01", agent.HostName);
         Assert.Equal(host.BiosSerial, agent.VmNativeId);
         Assert.True(agent.Online);
+        Assert.False(agent.DomainController);
+        Assert.Equal("bdfu-lab.local", agent.Domain);
+
+        // Promoted to a domain controller: the next poll reports the role.
+        host.DomainRole = 5;
+        Assert.Equal(HttpStatusCode.NoContent, (await agentHttp.PostAsJsonAsync("/api/agent/poll", new AgentPollRequest { Host = host }, Ct)).StatusCode);
+        Assert.True(Assert.Single((await console.GetFromJsonAsync<List<AgentDto>>("/api/agents", Ct))!).DomainController);
         Assert.Equal(HttpStatusCode.NoContent, (await console.DeleteAsync($"/api/agents/{agent.Id}", Ct)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await agentHttp.PostAsJsonAsync("/api/agent/poll", new AgentPollRequest { Host = host }, Ct)).StatusCode);
     }

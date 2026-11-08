@@ -5,8 +5,8 @@ using Microsoft.EntityFrameworkCore;
 namespace Backdafuckup.Server.Sql;
 
 /// <summary>
-/// Fills <see cref="RestorePointEntity.SqlDatabaseCount"/> once for restore points recorded before the count existed, by
-/// reading their guest metadata. Runs in the background after startup; a restore point that cannot be read stays
+/// Fills <see cref="RestorePointEntity.SqlDatabaseCount"/> and <see cref="RestorePointEntity.DomainController"/> once for
+/// restore points recorded before they existed, by reading their guest metadata. Runs in the background after startup; a restore point that cannot be read stays
 /// unknown and is tried again at the next start.
 /// </summary>
 public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory, RepositoryManager repositories, ILogger<SqlCatalogBackfill> logger) : BackgroundService
@@ -33,7 +33,7 @@ public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory
         await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
         {
             points = (await db.RestorePoints
-                .Where(r => r.SqlDatabaseCount == null && r.State == RestorePointState.Available)
+                .Where(r => (r.SqlDatabaseCount == null || r.DomainController == null) && r.State == RestorePointState.Available)
                 .Select(r => new { r.Id, r.RepositoryId })
                 .ToListAsync(cancellationToken).ConfigureAwait(false))
                 .Select(r => (r.Id, r.RepositoryId))
@@ -43,28 +43,33 @@ public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory
         var done = 0;
         foreach (var (id, repositoryId) in points)
         {
-            int count;
+            StoredGuestMetadata? metadata;
             try
             {
                 var repository = await repositories.GetAsync(repositoryId, cancellationToken).ConfigureAwait(false);
                 using var pin = repository.Pin(id);
                 await using var reader = await repository.OpenRestorePointAsync(id, cancellationToken).ConfigureAwait(false);
-                count = (await StoredGuestMetadata.ReadAsync(reader, cancellationToken).ConfigureAwait(false))?.SqlDatabases.Count ?? 0;
+                metadata = await StoredGuestMetadata.ReadAsync(reader, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger.LogInformation("The guest metadata of restore point {RestorePointId} could not be read ({Message}); its SQL databases stay unknown.", id, ex.Message);
+                logger.LogInformation("The guest metadata of restore point {RestorePointId} could not be read ({Message}); its SQL databases and domain controller role stay unknown.", id, ex.Message);
                 continue;
             }
 
+            var count = metadata?.SqlDatabases.Count ?? 0;
+            var (domainController, adDomain) = DomainController(metadata);
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-            await db.RestorePoints.Where(r => r.Id == id).ExecuteUpdateAsync(s => s.SetProperty(r => r.SqlDatabaseCount, count), cancellationToken).ConfigureAwait(false);
+            await db.RestorePoints.Where(r => r.Id == id).ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.SqlDatabaseCount, r => r.SqlDatabaseCount ?? count)
+                .SetProperty(r => r.DomainController, r => r.DomainController ?? domainController)
+                .SetProperty(r => r.AdDomain, r => r.DomainController == null ? adDomain : r.AdDomain), cancellationToken).ConfigureAwait(false);
             done++;
         }
 
         if (done > 0)
         {
-            logger.LogInformation("Recorded the SQL databases of {Count} older restore point(s).", done);
+            logger.LogInformation("Recorded the SQL databases and domain controller role of {Count} older restore point(s).", done);
         }
 
         var recorded = await RecordSnapshotFullsAsync(cancellationToken).ConfigureAwait(false);
@@ -75,6 +80,17 @@ public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory
 
         return done + recorded;
     }
+
+    /// <summary>
+    /// A restore point is of a domain controller when its guest metadata has the directory section, or (from agents before
+    /// it was recorded) the NTDS writer took part; the domain is then unknown ("").
+    /// </summary>
+    internal static (bool DomainController, string? AdDomain) DomainController(StoredGuestMetadata? metadata) => metadata switch
+    {
+        { ActiveDirectory: { } ad } => (true, ad.DomainDns ?? string.Empty),
+        { } m when m.Writers.Any(w => string.Equals(w.Name, StoredGuestMetadata.NtdsWriterName, StringComparison.OrdinalIgnoreCase)) => (true, string.Empty),
+        _ => (false, null),
+    };
 
     /// <summary>
     /// Puts the snapshot fulls of restore points into the SQL catalog that have not been recorded there yet (taken before

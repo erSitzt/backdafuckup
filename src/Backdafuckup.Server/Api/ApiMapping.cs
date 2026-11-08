@@ -86,5 +86,7 @@ internal static class ApiMapping
         r.Vm?.Firmware,
         r.Consistency,
         r.ConsistencyReason,
-        r.SqlDatabaseCount);
+        r.SqlDatabaseCount,
+        r.DomainController == true,
+        r.AdDomain);
 }

@@ -61,6 +61,11 @@ internal sealed class NativeVss : IVssBridge
                 })
                 .ToList(),
             SqlWriterMetadataXml = native.Writers.FirstOrDefault(w => IsSqlWriter(w.Name))?.MetadataXml,
+
+            // A domain controller: its database files from the NTDS writer, its facts from the registry and LDAP.
+            ActiveDirectory = native.Writers.FirstOrDefault(w => string.Equals(w.Name, "NTDS", StringComparison.OrdinalIgnoreCase)) is { } ntds
+                ? WindowsAdFacts.Read(ntds.Components.SelectMany(c => c.DataFiles).ToList(), ntds.Components.SelectMany(c => c.LogFiles).ToList())
+                : null,
         };
     }
 
