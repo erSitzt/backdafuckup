@@ -160,6 +160,7 @@ public sealed class AdQueries
                 ObjectClass = r.ObjectClass,
                 State = AdCompare.State(r, current),
                 SamAccountName = r.Text("sAMAccountName"),
+                DisplayName = r.Text("displayName"),
                 Description = r.Text("description"),
                 Container = r.Values("objectClass").OfType<string>().Any(c => c is "organizationalUnit" or "container" or "builtinDomain" or "domainDNS" or "lostAndFound"),
                 ChangedInBackup = r.Text("whenChanged"),

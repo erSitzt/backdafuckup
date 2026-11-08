@@ -1,0 +1,910 @@
+@page "/ad/{RestorePointId:guid}"
+@implements IDisposable
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject NavigationManager Navigation
+
+<PageTitle>AD objects – backdafuckup</PageTitle>
+
+<PageHeader Title="Active Directory objects" Back="/backups">
+    <TitleContent>
+        @if (_point is not null)
+        {
+            <MudChip T="string" Size="Size.Small" Color="Color.Default">@_point.VmName</MudChip>
+            <MudChip T="string" Size="Size.Small" Color="Color.Default">@Fmt.Time(_point.CreatedUtc)</MudChip>
+            @if (!string.IsNullOrEmpty(_point.AdDomain))
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Info" Icon="@Icons.Material.Filled.Domain">@_point.AdDomain</MudChip>
+            }
+        }
+    </TitleContent>
+    <Actions>
+        @if (_explore is { State: "Ready" } ready && ready.Mount is { } mount)
+        {
+            <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Icon="@Icons.Material.Filled.Dns">@mount.LiveHost</MudChip>
+            <MudTooltip Text="@(mount.RecycleBin ? "Deleted objects come back with all attributes, links and the password." : "Deleted objects are tombstones: the restore writes their attributes and memberships back; accounts need a new password.")">
+                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@(mount.RecycleBin ? Color.Success : Color.Default)" Icon="@Icons.Material.Filled.Recycling">
+                    Recycle Bin @(mount.RecycleBin ? "on" : "off")
+                </MudChip>
+            </MudTooltip>
+            <MudText Typo="Typo.caption" Class="nowrap">Closes after @ready.IdleMinutes min without use</MudText>
+        }
+        @if (_explore is not null)
+        {
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" StartIcon="@Icons.Material.Filled.Close" OnClick="CloseAsync" Disabled="_busy">Close</MudButton>
+        }
+    </Actions>
+</PageHeader>
+
+@if (_loadError is not null)
+{
+    <MudAlert Severity="Severity.Error">@_loadError</MudAlert>
+}
+else if (_point is null)
+{
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" />
+}
+else if (_explore is null)
+{
+    <MudPaper Class="pa-4" Elevation="1" Style="max-width:900px">
+        <MudText Typo="Typo.h6" Class="section-title mb-1">Open the backup's directory</MudText>
+        <MudText Typo="Typo.body2" Class="mb-3">
+            The restore point's AD database (ntds.dit and its logs) is copied into a folder on a domain controller of the domain that only SYSTEM and
+            Administrators can open, and Windows' AD Database Mounting Tool (dsamain) serves it there read-only. The copy holds every password hash
+            of the domain: it is deleted when you close it, after a time without use, and at the agent's next start.
+        </MudText>
+        @if (_targets is { Count: 0 })
+        {
+            <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">
+                No domain controller with the backdafuckup agent is known. Install the agent on a domain controller of @(_point.AdDomain ?? "the domain") under <MudLink Href="/infrastructure/agents">Guest agents</MudLink>.
+            </MudAlert>
+        }
+        <MudGrid Spacing="2">
+            <MudItem xs="12" md="6">
+                <MudSelect T="Guid?" @bind-Value="_agentId" Label="Domain controller" Variant="Variant.Outlined" Dense="true">
+                    @foreach (var target in _targets ?? [])
+                    {
+                        <MudSelectItem T="Guid?" Value="@target.AgentId" Disabled="@(!target.Usable)">
+                            @target.HostName @(target.Domain is null ? string.Empty : $"({target.Domain})")@(target.Usable ? string.Empty : $" – {target.Reason}")
+                        </MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" md="6">
+                <MudSelect T="Guid?" @bind-Value="_credentialId" Label="Windows account of the domain" Variant="Variant.Outlined" Dense="true"
+                           HelperText="Reads the directory; a restore also writes the objects, reanimates tombstones and writes SYSVOL (a domain admin can).">
+                    @foreach (var credential in _credentials ?? [])
+                    {
+                        <MudSelectItem T="Guid?" Value="@credential.Id">@credential.UserName@(credential.Description is null ? string.Empty : $" – {credential.Description}")</MudSelectItem>
+                    }
+                </MudSelect>
+                @if (_credentials is { Count: 0 })
+                {
+                    <MudText Typo="Typo.caption">No Windows account yet: add one under <MudLink Href="/infrastructure/credentials" Typo="Typo.caption">Credentials</MudLink>.</MudText>
+                }
+            </MudItem>
+        </MudGrid>
+        <MudButton Class="mt-3" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.FolderOpen"
+                   Disabled="@(_agentId is null || _credentialId is null || _busy)" OnClick="OpenAsync">Open</MudButton>
+    </MudPaper>
+}
+else if (_explore.State == "Opening")
+{
+    <MudPaper Class="pa-4" Elevation="1" Style="max-width:900px">
+        <MudText Typo="Typo.h6" Class="section-title mb-2">Opening on @_explore.TargetHost</MudText>
+        <MudText Typo="Typo.body2" Class="mb-2">@(_explore.Step ?? "Starting")…</MudText>
+        @if (_explore.TotalBytes > 0)
+        {
+            <MudProgressLinear Color="Color.Primary" Value="@(_explore.TransferredBytes * 100.0 / _explore.TotalBytes)" Class="mb-1" />
+            <MudText Typo="Typo.caption">@Fmt.Bytes(_explore.TransferredBytes) of @Fmt.Bytes(_explore.TotalBytes) copied</MudText>
+        }
+        else
+        {
+            <MudProgressLinear Color="Color.Primary" Indeterminate="true" />
+        }
+    </MudPaper>
+}
+else if (_explore.State != "Ready")
+{
+    <MudAlert Severity="Severity.Error" Class="mb-3">@(_explore.Error ?? "The explore session is closed.")</MudAlert>
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Refresh" OnClick="StartOverAsync">Open again</MudButton>
+}
+else
+{
+    <MudTabs Elevation="0" Rounded="true" TabPanelsClass="pt-3" @bind-ActivePanelIndex="_tab">
+        <MudTabPanel Text="Objects" Icon="@Icons.Material.Filled.AccountTree">
+            <MudGrid Spacing="2">
+                <MudItem xs="12" md="3">
+                    <MudPaper Class="pa-2" Elevation="1" Style="max-height:70vh;overflow:auto">
+                        <MudTreeView T="string" Items="_tree" ServerData="LoadContainersAsync" SelectedValue="_baseDn" SelectedValueChanged="OnContainerSelectedAsync" Dense="true" Hover="true">
+                            <ItemTemplate>
+                                <MudTreeViewItem T="string" Value="@context.Value" Text="@context.Text" Icon="@context.Icon" @bind-Items="context.Children"
+                                                 CanExpand="@context.Expandable" @bind-Expanded="@context.Expanded" />
+                            </ItemTemplate>
+                        </MudTreeView>
+                    </MudPaper>
+                </MudItem>
+                <MudItem xs="12" md="9">
+                    <MudPaper Class="pa-2" Elevation="1">
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Wrap="Wrap.Wrap" Class="mb-2">
+                            <MudTextField T="string" @bind-Value="_text" Label="Name, account or UPN" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:200px"
+                                          Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" OnKeyUp="@(e => e.Key == "Enter" ? SearchAsync() : Task.CompletedTask)" />
+                            <MudSelect T="string" @bind-SelectedValues="_classes" MultiSelection="true" Label="Kind" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:170px"
+                                       MultiSelectionTextFunc="@(values => values.Count == 0 ? "All" : string.Join(", ", values.Select(ClassLabel)))">
+                                @foreach (var kind in Kinds)
+                                {
+                                    <MudSelectItem T="string" Value="@kind">@ClassLabel(kind)</MudSelectItem>
+                                }
+                            </MudSelect>
+                            <MudSelect T="string" @bind-Value="_filter" Label="State" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:200px">
+                                <MudSelectItem T="string" Value="@("missing")">Deleted or gone since the backup</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("changed")">Changed since the backup</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("all")">All</MudSelectItem>
+                            </MudSelect>
+                            <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Search" OnClick="SearchAsync" Disabled="_searching">Search</MudButton>
+                            <MudSpacer />
+                            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore"
+                                       Disabled="@(_selected.Count == 0)" OnClick="RestoreSelectedAsync">Restore… @(_selected.Count > 0 ? $"({_selected.Count})" : string.Empty)</MudButton>
+                        </MudStack>
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Wrap="Wrap.Wrap" Class="mb-1">
+                            <MudText Typo="Typo.caption">In</MudText>
+                            <MudText Typo="Typo.caption" Class="mono">@(_baseDn ?? _explore.Mount?.DomainDn)</MudText>
+                            <MudText Typo="Typo.caption">@(_subtree ? "and below" : "(this container only)")</MudText>
+                            @if (_baseDn is not null)
+                            {
+                                <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="WholeDomainAsync">Whole domain</MudButton>
+                            }
+                        </MudStack>
+                        @if (_searching)
+                        {
+                            <MudProgressLinear Color="Color.Primary" Indeterminate="true" />
+                        }
+                        <MudTable T="AdEntryDto" Items="_entries" Dense="true" Hover="true" Elevation="0" MultiSelection="true" @bind-SelectedItems="_selected"
+                                  OnRowClick="@(args => args.Item is null ? Task.CompletedTask : ShowObjectAsync(args.Item))" RowClass="cursor-pointer" Breakpoint="Breakpoint.Sm">
+                            <HeaderContent>
+                                <MudTh>Name</MudTh>
+                                <MudTh>Kind</MudTh>
+                                <MudTh>State</MudTh>
+                                <MudTh>Account / description</MudTh>
+                            </HeaderContent>
+                            <RowTemplate>
+                                <MudTd DataLabel="Name">
+                                    <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
+                                        <MudIcon Icon="@IconFor(context.ObjectClass)" Size="Size.Small" />
+                                        <span>@context.Name</span>
+                                    </MudStack>
+                                    <span class="cell-sub mono">@context.Dn</span>
+                                </MudTd>
+                                <MudTd DataLabel="Kind">@ClassLabel(context.ObjectClass)</MudTd>
+                                <MudTd DataLabel="State"><MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@StateColor(context.State)">@StateLabel(context.State)</MudChip></MudTd>
+                                <MudTd DataLabel="Account">
+                                    @context.SamAccountName
+                                    @if (context.Description is not null)
+                                    {
+                                        <span class="cell-sub">@context.Description</span>
+                                    }
+                                </MudTd>
+                            </RowTemplate>
+                            <NoRecordsContent>
+                                <MudText Typo="Typo.body2" Class="pa-3">@(_searched ? "Nothing found." : "Search, or choose a container on the left.")</MudText>
+                            </NoRecordsContent>
+                        </MudTable>
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Class="mt-2">
+                            <MudText Typo="Typo.caption">@_entries.Count shown, @_scanned object(s) of the backup checked</MudText>
+                            @if (_cookie is not null)
+                            {
+                                <MudButton Size="Size.Small" Variant="Variant.Outlined" OnClick="MoreAsync" Disabled="_searching">Search further</MudButton>
+                            }
+                        </MudStack>
+                    </MudPaper>
+                </MudItem>
+            </MudGrid>
+        </MudTabPanel>
+        <MudTabPanel Text="Group policies" Icon="@Icons.Material.Filled.Policy">
+            <MudPaper Class="pa-2" Elevation="1">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Wrap="Wrap.Wrap" Class="mb-2">
+                    <MudText Typo="Typo.body2">A restore brings back a policy's files in SYSVOL and its container, raises its version so that clients apply it again, and adds its links back if chosen.</MudText>
+                    <MudSpacer />
+                    <MudSwitch T="bool" @bind-Value="_gpoLinks" Color="Color.Primary" Label="Add the links back" />
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore"
+                               Disabled="@(_selectedGpos.Count == 0)" OnClick="RestoreGposAsync">Restore… @(_selectedGpos.Count > 0 ? $"({_selectedGpos.Count})" : string.Empty)</MudButton>
+                </MudStack>
+                <MudTable T="AdEntryDto" Items="_gpos" Dense="true" Hover="true" Elevation="0" MultiSelection="true" @bind-SelectedItems="_selectedGpos" Loading="_gposLoading" Breakpoint="Breakpoint.Sm">
+                    <HeaderContent>
+                        <MudTh>Policy</MudTh>
+                        <MudTh>State</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd DataLabel="Policy">
+                            @(context.DisplayName ?? context.Name)
+                            <span class="cell-sub mono">@context.Name</span>
+                        </MudTd>
+                        <MudTd DataLabel="State"><MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@StateColor(context.State)">@StateLabel(context.State)</MudChip></MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent>
+                        <MudText Typo="Typo.body2" Class="pa-3">No group policies in the backup.</MudText>
+                    </NoRecordsContent>
+                </MudTable>
+            </MudPaper>
+        </MudTabPanel>
+    </MudTabs>
+}
+
+<MudDialog @bind-Visible="_objectOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Large, FullWidth = true, CloseOnEscapeKey = true, CloseButton = true })">
+    <TitleContent>
+        @if (_object is not null)
+        {
+            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Wrap="Wrap.Wrap">
+                <MudIcon Icon="@IconFor(_object.ObjectClass)" />
+                <MudText Typo="Typo.h6">@RdnValue(_object.Dn)</MudText>
+                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@StateColor(_object.State)">@StateLabel(_object.State)</MudChip>
+                @if (_object.Sid is not null)
+                {
+                    <MudText Typo="Typo.caption" Class="mono">@_object.Sid</MudText>
+                }
+            </MudStack>
+        }
+    </TitleContent>
+    <DialogContent>
+        @if (_object is null)
+        {
+            <MudProgressLinear Color="Color.Primary" Indeterminate="true" />
+        }
+        else
+        {
+            <MudSimpleTable Dense="true" Elevation="0" Class="mb-2">
+                <tbody>
+                    <tr><td style="width:160px">In the backup</td><td class="mono">@_object.Dn</td></tr>
+                    <tr><td>Live</td><td class="mono">@(_object.LiveDn ?? "not in the directory any more")</td></tr>
+                    @if (_object.State is "deleted" or "recycled" or "gone")
+                    {
+                        <tr><td>Container live</td><td class="mono">@(_object.LiveParentDn ?? $"{_object.ParentDn} is not in the directory: restore it too, or choose a container in the restore")</td></tr>
+                    }
+                </tbody>
+            </MudSimpleTable>
+            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Class="mb-1">
+                <MudSwitch T="bool" @bind-Value="_onlyDifferences" Color="Color.Primary" Label="Only differences" />
+                <MudSpacer />
+                <MudText Typo="Typo.caption">@_object.Attributes.Count(a => a.Changed) attribute(s) differ</MudText>
+            </MudStack>
+            <MudTable T="AdAttributeDto" Items="VisibleAttributes" Dense="true" Elevation="0" Breakpoint="Breakpoint.Sm" FixedHeader="true" Height="45vh">
+                <HeaderContent>
+                    <MudTh Style="width:40px"></MudTh>
+                    <MudTh>Attribute</MudTh>
+                    <MudTh>In the backup</MudTh>
+                    <MudTh>Live</MudTh>
+                </HeaderContent>
+                <RowTemplate>
+                    <MudTd>
+                        @if (context.Restorable && (context.Changed || _object.State is "deleted" or "recycled" or "gone"))
+                        {
+                            <MudCheckBox T="bool" Value="@_attributes.Contains(context.Name)" ValueChanged="@(on => Toggle(context.Name, on))" Size="Size.Small" Dense="true" />
+                        }
+                    </MudTd>
+                    <MudTd DataLabel="Attribute">
+                        <span style="@(context.Changed ? "font-weight:600" : null)">@context.Name</span>
+                        @if (context.Note is not null)
+                        {
+                            <span class="cell-sub">@context.Note</span>
+                        }
+                    </MudTd>
+                    <MudTd DataLabel="Backup" Class="mono">@Values(context.Backup)</MudTd>
+                    <MudTd DataLabel="Live" Class="mono" Style="@(context.Changed ? "background:var(--mud-palette-warning-hover)" : null)">@Values(context.Live)</MudTd>
+                </RowTemplate>
+            </MudTable>
+            <MudGrid Spacing="2" Class="mt-2">
+                <MudItem xs="12" md="6">
+                    <MudText Typo="Typo.subtitle2">Member of (backup)</MudText>
+                    @if (_object.MemberOfBackup.Count == 0)
+                    {
+                        <MudText Typo="Typo.body2">–</MudText>
+                    }
+                    @foreach (var group in _object.MemberOfBackup)
+                    {
+                        <MudText Typo="Typo.body2" Class="mono">@group.Text</MudText>
+                    }
+                </MudItem>
+                <MudItem xs="12" md="6">
+                    <MudText Typo="Typo.subtitle2">Member of (live)</MudText>
+                    @if (_object.MemberOfLive.Count == 0)
+                    {
+                        <MudText Typo="Typo.body2">–</MudText>
+                    }
+                    @foreach (var group in _object.MemberOfLive)
+                    {
+                        <MudText Typo="Typo.body2" Class="mono">@group.Text</MudText>
+                    }
+                </MudItem>
+            </MudGrid>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="@(() => _objectOpen = false)">Close</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore"
+                   Disabled="@(_object is null || (_object.State is "changed" && _attributes.Count == 0) || _object.State == "unchanged")" OnClick="RestoreObjectAsync">Restore…</MudButton>
+    </DialogActions>
+</MudDialog>
+
+<MudDialog @bind-Visible="_restoreOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true, CloseOnEscapeKey = true })">
+    <TitleContent>
+        <MudText Typo="Typo.h6">Restore into @(_plan?.LiveDomain ?? _point?.AdDomain) on @(_plan?.LiveHost ?? _explore?.TargetHost)</MudText>
+    </TitleContent>
+    <DialogContent>
+        <MudStack Spacing="2">
+            @if (_restoreObjects.Count > 0)
+            {
+                <MudGrid Spacing="1">
+                    <MudItem xs="12" sm="4"><MudSwitch T="bool" @bind-Value="_recreate" Color="Color.Primary" Label="Re-create objects that are gone" /></MudItem>
+                    <MudItem xs="12" sm="4"><MudSwitch T="bool" @bind-Value="_memberships" Color="Color.Primary" Label="Add group memberships back" /></MudItem>
+                    <MudItem xs="12" sm="4"><MudSwitch T="bool" @bind-Value="_moveBack" Color="Color.Primary" Label="Move moved objects back" /></MudItem>
+                    <MudItem xs="12" sm="6">
+                        <MudTextField T="string" @bind-Value="_targetParent" Label="Container for objects whose container is gone (optional)" Variant="Variant.Outlined" Margin="Margin.Dense"
+                                      Placeholder="OU=Restored,DC=…" HelperText="Empty: such objects are skipped." />
+                    </MudItem>
+                    <MudItem xs="12" sm="6">
+                        <MudTextField T="string" @bind-Value="_password" Label="New password for accounts without one (optional)" Variant="Variant.Outlined" Margin="Margin.Dense"
+                                      InputType="@(_showPassword ? InputType.Text : InputType.Password)" Adornment="Adornment.End"
+                                      AdornmentIcon="@(_showPassword ? Icons.Material.Filled.VisibilityOff : Icons.Material.Filled.Visibility)" OnAdornmentClick="@(() => _showPassword = !_showPassword)"
+                                      HelperText="Empty: they stay disabled and must change the password at the next logon. Never stored." />
+                    </MudItem>
+                </MudGrid>
+            }
+            <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2">
+                <MudText Typo="Typo.subtitle1" Class="section-title">Preview</MudText>
+                <MudButton Size="Size.Small" Variant="Variant.Text" StartIcon="@Icons.Material.Filled.Refresh" OnClick="PlanAsync" Disabled="_planning">Update</MudButton>
+                <MudSpacer />
+                @if (_plan is not null)
+                {
+                    <MudText Typo="Typo.caption">@_plan.Items.Count(i => i.Outcome == "planned") of @_plan.Items.Count to restore, nothing written yet</MudText>
+                }
+            </MudStack>
+            @if (_planning)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" />
+            }
+            <div style="max-height:45vh;overflow:auto">
+                @foreach (var item in _plan?.Items ?? [])
+                {
+                    <MudPaper Outlined="true" Class="pa-2 mb-2">
+                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Wrap="Wrap.Wrap">
+                            <MudIcon Icon="@IconFor(item.ObjectClass)" Size="Size.Small" />
+                            <MudText Typo="Typo.body1">@RdnValue(item.Dn)</MudText>
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@StateColor(item.State)">@StateLabel(item.State)</MudChip>
+                            <MudChip T="string" Size="Size.Small" Color="@(item.Outcome == "planned" ? Color.Primary : Color.Default)">@ActionLabel(item)</MudChip>
+                        </MudStack>
+                        @if (item.Reason is not null)
+                        {
+                            <MudText Typo="Typo.body2" Color="@(item.Outcome == "failed" ? Color.Error : Color.Default)">@item.Reason</MudText>
+                        }
+                        @foreach (var warning in item.Warnings)
+                        {
+                            <MudAlert Severity="Severity.Warning" Dense="true" Class="my-1">@warning</MudAlert>
+                        }
+                        @if (item.Steps.Count > 0)
+                        {
+                            <MudSimpleTable Dense="true" Elevation="0">
+                                <tbody>
+                                    @foreach (var step in item.Steps)
+                                    {
+                                        <tr>
+                                            <td style="width:90px" class="nowrap">@step.Operation</td>
+                                            <td class="mono">@step.Text<span class="cell-sub">@step.Target</span></td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </MudSimpleTable>
+                        }
+                    </MudPaper>
+                }
+            </div>
+            <MudTextField T="string" @bind-Value="_confirm" Immediate="true" Label="@($"Type {_plan?.LiveDomain ?? _point?.AdDomain} to restore into the live directory")" Variant="Variant.Outlined" Margin="Margin.Dense" />
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="@(() => _restoreOpen = false)">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Error" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="StartRestoreAsync"
+                   Disabled="@(_plan is null || _starting || !string.Equals(_confirm?.Trim(), _plan.LiveDomain, StringComparison.OrdinalIgnoreCase) || _plan.Items.All(i => i.Outcome != "planned"))">Restore</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    private static readonly string[] Kinds = ["user", "group", "computer", "contact", "organizationalUnit"];
+
+    [Parameter]
+    public Guid RestorePointId { get; set; }
+
+    private readonly CancellationTokenSource _stop = new();
+    private RestorePointDto? _point;
+    private string? _loadError;
+    private List<AdTargetDto>? _targets;
+    private List<WindowsCredentialDto>? _credentials;
+    private Guid? _agentId;
+    private Guid? _credentialId;
+    private AdExploreDto? _explore;
+    private bool _busy;
+    private int _tab;
+
+    private List<TreeItemData<string>> _tree = [];
+    private string? _baseDn;
+    private bool _subtree = true;
+    private string? _text;
+    private IReadOnlyCollection<string> _classes = [];
+    private string _filter = "missing";
+    private List<AdEntryDto> _entries = [];
+    private HashSet<AdEntryDto> _selected = [];
+    private string? _cookie;
+    private int _scanned;
+    private bool _searching;
+    private bool _searched;
+
+    private List<AdEntryDto> _gpos = [];
+    private HashSet<AdEntryDto> _selectedGpos = [];
+    private bool _gposLoading;
+    private bool _gpoLinks = true;
+
+    private bool _objectOpen;
+    private AdObjectDto? _object;
+    private bool _onlyDifferences = true;
+    private HashSet<string> _attributes = new(StringComparer.OrdinalIgnoreCase);
+
+    private bool _restoreOpen;
+    private List<AdRestoreObjectDto> _restoreObjects = [];
+    private List<AdGpoRestoreDto> _restoreGpos = [];
+    private bool _recreate;
+    private bool _memberships = true;
+    private bool _moveBack;
+    private string? _targetParent;
+    private string? _password;
+    private bool _showPassword;
+    private AdRestorePlanDto? _plan;
+    private bool _planning;
+    private string? _confirm;
+    private bool _starting;
+
+    private IEnumerable<AdAttributeDto> VisibleAttributes =>
+        _object is null ? [] : _onlyDifferences && _object.State != "gone" && _object.Attributes.Any(a => a.Changed) ? _object.Attributes.Where(a => a.Changed) : _object.Attributes;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _point = await Api.GetAsync<RestorePointDto>($"api/restore-points/{RestorePointId}");
+            var open = (await Api.GetAsync<List<AdExploreDto>>("api/ad/explores")).FirstOrDefault(e => e.RestorePointId == RestorePointId && e.State is "Opening" or "Ready");
+            if (open is not null)
+            {
+                await ShowAsync(open);
+                return;
+            }
+
+            await LoadChoicesAsync();
+        }
+        catch (ApiException ex)
+        {
+            _loadError = ex.Message;
+        }
+    }
+
+    private async Task LoadChoicesAsync()
+    {
+        _targets = await Api.GetAsync<List<AdTargetDto>>($"api/ad/restore-points/{RestorePointId}/targets");
+        _credentials = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
+        _agentId ??= _targets.FirstOrDefault(t => t.Usable)?.AgentId;
+        _credentialId ??= _credentials.FirstOrDefault(c => _point?.AdDomain is { } d && c.UserName.Contains(d.Split('.')[0], StringComparison.OrdinalIgnoreCase))?.Id;
+    }
+
+    private async Task OpenAsync()
+    {
+        _busy = true;
+        try
+        {
+            await ShowAsync(await Api.PostAsync<AdExploreDto>("api/ad/explores", new OpenAdExploreDto(RestorePointId, _agentId!.Value, _credentialId!.Value)));
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    /// <summary>Shows the explore session; while it opens, its progress is polled.</summary>
+    private async Task ShowAsync(AdExploreDto explore)
+    {
+        _explore = explore;
+        while (_explore.State == "Opening" && !_stop.IsCancellationRequested)
+        {
+            StateHasChanged();
+            try
+            {
+                await Task.Delay(1000, _stop.Token);
+                _explore = await Api.GetAsync<AdExploreDto>($"api/ad/explores/{_explore.Id}");
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (ApiException ex)
+            {
+                _explore = _explore with { State = "Closed", Error = ex.Message };
+            }
+        }
+
+        if (_explore.State == "Ready")
+        {
+            var domain = _explore.Mount?.DomainDn ?? string.Empty;
+            _tree = [new TreeItemData<string> { Value = domain, Text = _point?.AdDomain ?? domain, Icon = Icons.Material.Filled.Domain, Expandable = true, Expanded = false }];
+            await SearchAsync();
+            await LoadGposAsync();
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task<IReadOnlyCollection<TreeItemData<string>>> LoadContainersAsync(string? dn)
+    {
+        if (_explore is null || dn is null)
+        {
+            return _tree;
+        }
+
+        try
+        {
+            var children = await Api.GetAsync<List<AdEntryDto>>($"api/ad/explores/{_explore.Id}/tree?dn={Uri.EscapeDataString(dn)}");
+            return [.. children.Select(c => new TreeItemData<string>
+            {
+                Value = c.Dn,
+                Text = c.State is "unchanged" or "changed" ? c.Name : $"{c.Name} ({StateLabel(c.State)})",
+                Icon = c.ObjectClass == "organizationalUnit" ? Icons.Material.Filled.FolderShared : Icons.Material.Filled.Folder,
+                Expandable = true,
+            })];
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+            return [];
+        }
+    }
+
+    private async Task OnContainerSelectedAsync(string? dn)
+    {
+        _baseDn = dn;
+        _subtree = false;
+        _filter = "all";
+        await SearchAsync();
+    }
+
+    private async Task WholeDomainAsync()
+    {
+        _baseDn = null;
+        _subtree = true;
+        await SearchAsync();
+    }
+
+    private async Task SearchAsync()
+    {
+        _entries = [];
+        _selected = [];
+        _cookie = null;
+        _scanned = 0;
+        await MoreAsync();
+    }
+
+    /// <summary>Pages through the backup until 50 matches or its end (a state filter may drop most of a page).</summary>
+    private async Task MoreAsync()
+    {
+        if (_explore is null)
+        {
+            return;
+        }
+
+        _searching = true;
+        StateHasChanged();
+        try
+        {
+            var found = 0;
+            var pages = 0;
+            do
+            {
+                var page = await Api.PostAsync<AdSearchPageDto>($"api/ad/explores/{_explore.Id}/search", new AdSearchDto(
+                    _baseDn, _text, [.. _classes], _filter switch { "missing" => ["deleted", "recycled", "gone"], "changed" => ["changed"], _ => [] }, _subtree, 200, _cookie));
+                _entries.AddRange(page.Entries);
+                _cookie = page.Cookie;
+                _scanned += page.Scanned;
+                found += page.Entries.Count;
+                pages++;
+            }
+            while (_cookie is not null && found < 50 && pages < 25);
+            _searched = true;
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+            await RefreshStateAsync();
+        }
+        finally
+        {
+            _searching = false;
+        }
+    }
+
+    private async Task LoadGposAsync()
+    {
+        if (_explore is null)
+        {
+            return;
+        }
+
+        _gposLoading = true;
+        try
+        {
+            _gpos = (await Api.PostAsync<AdSearchPageDto>($"api/ad/explores/{_explore.Id}/search", new AdSearchDto(Classes: ["groupPolicyContainer"], PageSize: 1000))).Entries
+                .OrderBy(g => g.DisplayName ?? g.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _gposLoading = false;
+        }
+    }
+
+    private async Task ShowObjectAsync(AdEntryDto entry)
+    {
+        _object = null;
+        _attributes.Clear();
+        _onlyDifferences = true;
+        _objectOpen = true;
+        try
+        {
+            _object = await Api.GetAsync<AdObjectDto>($"api/ad/explores/{_explore!.Id}/objects/{entry.Guid}");
+            foreach (var attribute in _object.Attributes.Where(a => a.Restorable && a.Changed))
+            {
+                _attributes.Add(attribute.Name);
+            }
+        }
+        catch (ApiException ex)
+        {
+            _objectOpen = false;
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private void Toggle(string name, bool on)
+    {
+        if (on)
+        {
+            _attributes.Add(name);
+        }
+        else
+        {
+            _attributes.Remove(name);
+        }
+    }
+
+    private Task RestoreSelectedAsync() =>
+        OpenRestoreAsync([.. _selected.Select(e => new AdRestoreObjectDto(e.Guid))], [], recreate: _selected.Any(e => e.State == "gone"));
+
+    private Task RestoreGposAsync() =>
+        OpenRestoreAsync([], [.. _selectedGpos.Select(g => new AdGpoRestoreDto(g.Guid, _gpoLinks))], recreate: false);
+
+    private Task RestoreObjectAsync()
+    {
+        _objectOpen = false;
+        var chosen = _object!.State == "changed" ? _attributes.ToList() : null;
+        return OpenRestoreAsync([new AdRestoreObjectDto(_object.Guid, chosen)], [], recreate: _object.State == "gone");
+    }
+
+    private async Task OpenRestoreAsync(List<AdRestoreObjectDto> objects, List<AdGpoRestoreDto> gpos, bool recreate)
+    {
+        _restoreObjects = objects;
+        _restoreGpos = gpos;
+        _recreate = recreate;
+        _confirm = null;
+        _password = null;
+        _plan = null;
+        _restoreOpen = true;
+        await PlanAsync();
+    }
+
+    private AdRestoreRequestDto Request(bool withSecrets) => new(
+        [.. _restoreObjects.Select(o => o with { Memberships = _memberships, MoveBack = _moveBack })],
+        _recreate,
+        string.IsNullOrWhiteSpace(_targetParent) ? null : _targetParent.Trim(),
+        withSecrets && !string.IsNullOrEmpty(_password) ? _password : null,
+        withSecrets ? _confirm?.Trim() : null,
+        _restoreGpos);
+
+    private async Task PlanAsync()
+    {
+        _planning = true;
+        StateHasChanged();
+        try
+        {
+            _plan = await Api.PostAsync<AdRestorePlanDto>($"api/ad/explores/{_explore!.Id}/restore/plan", Request(withSecrets: false));
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _planning = false;
+        }
+    }
+
+    private async Task StartRestoreAsync()
+    {
+        _starting = true;
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/ad/explores/{_explore!.Id}/restore", Request(withSecrets: true));
+            _restoreOpen = false;
+            _password = null;
+            Snackbar.Add($"Restore into {_plan?.LiveDomain} started. Search again when it has finished to see the new states.", Severity.Success, options =>
+            {
+                options.Action = "Show session";
+                options.ActionColor = Color.Primary;
+                options.OnClick = _ =>
+                {
+                    Navigation.NavigateTo($"sessions/{started.SessionId}");
+                    return Task.CompletedTask;
+                };
+            });
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _starting = false;
+        }
+    }
+
+    private async Task RefreshStateAsync()
+    {
+        if (_explore is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _explore = await Api.GetAsync<AdExploreDto>($"api/ad/explores/{_explore.Id}");
+        }
+        catch (ApiException ex)
+        {
+            _explore = _explore with { State = "Closed", Error = ex.Message };
+        }
+    }
+
+    private async Task CloseAsync()
+    {
+        if (_explore is null)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            await Api.DeleteAsync($"api/ad/explores/{_explore.Id}");
+            _explore = null;
+            _entries = [];
+            _gpos = [];
+            await LoadChoicesAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task StartOverAsync()
+    {
+        if (_explore is not null)
+        {
+            try
+            {
+                await Api.DeleteAsync($"api/ad/explores/{_explore.Id}");
+            }
+            catch (ApiException)
+            {
+                // Already closed.
+            }
+        }
+
+        _explore = null;
+        await LoadChoicesAsync();
+    }
+
+    // The explore session stays open when the page is left (opening copies the whole directory); it closes after its idle time.
+    public void Dispose()
+    {
+        _stop.Cancel();
+        _stop.Dispose();
+    }
+
+    private static string Values(List<AdValueDto> values) => values.Count switch
+    {
+        0 => "–",
+        > 20 => string.Join("\n", values.Take(20).Select(v => v.Text)) + $"\n… {values.Count - 20} more",
+        _ => string.Join("\n", values.Select(v => v.Text)),
+    };
+
+    private static string RdnValue(string dn)
+    {
+        var end = 0;
+        while (end < dn.Length && !(dn[end] == ',' && (end == 0 || dn[end - 1] != '\\')))
+        {
+            end++;
+        }
+
+        var rdn = dn[..end];
+        var value = rdn.Contains('=') ? rdn[(rdn.IndexOf('=') + 1)..] : rdn;
+        var deleted = value.IndexOf("\\0ADEL:", StringComparison.OrdinalIgnoreCase);
+        return (deleted >= 0 ? value[..deleted] : value).Replace("\\,", ",");
+    }
+
+    private static string ClassLabel(string objectClass) => objectClass switch
+    {
+        "user" => "User",
+        "group" => "Group",
+        "computer" => "Computer",
+        "contact" => "Contact",
+        "organizationalUnit" => "OU",
+        "container" => "Container",
+        "groupPolicyContainer" => "Group policy",
+        "domainDNS" => "Domain",
+        _ => objectClass,
+    };
+
+    private static string IconFor(string objectClass) => objectClass switch
+    {
+        "user" => Icons.Material.Filled.Person,
+        "group" => Icons.Material.Filled.Group,
+        "computer" => Icons.Material.Filled.Computer,
+        "contact" => Icons.Material.Filled.ContactMail,
+        "organizationalUnit" => Icons.Material.Filled.FolderShared,
+        "groupPolicyContainer" => Icons.Material.Filled.Policy,
+        "domainDNS" => Icons.Material.Filled.Domain,
+        _ => Icons.Material.Filled.Folder,
+    };
+
+    private static string StateLabel(string state) => state switch
+    {
+        "unchanged" => "unchanged",
+        "changed" => "changed",
+        "deleted" => "deleted",
+        "recycled" => "recycled",
+        "gone" => "gone",
+        _ => state,
+    };
+
+    private static Color StateColor(string state) => state switch
+    {
+        "changed" => Color.Info,
+        "deleted" or "recycled" => Color.Warning,
+        "gone" => Color.Error,
+        _ => Color.Default,
+    };
+
+    private static string ActionLabel(AdRestoreItemDto item) => (item.Outcome, item.Action) switch
+    {
+        ("skipped", _) => "skipped",
+        ("failed", _) => "fails",
+        (_, "reanimate") => "reanimate",
+        (_, "recreate") => "re-create",
+        (_, "modify") => "write back",
+        (_, "gpo") => "restore policy",
+        _ => item.Action,
+    };
+}

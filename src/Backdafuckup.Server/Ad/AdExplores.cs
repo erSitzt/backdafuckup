@@ -99,6 +99,9 @@ public sealed class AdExplore
 
     internal int Queries;
 
+    /// <summary>Restores running from this session (it is not closed by a user meanwhile).</summary>
+    internal int Restores;
+
     internal CancellationTokenSource Stop { get; } = new();
 
     internal Task Opening { get; set; } = Task.CompletedTask;
@@ -336,6 +339,7 @@ public sealed class AdExplores(
 
         explore.Log.Info($"{user} started restoring {request.Objects.Count} object(s){(request.Gpos is { Count: > 0 } g ? $" and {g.Count} group policy(ies)" : string.Empty)} into {explore.Host} (session {sessionId}).");
         Interlocked.Increment(ref explore.Queries);
+        Interlocked.Increment(ref explore.Restores);
         _ = Task.Run(async () =>
         {
             try
@@ -344,6 +348,7 @@ public sealed class AdExplores(
             }
             finally
             {
+                Interlocked.Decrement(ref explore.Restores);
                 Interlocked.Decrement(ref explore.Queries);
                 explore.LastUsedUtc = time.GetUtcNow();
             }
@@ -522,6 +527,18 @@ public sealed class AdExplores(
     private static AdRestoreItemDto ToDto(AdRestoreItem i) => new(
         i.Guid, i.Dn, i.ObjectClass, i.State, i.Action, i.Outcome, i.Reason, i.LiveDn, i.NewGuid,
         [.. i.Steps.Select(s => new AdRestoreStepDto(s.Operation, s.Target, s.Text, s.Done))], [.. i.Warnings]);
+
+    /// <summary>A user closes the explore session; not while one of its restores runs (it needs the backup's directory).</summary>
+    public Task CloseByUserAsync(AdExplore explore, string user)
+    {
+        ArgumentNullException.ThrowIfNull(explore);
+        if (Volatile.Read(ref explore.Restores) > 0)
+        {
+            throw new InvalidOperationException("A restore from this explore session is still running; close it when the restore has finished.");
+        }
+
+        return CloseAsync(explore, $"closed by {user}");
+    }
 
     /// <summary>Unmounts on the DC (deleting the copy), ends the session and forgets the explore.</summary>
     public async Task CloseAsync(AdExplore explore, string reason, SessionState state = SessionState.Succeeded, bool flushLog = true)
@@ -963,7 +980,7 @@ public sealed class AdExplores(
     }
 
     private static AdEntryDto ToDto(AdEntry e) =>
-        new(e.Guid, e.Dn, e.LiveDn, e.Name, e.ObjectClass, e.State, e.SamAccountName, e.Description, e.Container, e.ChangedInBackup, e.ChangedLive);
+        new(e.Guid, e.Dn, e.LiveDn, e.Name, e.ObjectClass, e.State, e.SamAccountName, e.DisplayName, e.Description, e.Container, e.ChangedInBackup, e.ChangedLive);
 
     private static AdValueDto ToDto(AdValue v) => new(v.Text, v.Guid);
 

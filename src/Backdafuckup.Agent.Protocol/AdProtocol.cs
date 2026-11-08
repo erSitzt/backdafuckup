@@ -344,6 +344,9 @@ public sealed class AdEntry
 
     public string? SamAccountName { get; set; }
 
+    /// <summary>displayName in the backup (e.g. a group policy's name).</summary>
+    public string? DisplayName { get; set; }
+
     public string? Description { get; set; }
 
     /// <summary>Can hold other objects (OU, container, domain).</summary>

@@ -28,7 +28,7 @@ public static class AdEndpoints
         group.MapDelete("/explores/{id:guid}", (Guid id, AdExplores explores, HttpContext http) =>
             Handle(async () =>
             {
-                await explores.CloseAsync(explores.Get(id, User(http)), $"closed by {User(http)}");
+                await explores.CloseByUserAsync(explores.Get(id, User(http)), User(http));
                 return Results.NoContent();
             }));
 

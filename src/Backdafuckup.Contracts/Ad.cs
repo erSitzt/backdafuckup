@@ -51,6 +51,7 @@ public sealed record AdEntryDto(
     string ObjectClass,
     string State,
     string? SamAccountName,
+    string? DisplayName,
     string? Description,
     bool Container,
     string? ChangedInBackup,

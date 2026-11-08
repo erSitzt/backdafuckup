@@ -246,30 +246,129 @@ public sealed partial class ApiIntegrationTests
     {
         var backup = new InMemoryDirectory("dc1.bdfu-lab.local:50000", AdDomain);
         var live = new InMemoryDirectory("dc1.bdfu-lab.local:389", AdDomain);
-        var ids = new Dictionary<string, Guid>();
-        Guid Id(string name) => ids.TryGetValue(name, out var id) ? id : ids[name] = Guid.NewGuid();
+        var domain = Guid.NewGuid();
+        var lab = Guid.NewGuid();
+        foreach (var directory in new[] { backup, live })
+        {
+            directory.Add(AdDomain, domain, ("objectClass", ["top", "domain", "domainDNS"]));
+            directory.Add("OU=Lab," + AdDomain, lab, ("objectClass", ["top", "organizationalUnit"]));
+        }
+
+        AddGpo(backup, live, gpo, "Lab Policy A");
+        return (backup, live);
+    }
+
+    /// <summary>Adds a policy (changed live, its link on OU=Lab only in the backup) and the schema attributes it needs.</summary>
+    private static void AddGpo(InMemoryDirectory backup, InMemoryDirectory live, string gpo, string name)
+    {
         var policies = "CN=Policies,CN=System," + AdDomain;
+        var ids = new Dictionary<string, Guid>();
+        Guid Id(string key) => ids.TryGetValue(key, out var id) ? id : ids[key] = Guid.NewGuid();
         foreach (var directory in new[] { backup, live })
         {
             var isLive = directory == live;
-            directory.Add(AdDomain, Id("domain"), ("objectClass", ["top", "domain", "domainDNS"]));
-            directory.Add("CN=System," + AdDomain, Id("System"), ("objectClass", ["top", "container"]));
-            directory.Add(policies, Id("Policies"), ("objectClass", ["top", "container"]));
-            directory.Add("OU=Lab," + AdDomain, Id("Lab"), ("objectClass", ["top", "organizationalUnit"]),
-                ("gPLink", [isLive ? string.Empty : $"[LDAP://cn={gpo},cn=policies,cn=system,{AdDomain};0]"]));
+            if (directory.Find("CN=System," + AdDomain, false) is null)
+            {
+                directory.Add("CN=System," + AdDomain, Id("System"), ("objectClass", ["top", "container"]));
+                directory.Add(policies, Id("Policies"), ("objectClass", ["top", "container"]));
+            }
+
+            directory.Find("OU=Lab," + AdDomain, false)!.Attributes["gPLink"] = [isLive ? string.Empty : $"[LDAP://cn={gpo},cn=policies,cn=system,{AdDomain};0]"];
             var gpc = directory.Add($"CN={gpo},{policies}", Id(gpo), ("objectClass", ["top", "container", "groupPolicyContainer"]), ("cn", [gpo]),
-                ("displayName", [isLive ? "Lab Policy A (changed)" : "Lab Policy A"]), ("versionNumber", [isLive ? "327681" : "131075"]));
+                ("displayName", [isLive ? name + " (changed)" : name]), ("versionNumber", [isLive ? "327681" : "131075"]));
             directory.Add($"CN=User,{gpc.Dn}", Id("User"), ("objectClass", ["top", "container"]));
             directory.Add($"CN=Machine,{gpc.Dn}", Id("Machine"), ("objectClass", ["top", "container"]));
         }
 
-        foreach (var (name, syntax) in new[] { ("displayName", "2.5.5.12"), ("versionNumber", "2.5.5.9"), ("gPLink", "2.5.5.12"), ("objectClass", "2.5.5.2") })
+        foreach (var (attribute, syntax) in new[] { ("displayName", "2.5.5.12"), ("versionNumber", "2.5.5.9"), ("gPLink", "2.5.5.12"), ("objectClass", "2.5.5.2") })
         {
-            live.Add($"CN={name},{live.SchemaDn}", Guid.NewGuid(), ("objectClass", ["top", "attributeSchema"]), ("lDAPDisplayName", [name]), ("attributeSyntax", [syntax]));
+            if (live.Find($"CN={attribute},{live.SchemaDn}", false) is null)
+            {
+                live.Add($"CN={attribute},{live.SchemaDn}", Guid.NewGuid(), ("objectClass", ["top", "attributeSchema"]), ("lDAPDisplayName", [attribute]), ("attributeSyntax", [syntax]));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Not a test: with BDFU_UI_FIXTURE=&lt;folder&gt; it leaves a repository with a domain controller's restore point
+    /// (ntds.dit, logs and a group policy in SYSVOL) for checking the AD pages by hand, with <see cref="Ui_dc_agent_for_a_running_server"/>.
+    /// </summary>
+    [Fact]
+    public async Task Ui_fixture_for_active_directory()
+    {
+        var keep = Environment.GetEnvironmentVariable("BDFU_UI_FIXTURE");
+        Assert.SkipUnless(keep is { Length: > 0 }, "Only builds a repository for checking the console (BDFU_UI_FIXTURE=<folder>).");
+        var client = await SignedInClientAsync();
+        var sandbox = Path.Combine(_root, "ui-dc");
+        var (backup, live) = AdDirectories();
+        var point = await BackUpImageAsync(client, "dc1", UiDcImage(), async vm => await StartAgentAsync(vm, new SandboxRestoreFileSystem(sandbox), ad: new FakeAdEnvironment(sandbox, backup, live, windowsSandbox: true)));
+        Assert.True(point.DomainController);
+        CopyDirectory(Path.Combine(_root, "repo"), keep!);
+    }
+
+    /// <summary>
+    /// Not a test: with BDFU_UI_SERVER=http://localhost:9556/ and BDFU_UI_SECRET it runs the real agent as a domain controller of
+    /// bdfu-lab.local (in-memory directories, files in a sandbox) against that server until BDFU_UI_STOP (a file) exists.
+    /// </summary>
+    [Fact]
+    public async Task Ui_dc_agent_for_a_running_server()
+    {
+        var server = Environment.GetEnvironmentVariable("BDFU_UI_SERVER");
+        Assert.SkipUnless(server is { Length: > 0 }, "Only runs a domain controller's agent for checking the console (BDFU_UI_SERVER=<url>).");
+        var stopFile = Environment.GetEnvironmentVariable("BDFU_UI_STOP") ?? Path.Combine(_root, "stop");
+        // The enrollment secret from the console (Guest agents → Settings); the sign-in cookie is HTTPS-only.
+        var secret = Environment.GetEnvironmentVariable("BDFU_UI_SECRET");
+        Assert.False(string.IsNullOrEmpty(secret), "Set BDFU_UI_SECRET to the server's enrollment secret.");
+
+        var directory = Path.Combine(_root, "ui-agent");
+        Directory.CreateDirectory(directory);
+        var paths = new AgentPaths(directory);
+        await File.WriteAllTextAsync(paths.ConfigFile, System.Text.Json.JsonSerializer.Serialize(new AgentConfig { ServerUrl = server!, EnrollmentSecret = secret }, Backdafuckup.Agent.Core.AgentJson.Options), Ct);
+        var sandbox = Path.Combine(_root, "ui-dc");
+        var live = Path.Combine(sandbox, "C", "Windows", "SYSVOL", "sysvol", "bdfu-lab.local", "Policies", UiGpo);
+        Directory.CreateDirectory(Path.Combine(live, "Machine"));
+        await File.WriteAllTextAsync(Path.Combine(live, "GPT.INI"), "[General]\r\nVersion=327681\r\n", Ct);
+        await File.WriteAllTextAsync(Path.Combine(live, "Machine", "registry.pol"), "live settings", Ct);
+        var (backupDirectory, liveDirectory) = AdDirectories();
+        AddGpo(backupDirectory, liveDirectory, UiGpo, "Lab Policy A");
+        for (var i = 10; i < 40; i++)
+        {
+            var guid = Guid.NewGuid();
+            foreach (var d in new[] { backupDirectory, liveDirectory })
+            {
+                d.Add($"CN=lab-user{i},OU=Lab,{AdDomain}", guid, ("objectClass", ["top", "person", "organizationalPerson", "user"]), ("objectCategory", ["person"]),
+                    ("sAMAccountName", [$"lab-user{i}"]), ("description", [i % 7 == 0 && d == liveDirectory ? "Changed after the backup" : $"Lab user {i}"]));
+            }
         }
 
-        return (backup, live);
+        var env = new FakeAdEnvironment(sandbox, backupDirectory, liveDirectory, windowsSandbox: true);
+        var runner = new AgentRunner(paths, new SimulatedHost(Environment.GetEnvironmentVariable("BDFU_UI_VM") ?? Guid.NewGuid().ToString(), true), new SimulatedVss(null, true),
+            new AgentLog(paths.LogFile), _ => new HttpClientHandler(), TimeSpan.FromSeconds(2), new SandboxRestoreFileSystem(sandbox) { RecordPermissions = true }, ad: env);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var running = Task.Run(() => runner.RunAsync(stop.Token), Ct);
+        var until = DateTime.UtcNow.AddHours(2);
+        while (!File.Exists(stopFile) && DateTime.UtcNow < until && !running.IsCompleted)
+        {
+            await Task.Delay(1000, Ct);
+        }
+
+        await stop.CancelAsync();
+        await running;
     }
+
+    private const string UiGpo = "{6AC1786C-016F-11D2-945F-00C04FB984F9}";
+
+    private static byte[] UiDcImage() => WindowsTestDisk.Create(
+    [
+        new WindowsTestDisk.Volume('C', 24, new Dictionary<string, byte[]>
+        {
+            ["Windows/NTDS/ntds.dit"] = Pattern(3 << 20, 0x5a),
+            ["Windows/NTDS/edb.chk"] = Pattern(8192, 0x22),
+            ["Windows/NTDS/edb.log"] = Pattern(1 << 20, 0x11),
+            [$"Windows/SYSVOL/domain/Policies/{UiGpo}/GPT.INI"] = "[General]\r\nVersion=131075\r\ndisplayName=Lab Policy A\r\n"u8.ToArray(),
+            [$"Windows/SYSVOL/domain/Policies/{UiGpo}/Machine/registry.pol"] = "backup settings"u8.ToArray(),
+        }),
+    ]);
 
     private static async Task<AdExploreDto> WaitForExploreAsync(HttpClient client, Guid id)
     {

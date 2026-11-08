@@ -4,7 +4,7 @@
 @inject IDialogService Dialogs
 
 <PageTitle>Backups – backdafuckup</PageTitle>
-<PageHeader Title="Backups &amp; Restore" Description="The restore points of each VM. Restore the whole VM, single files or SQL Server databases from any of them." />
+<PageHeader Title="Backups &amp; Restore" Description="The restore points of each VM. Restore the whole VM, single files, SQL Server databases or Active Directory objects from any of them." />
 
 @if (_points is null)
 {
@@ -70,7 +70,9 @@ else
                                     <td style="text-align:right;white-space:nowrap">
                                         <MudMenu AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true">
                                             <ActivatorContent>
-                                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Restore" EndIcon="@Icons.Material.Filled.ArrowDropDown">Restore</MudButton>
+                                                @* MudBlazor 9: a custom activator opens the menu itself. *@
+                                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Restore" EndIcon="@Icons.Material.Filled.ArrowDropDown"
+                                                           OnClick="@context.ToggleAsync">Restore</MudButton>
                                             </ActivatorContent>
                                             <ChildContent>
                                                 <MudMenuItem Icon="@Icons.Material.Filled.Computer" Href="@($"/restore/{p.Id}")">Entire VM</MudMenuItem>
@@ -78,6 +80,10 @@ else
                                                 @if (p.SqlDatabaseCount > 0)
                                                 {
                                                     <MudMenuItem Icon="@Icons.Material.Filled.TableChart" Href="@($"/sql/{p.Id}")">SQL Server databases</MudMenuItem>
+                                                }
+                                                @if (p.DomainController)
+                                                {
+                                                    <MudMenuItem Icon="@Icons.Material.Filled.Domain" Href="@($"/ad/{p.Id}")">Active Directory objects</MudMenuItem>
                                                 }
                                             </ChildContent>
                                         </MudMenu>
