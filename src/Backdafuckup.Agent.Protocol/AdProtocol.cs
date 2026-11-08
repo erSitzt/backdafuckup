@@ -247,6 +247,9 @@ public sealed class AdJobRequest
     /// </summary>
     public string? NewPassword { get; set; }
 
+    /// <summary>Plan: a password will be entered for accounts without one (the preview shows those steps without it).</summary>
+    public bool PasswordEntered { get; set; }
+
     /// <summary>Gpo-prepare, plan and restore: the group policies.</summary>
     public List<AdGpoChoice> Gpos { get; set; } = new List<AdGpoChoice>();
 }

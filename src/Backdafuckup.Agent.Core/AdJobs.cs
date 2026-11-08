@@ -671,7 +671,7 @@ public sealed class AdJobRunner
                 return schema;
             }
 
-            var queries = new AdQueries(backup, live, info.LiveDomainDn ?? info.BackupDomainDn ?? string.Empty);
+            var queries = new AdQueries(backup, live, info.LiveDomainDn ?? info.BackupDomainDn ?? string.Empty, info.RecycleBin);
             switch (request.Kind)
             {
                 case AdJobKinds.Tree:

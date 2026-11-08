@@ -55,9 +55,9 @@ The lab forest `bdfu-lab.local` (deploy/lab: `dc1` with `ad_forest`, later `dc2`
 
 | Spike | Date | Result |
 |---|---|---|
-| S1 | | |
-| S2 | | |
-| S3 | | |
-| S4 | | |
+| S1 | 2026-11-08 | Open: the VSS freeze ran out (snapshot 28.1 s on shared LVM, two disks), so no backup was recorded; again with the config drive left out. |
+| S2 | 2026-11-08 | dsamain opens a copy from a VSS snapshot after `esentutl /r` ("consistent"); `/logpath` and `/allowUpgrade` are accepted; Negotiate bind as the domain admin over the DC's FQDN works; queries fast. Ports and firewall not checked yet. |
+| S3 | 2026-11-08 | Without the Recycle Bin (Windows Server 2025, forest level 2025): a deleted object has `isDeleted` and `isRecycled` at once; reanimation with the Show-Deleted modify works, the tombstone kept sAMAccountName and objectSid. With the Recycle Bin: open. |
+| S4 | 2026-11-08 | `unicodePwd` over the sealed Negotiate connection works; enabling the account after it works too. |
 | S5 | | |
 | S6 | | |

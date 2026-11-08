@@ -55,7 +55,7 @@ public sealed class AdRestorer
             }
 
             var live = Read(_live, choice.Guid, true);
-            var item = new AdRestoreItem { Guid = choice.Guid, Dn = backup.Dn, ObjectClass = backup.ObjectClass, State = AdCompare.State(backup, live), LiveDn = live?.Dn };
+            var item = new AdRestoreItem { Guid = choice.Guid, Dn = backup.Dn, ObjectClass = backup.ObjectClass, State = AdCompare.State(backup, live, _recycleBin), LiveDn = live?.Dn };
             items.Add(item);
             work.Add(new Work(choice, backup, live, item));
         }
@@ -275,7 +275,8 @@ public sealed class AdRestorer
     {
         var item = w.Item;
         var flags = int.TryParse(w.Backup.Text("userAccountControl"), out var uac) ? uac : 0x200;
-        if (!string.IsNullOrEmpty(request.NewPassword))
+        // The preview knows only that a password was entered; the restore gets the password itself.
+        if (!string.IsNullOrEmpty(request.NewPassword) || (!write && request.PasswordEntered))
         {
             Step(item, "password", item.LiveDn!, "the password entered for the restore", write, log,
                 () => _live.Modify(item.LiveDn!, new[] { new AdModification(AdModificationKind.Replace, "unicodePwd", PasswordValue(request.NewPassword!)) }));

@@ -716,7 +716,8 @@ else
         string.IsNullOrWhiteSpace(_targetParent) ? null : _targetParent.Trim(),
         withSecrets && !string.IsNullOrEmpty(_password) ? _password : null,
         withSecrets ? _confirm?.Trim() : null,
-        _restoreGpos);
+        _restoreGpos,
+        !string.IsNullOrEmpty(_password));
 
     private async Task PlanAsync()
     {

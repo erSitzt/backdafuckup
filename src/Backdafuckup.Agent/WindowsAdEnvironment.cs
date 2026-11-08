@@ -632,9 +632,12 @@ internal sealed class WindowsAdDirectory : IAdDirectory
     private static AdRecord Record(SearchResultEntry entry)
     {
         var record = new AdRecord(AdText.ParseExtendedDn(entry.DistinguishedName).Dn);
-        foreach (string name in entry.Attributes.AttributeNames)
+        foreach (string key in entry.Attributes.AttributeNames)
         {
-            record.Attributes[name] = Values(name, entry.Attributes[name]);
+            // The collection's keys are lower-cased; the attribute keeps the server's spelling (sAMAccountName).
+            var attribute = entry.Attributes[key];
+            var name = string.IsNullOrEmpty(attribute.Name) ? key : attribute.Name;
+            record.Attributes[name] = Values(name, attribute);
         }
 
         return record;

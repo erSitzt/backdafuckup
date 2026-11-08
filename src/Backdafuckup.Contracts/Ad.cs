@@ -91,9 +91,10 @@ public sealed record AdRestoreObjectDto(Guid Guid, List<string>? Attributes = nu
 /// <param name="NewPassword">For accounts that come back without a password; null: they stay disabled (change at next logon). Never stored.</param>
 /// <param name="ConfirmDomain">Restore only: the live domain's DNS name, typed by the user as confirmation.</param>
 /// <param name="Gpos">Group policies: their files (GPT) and container (GPC), versions raised, links optional.</param>
+/// <param name="PasswordEntered">Preview: a password will be entered (the preview shows those steps without it).</param>
 public sealed record AdRestoreRequestDto(
     List<AdRestoreObjectDto> Objects, bool Recreate = false, string? TargetParentDn = null, string? NewPassword = null, string? ConfirmDomain = null,
-    List<AdGpoRestoreDto>? Gpos = null);
+    List<AdGpoRestoreDto>? Gpos = null, bool PasswordEntered = false);
 
 /// <param name="Guid">The objectGUID of the groupPolicyContainer in the backup.</param>
 /// <param name="Links">Add back the links (gPLink of the domain and OUs) the backup had.</param>

@@ -54,6 +54,18 @@ public sealed class AdTests : IDisposable
     }
 
     [Fact]
+    public void Without_the_recycle_bin_a_recycled_object_is_an_ordinary_tombstone()
+    {
+        // AD marks a deleted object as recycled at once when the Recycle Bin is off (seen on Windows Server 2025).
+        var queries = new AdQueries(_backup, _live, Domain, recycleBin: false);
+
+        var (entries, _, _) = queries.Search(new AdJobRequest { Classes = ["user"] });
+
+        Assert.Equal(AdObjectStates.Deleted, entries.Single(e => e.Name == "lab-user04").State);
+        Assert.Equal(AdObjectStates.Deleted, entries.Single(e => e.Name == "lab-user03").State);
+    }
+
+    [Fact]
     public void A_search_is_paged_and_looks_up_the_live_objects_in_batches()
     {
         var queries = new AdQueries(_backup, _live, Domain);

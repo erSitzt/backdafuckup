@@ -149,6 +149,38 @@ The VMs, accounts and job of section F. In the job's guest processing: *SQL Serv
 | G13 | An image backup of the job while log backups run (SQL Server snapshot). | The suspend waits for a running log backup and vice versa; both succeed. |
 | G14 | On a VM with SQL Server 2019 (or a VSS-mode job): turn on the backups. | A native full first (no snapshot base), then log backups; G3 with the native full as the base (downloaded into the staging folder). *Publish* is offered only with a restore point as the base. The full is downloadable as `.bak` on the database's page. |
 
+### H. Active Directory
+
+The lab forest `bdfu-lab.local` from [`deploy/lab`](../deploy/lab/README.md):
+- `dc1` (`ad_forest`) with the test data: OU `Lab` with `Users` (`lab-user01`–`30`; `lab-user01` is the manager of 02–10), `Groups` (`LabGroupA`, `LabGroupB` with A as a member, `LabDistribution`, `LabUniversal`), `Computers` (`lab-pc01`–`05`) and `Deep\Nested` with `lab-deep`;
+- the GPOs *Lab Policy A* (linked to `Lab`), *B* (linked to `Lab\Users`) and *C* (not linked);
+- the Recycle Bin off;
+- `dc2` (`ad_replica`) as a second DC.
+
+Preparation:
+1. Install the agent on both DCs (account `BDFU-LAB\Administrator`, also under *Credentials*).
+2. Create a job for `dc1` (and `dc2`) with guest processing *VSS*.
+
+The state before each change is in `C:\bdfu-lab-setup\ad-before.xml` and `gpo-before.csv` on dc1. The spikes in [`spike.md`](../agent-os/specs/2026-11-06-2308-ad-object-restore/spike.md) come first.
+
+| # | Steps | Expected |
+|---|---|---|
+| H1 | Back up dc1. | Session log: "DC1 is a domain controller of domain bdfu-lab.local; VSS full backup". The restore point shows *AD* and *application*. On dc1 `repadmin /showbackup` shows the backup's time for every partition; event 1917 in *Directory Service*, no new 2089. |
+| H2 | *Restore → Active Directory objects*, DC `dc1`, `BDFU-LAB\Administrator`, *Open*. | Progress while copying; then the domain's OUs. On dc1: `icacls C:\ProgramData\backdafuckup\ad\<id>` only SYSTEM and Administrators; `dsamain` listening on 50000–50003 (`Get-NetTCPConnection -LocalPort 50000`). From another machine port 50000 is blocked or the logon fails. The default search finds nothing deleted. |
+| H3 | Delete `lab-user05` (Recycle Bin off). *Search*, open it, restore it with a new password. | Before: *deleted*, the object view shows what the tombstone lost (description, `memberOf`, `manager`). Preview: reanimate, attributes, member of `LabGroupA`, password and account. Afterwards `Get-ADUser lab-user05 -Properties *` equals `ad-before.xml` (same objectGUID and SID), enabled, member of its groups; a logon with the new password works. The password is in no log. |
+| H4 | Delete `lab-user07`, restore it without a password. | Disabled, `pwdLastSet` 0, the warning in the preview and the session; enabling it needs a new password. |
+| H5 | Change `description`, `title` and `manager` of `lab-user02`, move it into `Lab`. Restore only `description` and `manager`, with *Move moved objects back*. | *changed*; only those two attributes and the move are written (title stays changed); `manager` points to `lab-user01` again. |
+| H6 | Delete the OU `Deep` with everything below (`Remove-ADOrganizationalUnit -Recursive`; protection off first). Restore `Deep`, `Nested` and `lab-deep` in one go. | Parents first: `Deep`, then `Nested`, then `lab-deep`, each with its objectGUID; nothing skipped. |
+| H7 | Delete `LabGroupB`. Restore it. | Reanimated; `member` again contains `LabGroupA`; its own memberships back. |
+| H8 | Turn the Recycle Bin on (`Enable-ADOptionalFeature 'Recycle Bin Feature' …`), back up, delete `lab-user06`, restore it. | Explore shows *Recycle Bin on*; the preview has only *reanimate*; the user comes back whole, the old password still works. |
+| H9 | Long run: `msDS-DeletedObjectLifetime` and `tombstoneLifetime` at their minimum (2 days); delete `lab-user08`; after 3 days *Re-create objects that are gone*. | *gone* (or *recycled* → reanimation refused, then re-create); new objectGUID and SID, the warning, attributes and memberships from the backup. |
+| H10 | Change a setting of *Lab Policy A* (the registry marker) and remove its link on `Lab`. Restore the policy with *Add the links back*. | Files back (`registry.pol` as in the backup), version user and computer each max + 1 in `GPT.INI` and GPMC, link on `Lab` back; on dc2 the same files and version after DFS-R (`Get-DfsrBacklog` empty); no `{GUID}.bdfu-*` folders left; on a member `gpupdate /force` applies the old setting. |
+| H11 | Delete *Lab Policy C* in GPMC (container and files). Restore it. | Re-created under the same `{GUID}`, GPMC shows it with its settings and delegation (DACL from the backup); warning "re-created". |
+| H12 | Open an explore session, then: (a) *Close*; (b) restart the agent service on dc1; (c) restart the backup server; (d) leave it for an hour. | Each time `dsamain` is gone and the work folder deleted: (a) at once, (b) at the agent's start, (c) when the agent is reachable again (the session says so), (d) after 60 minutes. |
+| H13 | Restore the dc1 VM to another location, powered off; then once more with *Power on*, isolated network only. | The wizard's note; the session logs the old and the new VM generation id; with power on a warning about the copy. In the copy: event 2179/2180 (generation id changed), a new invocationId (`repadmin /showrepl`). |
+| H14 | Open dc1's restore point on `dc2`; restore `lab-user09` after deleting it. | Works on dc2; the change replicates to dc1. |
+| H15 | A delegated account without "Reanimate Tombstones": restore a deleted user. | The object fails with `InsufficientAccessRights (50)`, the DN and the DC in the session; nothing else is written. |
+
 ## Results
 
 | Check | Date | Server / agent version | Result | Notes |
@@ -173,3 +205,7 @@ The VMs, accounts and job of section F. In the job's guest processing: *SQL Serv
 | G11 | 2026-11-06 | 0.3.0 (`67c2e82`) | passed, fixed | bdfu-lab-sql2: about 1.1 GB of log in `shop_restored`, the agent process killed during its `BACKUP LOG` (09:45). SQL Server aborted the backup (not in `msdb`, no partial file); the finished `shop` backup of the same run stayed queued; the service restarted itself. The 10:00 run resolved the interrupted entry ("partial file was deleted"), sent the queued file first and backed up `shop_restored` from the previous last LSN (1.2 GB, 39 MB new in the repository); LSNs contiguous. The warning repeated itself and did not name the IP (fixed). |
 | G12 | 2026-11-06 | 0.3.0 (`67c2e82`) | passed | Agent service on bdfu-lab-sql2 stopped 10:13–10:16: the 10:15 run warned "The agent in BDFU-LAB-SQL2 (10.26.17.21) is offline …"; the 10:30 run caught up, LSNs contiguous, chain *intact*. |
 | G10 | 2026-11-06 | 0.3.0 (`61f887e`) | passed, fixed | Service stopped 10:46–11:16: no backups in either VM meanwhile, chains intact. Found: the run due at the start went at once, before the agents had reconnected, and reported both agents offline (fixed: up to 2 minutes' grace for the agents after a start); the 11:30 run caught up without an RPO warning, since the check compared with the log backup the run had just stored (fixed: it compares with the backup before). |
+| H1 | 2026-11-08 | 0.3.0 (`33bc662`) | open | bdfu-lab-dc1 (Windows Server 2025): the session logs "BDFU-LAB-DC1 is a domain controller of domain bdfu-lab.local; VSS full backup", the restore point is marked *AD*. The VM snapshot took 28.1 s on `alletra-mp01` (shared LVM, two disks: C: and the XO config drive), so the backup was crash-consistent (`VSS_E_HOLD_WRITES_TIMEOUT`) and AD did not record it. Again with the config drive left out (`[NOBAK]`). |
+| H2 | 2026-11-08 | 0.3.0 (`33bc662`) | passed | From the crash-consistent restore point: 5 files, 70 MB (ntds.dit, edb.chk, edb.log, edb00001.log, edbtmp.log) copied and checked; `esentutl /r`: consistent; dsamain on port 50156 (`/logpath` and `/allowUpgrade` accepted); tree, search, object view and the 5 GPOs in 0.1–0.2 s each. |
+| H3 | 2026-11-08 | 0.3.0 (`33bc662`) | passed, fixed | `lab-user05` deleted (Recycle Bin off) and restored with a new password: same objectGUID and SID, attributes as in `ad-before.xml`, manager and both groups back, enabled, logon with the new password works, the password in no log. Found and fixed: AD marks a deleted object as recycled at once without the Recycle Bin, so it showed as *recycled* (now *deleted*); the preview did not show the password steps when a password was entered; `adminCount` was cleared (now left to AD); attribute names came lower-case from System.DirectoryServices.Protocols. |
+| H12 (a) | 2026-11-08 | 0.3.0 (`33bc662`) | passed | *Close*: dsamain stopped, work folder and `ad-mounts.json` gone, nothing listening on 50000–50999; the work root only SYSTEM and Administrators. |

@@ -119,7 +119,7 @@ public sealed class AdGpoRestorer
         var name = Name(gpc);
         item.Dn = gpc.Dn;
         var liveGpc = Read(_live, choice.Guid, true);
-        item.State = AdCompare.State(gpc, liveGpc);
+        item.State = AdCompare.State(gpc, liveGpc, _recycleBin);
         if (liveGpc is null && FindByName(name) is { } other)
         {
             throw new InvalidOperationException(

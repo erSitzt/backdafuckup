@@ -62,6 +62,20 @@ public sealed class AdRestoreTests
     }
 
     [Fact]
+    public void The_preview_shows_the_password_steps_when_a_password_will_be_entered()
+    {
+        var request = Request(false, Choice("lab-user03"));
+        request.PasswordEntered = true;
+
+        var item = Item(Restorer(false).Run(request, write: false, _log.Add), "lab-user03");
+
+        Assert.Equal(["reanimate", "modify", "member", "password", "account"], item.Steps.Select(s => s.Operation));
+        Assert.Equal("userAccountControl 512 (enabled, as in the backup)", item.Steps[^1].Text);
+        Assert.Empty(item.Warnings);
+        Assert.Empty(_live.Writes);
+    }
+
+    [Fact]
     public void A_tombstone_comes_back_with_its_attributes_membership_and_a_new_password_and_a_changed_object_is_put_back()
     {
         var items = Restorer(false).Run(Request(false, Password, Choice("lab-user03"), Choice("lab-user02", moveBack: true)), write: true, _log.Add);

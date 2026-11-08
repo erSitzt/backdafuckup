@@ -42,6 +42,7 @@ public static class AdCompare
         ["memberOf"] = "back link: restored through the groups' member attribute",
         ["msDS-KeyVersionNumber"] = "maintained by the domain controllers",
         ["lockoutTime"] = "account lockout: maintained by the domain controllers",
+        ["adminCount"] = "maintained by the domain controllers (AdminSDHolder)",
     };
 
     /// <summary>Integer attributes that hold a FILETIME.</summary>
@@ -50,10 +51,13 @@ public static class AdCompare
         "pwdLastSet", "accountExpires", "lastLogon", "lastLogonTimestamp", "badPasswordTime", "lastLogoff", "lockoutTime",
     };
 
-    /// <summary>The state of a backup object given its live counterpart (null: none with this objectGUID, even deleted).</summary>
-    public static string State(AdRecord backup, AdRecord? live) =>
+    /// <summary>
+    /// The state of a backup object given its live counterpart (null: none with this objectGUID, even deleted). Without
+    /// the Recycle Bin, AD marks a deleted object as recycled at once: that is an ordinary tombstone, shown as deleted.
+    /// </summary>
+    public static string State(AdRecord backup, AdRecord? live, bool recycleBin = true) =>
         live is null ? AdObjectStates.Gone
-        : live.Flag("isRecycled") ? AdObjectStates.Recycled
+        : live.Flag("isRecycled") && recycleBin ? AdObjectStates.Recycled
         : live.Flag("isDeleted") ? AdObjectStates.Deleted
         : Differs(backup, live) ? AdObjectStates.Changed
         : AdObjectStates.Unchanged;
@@ -80,7 +84,7 @@ public static class AdCompare
     }
 
     /// <summary>The whole object view: every attribute of both sides with syntax, difference and whether a restore can write it.</summary>
-    public static AdObjectView View(AdRecord backup, AdRecord? live, AdSchema schema)
+    public static AdObjectView View(AdRecord backup, AdRecord? live, AdSchema schema, bool recycleBin = true)
     {
         var view = new AdObjectView
         {
@@ -88,7 +92,7 @@ public static class AdCompare
             Dn = backup.Dn,
             LiveDn = live?.Dn,
             ObjectClass = backup.ObjectClass,
-            State = State(backup, live),
+            State = State(backup, live, recycleBin),
             Sid = backup.Bytes("objectSid") is { } sid ? AdText.Sid(sid) : null,
             ParentDn = AdText.Parent(backup.Dn),
         };
@@ -114,7 +118,7 @@ public static class AdCompare
             var maintained = Maintained.Contains(name);
             view.Attributes.Add(new AdAttribute
             {
-                Name = name,
+                Name = info?.Name ?? name,
                 Syntax = syntax,
                 Backup = Values(left, name, syntax, name),
                 Live = Values(right, name, syntax, name),

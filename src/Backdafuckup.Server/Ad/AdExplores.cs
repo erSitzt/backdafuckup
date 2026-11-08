@@ -516,6 +516,7 @@ public sealed class AdExplores(
         Recreate = request.Recreate,
         TargetParentDn = string.IsNullOrWhiteSpace(request.TargetParentDn) ? null : request.TargetParentDn.Trim(),
         NewPassword = kind == AdJobKinds.Restore && !string.IsNullOrEmpty(request.NewPassword) ? request.NewPassword : null,
+        PasswordEntered = request.PasswordEntered || !string.IsNullOrEmpty(request.NewPassword),
     };
 
     /// <summary>The live domain's DNS name (from the mount, else the restore point's domain).</summary>

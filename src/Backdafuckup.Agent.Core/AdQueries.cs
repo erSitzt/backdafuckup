@@ -19,12 +19,15 @@ public sealed class AdQueries
     private readonly IAdDirectory _backup;
     private readonly IAdDirectory _live;
     private readonly string _domainDn;
+    private readonly bool _recycleBin;
 
-    public AdQueries(IAdDirectory backup, IAdDirectory live, string domainDn)
+    /// <param name="recycleBin">The live directory has the Recycle Bin (else a recycled object is an ordinary tombstone).</param>
+    public AdQueries(IAdDirectory backup, IAdDirectory live, string domainDn, bool recycleBin = true)
     {
         _backup = backup;
         _live = live;
         _domainDn = domainDn;
+        _recycleBin = recycleBin;
     }
 
     /// <summary>The containers and OUs one level below <paramref name="baseDn"/> (null: the domain).</summary>
@@ -64,7 +67,7 @@ public sealed class AdQueries
         var backup = _backup.Search(_domainDn, AdText.GuidFilter(guid), AdScope.Subtree, All, 1, null, extendedDn: true, fullValues: true).Records.FirstOrDefault()
             ?? throw new AdDirectoryException($"The backup's directory ({_backup.Endpoint}) has no object with objectGUID {guid} below {_domainDn}.", 32);
         var live = _live.Search(_domainDn, AdText.GuidFilter(guid), AdScope.Subtree, All, 1, null, showDeleted: true, extendedDn: true, fullValues: true).Records.FirstOrDefault();
-        var view = AdCompare.View(backup, live, schema);
+        var view = AdCompare.View(backup, live, schema, _recycleBin);
 
         // The parent must exist live for a restore into the old place: found by its objectGUID (it may have moved).
         if (view.ParentDn is { } parentDn)
@@ -158,7 +161,7 @@ public sealed class AdQueries
                 LiveDn = current?.Dn,
                 Name = AdText.RdnValue(r.Dn),
                 ObjectClass = r.ObjectClass,
-                State = AdCompare.State(r, current),
+                State = AdCompare.State(r, current, _recycleBin),
                 SamAccountName = r.Text("sAMAccountName"),
                 DisplayName = r.Text("displayName"),
                 Description = r.Text("description"),

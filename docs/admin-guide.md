@@ -135,7 +135,7 @@ XCP-ng / XenServer removed the quiesced snapshot in 8.1, so a VM snapshot is cra
 4. **10 s limit:** Windows releases held writes after **10 seconds** at the latest (`VSS_E_HOLD_WRITES_TIMEOUT`). Only the VM snapshot runs inside that window, so it must finish within 10 s. Otherwise the backup is crash-consistent and the session ends with a warning, or the VM fails if the job says so.
    - XAPI snapshots the disks of a VM one after another, so the time grows with the number of disks. Measured on shared LVM storage (FC/iSCSI), one snapshot at a time: 7–9 s for a VM with one disk, 25 s for three disks, 47 s for four disks. The session log shows the time of every snapshot with the free space of its storages ("Snapshot … created in 8.1 s: 1 disk(s) on 'storage' (23.4 % free).").
    - What shortens it: fewer disks in the snapshot (mark disks without backup value with `[NOBAK]`, see [VM snapshots](#vm-snapshots)), and only one snapshot at a time per storage (the default).
-5. **Copy-only:** the backup is a VSS copy-only backup (`VSS_BT_COPY`). The SQL Server backup chain (differential base, log backups) of other backup products stays untouched. Logs are not truncated.
+5. **Copy-only:** the backup is a VSS copy-only backup (`VSS_BT_COPY`). The SQL Server backup chain (differential base, log backups) of other backup products stays untouched. Logs are not truncated. Domain controllers are the exception: they get a VSS full backup, so that AD records it (see [Active Directory](#active-directory)).
 
 **Method "SQL Server snapshot where SQL Server 2022+ runs, VSS for all other VMs"**
 
@@ -156,7 +156,7 @@ When the VM snapshot takes longer than VSS allows (see the 10 s limit above), ch
   - For a database in FULL or BULK_LOGGED recovery that never had a regular full backup, it starts the log chain. Until then SQL Server frees the log at checkpoints as in SIMPLE recovery and refuses `BACKUP LOG` (error 4214). From then on only log backups free it, so the log grows until log backups run. The session ends with a warning naming these databases.
 - **Copy-only backup (outside the backup chain):** changes nothing in the backup chains. Choose it for VMs whose SQL Server backups another tool takes with differential backups, or for backups kept apart from the chain. Log backups of an existing chain can still be restored on top of it, but it does not start a chain.
 - With either type, the session warns about databases in FULL or BULK_LOGGED recovery that have a log chain but no log backup for more than a day (by any tool): their log grows.
-- VSS backups are always copy-only, also for the VMs of this method that fall back to VSS.
+- VSS backups are copy-only (domain controllers: full, see [Active Directory](#active-directory)), also for the VMs of this method that fall back to VSS.
 - Jobs that used the SQL Server snapshot before this setting existed keep copy-only backups.
 
 **VSS for all other VMs:** if the agent cannot suspend a single database, the same backup uses the VSS freeze, as with the method "VSS for every VM". The session log says why:
@@ -390,6 +390,118 @@ A job backs up the transaction logs of the SQL Server databases in its VMs when 
 **Full backups as .bak:** the database's page lists the native and system database fulls the agent took, newest first, with *Download*. The file comes straight from the repository through a link that works once, for a minute. Restore it anywhere with `RESTORE DATABASE … FROM DISK = N'…' WITH MOVE …`; `RESTORE FILELISTONLY` lists the logical names. System databases (`master`, `msdb`, `model`) are restored this way, by hand (`master` in single-user mode).
 
 **Limits:** no differential backups, no availability groups or failover cluster instances, no resume of a large upload (it starts again), and one SQL backup object per run and instance in the repository (288 per VM and day at 5 minutes).
+
+## Active Directory
+
+For domain controllers backed up with guest processing. AD records each backup, and single objects and group policies come back from a restore point without restoring the VM. The product reads the backup's directory only through Windows' own AD Database Mounting Tool (`dsamain.exe`) and LDAP, and changes the live directory only over LDAP; it never parses or writes a database file itself.
+
+**Backing up a domain controller**
+- **Method:** guest processing with **VSS**. With the method *SQL Server snapshot* the directory is only crash-consistent (the snapshot suspends SQL Server only), and the session warns.
+- **VSS full:** the agent reports the domain role, and a domain controller gets a VSS full backup (`VSS_BT_FULL`). The NTDS writer then records the backup in AD: `repadmin /showbackup` shows its time, and event 2089 ("not backed up") stops. All other VMs stay copy-only.
+  - Exception: a domain controller with SQL Server databases in a job with SQL Server log backups stays copy-only, with a warning (SQL Server would record a VSS full as a full backup of every database). Back such a VM up in a job without log backups.
+- **The restore point:**
+  - It carries an *AD* chip and the facts at backup time: domain, paths of `ntds.dit`, its logs and SYSVOL, invocation id, USN, functional levels, Recycle Bin, tombstone and deleted-object lifetimes.
+  - The directory has its own consistency, from the NTDS writer. A crash-consistent directory is a warning; the recovery on the domain controller replays its logs.
+  - Restore points from before this version are marked by the server when it starts, from their guest metadata.
+
+**Opening a backup's directory** (*Backups & Restore → Restore → Active Directory objects*)
+- **Choose:**
+  - a domain controller of the same domain with the agent, online and with the AD DS tools (`dsamain.exe`);
+  - a Windows account of the domain (under *Credentials*).
+- **The database and its logs are copied into a work folder on that DC:**
+  - `ntds.dit`, `edb.chk` and `edb*.log` go into `%ProgramData%\backdafuckup\ad\<session>`. Only SYSTEM and Administrators can open the folder.
+  - The copy goes through the agent, each file checked with SHA-256.
+  - Free space needed: the files plus 10 %, at least 1 GiB more.
+- **The copy is served there:**
+  - `esentutl /r` recovers the copy.
+  - `dsamain` serves it read-only over LDAP on four free ports from 50000 (LDAP, LDAPS, GC, GC-SSL).
+  - dsamain listens on all interfaces and lets only administrators in. Block 50000–50999 in the Windows Firewall if other machines could reach the DC on them.
+- **The DC's Windows version must be the same or newer:** dsamain cannot open a database from a newer Windows (e.g. Windows Server 2025's database on a 2022 DC).
+- **The copy holds every password hash of the domain.** It is deleted:
+  - when the session is closed (*Close*, or *Stop* on the Sessions page);
+  - after 60 minutes without use (`AdExplore:IdleTimeout`; the agent itself after 75);
+  - when the backup server restarts (as soon as the DC's agent is reachable);
+  - when the agent starts again (from its journal `ad-mounts.json`).
+
+  A folder that cannot be deleted is an error in the agent log with its path: delete it by hand. At most 4 sessions are open at a time (`AdExplore:MaxOpen`).
+- **Audit:**
+  - The session *AD explore* logs who opened what, the copied files, every object someone viewed and the closing.
+  - It stays open when the page is left. The page continues an open session of the same restore point.
+
+**Browsing and comparing**
+- **States:** each object of the backup gets its state in the live directory, matched by objectGUID (deleted objects too):
+  - *unchanged*;
+  - *changed*;
+  - *deleted* (in Deleted Objects: with the Recycle Bin with all attributes, without it a tombstone);
+  - *recycled* (Recycle Bin, past the deleted-object lifetime);
+  - *gone* (removed after the tombstone lifetime).
+- **What counts as a change:**
+  - Attributes the DCs maintain themselves (logons, USNs, replication data) do not.
+  - Links (e.g. `manager`, `member`) are compared by the objectGUID they point to.
+  - A move shows as a different parent (`parentGUID`); renaming an OU changes nothing below it.
+- **The search** goes page by page through the backup. By default it shows what was deleted or is gone since the backup; *Search further* continues.
+- **The object view** shows every attribute in the backup and live, the differences, the group memberships, and for each attribute whether a restore can write it and why not.
+
+**Restoring objects**
+- **How:**
+  1. Choose objects (or attributes in the object view).
+  2. The preview lists every write with its DN and old and new values; nothing is written yet.
+  3. Type the live domain to confirm.
+
+  The restore runs as the session *AD restore*, with one task per object and every write in its log.
+- **Deleted, Recycle Bin on:** reanimated with its objectGUID and SID; attributes, links and the password come back with it.
+- **Deleted without Recycle Bin (tombstone), or recycled:**
+  1. Reanimated with its objectGUID and SID.
+  2. The attributes the tombstone lost are written from the backup.
+  3. It is added back to its groups.
+  4. Accounts: with a password entered in the dialog, the password is set and the account enabled as in the backup. Otherwise it stays disabled and must change the password at the next logon.
+- **Gone:** with *Re-create objects that are gone*, created anew from the backup, with its attributes and memberships.
+  - It has a **new objectGUID and SID**: permissions on other objects, SID-based assignments and references from other domains do not follow (the preview and the log say so).
+  - Accounts as above. A re-created computer must join the domain again.
+- **Changed:**
+  - The chosen attributes are written back. Links are mapped to the live objects by GUID; a value whose object does not exist live is skipped with a warning.
+  - *Move moved objects back* moves and renames an object into its old place.
+- **Order:**
+  - Parents come first, and links can point to objects restored in the same run.
+  - An object whose container is not live (and not restored with it) is skipped, or goes into the container given in the dialog.
+- **Passwords:** entered in the dialog only. They travel in memory and in the agent's job, are written as `unicodePwd` over a signed and sealed LDAP connection, and are never stored or logged.
+- **Never:**
+  - no live object is deleted;
+  - no passwords or SID history from the backup;
+  - no security descriptors of objects (except those of group policies);
+  - no links with binary data (e.g. `msDS-KeyCredentialLink`);
+  - nothing in the configuration partition (sites), in DNS zones or in other domains of the forest.
+- **Rights of the account:**
+  - write the objects and attributes and create objects in their containers;
+  - "Reanimate Tombstones" on the domain;
+  - reset passwords;
+  - for group policies, write SYSVOL.
+
+  Domain admins have all of these.
+
+**Restoring group policies** (tab *Group policies*)
+1. A staging folder `<SYSVOL>\<domain>\Policies\{GUID}.bdfu-new` is created in the DC's SYSVOL, with SYSVOL's permissions.
+2. The backup's files of the policy (`SYSVOL\domain\Policies\{GUID}` in the restore point) are copied into it with their permissions, each checked with SHA-256.
+3. The folders are swapped. The current one stays as `{GUID}.bdfu-replaced` until the restore is done, and comes back if it fails.
+4. The container (GPC) is restored like an object. A gone policy is re-created under the same `{GUID}`, with its `User` and `Machine` containers.
+5. The version goes up in `GPT.INI` and `versionNumber`: user and computer half each to max(live, backup) + 1. Clients then apply the policy again, and DFS-R replicates it.
+6. The DACL comes from the backup.
+7. With *Add the links back*, the links the backup had on the domain and the OUs are added where they are missing (not on sites).
+
+An interrupted restore is cleaned up when the agent starts:
+- a staging folder is deleted;
+- a set-aside folder goes back if the policy has no folder, otherwise it stays and the agent log names it.
+
+Only folders named `{GUID}` or `{GUID}.bdfu-*` directly in `Policies` are ever touched. WMI filters are not restored.
+
+**Restoring a whole domain controller** (VM restore)
+- **New VM generation id:** XCP-ng gives a restored VM a new VM generation id. At the first start, Windows Server 2012 and later then restore AD non-authoritatively: a new invocation id, the RID pool dropped, and the newer changes taken from the other DCs.
+  - The restore session logs the old and the new id.
+  - If the id is missing or unchanged, it warns: start the VM without network and handle it by hand (USN rollback risk).
+- **A copy beside the original:** a copy at another location has the same name, addresses and computer account as the original. Connect it only to an isolated network; the wizard and the session warn when it is powered on.
+- **Not done by the product:**
+  - Authoritative restores (e.g. a deleted OU with everything below it on all DCs, without object restore) are done with `ntdsutil` in Directory Services Restore Mode on a DC restored to an isolated network.
+  - Recovering a whole forest follows Microsoft's *AD Forest Recovery* guide.
 
 ## API and API tokens
 

@@ -17,7 +17,11 @@
 - **Status & alerting:** job logs, success/failure reporting and notifications
 - **Application awareness:** application-consistent backups of Windows guests (VSS). Needs our own in-guest agent (VSS requester), because XAPI's quiesced snapshots were removed in XenServer / XCP-ng 8.1
   - On storage where the XAPI snapshot takes longer than VSS's 10 s (shared LVM, several disks): T-SQL snapshot backup for SQL Server 2022+, then an in-guest shadow copy that is reverted when the backup is read (spec `2026-11-04-2026-consistent-snapshots-slow-storage`)
-- **Active Directory objects:** application-aware AD backup with object-level restore
+- **Active Directory objects:** application-aware AD backup with object-level restore (spec `2026-11-06-2308-ad-object-restore`)
+  - Backup: domain controllers are recognised and get a VSS full backup (AD records it); the directory's facts and consistency go into the restore point; a VM restore of a DC gets a new VM generation id (non-authoritative restore by Windows)
+  - Explore: the restore point's `ntds.dit` is copied to a live DC of the domain and served there by Windows' AD Database Mounting Tool (dsamain); browse, search and compare every object with the live directory (unchanged, changed, deleted, recycled, gone); the copy is always deleted (close, idle time, restarts)
+  - Restore over LDAP from a preview with typed confirmation: deleted objects reanimated with and without the Recycle Bin (tombstone attributes and memberships written back), gone ones re-created with a new SID, changed attributes and moves put back, new passwords set or accounts left disabled; nothing live deleted
+  - Group policies: files in SYSVOL swapped in with their permissions, container, DACL, versions raised for clients and DFS-R, links added back
 - **MS SQL Server:** application-aware backup and restore of SQL Server databases (spec `2026-11-03-0026-sql-server-restore`)
   - Backup: VSS, or the T-SQL snapshot backup for SQL Server 2022+ as a full (default) or copy-only backup, with the `.bkm` and LSNs in the restore point
   - SQL browser with export of the files (ZIP) and as `.bak`, publish without copying (loopback iSCSI with a write overlay), restore as a new database (same or another VM or instance), overwrite of the original with rollback
@@ -30,6 +34,7 @@
 ## Phase 2: Post-Launch
 
 - **Users, roles and audit (user request 2026-11-06):** more than one administrator; roles (e.g. administrator, operator who runs jobs and restores, read-only) checked on every endpoint, also for API tokens (a token acts with its user's roles; scopes per token later); an audit log of who did what (sign-ins, changes to jobs, credentials and repositories, restores, publishes, downloads, token use), kept in the catalog and shown in the console. API tokens (2026-11-06) are the first step: they already act as their user and mark each request as a token request.
+- **Active Directory, follow-ups:** WMI filters and site links of group policies; security descriptors of objects; AD-integrated DNS zones and the configuration partition; authoritative restore through the product (`ntdsutil` in DSRM on an isolated copy); passwords from the backup (would need the backup's boot key; not planned unless asked); compare and restore across domains
 - **Tape out:** move or copy backups to tape on an HPE MSL tape library
 - **Offsite / immutable copy:** backup copies to a secondary site, S3 or immutable storage
 - **SQL Server, follow-ups:** differential backups; automatic restore tests (restore to a point in time into a test instance and `DBCC CHECKDB` on a schedule); mail/webhook alerts for chain breaks and RPO; availability groups and failover cluster instances; streaming fulls without staging space in the VM (VDI); resumable uploads; repository pack files for the many small log backup objects
