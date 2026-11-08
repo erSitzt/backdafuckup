@@ -361,7 +361,88 @@ internal sealed class WindowsAdDirectory : IAdDirectory
         return page;
     }
 
+    public void Add(string dn, IReadOnlyDictionary<string, List<object>> attributes)
+    {
+        var request = new AddRequest(dn);
+        foreach (var pair in attributes)
+        {
+            var attribute = new DirectoryAttribute { Name = pair.Key };
+            foreach (var value in pair.Value)
+            {
+                Value(attribute, value);
+            }
+
+            request.Attributes.Add(attribute);
+        }
+
+        Write(request, dn, "add");
+    }
+
+    public void Modify(string dn, IReadOnlyList<AdModification> changes, bool showDeleted = false)
+    {
+        var request = new ModifyRequest(dn);
+        foreach (var change in changes)
+        {
+            var modification = new DirectoryAttributeModification
+            {
+                Name = change.Name,
+                Operation = change.Kind switch
+                {
+                    AdModificationKind.Add => DirectoryAttributeOperation.Add,
+                    AdModificationKind.Delete => DirectoryAttributeOperation.Delete,
+                    _ => DirectoryAttributeOperation.Replace,
+                },
+            };
+            foreach (var value in change.Values)
+            {
+                Value(modification, value);
+            }
+
+            request.Modifications.Add(modification);
+        }
+
+        if (showDeleted)
+        {
+            request.Controls.Add(new ShowDeletedControl());
+        }
+
+        Write(request, dn, "modify");
+    }
+
+    public void Move(string dn, string newRdn, string newParentDn) =>
+        Write(new ModifyDNRequest(dn, newParentDn, newRdn) { DeleteOldRdn = true }, dn, "move");
+
     public void Dispose() => _connection.Dispose();
+
+    private static void Value(DirectoryAttribute attribute, object value)
+    {
+        if (value is byte[] bytes)
+        {
+            attribute.Add(bytes);
+        }
+        else
+        {
+            attribute.Add((string)value);
+        }
+    }
+
+    /// <summary>Sends a write; errors name the DC, the DN and the LDAP result with the server's extended error.</summary>
+    private void Write(DirectoryRequest request, string dn, string operation)
+    {
+        try
+        {
+            _connection.SendRequest(request);
+        }
+        catch (DirectoryOperationException ex)
+        {
+            var code = (int)(ex.Response?.ResultCode ?? ResultCode.Other);
+            throw new AdDirectoryException($"LDAP {operation} of '{dn}' on {Endpoint} failed: {ex.Response?.ResultCode} ({code}) {ex.Response?.ErrorMessage ?? ex.Message}".TrimEnd(), code, ex);
+        }
+        catch (LdapException ex)
+        {
+            throw new AdDirectoryException($"LDAP {operation} of '{dn}' on {Endpoint} failed: {ex.ErrorCode} {ex.Message} {ex.ServerErrorMessage}".TrimEnd(), ex.ErrorCode, ex);
+        }
+    }
 
     private static NetworkCredential Credential(AdAccount account)
     {

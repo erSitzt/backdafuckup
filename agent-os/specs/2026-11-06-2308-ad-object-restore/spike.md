@@ -29,6 +29,9 @@ The lab forest `bdfu-lab.local` (deploy/lab: `dc1` with `ad_forest`, later `dc2`
 1. Recycle Bin **off** (default in the lab): delete `lab-user05`, then reanimate over LDAP (delete `isDeleted`, replace `distinguishedName` with the Show-Deleted control). Which attributes are left (tombstone)? Memberships?
 2. Recycle Bin **on** (`ad_recycle_bin = true` or `Enable-ADOptionalFeature`): the same with `lab-user06`. Are all attributes and links back?
 3. The right "Reanimate Tombstones" on the domain for a delegated account (not a domain admin).
+4. A recycled object (Recycle Bin on, past the deleted-object lifetime): does the reanimation fail (unwillingToPerform)? Then the product should re-create it instead.
+5. A reanimated tombstone user: is `userAccountControl` kept, and may it be enabled without a password? (The product writes the account step itself.)
+6. Re-created user: does the add with `userAccountControl` | ACCOUNTDISABLE and without a password work under the default password policy?
 
 ## S4 — Passwords
 

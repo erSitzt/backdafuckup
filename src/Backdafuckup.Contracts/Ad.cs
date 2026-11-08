@@ -81,3 +81,24 @@ public sealed record AdObjectDto(
     List<AdAttributeDto> Attributes,
     List<AdValueDto> MemberOfBackup,
     List<AdValueDto> MemberOfLive);
+
+/// <summary>An object to restore: null attributes means every restorable one that differs from the backup.</summary>
+public sealed record AdRestoreObjectDto(Guid Guid, List<string>? Attributes = null, bool MoveBack = false, bool Memberships = true);
+
+/// <param name="Recreate">Objects that are gone are created anew (new objectGUID and SID).</param>
+/// <param name="TargetParentDn">Where objects go whose container is not in the live directory; null: they are skipped.</param>
+/// <param name="NewPassword">For accounts that come back without a password; null: they stay disabled (change at next logon). Never stored.</param>
+/// <param name="ConfirmDomain">Restore only: the live domain's DNS name, typed by the user as confirmation.</param>
+public sealed record AdRestoreRequestDto(
+    List<AdRestoreObjectDto> Objects, bool Recreate = false, string? TargetParentDn = null, string? NewPassword = null, string? ConfirmDomain = null);
+
+public sealed record AdRestoreStepDto(string Operation, string Target, string Text, bool Done);
+
+/// <param name="Action">reanimate, recreate, modify, none.</param>
+/// <param name="Outcome">planned, done, skipped, failed.</param>
+public sealed record AdRestoreItemDto(
+    Guid Guid, string Dn, string ObjectClass, string State, string Action, string Outcome, string? Reason, string? LiveDn, Guid? NewGuid,
+    List<AdRestoreStepDto> Steps, List<string> Warnings);
+
+/// <summary>What a restore would do (the preview), and where: the live DC and domain the confirmation names.</summary>
+public sealed record AdRestorePlanDto(string LiveHost, string? LiveDomain, List<AdRestoreItemDto> Items);

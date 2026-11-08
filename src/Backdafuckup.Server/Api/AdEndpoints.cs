@@ -40,6 +40,13 @@ public static class AdEndpoints
 
         group.MapGet("/explores/{id:guid}/objects/{guid:guid}", (Guid id, Guid guid, AdExplores explores, HttpContext http, CancellationToken ct) =>
             Handle(async () => Results.Ok(await explores.ObjectAsync(explores.Get(id, User(http)), guid, ct))));
+
+        // The preview writes nothing; the restore needs the live domain typed as confirmation.
+        group.MapPost("/explores/{id:guid}/restore/plan", (Guid id, AdRestoreRequestDto request, AdExplores explores, HttpContext http, CancellationToken ct) =>
+            Handle(async () => Results.Ok(await explores.PlanAsync(explores.Get(id, User(http)), request, ct))));
+
+        group.MapPost("/explores/{id:guid}/restore", (Guid id, AdRestoreRequestDto request, AdExplores explores, HttpContext http, CancellationToken ct) =>
+            Handle(async () => Results.Ok(new StartedDto(await explores.RestoreAsync(explores.Get(id, User(http)), request, User(http), ct)))));
     }
 
     private static string User(HttpContext http) => http.User.Identity?.Name ?? "user";

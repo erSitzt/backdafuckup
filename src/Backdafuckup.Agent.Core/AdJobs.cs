@@ -544,7 +544,7 @@ public sealed class AdJobRunner
                 result.Log.Add(line);
             }
 
-            if (request.Kind != AdJobKinds.Search && request.Kind != AdJobKinds.Tree && request.Kind != AdJobKinds.Object)
+            if (request.Kind != AdJobKinds.Search && request.Kind != AdJobKinds.Tree && request.Kind != AdJobKinds.Object && request.Kind != AdJobKinds.Plan)
             {
                 _log.Write($"AD job {_id}: {request.Kind} of explore session {request.MountId}{(request.Account is { } account ? $" as {account.UserName}" : string.Empty)}.");
             }
@@ -595,6 +595,17 @@ public sealed class AdJobRunner
         using (var backup = _mounts.Environment.Connect(info.Port, account))
         using (var live = _mounts.Environment.Connect(389, account))
         {
+            AdSchema Schema()
+            {
+                if (schema is null)
+                {
+                    schema = AdSchema.Load(live);
+                    keepSchema(schema);
+                }
+
+                return schema;
+            }
+
             var queries = new AdQueries(backup, live, info.LiveDomainDn ?? info.BackupDomainDn ?? string.Empty);
             switch (request.Kind)
             {
@@ -608,13 +619,18 @@ public sealed class AdJobRunner
                     result.Scanned = scanned;
                     break;
                 case AdJobKinds.Object:
-                    if (schema is null)
+                    result.Object = queries.Object(request.ObjectGuid, Schema());
+                    break;
+                case AdJobKinds.Plan:
+                case AdJobKinds.Restore:
+                    var write = request.Kind == AdJobKinds.Restore;
+                    if (write)
                     {
-                        schema = AdSchema.Load(live);
-                        keepSchema(schema);
+                        log($"Restoring {request.Objects.Count} object(s) into {live.Endpoint} as {account.UserName}{(string.IsNullOrEmpty(request.NewPassword) ? string.Empty : " (with a password entered for accounts without one)")}.");
                     }
 
-                    result.Object = queries.Object(request.ObjectGuid, schema);
+                    var restorer = new AdRestorer(backup, live, info.LiveDomainDn ?? info.BackupDomainDn ?? string.Empty, Schema(), info.RecycleBin);
+                    result.Restore = restorer.Run(request, write, log);
                     break;
                 default:
                     throw new InvalidOperationException($"Unknown AD job kind '{request.Kind}'.");

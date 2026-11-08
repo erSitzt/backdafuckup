@@ -272,6 +272,204 @@ public sealed class AdExplores(
             [.. o.MemberOfLive.Select(ToDto)]);
     }
 
+    /// <summary>What a restore of the chosen objects would write, step by step; writes nothing.</summary>
+    public async Task<AdRestorePlanDto> PlanAsync(AdExplore explore, AdRestoreRequestDto request, CancellationToken cancellationToken)
+    {
+        var result = await QueryAsync(explore, Job(request, AdJobKinds.Plan), cancellationToken).ConfigureAwait(false);
+        return new AdRestorePlanDto(explore.Host, LiveDomain(explore), [.. result.Restore.Select(ToDto)]);
+    }
+
+    /// <summary>
+    /// Restores the chosen objects into the live directory (session kind AdRestore, one task per object). Not queued: the
+    /// password for accounts without one stays in memory and goes to the agent in the job request only.
+    /// </summary>
+    public async Task<Guid> RestoreAsync(AdExplore explore, AdRestoreRequestDto request, string user, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Objects.Count is 0 or > 1000)
+        {
+            throw new ArgumentException("Choose 1 to 1,000 objects to restore.");
+        }
+
+        var domain = LiveDomain(explore);
+        if (domain is null || !string.Equals(request.ConfirmDomain?.Trim(), domain, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException($"Type the live domain ({domain ?? "unknown"}) to confirm the restore into {explore.Host}.");
+        }
+
+        if (explore.State != AdExploreStates.Ready)
+        {
+            throw new InvalidOperationException(explore.State == AdExploreStates.Opening ? "The directory is still being opened." : explore.Error ?? "This explore session is closed. Open it again.");
+        }
+
+        Guid sessionId;
+        await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var now = time.GetUtcNow();
+            var session = new SessionEntity
+            {
+                Kind = SessionKind.AdRestore,
+                RepositoryId = explore.Point.RepositoryId,
+                Name = $"Restore AD objects of {explore.Point.VmName} ({explore.Point.CreatedUtc.ToLocalTime():g}) into {explore.Agent.HostName}",
+                TriggeredBy = user,
+                State = SessionState.Running,
+                CreatedUtc = now,
+                StartedUtc = now,
+                ServerInstanceId = engine.Value.ServerInstanceId,
+                Parameters = JsonSerializer.Serialize(new
+                {
+                    ExploreSessionId = explore.SessionId,
+                    explore.Point.Id,
+                    AgentId = explore.Agent.Id,
+                    request.Objects,
+                    request.Recreate,
+                    request.TargetParentDn,
+                    PasswordEntered = !string.IsNullOrEmpty(request.NewPassword),
+                }),
+            };
+            db.Sessions.Add(session);
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await notifier.SessionUpdatedAsync(session.ToDto()).ConfigureAwait(false);
+            sessionId = session.Id;
+        }
+
+        explore.Log.Info($"{user} started restoring {request.Objects.Count} object(s) into {explore.Host} (session {sessionId}).");
+        Interlocked.Increment(ref explore.Queries);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RunRestoreAsync(explore, request, sessionId, user).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref explore.Queries);
+                explore.LastUsedUtc = time.GetUtcNow();
+            }
+        }, CancellationToken.None);
+        return sessionId;
+    }
+
+    private async Task RunRestoreAsync(AdExplore explore, AdRestoreRequestDto request, Guid sessionId, string user)
+    {
+        var log = events.CreateLog(sessionId, null);
+        var point = explore.Point;
+        log.Info($"Restoring {request.Objects.Count} object(s) of {point.VmName} from the restore point of {point.CreatedUtc.ToLocalTime():g} into {LiveDomain(explore)} " +
+            $"on {explore.Host}, started by {user}, written as {explore.Account.UserName}." +
+            (request.Recreate ? " Objects that are gone are re-created with a new SID." : string.Empty) +
+            (string.IsNullOrEmpty(request.NewPassword) ? " Accounts without a password stay disabled." : " Accounts without a password get the password entered for the restore."));
+        SessionState state;
+        string summary;
+        try
+        {
+            var job = Job(request, AdJobKinds.Restore);
+            job.Account = explore.Account;
+            job.MountId = explore.Id;
+            var result = await jobs.RunAsync(explore.Agent.Id, job, TimeSpan.FromMinutes(30), CancellationToken.None).ConfigureAwait(false);
+            if (!result.Success)
+            {
+                throw new InvalidOperationException(result.NotMounted
+                    ? $"The domain controller {explore.Host} no longer serves the backup's directory ({result.Error}). Open the explore session again."
+                    : result.Error ?? $"The agent on {explore.Host} reported no details.");
+            }
+
+            foreach (var line in result.Log)
+            {
+                log.Info(line);
+            }
+
+            foreach (var item in result.Restore)
+            {
+                var task = await tracker.AddTaskAsync(sessionId, (item.NewGuid ?? item.Guid).ToString("D"), item.Dn, CancellationToken.None).ConfigureAwait(false);
+                var taskLog = events.CreateLog(sessionId, task.Id);
+                var taskState = item.Outcome switch
+                {
+                    AdRestoreOutcomes.Failed => SessionState.Failed,
+                    AdRestoreOutcomes.Skipped => SessionState.Warning,
+                    _ => item.Warnings.Count > 0 ? SessionState.Warning : SessionState.Succeeded,
+                };
+                var verb = item.Action switch
+                {
+                    AdRestoreActions.Reanimate => "reanimated",
+                    AdRestoreActions.Recreate => "re-created",
+                    _ => "restored",
+                };
+                var text = item.Outcome switch
+                {
+                    AdRestoreOutcomes.Done => $"{item.Dn} ({item.ObjectClass}, was {item.State}): {verb} as {item.LiveDn}{(item.NewGuid is { } g ? $" (new objectGUID {g})" : string.Empty)}.",
+                    AdRestoreOutcomes.Skipped => $"{item.Dn}: skipped. {item.Reason}",
+                    _ => $"{item.Dn}: failed. {item.Reason}",
+                };
+                if (taskState == SessionState.Failed)
+                {
+                    taskLog.Error(text);
+                }
+                else
+                {
+                    taskLog.Info(text);
+                }
+
+                foreach (var warning in item.Warnings)
+                {
+                    taskLog.Warning($"{item.Dn}: {warning}");
+                }
+
+                await tracker.UpdateTaskAsync(task.Id, t =>
+                {
+                    t.State = taskState;
+                    t.Error = taskState == SessionState.Succeeded ? null : item.Reason ?? string.Join(" ", item.Warnings);
+                    t.Progress = 100;
+                    t.StartedUtc = time.GetUtcNow();
+                    t.EndedUtc = time.GetUtcNow();
+                }, CancellationToken.None).ConfigureAwait(false);
+            }
+
+            var done = result.Restore.Count(i => i.Outcome == AdRestoreOutcomes.Done);
+            var skipped = result.Restore.Count(i => i.Outcome == AdRestoreOutcomes.Skipped);
+            var failed = result.Restore.Count(i => i.Outcome == AdRestoreOutcomes.Failed);
+            var warned = result.Restore.Count(i => i.Outcome == AdRestoreOutcomes.Done && i.Warnings.Count > 0);
+            summary = $"{done} of {result.Restore.Count} object(s) restored into {explore.Agent.HostName}" +
+                (warned > 0 ? $" ({warned} with warnings)" : string.Empty) + (skipped > 0 ? $", {skipped} skipped" : string.Empty) + (failed > 0 ? $", {failed} failed" : string.Empty) + ".";
+            state = failed == result.Restore.Count ? SessionState.Failed : failed + skipped + warned > 0 ? SessionState.Warning : SessionState.Succeeded;
+            log.Info(summary);
+            explore.Log.Info($"Restore session {sessionId}: {summary}");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException)
+        {
+            summary = $"The restore failed: {ex.Message}";
+            state = SessionState.Failed;
+            log.Error(summary);
+        }
+
+        await events.FlushAsync().ConfigureAwait(false);
+        await tracker.UpdateSessionAsync(sessionId, s =>
+        {
+            s.State = state;
+            s.Summary = summary;
+            s.EndedUtc = time.GetUtcNow();
+            s.Progress = 100;
+        }, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private static AdJobRequest Job(AdRestoreRequestDto request, string kind) => new()
+    {
+        Kind = kind,
+        Objects = [.. request.Objects.Select(o => new AdRestoreObject { Guid = o.Guid, Attributes = o.Attributes, MoveBack = o.MoveBack, Memberships = o.Memberships })],
+        Recreate = request.Recreate,
+        TargetParentDn = string.IsNullOrWhiteSpace(request.TargetParentDn) ? null : request.TargetParentDn.Trim(),
+        NewPassword = kind == AdJobKinds.Restore && !string.IsNullOrEmpty(request.NewPassword) ? request.NewPassword : null,
+    };
+
+    /// <summary>The live domain's DNS name (from the mount, else the restore point's domain).</summary>
+    private static string? LiveDomain(AdExplore explore) =>
+        explore.Mount?.LiveDomainDn is { Length: > 0 } dn
+            ? string.Join('.', dn.Split(',').Select(p => p.Trim()).Where(p => p.StartsWith("DC=", StringComparison.OrdinalIgnoreCase)).Select(p => p[3..]))
+            : string.IsNullOrEmpty(explore.Point.AdDomain) ? null : explore.Point.AdDomain;
+
+    private static AdRestoreItemDto ToDto(AdRestoreItem i) => new(
+        i.Guid, i.Dn, i.ObjectClass, i.State, i.Action, i.Outcome, i.Reason, i.LiveDn, i.NewGuid,
+        [.. i.Steps.Select(s => new AdRestoreStepDto(s.Operation, s.Target, s.Text, s.Done))], [.. i.Warnings]);
+
     /// <summary>Unmounts on the DC (deleting the copy), ends the session and forgets the explore.</summary>
     public async Task CloseAsync(AdExplore explore, string reason, SessionState state = SessionState.Succeeded, bool flushLog = true)
     {

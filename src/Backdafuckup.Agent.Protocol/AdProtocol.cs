@@ -23,6 +23,103 @@ public static class AdJobKinds
 
     /// <summary>One object: all attributes in the backup and live, their differences, and the memberships.</summary>
     public const string Object = "object";
+
+    /// <summary>What a restore of <see cref="AdJobRequest.Objects"/> would write, step by step; writes nothing.</summary>
+    public const string Plan = "plan";
+
+    /// <summary>Restores <see cref="AdJobRequest.Objects"/> into the live directory (reanimate, re-create, write attributes).</summary>
+    public const string Restore = "restore";
+}
+
+/// <summary>What a restore does with an object (<see cref="AdRestoreItem.Action"/>).</summary>
+public static class AdRestoreActions
+{
+    /// <summary>Brings a deleted or recycled object back from Deleted Objects (same objectGUID and SID).</summary>
+    public const string Reanimate = "reanimate";
+
+    /// <summary>Creates the object anew from the backup (new objectGUID and SID).</summary>
+    public const string Recreate = "recreate";
+
+    /// <summary>Writes attributes of a live object back (and moves or renames it, if chosen).</summary>
+    public const string Modify = "modify";
+
+    /// <summary>Nothing to restore.</summary>
+    public const string None = "none";
+}
+
+/// <summary>The outcome of an object in a restore (<see cref="AdRestoreItem.Outcome"/>).</summary>
+public static class AdRestoreOutcomes
+{
+    public const string Planned = "planned";
+
+    public const string Done = "done";
+
+    public const string Skipped = "skipped";
+
+    public const string Failed = "failed";
+}
+
+/// <summary>An object chosen for a restore.</summary>
+public sealed class AdRestoreObject
+{
+    public Guid Guid { get; set; }
+
+    /// <summary>The attributes to write back; null: every restorable attribute that differs from the backup.</summary>
+    public List<string>? Attributes { get; set; }
+
+    /// <summary>A live object that was moved or renamed goes back into the backup's container and name.</summary>
+    public bool MoveBack { get; set; }
+
+    /// <summary>The object is added back to the groups it was a direct member of in the backup.</summary>
+    public bool Memberships { get; set; } = true;
+}
+
+/// <summary>An object of a restore: what was planned or done, step by step.</summary>
+public sealed class AdRestoreItem
+{
+    public Guid Guid { get; set; }
+
+    /// <summary>Its DN in the backup.</summary>
+    public string Dn { get; set; } = string.Empty;
+
+    public string ObjectClass { get; set; } = string.Empty;
+
+    /// <summary>Its state before the restore (<see cref="AdObjectStates"/>).</summary>
+    public string State { get; set; } = string.Empty;
+
+    /// <summary>One of <see cref="AdRestoreActions"/>.</summary>
+    public string Action { get; set; } = AdRestoreActions.None;
+
+    /// <summary>One of <see cref="AdRestoreOutcomes"/>.</summary>
+    public string Outcome { get; set; } = AdRestoreOutcomes.Planned;
+
+    /// <summary>Why it was skipped or failed (with the DC, the DN and the LDAP result).</summary>
+    public string? Reason { get; set; }
+
+    /// <summary>Its DN in the live directory after the restore.</summary>
+    public string? LiveDn { get; set; }
+
+    /// <summary>A re-created object's new objectGUID.</summary>
+    public Guid? NewGuid { get; set; }
+
+    public List<AdRestoreStep> Steps { get; set; } = new List<AdRestoreStep>();
+
+    public List<string> Warnings { get; set; } = new List<string>();
+}
+
+/// <summary>One write of a restore.</summary>
+public sealed class AdRestoreStep
+{
+    /// <summary><c>reanimate</c>, <c>add</c>, <c>modify</c>, <c>move</c>, <c>member</c>, <c>password</c>, <c>account</c>.</summary>
+    public string Operation { get; set; } = string.Empty;
+
+    /// <summary>The DN the operation writes.</summary>
+    public string Target { get; set; } = string.Empty;
+
+    /// <summary>What it writes, e.g. <c>description: "Marketing" → "Sales"</c> (never a password).</summary>
+    public string Text { get; set; } = string.Empty;
+
+    public bool Done { get; set; }
 }
 
 /// <summary>An object of the backup compared with the live directory (matched by objectGUID).</summary>
@@ -98,6 +195,24 @@ public sealed class AdJobRequest
 
     /// <summary>Object: the objectGUID.</summary>
     public Guid ObjectGuid { get; set; }
+
+    /// <summary>Plan and restore: the objects, restored parents first.</summary>
+    public List<AdRestoreObject> Objects { get; set; } = new List<AdRestoreObject>();
+
+    /// <summary>Plan and restore: objects that are gone are created anew (new objectGUID and SID).</summary>
+    public bool Recreate { get; set; }
+
+    /// <summary>
+    /// Plan and restore: where objects go whose container is not in the live directory (and not restored with them);
+    /// null: they are skipped.
+    /// </summary>
+    public string? TargetParentDn { get; set; }
+
+    /// <summary>
+    /// Restore: the password for user accounts that come back without one (tombstone or re-created). Null: they stay
+    /// disabled and must change the password at the next logon. Never logged or stored.
+    /// </summary>
+    public string? NewPassword { get; set; }
 }
 
 /// <summary>The outcome of an Active Directory job (<c>POST api/agent/ad-jobs/{id}/result</c>).</summary>
@@ -130,6 +245,9 @@ public sealed class AdJobResult
     public int Scanned { get; set; }
 
     public AdObjectView? Object { get; set; }
+
+    /// <summary>Plan and restore: the objects with their steps and outcomes.</summary>
+    public List<AdRestoreItem> Restore { get; set; } = new List<AdRestoreItem>();
 }
 
 public sealed class AdPrepareInfo

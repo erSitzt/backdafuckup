@@ -41,6 +41,7 @@ public static class AdCompare
         ["systemFlags"] = "system object flag",
         ["memberOf"] = "back link: restored through the groups' member attribute",
         ["msDS-KeyVersionNumber"] = "maintained by the domain controllers",
+        ["lockoutTime"] = "account lockout: maintained by the domain controllers",
     };
 
     /// <summary>Integer attributes that hold a FILETIME.</summary>
@@ -153,6 +154,11 @@ public static class AdCompare
         if (info.SystemOnly)
         {
             return (false, "system only");
+        }
+
+        if (info.Syntax is "2.5.5.7" or "2.5.5.14")
+        {
+            return (false, "a link with binary or string data: not restored in this version");
         }
 
         return (true, info.ForwardLink ? "link: the values point to objects by their objectGUID" : null);

@@ -78,6 +78,36 @@ public sealed partial class ApiIntegrationTests
         var missing = await client.GetAsync($"/api/ad/explores/{explore.Id}/objects/{Guid.NewGuid()}", Ct);
         Assert.Equal(HttpStatusCode.Conflict, missing.StatusCode);
 
+        // The preview writes nothing; the restore needs the live domain as confirmation; the password is never logged.
+        var gonePoint = gone.Entries.Single(e => e.Name == "lab-user03");
+        var objects = new List<AdRestoreObjectDto> { new(deleted.Guid), new(gonePoint.Guid) };
+        var plan = await Read<AdRestorePlanDto>(client.PostAsJsonAsync($"/api/ad/explores/{explore.Id}/restore/plan", new AdRestoreRequestDto(objects, Recreate: true), Ct));
+        Assert.Equal("bdfu-lab.local", plan.LiveDomain);
+        Assert.Equal(["reanimate", "recreate"], plan.Items.OrderBy(i => i.Dn, StringComparer.Ordinal).Select(i => i.Action));
+        Assert.All(plan.Items, i => Assert.Equal("planned", i.Outcome));
+        Assert.Empty(live.Writes);
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await client.PostAsJsonAsync($"/api/ad/explores/{explore.Id}/restore", new AdRestoreRequestDto(objects, Recreate: true, NewPassword: "N3w-Passw0rd!", ConfirmDomain: "other.local"), Ct)).StatusCode);
+        Assert.Empty(live.Writes);
+        var restore = await Read<StartedDto>(client.PostAsJsonAsync($"/api/ad/explores/{explore.Id}/restore",
+            new AdRestoreRequestDto(objects, Recreate: true, NewPassword: "N3w-Passw0rd!", ConfirmDomain: "BDFU-LAB.local"), Ct));
+        var restored = await WaitForSessionAsync(client, restore.SessionId);
+        Assert.Equal("Warning", restored.Session.State); // the re-created account has a new SID
+        Assert.Equal("AdRestore", restored.Session.Kind);
+        Assert.Equal(2, restored.Tasks.Count);
+        Assert.Contains("2 of 2 object(s) restored into DC1 (1 with warnings)", restored.Session.Summary, StringComparison.Ordinal);
+        Assert.False(live.Find(deleted.Guid)!.Flag("isDeleted"));
+        Assert.Equal("CN=lab-user02,OU=Lab," + AdDomain, live.Find(deleted.Guid)!.Dn);
+        Assert.Equal("Sales", live.Find(deleted.Guid)!.Text("description"));
+        Assert.Equal(Backdafuckup.Agent.Core.AdRestorer.PasswordValue("N3w-Passw0rd!"), live.Find("CN=lab-user03,OU=Lab," + AdDomain, false)!.Bytes("unicodePwd"));
+        var restoreLog = (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{restore.SessionId}/log", Ct))!.Select(l => l.Message).ToList();
+        Assert.Contains(restoreLog, m => m.Contains(@"written as BDFU-LAB\Administrator", StringComparison.Ordinal));
+        Assert.Contains(restoreLog, m => m.StartsWith($"CN=lab-user02,OU=Lab,{AdDomain} (user, was deleted): reanimated as CN=lab-user02,OU=Lab,{AdDomain}", StringComparison.Ordinal));
+        Assert.Contains(restoreLog, m => m.Contains("re-created as CN=lab-user03,OU=Lab," + AdDomain, StringComparison.Ordinal) && m.Contains("new objectGUID", StringComparison.Ordinal));
+        Assert.Contains(restoreLog, m => m.StartsWith("reanimate CN=lab-user02", StringComparison.Ordinal));
+        Assert.DoesNotContain(restoreLog, m => m.Contains("N3w-Passw0rd!", StringComparison.Ordinal));
+        Assert.DoesNotContain("N3w-Passw0rd!", restored.Session.Summary ?? string.Empty, StringComparison.Ordinal);
+
         // Closing removes the copy from the DC and ends the session.
         await Ok(client.DeleteAsync($"/api/ad/explores/{explore.Id}", Ct));
         Assert.False(Directory.Exists(folder));
@@ -94,7 +124,13 @@ public sealed partial class ApiIntegrationTests
         Assert.Contains(log, m => m.Contains($"admin viewed CN=lab-user02,OU=Lab,{AdDomain} (user, deleted", StringComparison.Ordinal));
         Assert.Contains(log, m => m.Contains("The backup's directory was removed from DC1", StringComparison.Ordinal));
         Assert.DoesNotContain(log, m => m.Contains("secret", StringComparison.Ordinal));
-        Assert.DoesNotContain("secret", await File.ReadAllTextAsync(Path.Combine(Directory.GetDirectories(_root, "agent-*").Single(), AgentProtocol.LogFile), Ct), StringComparison.Ordinal);
+        var agentLog = await File.ReadAllTextAsync(Path.Combine(Directory.GetDirectories(_root, "agent-*").Single(), AgentProtocol.LogFile), Ct);
+        Assert.DoesNotContain("secret", agentLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("N3w-Passw0rd!", agentLog, StringComparison.Ordinal);
+        await using (var db = await _factory!.Services.GetRequiredService<Microsoft.EntityFrameworkCore.IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>().CreateDbContextAsync(Ct))
+        {
+            Assert.DoesNotContain("N3w-Passw0rd!", (await db.Sessions.FindAsync([restore.SessionId], Ct))!.Parameters, StringComparison.Ordinal);
+        }
 
         await dc!.Value.Stop.CancelAsync();
         await dc.Value.Running;

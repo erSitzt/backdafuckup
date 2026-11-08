@@ -195,6 +195,7 @@ public static class Fmt
         "SqlExport" => "SQL export",
         "SqlBackup" => "SQL Server backups",
         "AdExplore" => "AD explore",
+        "AdRestore" => "AD restore",
         null => string.Empty,
         _ => kind,
     };

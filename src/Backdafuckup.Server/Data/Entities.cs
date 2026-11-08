@@ -544,6 +544,9 @@ public enum SessionKind
     /// its log is the audit trail.
     /// </summary>
     AdExplore,
+
+    /// <summary>Objects of an AD explore session restored into the live directory (one task per object).</summary>
+    AdRestore,
 }
 
 public enum GuestProcessingMode

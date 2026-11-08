@@ -91,6 +91,127 @@ internal sealed class InMemoryDirectory(string endpoint, string domainDn) : IAdD
 
     public void Dispose() => Disposed = true;
 
+    /// <summary>Every write, in order: "add DN", "modify DN: names", "move DN → new DN".</summary>
+    public List<string> Writes { get; } = [];
+
+    /// <summary>The DC refuses to reanimate recycled objects (unwillingToPerform), as with the Recycle Bin.</summary>
+    public bool RefuseRecycledReanimation { get; set; }
+
+    public void Add(string dn, IReadOnlyDictionary<string, List<object>> attributes)
+    {
+        Writes.Add($"add {dn}");
+        if (Find(dn, true) is not null)
+        {
+            throw new AdDirectoryException($"LDAP add of '{dn}' on {Endpoint} failed: EntryAlreadyExists (68)", 68);
+        }
+
+        if (AdText.Parent(dn) is not { } parent || Find(parent, false) is null)
+        {
+            throw new AdDirectoryException($"LDAP add of '{dn}' on {Endpoint} failed: NoSuchObject (32)", 32);
+        }
+
+        var record = Add(dn, Guid.NewGuid());
+        foreach (var (name, values) in attributes)
+        {
+            record.Attributes[name] = [.. values.Select(v => Stored(name, v))];
+        }
+    }
+
+    public void Modify(string dn, IReadOnlyList<AdModification> changes, bool showDeleted = false)
+    {
+        Writes.Add($"modify {dn}: {string.Join(", ", changes.Select(c => $"{c.Kind.ToString().ToLowerInvariant()} {c.Name}"))}");
+        var record = Find(dn, showDeleted) ?? throw new AdDirectoryException($"LDAP modify of '{dn}' on {Endpoint} failed: NoSuchObject (32)", 32);
+        var rest = changes.ToList();
+        if (changes.Any(c => c.Kind == AdModificationKind.Delete && c.Name == "isDeleted")
+            && changes.FirstOrDefault(c => c.Kind == AdModificationKind.Replace && c.Name == "distinguishedName") is { } target)
+        {
+            if (record.Flag("isRecycled") && RefuseRecycledReanimation)
+            {
+                throw new AdDirectoryException($"LDAP modify of '{dn}' on {Endpoint} failed: UnwillingToPerform (53)", 53);
+            }
+
+            var newDn = (string)target.Values[0];
+            if (AdText.Parent(newDn) is not { } parent || Find(parent, false) is null)
+            {
+                throw new AdDirectoryException($"LDAP modify of '{dn}' on {Endpoint} failed: NoSuchObject (32), no parent {AdText.Parent(newDn)}", 32);
+            }
+
+            record = Rename(record, newDn);
+            record.Attributes.Remove("isDeleted");
+            record.Attributes.Remove("isRecycled");
+            record.Attributes.Remove("lastKnownParent");
+            rest = [.. changes.Where(c => c != target && c.Name != "isDeleted")];
+        }
+
+        foreach (var change in rest)
+        {
+            var values = change.Values.Select(v => Stored(change.Name, v)).ToList();
+            var current = record.Values(change.Name);
+            switch (change.Kind)
+            {
+                case AdModificationKind.Add:
+                    if (values.Any(v => current.Any(c => Same(c, v))))
+                    {
+                        throw new AdDirectoryException($"LDAP modify of '{dn}' on {Endpoint} failed: AttributeOrValueExists (20)", 20);
+                    }
+
+                    record.Attributes[change.Name] = [.. current, .. values];
+                    break;
+                case AdModificationKind.Replace:
+                    record.Attributes[change.Name] = values;
+                    break;
+                default:
+                    if (values.Count == 0)
+                    {
+                        record.Attributes.Remove(change.Name);
+                    }
+                    else
+                    {
+                        record.Attributes[change.Name] = [.. current.Where(c => !values.Any(v => Same(c, v)))];
+                    }
+
+                    break;
+            }
+        }
+    }
+
+    public void Move(string dn, string newRdn, string newParentDn)
+    {
+        Writes.Add($"move {dn} → {newRdn},{newParentDn}");
+        var record = Find(dn, false) ?? throw new AdDirectoryException($"LDAP move of '{dn}' on {Endpoint} failed: NoSuchObject (32)", 32);
+        Rename(record, newRdn + "," + newParentDn);
+    }
+
+    public AdRecord? Find(string dn, bool deletedToo) =>
+        Records.FirstOrDefault(r => string.Equals(r.Dn, dn, StringComparison.OrdinalIgnoreCase) && (deletedToo || !r.Flag("isDeleted")));
+
+    public AdRecord? Find(Guid guid) => Records.FirstOrDefault(r => r.Guid == guid);
+
+    private AdRecord Rename(AdRecord record, string newDn)
+    {
+        var renamed = new AdRecord(newDn);
+        foreach (var (name, values) in record.Attributes)
+        {
+            renamed.Attributes[name] = values;
+        }
+
+        renamed.Attributes["distinguishedName"] = [newDn];
+        renamed.Attributes["name"] = [AdText.RdnValue(newDn)];
+        Records[Records.IndexOf(record)] = renamed;
+        return renamed;
+    }
+
+    /// <summary>A written DN value is stored as a link to its object (extended DN), as the directory keeps links by GUID.</summary>
+    private object Stored(string name, object value) =>
+        DnAttributes.Contains(name) && value is string dn && Find(dn, false) is { } target ? Link(target) : value;
+
+    private static bool Same(object a, object b) => (a, b) switch
+    {
+        (string x, string y) => string.Equals(AdText.ParseExtendedDn(x).Guid?.ToString() ?? x, AdText.ParseExtendedDn(y).Guid?.ToString() ?? y, StringComparison.OrdinalIgnoreCase),
+        (byte[] x, byte[] y) => x.SequenceEqual(y),
+        _ => false,
+    };
+
     /// <summary>An extended DN value pointing to <paramref name="record"/>.</summary>
     public static string Link(AdRecord record) => $"<GUID={record.Guid:D}>;{record.Dn}";
 

@@ -77,6 +77,42 @@ public interface IAdDirectory : IDisposable
     /// </summary>
     AdPage Search(string baseDn, string filter, AdScope scope, IReadOnlyList<string> attributes, int pageSize, byte[]? cookie,
         bool showDeleted = false, bool extendedDn = false, bool fullValues = false);
+
+    /// <summary>Creates an object (LDAP add).</summary>
+    void Add(string dn, IReadOnlyDictionary<string, List<object>> attributes);
+
+    /// <summary>
+    /// Changes an object (LDAP modify). <paramref name="showDeleted"/>: the object is in Deleted Objects (reanimation:
+    /// delete isDeleted, replace distinguishedName, [MS-ADTS] 3.1.1.5.3.7).
+    /// </summary>
+    void Modify(string dn, IReadOnlyList<AdModification> changes, bool showDeleted = false);
+
+    /// <summary>Moves and/or renames an object (LDAP modify DN).</summary>
+    void Move(string dn, string newRdn, string newParentDn);
+}
+
+public enum AdModificationKind
+{
+    Add,
+    Delete,
+    Replace,
+}
+
+/// <summary>One change of an LDAP modify: values are <see cref="string"/> or <see cref="byte"/>[]; Delete without values removes the attribute.</summary>
+public sealed class AdModification
+{
+    public AdModification(AdModificationKind kind, string name, params object[] values)
+    {
+        Kind = kind;
+        Name = name;
+        Values = values.ToList();
+    }
+
+    public AdModificationKind Kind { get; }
+
+    public string Name { get; }
+
+    public List<object> Values { get; }
 }
 
 /// <summary>An LDAP error, with the endpoint, the DN and the result code in its message.</summary>
