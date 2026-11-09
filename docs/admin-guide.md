@@ -231,6 +231,13 @@ The page lists every VM with restore points once, with its newest restore point.
 
 JSON responses of the API are compressed (Brotli or gzip) when the client accepts it, except those of `/api/setup`, `/api/auth` and `/api/tokens`, which can carry secrets.
 
+**Entire VM to the original location:**
+- The VM gets the MAC addresses of the backup, so the guest keeps its network adapters and their settings (static addresses, DNS servers, DHCP reservations). New MAC addresses are an option only for another location.
+- **With *Replace the existing VM*:**
+  - the original is shut down and renamed `<name> (replaced <time>)`, and kept unless *Delete the replaced VM* is chosen;
+  - it keeps the same MAC addresses, so do not start both VMs at the same time;
+  - the restored VM gets a new VM id, because the original still holds the old one. Its jobs then back up the restored VM, starting with a full backup; the session log names each job.
+
 ## File-level restore
 
 *Backups & Restore → Restore files* opens a restore point in a file browser: volumes and folders on the left, the folder content on the right.

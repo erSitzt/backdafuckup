@@ -48,7 +48,7 @@ else
                 </MudRadioGroup>
                 @if (_mode == RestoreModeDto.OriginalLocation)
                 {
-                    <MudCheckBox @bind-Value="_replace" Label="Replace the existing VM if it still exists (it is shut down and renamed)" Class="mt-2" />
+                    <MudCheckBox @bind-Value="_replace" Label="Replace the existing VM if it still exists (it is shut down and renamed; its jobs then back up the restored VM)" Class="mt-2" />
                     @if (_replace)
                     {
                         <MudCheckBox @bind-Value="_deleteReplaced" Label="Delete the replaced VM and its disks after a successful restore" Color="Color.Error" />

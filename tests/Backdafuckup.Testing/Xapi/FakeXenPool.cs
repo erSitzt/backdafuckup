@@ -116,6 +116,15 @@ public sealed class FakeXenPool : IAsyncDisposable
         }
     }
 
+    /// <summary>The opaque reference of the record with the given UUID.</summary>
+    public string Ref(string table, string uuid)
+    {
+        lock (_lock)
+        {
+            return RefByUuid(table, uuid);
+        }
+    }
+
     public IReadOnlyList<JsonObject> Records(string table)
     {
         lock (_lock)
@@ -754,12 +763,13 @@ public sealed class FakeXenPool : IAsyncDisposable
 
         foreach (var vif in ((JsonArray)export["vifs"]!).OfType<JsonObject>())
         {
+            // Like XAPI: an import that is not a restore gives a generated MAC a new value.
             var vifRef = Add("VIF", new JsonObject
             {
                 ["device"] = vif["device"]!.DeepClone(),
                 ["network"] = RefByUuid("network", vif["network_uuid"]!.GetValue<string>()),
                 ["VM"] = vmRef,
-                ["MAC"] = vif["MAC"]!.DeepClone(),
+                ["MAC"] = restore ? vif["MAC"]!.DeepClone() : string.Join(':', RandomNumberGenerator.GetBytes(6).Select(b => b.ToString("x2", CultureInfo.InvariantCulture))),
                 ["MTU"] = vif["MTU"]!.DeepClone(),
             });
             ((JsonArray)vm["VIFs"]!).Add(vifRef);

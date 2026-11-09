@@ -154,6 +154,11 @@ public sealed class RestoreSessionRunner(
             }
 
             var restored = await restore.CompleteAsync(cancellationToken).ConfigureAwait(false);
+            if (plan.Mode == RestoreMode.OriginalLocation && restored.VmId != point.VmNativeId)
+            {
+                warnings |= await FollowRestoredVmAsync(point, targetConnection, restored, log).ConfigureAwait(false);
+            }
+
             var final = Metrics(done, transferred) with { CurrentBytesPerSecond = 0 };
             log.Info(
                 $"Restore finished: VM '{restored.Name}' ({restored.VmId}), {VmBackupTask.Format(done)} restored in {MetricsText.Duration(final.Seconds)} " +
@@ -172,6 +177,56 @@ public sealed class RestoreSessionRunner(
             log.Error($"Restore failed: {ex.Message}");
             await FinishAsync(task.Id, SessionState.Failed, ex.Message, 0).ConfigureAwait(false);
             return (SessionState.Failed, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// A restore to the original location that got a new VM id (the original still existed and was replaced) hands the
+    /// original's place in its jobs to the restored VM: otherwise their next run backs up the renamed original (lab check H13).
+    /// The restored VM starts a new chain, so its first backup is a full one.
+    /// </summary>
+    /// <returns>True when the jobs could not be changed (a warning was logged).</returns>
+    private async Task<bool> FollowRestoredVmAsync(RestorePointEntity point, Guid connectionId, RestoredVm restored, IOperationLog log)
+    {
+        try
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(CancellationToken.None).ConfigureAwait(false);
+            var members = await db.JobObjects.Where(o => o.NativeId == point.VmNativeId)
+                .Join(db.Jobs.Where(j => j.ConnectionId == connectionId), o => o.JobId, j => j.Id, (o, j) => new { Member = o, Job = j.Name })
+                .ToListAsync(CancellationToken.None).ConfigureAwait(false);
+            if (members.Count == 0)
+            {
+                return false;
+            }
+
+            var jobIds = members.Select(m => m.Member.JobId).ToList();
+            var already = await db.JobObjects.Where(o => jobIds.Contains(o.JobId) && o.NativeId == restored.VmId).Select(o => o.JobId)
+                .ToListAsync(CancellationToken.None).ConfigureAwait(false);
+            foreach (var member in members)
+            {
+                if (already.Contains(member.Member.JobId))
+                {
+                    db.JobObjects.Remove(member.Member);
+                }
+                else
+                {
+                    member.Member.NativeId = restored.VmId;
+                    member.Member.CachedName = restored.Name;
+                }
+            }
+
+            await db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
+            foreach (var job in members.Select(m => m.Job).Order(StringComparer.OrdinalIgnoreCase))
+            {
+                log.Info($"Job '{job}' now backs up the restored VM '{restored.Name}' ({restored.VmId}) instead of the replaced one ({point.VmNativeId}); its next run is a full backup.");
+            }
+
+            return false;
+        }
+        catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException or Npgsql.NpgsqlException)
+        {
+            log.Warning($"The jobs of {point.VmName} still name the replaced VM ({point.VmNativeId}): {ex.Message}. Replace it with the restored VM '{restored.Name}' ({restored.VmId}) in each job by hand.");
+            return true;
         }
     }
 

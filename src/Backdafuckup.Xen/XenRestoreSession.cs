@@ -352,13 +352,21 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         var replacedName = $"{name} (replaced {DateTime.Now:yyyy-MM-dd HH:mm})";
         await xapi.CallAsync("VM.set_name_label", cancellationToken, originalRef, replacedName).ConfigureAwait(false);
         _replaced = (originalRef, name);
-        log.Info($"The original VM was renamed to '{replacedName}'.");
+        log.Info(plan.RegenerateMacs
+            ? $"The original VM was renamed to '{replacedName}'."
+            : $"The original VM was renamed to '{replacedName}'. The restored VM gets its MAC addresses: do not start both at the same time.");
     }
 
     private async Task ReconfigureNicsAsync(CancellationToken cancellationToken)
     {
         var vm = await xapi.GetRecordAsync("VM", _vmRef!, cancellationToken).ConfigureAwait(false);
         var regenerate = plan.RegenerateMacs;
+
+        // Without regenerating, every NIC keeps the MAC of the backup. XAPI gives an imported NIC a new MAC when its MAC was
+        // generated and the import is not a restore (beside the replaced original, which still owns the VM's UUID); Windows
+        // then sees a new network adapter without the old one's settings (static address, DNS servers) and DHCP gives another address.
+        var backedUp = plan.Manifest.Vm.Nics.Where(n => !string.IsNullOrEmpty(n.Mac)).GroupBy(n => n.Device, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().Mac, StringComparer.Ordinal);
         foreach (var vifRef in vm.Set("VIFs"))
         {
             var vif = await xapi.GetRecordAsync("VIF", vifRef, cancellationToken).ConfigureAwait(false);
@@ -369,9 +377,16 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
                 networkRef = await xapi.TryGetByUuidAsync("network", networkUuid, cancellationToken).ConfigureAwait(false) ?? networkRef;
             }
 
-            if (networkRef == vif.Str("network") && !regenerate)
+            var mac = vif.Str("MAC");
+            var wanted = regenerate ? string.Empty : backedUp.TryGetValue(device, out var original) ? original : mac;
+            if (networkRef == vif.Str("network") && !regenerate && string.Equals(mac, wanted, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
+            }
+
+            if (!regenerate && !string.Equals(mac, wanted, StringComparison.OrdinalIgnoreCase))
+            {
+                log.Info($"NIC {device}: MAC {wanted} as in the backup (the import had given it {mac}).");
             }
 
             await xapi.CallAsync("VIF.destroy", cancellationToken, vifRef).ConfigureAwait(false);
@@ -380,7 +395,7 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
                 ["device"] = device,
                 ["network"] = networkRef,
                 ["VM"] = _vmRef,
-                ["MAC"] = regenerate ? string.Empty : vif.Str("MAC"),
+                ["MAC"] = wanted,
                 ["MTU"] = vif.Long("MTU").ToString(CultureInfo.InvariantCulture),
                 ["other_config"] = new JsonObject(),
                 ["qos_algorithm_type"] = string.Empty,

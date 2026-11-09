@@ -606,7 +606,13 @@ public sealed class XenProviderTests : IAsyncDisposable
         var replaced = _pool.Records("VM").Single(v => v.Str("uuid") == vmUuid);
         Assert.StartsWith("erp01 (replaced", replaced.Str("name_label"), StringComparison.Ordinal);
         Assert.Equal("Halted", replaced.Str("power_state"));
-        Assert.Single(_pool.Records("VM"), v => v.Str("name_label") == "erp01");
+        var restored = Assert.Single(_pool.Records("VM"), v => v.Str("name_label") == "erp01");
+
+        // The import beside the original gave the NIC a new MAC (XAPI does for a generated MAC); it gets the backed-up one back,
+        // so the guest sees the same network adapter with its settings (lab check H13: dc2 got a new adapter and another DHCP address).
+        var vif = _pool.Records("VIF").Single(v => v.Str("VM") == _pool.Ref("VM", restored.Str("uuid")));
+        Assert.Equal("aa:bb:cc:00:00:01", vif.Str("MAC"));
+        Assert.Contains(_log, l => l.Contains("NIC 0: MAC aa:bb:cc:00:00:01 as in the backup (the import had given it", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -192,6 +192,37 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Replacing_the_original_moves_its_jobs_to_the_restored_vm()
+    {
+        var (vmUuid, _) = _pool.AddVm("erp01", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 2);
+        var queue = Services.GetRequiredService<SessionQueue>();
+        Assert.Equal(SessionState.Succeeded, (await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct))).State);
+        var point = await LatestRestorePointAsync();
+
+        var restore = await RunAsync(queue.EnqueueRestoreAsync(
+            new RestoreRequestDto { RestorePointId = point.Id, Mode = RestoreModeDto.OriginalLocation, ReplaceExisting = true, DiskStorage = new Dictionary<string, string>() },
+            "erp01", "test", Ct));
+
+        // The original keeps its id (renamed, halted); the restored VM has a new one, and the job now names it (lab check H13).
+        Assert.Equal(SessionState.Succeeded, restore.State);
+        var restored = _pool.Records("VM").Single(v => v.Str("name_label") == "erp01").Str("uuid");
+        Assert.NotEqual(vmUuid, restored);
+        await using (var db = await DbAsync())
+        {
+            var member = await db.JobObjects.SingleAsync(o => o.JobId == jobId, Ct);
+            Assert.Equal((restored, "erp01"), (member.NativeId, member.CachedName));
+            var log = await db.SessionLog.Where(l => l.SessionId == restore.Id).Select(l => l.Message).ToListAsync(Ct);
+            Assert.Contains(log, m => m.Contains($"now backs up the restored VM 'erp01' ({restored}) instead of the replaced one ({vmUuid}); its next run is a full backup", StringComparison.Ordinal));
+        }
+
+        // Its next run backs up the restored VM, as a new chain.
+        Assert.Equal(SessionState.Succeeded, (await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct))).State);
+        var next = await LatestRestorePointAsync();
+        Assert.Equal((restored, RestorePointKind.Full), (next.VmNativeId, next.Kind));
+    }
+
+    [Fact]
     public async Task Guest_processing_freezes_the_guest_for_the_snapshot_and_stores_the_guest_metadata()
     {
         var (vmUuid, _) = _pool.AddVm("sql01", DiskSize);
