@@ -1703,6 +1703,43 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.ToTable("ssh_host_keys", (string)null);
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.VmReplacementEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("ConnectionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("connection_id");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<string>("ReplacedVmId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("replaced_vm_id");
+
+                    b.Property<Guid>("SessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("session_id");
+
+                    b.Property<string>("VmId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("vm_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_vm_replacements");
+
+                    b.HasIndex("ConnectionId", "ReplacedVmId")
+                        .HasDatabaseName("ix_vm_replacements_connection_id_replaced_vm_id");
+
+                    b.ToTable("vm_replacements", (string)null);
+                });
+
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole<System.Guid>", b =>
                 {
                     b.Property<Guid>("Id")

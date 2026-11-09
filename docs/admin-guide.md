@@ -237,6 +237,8 @@ JSON responses of the API are compressed (Brotli or gzip) when the client accept
   - the original is shut down and renamed `<name> (replaced <time>)`, and kept unless *Delete the replaced VM* is chosen;
   - it keeps the same MAC addresses, so do not start both VMs at the same time;
   - the restored VM gets a new VM id, because the original still holds the old one. Its jobs then back up the restored VM, starting with a full backup; the session log names each job.
+- **Restore points from before a replace:** the catalog records which VM replaced which. A later restore to the original location from an older restore point treats the VM in use now as the original (the session log says so), not the renamed one.
+- **A running VM with the same name** that is not the original (e.g. one that replaced it by hand) stops a restore to the original location before anything is written: restore to another location, or shut that VM down or rename it first. A halted one only gives a warning.
 
 ## File-level restore
 

@@ -27,6 +27,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<RestorePointEntity> RestorePoints => Set<RestorePointEntity>();
 
+    public DbSet<VmReplacementEntity> VmReplacements => Set<VmReplacementEntity>();
+
     public DbSet<RestorePointDisk> RestorePointDisks => Set<RestorePointDisk>();
 
     public DbSet<SessionEntity> Sessions => Set<SessionEntity>();
@@ -230,6 +232,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasIndex(x => new { x.SessionId, x.Id });
             e.HasIndex(x => new { x.SessionId, x.Key });
             e.HasOne<SessionEntity>().WithMany().HasForeignKey(x => x.SessionId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<VmReplacementEntity>(e =>
+        {
+            e.ToTable("vm_replacements");
+            e.HasIndex(x => new { x.ConnectionId, x.ReplacedVmId });
         });
 
         builder.Entity<ProviderArtifactEntity>(e =>

@@ -29,7 +29,10 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
     private readonly List<(string VdiRef, string Uuid, Guid Artifact)> _createdVdis = [];
     private string? _vmRef;
     private Guid? _vmArtifact;
-    private (string Ref, string OriginalName)? _replaced;
+    private (string Ref, string Uuid, string OriginalName)? _replaced;
+
+    // Survives the delete of the replaced VM: the result names it.
+    private string? _replacedUuid;
     private bool _completed;
 
     public async Task<RestoreValidation> ValidateAsync(CancellationToken cancellationToken)
@@ -85,18 +88,25 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
             }
         }
 
-        if (plan.Mode == RestoreMode.OriginalLocation)
+        var original = plan.Mode == RestoreMode.OriginalLocation ? await FindOriginalAsync(cancellationToken).ConfigureAwait(false) : null;
+        if (original is { } existing && !plan.ReplaceExisting)
         {
-            var existing = await xapi.TryGetByUuidAsync("VM", plan.Manifest.Source.VmId, cancellationToken).ConfigureAwait(false);
-            if (existing is not null && !plan.ReplaceExisting)
-            {
-                errors.Add($"The original VM {plan.Manifest.Source.VmName} still exists. Choose 'Replace existing VM' or restore to another location.");
-            }
+            errors.Add($"The original VM {existing.Name} ({existing.Uuid}) still exists. Choose 'Replace existing VM' or restore to another location.");
         }
 
         var vms = await xapi.GetAllRecordsAsync("VM", cancellationToken).ConfigureAwait(false);
-        if (vms.Values.Any(v => !v.Bool("is_a_snapshot") && !v.Bool("is_a_template") && v.Str("name_label") == plan.VmName
-                                && !(plan.ReplaceExisting && v.Str("uuid") == plan.Manifest.Source.VmId)))
+        var sameName = vms.Values.Where(v => !v.Bool("is_a_snapshot") && !v.Bool("is_a_template") && v.Str("name_label") == plan.VmName
+                                             && v.Str("uuid") != original?.Uuid).ToList();
+        var running = sameName.FirstOrDefault(v => v.Str("power_state") != "Halted");
+        if (plan.Mode == RestoreMode.OriginalLocation && running is not null)
+        {
+            // Most likely the VM in use now, which replaced the backed-up one outside of this restore's knowledge (by hand, or
+            // at a restore before replacements were recorded). Putting the old VM back beside it would run both, e.g. two
+            // instances of a domain controller.
+            errors.Add($"A VM named '{plan.VmName}' ({running.Str("uuid")}, {running.Str("power_state")}) is not the backed-up VM ({plan.Manifest.Source.VmId}) " +
+                       "and is not halted. Restore to another location, or shut it down or rename it first.");
+        }
+        else if (sameName.Count > 0)
         {
             warnings.Add($"A VM named '{plan.VmName}' already exists.");
         }
@@ -107,7 +117,7 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         }
 
         if (plan.Mode == RestoreMode.AlternateLocation && !plan.RegenerateMacs
-            && vms.Values.Any(v => v.Str("uuid") == plan.Manifest.Source.VmId))
+            && vms.Values.Any(v => OriginalIds.Contains(v.Str("uuid"))))
         {
             warnings.Add("The original VM exists in the target pool; keeping its MAC addresses creates duplicate MACs on the network.");
         }
@@ -163,14 +173,15 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
     public async Task<RestoredVm> CreateVmAsync(IReadOnlyDictionary<string, string> sourceToNewDiskId, CancellationToken cancellationToken)
     {
         var keepIdentity = plan.Mode == RestoreMode.OriginalLocation;
-        if (plan.Mode == RestoreMode.OriginalLocation && plan.ReplaceExisting)
+        if (plan.Mode == RestoreMode.OriginalLocation && plan.ReplaceExisting && await FindOriginalAsync(cancellationToken).ConfigureAwait(false) is { } original)
         {
-            var originalRef = await xapi.TryGetByUuidAsync("VM", plan.Manifest.Source.VmId, cancellationToken).ConfigureAwait(false);
-            if (originalRef is not null)
+            if (original.Uuid != plan.Manifest.Source.VmId)
             {
-                await ReplaceOriginalAsync(originalRef, cancellationToken).ConfigureAwait(false);
-                keepIdentity = false; // the old VM still owns the UUID
+                log.Info($"The original VM is {original.Name} ({original.Uuid}): it replaced the backed-up VM ({plan.Manifest.Source.VmId}) at an earlier restore to the original location.");
             }
+
+            await ReplaceOriginalAsync(original.Ref, original.Uuid, cancellationToken).ConfigureAwait(false);
+            keepIdentity = false; // the old VM still owns the UUID
         }
 
         var taskRef = await xapi.CreateTaskAsync("backdafuckup restore: import VM metadata", cancellationToken).ConfigureAwait(false);
@@ -276,7 +287,24 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         }
 
         var vm = await xapi.GetRecordAsync("VM", _vmRef, cancellationToken).ConfigureAwait(false);
-        return new RestoredVm(vm.Str("uuid"), vm.Str("name_label"));
+        return new RestoredVm(vm.Str("uuid"), vm.Str("name_label"), ReplacedVmId: _replacedUuid);
+    }
+
+    private IReadOnlyList<string> OriginalIds => plan.OriginalVmIds.Count > 0 ? plan.OriginalVmIds : [plan.Manifest.Source.VmId];
+
+    /// <summary>The original VM: the last of <see cref="VmRestorePlan.OriginalVmIds"/> that still exists.</summary>
+    private async Task<(string Ref, string Uuid, string Name)?> FindOriginalAsync(CancellationToken cancellationToken)
+    {
+        foreach (var uuid in OriginalIds.Reverse())
+        {
+            if (await xapi.TryGetByUuidAsync("VM", uuid, cancellationToken).ConfigureAwait(false) is { } vmRef)
+            {
+                var vm = await xapi.GetRecordAsync("VM", vmRef, cancellationToken).ConfigureAwait(false);
+                return (vmRef, uuid, vm.Str("name_label"));
+            }
+        }
+
+        return null;
     }
 
     public async ValueTask DisposeAsync()
@@ -331,7 +359,7 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         await xapi.DisposeAsync().ConfigureAwait(false);
     }
 
-    private async Task ReplaceOriginalAsync(string originalRef, CancellationToken cancellationToken)
+    private async Task ReplaceOriginalAsync(string originalRef, string originalUuid, CancellationToken cancellationToken)
     {
         var original = await xapi.GetRecordAsync("VM", originalRef, cancellationToken).ConfigureAwait(false);
         var name = original.Str("name_label");
@@ -351,7 +379,8 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
 
         var replacedName = $"{name} (replaced {DateTime.Now:yyyy-MM-dd HH:mm})";
         await xapi.CallAsync("VM.set_name_label", cancellationToken, originalRef, replacedName).ConfigureAwait(false);
-        _replaced = (originalRef, name);
+        _replaced = (originalRef, originalUuid, name);
+        _replacedUuid = originalUuid;
         log.Info(plan.RegenerateMacs
             ? $"The original VM was renamed to '{replacedName}'."
             : $"The original VM was renamed to '{replacedName}'. The restored VM gets its MAC addresses: do not start both at the same time.");

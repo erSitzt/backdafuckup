@@ -164,6 +164,13 @@ public sealed record VmRestorePlan
     /// <summary>Original location only: replace an existing VM with the same id.</summary>
     public bool ReplaceExisting { get; init; }
 
+    /// <summary>
+    /// Original location: the ids the VM had, oldest first: the backed-up VM's, then each VM that replaced it at an earlier
+    /// restore to the original location (it got a new id because the original still held the old one). The last of them
+    /// that still exists is the original. Empty: the backed-up VM's id only.
+    /// </summary>
+    public IReadOnlyList<string> OriginalVmIds { get; init; } = [];
+
     /// <summary>Original location only: delete the replaced VM after a successful restore (otherwise renamed and halted).</summary>
     public bool DeleteReplaced { get; init; }
 
@@ -178,7 +185,8 @@ public sealed record RestoreValidation(IReadOnlyList<string> Errors, IReadOnlyLi
 public sealed record RestoreDiskTarget(string DiskKey, string SourceDiskId, string Name, long CapacityBytes, string StorageId);
 
 /// <param name="GenerationId">The VM generation id the hypervisor gave the VM (Xen: <c>generation_id</c>), if known.</param>
-public sealed record RestoredVm(string VmId, string Name, string? GenerationId = null);
+/// <param name="ReplacedVmId">The id of the VM this one replaced at the original location (renamed or deleted), if any.</param>
+public sealed record RestoredVm(string VmId, string Name, string? GenerationId = null, string? ReplacedVmId = null);
 
 /// <summary>
 /// VM generation ids (Xen: <c>generation_id</c>). An empty one means the VM has none: it was created from a template

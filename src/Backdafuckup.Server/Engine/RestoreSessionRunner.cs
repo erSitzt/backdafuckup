@@ -50,6 +50,7 @@ public sealed class RestoreSessionRunner(
                 metadata = memory.ToArray();
             }
 
+            var originalLocation = request.Mode == RestoreModeDto.OriginalLocation;
             var plan = new VmRestorePlan
             {
                 Mode = request.Mode == RestoreModeDto.OriginalLocation ? RestoreMode.OriginalLocation : RestoreMode.AlternateLocation,
@@ -63,6 +64,7 @@ public sealed class RestoreSessionRunner(
                 PowerOn = request.PowerOn,
                 ReplaceExisting = request.ReplaceExisting,
                 DeleteReplaced = request.DeleteReplaced,
+                OriginalVmIds = originalLocation ? await OriginalVmIdsAsync(targetConnection, point.VmNativeId, cancellationToken).ConfigureAwait(false) : [],
                 SessionId = session.Id,
             };
 
@@ -154,9 +156,9 @@ public sealed class RestoreSessionRunner(
             }
 
             var restored = await restore.CompleteAsync(cancellationToken).ConfigureAwait(false);
-            if (plan.Mode == RestoreMode.OriginalLocation && restored.VmId != point.VmNativeId)
+            if (restored.ReplacedVmId is { } replaced && replaced != restored.VmId)
             {
-                warnings |= await FollowRestoredVmAsync(point, targetConnection, restored, log).ConfigureAwait(false);
+                warnings |= await FollowRestoredVmAsync(session.Id, point.VmName, targetConnection, replaced, restored, log).ConfigureAwait(false);
             }
 
             var final = Metrics(done, transferred) with { CurrentBytesPerSecond = 0 };
@@ -181,24 +183,48 @@ public sealed class RestoreSessionRunner(
     }
 
     /// <summary>
-    /// A restore to the original location that got a new VM id (the original still existed and was replaced) hands the
-    /// original's place in its jobs to the restored VM: otherwise their next run backs up the renamed original (lab check H13).
-    /// The restored VM starts a new chain, so its first backup is a full one.
+    /// The ids the backed-up VM had at the original location, oldest first: its own, then each VM that replaced it at an
+    /// earlier restore there. The restore treats the last one that still exists as the original.
     /// </summary>
-    /// <returns>True when the jobs could not be changed (a warning was logged).</returns>
-    private async Task<bool> FollowRestoredVmAsync(RestorePointEntity point, Guid connectionId, RestoredVm restored, IOperationLog log)
+    private async Task<IReadOnlyList<string>> OriginalVmIdsAsync(Guid connectionId, string vmId, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var ids = new List<string> { vmId };
+        while (ids.Count < 100)
+        {
+            var current = ids[^1];
+            var next = await db.VmReplacements.Where(r => r.ConnectionId == connectionId && r.ReplacedVmId == current)
+                .OrderByDescending(r => r.CreatedUtc).Select(r => r.VmId).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+            if (next is null || ids.Contains(next))
+            {
+                break;
+            }
+
+            ids.Add(next);
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// A restore to the original location that replaced a VM got a new VM id (the original still held the old one). The
+    /// catalog records the replacement, for restores of older restore points to the original location, and the replaced
+    /// VM's jobs back up the restored one: otherwise their next run backs up the renamed original (lab check H13). The
+    /// restored VM starts a new chain, so its first backup is a full one.
+    /// </summary>
+    /// <returns>True when the catalog could not be changed (a warning was logged).</returns>
+    private async Task<bool> FollowRestoredVmAsync(Guid sessionId, string vmName, Guid connectionId, string replacedVmId, RestoredVm restored, IOperationLog log)
     {
         try
         {
             await using var db = await dbFactory.CreateDbContextAsync(CancellationToken.None).ConfigureAwait(false);
-            var members = await db.JobObjects.Where(o => o.NativeId == point.VmNativeId)
+            db.VmReplacements.Add(new VmReplacementEntity
+            {
+                ConnectionId = connectionId, ReplacedVmId = replacedVmId, VmId = restored.VmId, CreatedUtc = time.GetUtcNow(), SessionId = sessionId,
+            });
+            var members = await db.JobObjects.Where(o => o.NativeId == replacedVmId)
                 .Join(db.Jobs.Where(j => j.ConnectionId == connectionId), o => o.JobId, j => j.Id, (o, j) => new { Member = o, Job = j.Name })
                 .ToListAsync(CancellationToken.None).ConfigureAwait(false);
-            if (members.Count == 0)
-            {
-                return false;
-            }
-
             var jobIds = members.Select(m => m.Member.JobId).ToList();
             var already = await db.JobObjects.Where(o => jobIds.Contains(o.JobId) && o.NativeId == restored.VmId).Select(o => o.JobId)
                 .ToListAsync(CancellationToken.None).ConfigureAwait(false);
@@ -218,14 +244,14 @@ public sealed class RestoreSessionRunner(
             await db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
             foreach (var job in members.Select(m => m.Job).Order(StringComparer.OrdinalIgnoreCase))
             {
-                log.Info($"Job '{job}' now backs up the restored VM '{restored.Name}' ({restored.VmId}) instead of the replaced one ({point.VmNativeId}); its next run is a full backup.");
+                log.Info($"Job '{job}' now backs up the restored VM '{restored.Name}' ({restored.VmId}) instead of the replaced one ({replacedVmId}); its next run is a full backup.");
             }
 
             return false;
         }
         catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException or Npgsql.NpgsqlException)
         {
-            log.Warning($"The jobs of {point.VmName} still name the replaced VM ({point.VmNativeId}): {ex.Message}. Replace it with the restored VM '{restored.Name}' ({restored.VmId}) in each job by hand.");
+            log.Warning($"The catalog could not record that '{restored.Name}' ({restored.VmId}) replaced {vmName} ({replacedVmId}): {ex.Message}. Its jobs still name the replaced VM: replace it with the restored one in each job by hand. A later restore of an older restore point to the original location would replace the renamed VM, not this one.");
             return true;
         }
     }

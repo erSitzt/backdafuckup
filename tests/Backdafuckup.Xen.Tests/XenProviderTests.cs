@@ -616,6 +616,58 @@ public sealed class XenProviderTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Replacing_follows_earlier_replacements_and_refuses_a_running_vm_of_the_same_name()
+    {
+        var (vmUuid, disks) = _pool.AddVm("erp02", DiskSize);
+        await using var session = await Provider().OpenAsync(Settings(), Ct);
+        var (manifest, metadata) = await CaptureAsync(session, vmUuid);
+        VmRestorePlan Plan(params string[] originalIds) => new()
+        {
+            Mode = RestoreMode.OriginalLocation,
+            Manifest = manifest,
+            Metadata = metadata,
+            VmName = "erp02",
+            DiskStorage = new Dictionary<string, string> { ["0"] = _pool.Uuid("SR", _pool.SrRef) },
+            ReplaceExisting = true,
+            OriginalVmIds = originalIds,
+            PowerOn = true,
+            SessionId = Guid.NewGuid(),
+        };
+
+        async Task<RestoredVm> RestoreAsync(VmRestorePlan plan)
+        {
+            await using var restore = await session.BeginRestoreAsync(plan, Log, _ledger, Ct);
+            Assert.True((await restore.ValidateAsync(Ct)).Ok);
+            await using var writer = await restore.CreateDiskAsync(new RestoreDiskTarget("0", disks[0], "disk", DiskSize, plan.DiskStorage["0"]), Ct);
+            await writer.WriteAsync(new ByteImage(_pool.DiskContent(disks[0])), null, Ct);
+            await restore.CreateVmAsync(new Dictionary<string, string> { [disks[0]] = writer.DiskId }, Ct);
+            return await restore.CompleteAsync(Ct);
+        }
+
+        var first = await RestoreAsync(Plan());
+        Assert.Equal(vmUuid, first.ReplacedVmId);
+
+        // Without the replacement the original is the renamed VM again, while the VM that replaced it runs under the name:
+        // refused, instead of running both.
+        await using (var restore = await session.BeginRestoreAsync(Plan(), Log, _ledger, Ct))
+        {
+            var validation = await restore.ValidateAsync(Ct);
+            Assert.Contains(validation.Errors, e => e.Contains($"A VM named 'erp02' ({first.VmId}, Running) is not the backed-up VM ({vmUuid}) and is not halted", StringComparison.Ordinal));
+        }
+
+        // With it, the VM in use now is the one replaced.
+        var second = await RestoreAsync(Plan(vmUuid, first.VmId));
+        Assert.Equal(first.VmId, second.ReplacedVmId);
+        Assert.Contains(_log, l => l.Contains($"The original VM is erp02 ({first.VmId}): it replaced the backed-up VM ({vmUuid}) at an earlier restore", StringComparison.Ordinal));
+        var vms = _pool.Records("VM").Where(v => v.Str("name_label").StartsWith("erp02", StringComparison.Ordinal)).ToDictionary(v => v.Str("uuid"));
+        Assert.Equal(3, vms.Count);
+        Assert.StartsWith("erp02 (replaced", vms[vmUuid].Str("name_label"), StringComparison.Ordinal);
+        Assert.Equal(("Halted", "Halted"), (vms[vmUuid].Str("power_state"), vms[first.VmId].Str("power_state")));
+        Assert.StartsWith("erp02 (replaced", vms[first.VmId].Str("name_label"), StringComparison.Ordinal);
+        Assert.Equal(("erp02", "Running"), (vms[second.VmId].Str("name_label"), vms[second.VmId].Str("power_state")));
+    }
+
+    [Fact]
     public async Task Releasing_change_tokens_deletes_only_backdafuckups_own_tracking_data()
     {
         var (vmUuid, _) = _pool.AddVm("web05", DiskSize);

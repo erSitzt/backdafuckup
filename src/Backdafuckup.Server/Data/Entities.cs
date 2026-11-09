@@ -418,6 +418,27 @@ public sealed class BackupJobObject
     public int Order { get; set; }
 }
 
+/// <summary>
+/// A VM that replaced another at a restore to the original location. It got a new VM id because the original still held
+/// the old one. A later restore to the original location from a restore point of the old VM follows these to the VM in
+/// use now, instead of replacing the old, renamed one again.
+/// </summary>
+public sealed class VmReplacementEntity
+{
+    public Guid Id { get; set; } = Guid.CreateVersion7();
+
+    public Guid ConnectionId { get; set; }
+
+    public required string ReplacedVmId { get; set; }
+
+    public required string VmId { get; set; }
+
+    public DateTimeOffset CreatedUtc { get; set; }
+
+    /// <summary>The restore session that replaced it.</summary>
+    public Guid SessionId { get; set; }
+}
+
 public enum RestorePointState
 {
     Creating,

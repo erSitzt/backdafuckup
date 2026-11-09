@@ -220,6 +220,23 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
         Assert.Equal(SessionState.Succeeded, (await RunAsync(queue.EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct))).State);
         var next = await LatestRestorePointAsync();
         Assert.Equal((restored, RestorePointKind.Full), (next.VmNativeId, next.Kind));
+
+        // The old restore point to the original location once more: it replaces the VM in use now, not the renamed one.
+        restore = await RunAsync(queue.EnqueueRestoreAsync(
+            new RestoreRequestDto { RestorePointId = point.Id, Mode = RestoreModeDto.OriginalLocation, ReplaceExisting = true, DiskStorage = new Dictionary<string, string>() },
+            "erp01", "test", Ct));
+        Assert.Equal(SessionState.Succeeded, restore.State);
+        var third = _pool.Records("VM").Single(v => v.Str("name_label") == "erp01").Str("uuid");
+        Assert.DoesNotContain(third, new[] { vmUuid, restored });
+        Assert.StartsWith("erp01 (replaced", _pool.Records("VM").Single(v => v.Str("uuid") == restored).Str("name_label"), StringComparison.Ordinal);
+        await using (var db = await DbAsync())
+        {
+            Assert.Equal(third, (await db.JobObjects.SingleAsync(o => o.JobId == jobId, Ct)).NativeId);
+            var replacements = await db.VmReplacements.OrderBy(r => r.CreatedUtc).Select(r => new { r.ReplacedVmId, r.VmId }).ToListAsync(Ct);
+            Assert.Equal([new { ReplacedVmId = vmUuid, VmId = restored }, new { ReplacedVmId = restored, VmId = third }], replacements);
+            var log = await db.SessionLog.Where(l => l.SessionId == restore.Id).Select(l => l.Message).ToListAsync(Ct);
+            Assert.Contains(log, m => m.Contains($"The original VM is erp01 ({restored}): it replaced the backed-up VM ({vmUuid})", StringComparison.Ordinal));
+        }
     }
 
     [Fact]
