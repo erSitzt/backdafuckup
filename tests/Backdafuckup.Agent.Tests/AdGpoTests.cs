@@ -65,8 +65,11 @@ public sealed class AdGpoTests : IDisposable
         Assert.Equal("Lab Policy A", gpc.Text("displayName"));
         Assert.Equal(version.ToString(System.Globalization.CultureInfo.InvariantCulture), gpc.Text("versionNumber"));
         Assert.Equal([1, 2, 3], gpc.Bytes("nTSecurityDescriptor"));
-        Assert.Contains($"[LDAP://cn={A},cn=policies,cn=system,{Domain};0]", _live.Find(_ids["Lab"])!.Text("gPLink"), StringComparison.Ordinal);
+        Assert.Equal($"[LDAP://cn={A},cn=policies,cn=system,{Domain};0]", _live.Find(_ids["Lab"])!.Text("gPLink"));
         Assert.Equal(["files", "version", "modify", "modify", "acl", "link", "files"], item.Steps.Select(s => s.Operation));
+
+        // versionNumber only once, raised: never back to the backup's (lower) version first.
+        Assert.Single(item.Steps, s => s.Text.Contains("versionNumber", StringComparison.Ordinal));
         Assert.Contains(_log, l => l.StartsWith($"version {Path.Combine(folder, "GPT.INI")}: Version 327681 → {version} (user 6, computer 4)", StringComparison.Ordinal));
     }
 
@@ -96,6 +99,28 @@ public sealed class AdGpoTests : IDisposable
         Assert.DoesNotContain(item.Warnings, w => w.Contains("SID", StringComparison.Ordinal));
         Assert.Contains($"cn={B}", _live.Find(Domain, false)!.Text("gPLink"), StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("files", item.Steps.Where(s => s.Text.StartsWith("deleted", StringComparison.Ordinal)).Select(s => s.Operation));
+    }
+
+    [Fact]
+    public void A_deleted_policy_is_reanimated_with_the_dacl_its_tombstone_kept()
+    {
+        // Without the Recycle Bin the tombstone keeps nTSecurityDescriptor: neither the preview nor the restore rewrites it.
+        _live.Add($"CN={B}\\0ADEL:{_ids[B]:D},CN=Deleted Objects,{Domain}", _ids[B], ("objectClass", ["top", "container", "groupPolicyContainer"]), ("isDeleted", ["TRUE"]),
+            ("nTSecurityDescriptor", [new byte[] { 1, 2, 3 }]));
+        var restorer = Restorer();
+        var staging = Assert.Single(restorer.Prepare([new AdGpoChoice { Guid = _ids[B] }], _log.Add));
+        Copy(staging.Folder, "B settings", "[General]\r\nVersion=65537\r\n");
+
+        var plan = Assert.Single(restorer.Run(new AdJobRequest { Gpos = [new AdGpoChoice { Guid = _ids[B] }] }, write: false, _log.Add));
+        Assert.Equal(AdObjectStates.Deleted, plan.State);
+        Assert.Contains(plan.Steps, s => s.Operation == "reanimate");
+        Assert.DoesNotContain(plan.Steps, s => s.Operation == "acl");
+
+        var item = Assert.Single(restorer.Run(new AdJobRequest { Gpos = [new AdGpoChoice { Guid = _ids[B] }] }, write: true, _log.Add));
+        Assert.Equal(AdRestoreOutcomes.Done, item.Outcome);
+        Assert.Equal(_ids[B], _live.Find($"CN={B},{Policies}", false)!.Guid);
+        Assert.DoesNotContain(_live.Writes, w => w.StartsWith("acl", StringComparison.Ordinal));
+        Assert.DoesNotContain(item.Warnings, w => w.StartsWith("The policy container was re-created", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -191,7 +216,8 @@ public sealed class AdGpoTests : IDisposable
             directory.Add(Domain, Id("domain"), ("objectClass", Classes("domain", "domainDNS")), ("gPLink", [live ? string.Empty : linkB]));
             directory.Add("CN=System," + Domain, Id("System"), ("objectClass", Classes("container")));
             directory.Add(Policies, Id("Policies"), ("objectClass", Classes("container")));
-            directory.Add("OU=Lab," + Domain, Id("Lab"), ("objectClass", Classes("organizationalUnit")), ("gPLink", [live ? string.Empty : linkA]));
+            // GPMC leaves a single space when it removes the last link.
+            directory.Add("OU=Lab," + Domain, Id("Lab"), ("objectClass", Classes("organizationalUnit")), ("gPLink", [live ? " " : linkA]));
         }
 
         foreach (var (name, display, directory, version) in new[] { (A, "Lab Policy A", _backup, 0x20003), (A, "Lab Policy A (changed)", _live, 0x50001), (B, "Lab Policy B", _backup, 0x10001) })

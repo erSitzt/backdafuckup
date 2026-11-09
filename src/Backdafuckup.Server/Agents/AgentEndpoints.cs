@@ -25,7 +25,8 @@ public static class AgentEndpoints
                 : Results.Problem("The enrollment secret is not valid (renewed in the console?).", statusCode: StatusCodes.Status403Forbidden));
 
         agent.MapPost("/poll", async (
-            AgentPollRequest request, AgentService agents, AgentRegistry registry, AgentPackages packages, Sql.SqlJobs sqlJobs, Ad.AdJobs adJobs, Publishing.DiskPublishes publishes,
+            AgentPollRequest request, AgentService agents, AgentRegistry registry, AgentPackages packages, Sql.SqlJobs sqlJobs, Ad.AdJobs adJobs, Ad.AdExplores adExplores,
+            Publishing.DiskPublishes publishes,
             FileRestore.AgentTransfers transfers, Sql.SqlPublishLeftovers leftovers, IHostApplicationLifetime lifetime, HttpContext http, CancellationToken ct) =>
         {
             if (await agents.AuthenticateAsync(http.Request.Headers[AgentProtocol.KeyHeader], ct) is not { } agentId)
@@ -41,6 +42,7 @@ public static class AgentEndpoints
                 // A new process: what the previous one ran is gone (its journals clean up the guest at its start).
                 sqlJobs.AgentRestarted(agentId);
                 adJobs.AgentRestarted(agentId);
+                adExplores.AgentRestarted(agentId);
                 publishes.AgentRestarted(agentId);
                 transfers.AgentRestarted(agentId);
             }

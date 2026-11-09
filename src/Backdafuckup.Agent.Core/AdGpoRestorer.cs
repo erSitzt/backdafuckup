@@ -182,9 +182,10 @@ public sealed class AdGpoRestorer
                 }
             }
 
-            var gpcDn = restored.First(r => r.Guid == choice.Guid).LiveDn ?? liveGpc?.Dn ?? gpc.Dn;
+            var container = restored.First(r => r.Guid == choice.Guid);
+            var gpcDn = container.LiveDn ?? liveGpc?.Dn ?? gpc.Dn;
             item.LiveDn = gpcDn;
-            if (restored.Any(r => r.Action == AdRestoreActions.Recreate))
+            if (container.Action == AdRestoreActions.Recreate)
             {
                 item.Warnings.Add("The policy container was re-created: it has a new objectGUID, its name and links are the same.");
             }
@@ -194,7 +195,8 @@ public sealed class AdGpoRestorer
 
             // 3. Who may read and apply it: the DACL of the backup.
             var descriptor = _backup.ReadSecurityDescriptor(gpc.Dn);
-            var current = write ? _live.ReadSecurityDescriptor(gpcDn) : liveGpc is not null && !liveGpc.Flag("isDeleted") ? _live.ReadSecurityDescriptor(liveGpc.Dn) : null;
+            // A deleted container keeps its DACL, so the preview compares with the one it will have once reanimated.
+            var current = write ? _live.ReadSecurityDescriptor(gpcDn) : liveGpc is not null ? _live.ReadSecurityDescriptor(liveGpc.Dn) : null;
             if (descriptor is not null && (current is null || !descriptor.SequenceEqual(current)))
             {
                 Step(item, "acl", gpcDn, "permissions (DACL) from the backup", write, log, () => _live.WriteSecurityDescriptor(gpcDn, descriptor));
@@ -250,7 +252,8 @@ public sealed class AdGpoRestorer
                 continue;
             }
 
-            var links = live.Text("gPLink") ?? string.Empty;
+            // GPMC leaves a single space when it removes the last link.
+            var links = (live.Text("gPLink") ?? string.Empty).Trim();
             if (links.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 continue;

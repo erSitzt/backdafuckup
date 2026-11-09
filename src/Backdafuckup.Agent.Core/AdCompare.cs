@@ -43,6 +43,7 @@ public static class AdCompare
         ["msDS-KeyVersionNumber"] = "maintained by the domain controllers",
         ["lockoutTime"] = "account lockout: maintained by the domain controllers",
         ["adminCount"] = "maintained by the domain controllers (AdminSDHolder)",
+        ["versionNumber"] = "group policy version: a restore of the policy raises it above the live one (an older version is ignored by the clients)",
     };
 
     /// <summary>Integer attributes that hold a FILETIME.</summary>

@@ -90,7 +90,7 @@ public interface IAdDirectory : IDisposable
     /// <summary>Moves and/or renames an object (LDAP modify DN).</summary>
     void Move(string dn, string newRdn, string newParentDn);
 
-    /// <summary>The object's DACL as a self-relative security descriptor (SD flags control: DACL only); null if none.</summary>
+    /// <summary>The object's DACL as a self-relative security descriptor (SD flags control: DACL only), also of a deleted object; null if none.</summary>
     byte[]? ReadSecurityDescriptor(string dn);
 
     /// <summary>Writes the object's DACL from a self-relative security descriptor (SD flags control: DACL only).</summary>

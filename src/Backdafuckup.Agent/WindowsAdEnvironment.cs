@@ -509,6 +509,7 @@ internal sealed class WindowsAdDirectory : IAdDirectory
     {
         var request = new SearchRequest(dn, "(objectClass=*)", SearchScope.Base, "nTSecurityDescriptor");
         request.Controls.Add(new SecurityDescriptorFlagControl(System.DirectoryServices.Protocols.SecurityMasks.Dacl));
+        request.Controls.Add(new ShowDeletedControl());
         var response = Send(request, dn);
         return response.Entries.Count > 0 && response.Entries[0].Attributes["nTSecurityDescriptor"] is { Count: > 0 } values
             ? (byte[])values.GetValues(typeof(byte[]))[0]

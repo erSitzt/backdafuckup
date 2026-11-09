@@ -541,6 +541,23 @@ public sealed class AdExplores(
         return CloseAsync(explore, $"closed by {user}");
     }
 
+    /// <summary>
+    /// The agent restarted: its new process removed every copy at its start (journal), so its explore sessions end now
+    /// instead of at their next query. Sessions still opening fail through their running job.
+    /// </summary>
+    public void AgentRestarted(Guid agentId)
+    {
+        foreach (var explore in _explores.Values.Where(e => e.Agent.Id == agentId && e.State == AdExploreStates.Ready).ToList())
+        {
+            explore.Error = $"The agent on {explore.Host} restarted (service restart, crash or VM reboot) and removed the backup's directory at its start. Open it again.";
+            explore.State = AdExploreStates.Failed;
+            explore.Prepared = false;
+            explore.Mount = null;
+            explore.Log.Warning(explore.Error);
+            _ = Task.Run(() => CloseAsync(explore, "the agent restarted", SessionState.Failed));
+        }
+    }
+
     /// <summary>Unmounts on the DC (deleting the copy), ends the session and forgets the explore.</summary>
     public async Task CloseAsync(AdExplore explore, string reason, SessionState state = SessionState.Succeeded, bool flushLog = true)
     {
@@ -881,7 +898,7 @@ public sealed class AdExplores(
             var result = await RunAsync(explore, request, options.Value.QueryTimeout, cancellationToken, failOnError: false).ConfigureAwait(false);
             if (result.NotMounted)
             {
-                explore.Error = $"The domain controller {explore.Host} no longer serves the backup's directory ({result.Error}). Open it again.";
+                explore.Error = $"The domain controller {explore.Host} no longer serves the backup's directory ({result.Error?.TrimEnd('.')}). Open it again.";
                 explore.State = AdExploreStates.Failed;
                 explore.Prepared = false;
                 explore.Mount = null;

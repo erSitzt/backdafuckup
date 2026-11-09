@@ -173,8 +173,25 @@ public sealed partial class ApiIntegrationTests
         var folder = Path.Combine(sandbox, "C", "ProgramData", "backdafuckup", "ad", explore.Id.ToString("D"));
         Assert.Equal(["ntds.dit"], Directory.GetFiles(folder).Select(Path.GetFileName));
         Assert.Equal(ifmDit, await File.ReadAllBytesAsync(Path.Combine(folder, "ntds.dit"), Ct));
-        await Ok(client.DeleteAsync($"/api/ad/explores/{explore.Id}", Ct));
-        var log = (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{explore.SessionId}/log", Ct))!.Select(l => l.Message).ToList();
+
+        // The agent restarts: it removes the copy at its start, and the session ends at once (not at the next query).
+        await dc.Value.Stop.CancelAsync();
+        await dc.Value.Running;
+        dc = await StartAgentAsync(point.VmNativeId, new SandboxRestoreFileSystem(sandbox), ad: env, directory: Directory.GetDirectories(_root, "agent-*").Single());
+        var ended = await WaitForSessionAsync(client, explore.SessionId);
+        Assert.Equal("Failed", ended.Session.State);
+        Assert.False(Directory.Exists(folder));
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/ad/explores/{explore.Id}", Ct)).StatusCode);
+        var restarted = "restarted (service restart, crash or VM reboot) and removed the backup's directory at its start";
+        var log = new List<string>();
+        for (var i = 0; i < 50 && !log.Any(m => m.Contains(restarted, StringComparison.Ordinal)); i++)
+        {
+            // The log is flushed when the session has been closed in the background.
+            await Task.Delay(100, Ct);
+            log = (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{explore.SessionId}/log", Ct))!.Select(l => l.Message).ToList();
+        }
+
+        Assert.True(log.Any(m => m.StartsWith("The agent on DC1 (10.0.0.10) restarted", StringComparison.Ordinal) && m.Contains(restarted, StringComparison.Ordinal)), string.Join("\n", log));
         Assert.Contains(log, m => m.Contains(@"Directory database C:\ProgramData\backdafuckup\ad-ifm\Active Directory\ntds.dit: the consistent copy made with ntdsutil IFM", StringComparison.Ordinal));
         Assert.DoesNotContain(log, m => m.Contains("crash-consistent", StringComparison.Ordinal));
         await dc.Value.Stop.CancelAsync();
