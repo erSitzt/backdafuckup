@@ -44,6 +44,36 @@ public sealed class ScheduleCalculatorTests
     }
 
     [Fact]
+    public void Previous_is_the_last_run_at_or_before_the_time()
+    {
+        var daily = new JobSchedule { Kind = ScheduleKind.Daily, TimeOfDay = new TimeOnly(22, 0), TimeZoneId = "Europe/Berlin" };
+        Assert.Equal(new DateTimeOffset(2026, 11, 1, 21, 0, 0, TimeSpan.Zero), ScheduleCalculator.Previous(daily, Monday));
+        Assert.Equal(new DateTimeOffset(2026, 11, 2, 21, 0, 0, TimeSpan.Zero), ScheduleCalculator.Previous(daily, new DateTimeOffset(2026, 11, 2, 21, 0, 0, TimeSpan.Zero)));
+
+        var weekly = new JobSchedule
+        {
+            Kind = ScheduleKind.Weekly,
+            TimeOfDay = new TimeOnly(1, 30),
+            DaysOfWeek = (1 << (int)DayOfWeek.Saturday) | (1 << (int)DayOfWeek.Wednesday),
+            TimeZoneId = "UTC",
+        };
+        Assert.Equal(new DateTimeOffset(2026, 10, 31, 1, 30, 0, TimeSpan.Zero), ScheduleCalculator.Previous(weekly, Monday));
+        Assert.Equal(new DateTimeOffset(2026, 10, 28, 1, 30, 0, TimeSpan.Zero), ScheduleCalculator.Previous(weekly, new DateTimeOffset(2026, 10, 31, 1, 29, 0, TimeSpan.Zero)));
+
+        Assert.Null(ScheduleCalculator.Previous(new JobSchedule { Kind = ScheduleKind.None }, Monday));
+        Assert.Null(ScheduleCalculator.Previous(new JobSchedule { Kind = ScheduleKind.Weekly, DaysOfWeek = 0 }, Monday));
+    }
+
+    [Fact]
+    public void Previous_handles_daylight_saving_transitions_like_next()
+    {
+        // The same runs as Next: the first valid minute after the spring gap, the first of the repeated hour.
+        var schedule = new JobSchedule { Kind = ScheduleKind.Daily, TimeOfDay = new TimeOnly(2, 30), TimeZoneId = "Europe/Berlin" };
+        Assert.Equal(new DateTimeOffset(2027, 3, 28, 1, 0, 0, TimeSpan.Zero), ScheduleCalculator.Previous(schedule, new DateTimeOffset(2027, 3, 28, 12, 0, 0, TimeSpan.Zero)));
+        Assert.Equal(new DateTimeOffset(2026, 10, 25, 0, 30, 0, TimeSpan.Zero), ScheduleCalculator.Previous(schedule, new DateTimeOffset(2026, 10, 25, 12, 0, 0, TimeSpan.Zero)));
+    }
+
+    [Fact]
     public void Unscheduled_jobs_have_no_next_run()
     {
         Assert.Null(ScheduleCalculator.Next(new JobSchedule { Kind = ScheduleKind.None }, Monday));

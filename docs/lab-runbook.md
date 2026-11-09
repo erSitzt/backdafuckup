@@ -106,6 +106,8 @@ sudo mkdir -p /var/www/html/bdfu-lab && sudo sh -c 'echo page > /var/www/html/bd
 | E1 | Run `scripts/deploy/update-windows.sh` while a file browser is open. | The update is refused with the number of running sessions. |
 | E2 | Leave a file browser unused for 30 minutes. | It closes; its session log says "closed after 30 minutes without use". |
 | E3 | Keep a file browser open on the oldest restore point while the job runs and retention would remove it. | The restore point stays; the next job run removes it after the browser is closed. |
+| E4 | Open *Backups & Restore* on the server; switch to *By VM*, filter by a job and by *Contains: SQL Server*, reload the page. | By job: each job with its schedule, its VMs with the newest restore point; a VM that missed the last nightly run is marked *missed a run*. The filters stay in the address after the reload. *Restore* on a VM offers Entire VM, Files and, where the restore point has them, SQL Server databases and Active Directory objects. |
+| E5 | Scale, on a **scratch** instance only (own database, never the server's catalog): add a repository, load `python3 scripts/dev/scale-catalog.py <repository id> \| psql …` (280 VMs, about 6,000 restore points without data), open *Backups & Restore*. | The page is there within about 2 s with 285 VMs (6 *missed a run*, 5 *no restore point*); a filter answers within about 1 s; `/api/restore-points/vms` answers within 150 ms, compressed under 100 KB. |
 
 ### F. SQL Server
 

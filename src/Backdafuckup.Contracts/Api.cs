@@ -264,6 +264,72 @@ public sealed record RestorePointDto(
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 
+// ---- Backups overview (one row per VM, GET /api/restore-points/vms) ----
+
+/// <summary>The state of a VM in a job (<see cref="BackupVmJobDto.State"/>) and of the whole VM (<see cref="BackupVmDto.State"/>).</summary>
+public static class BackupVmStates
+{
+    /// <summary>A restore point of the job's most recent scheduled run is there.</summary>
+    public const string Ok = "ok";
+
+    /// <summary>The VM missed the most recent scheduled run that started at least 12 hours ago.</summary>
+    public const string Stale = "stale";
+
+    /// <summary>The VM is in the job but has no restore point of it.</summary>
+    public const string NoPoint = "nopoint";
+
+    /// <summary>The job has no schedule: it never marks a VM as stale.</summary>
+    public const string Manual = "manual";
+
+    /// <summary>The job is disabled.</summary>
+    public const string Disabled = "disabled";
+
+    /// <summary>Restore points without a job, or of a deleted job.</summary>
+    public const string NoJob = "nojob";
+}
+
+/// <summary>The newest restore point of a VM (in a job, or overall), without disks and NICs.</summary>
+public sealed record BackupVmPointDto(
+    Guid Id,
+    Guid? JobId,
+    DateTimeOffset CreatedUtc,
+    string Kind,
+    string Consistency,
+    string? ConsistencyReason,
+    long LogicalBytes,
+    int SqlDatabaseCount,
+    bool DomainController,
+    string? AdDomain);
+
+/// <summary>
+/// A VM in one job: its restore points there and its state. <see cref="JobId"/> is null (and <see cref="JobExists"/>
+/// false) for restore points without a job: their job was deleted, and <see cref="JobName"/> is the name stored with the
+/// newest of them.
+/// </summary>
+public sealed record BackupVmJobDto(
+    Guid? JobId,
+    string JobName,
+    bool JobExists,
+    bool Enabled,
+    ScheduleDto? Schedule,
+    int PointCount,
+    long StoredBytes,
+    IReadOnlyList<Guid> RepositoryIds,
+    BackupVmPointDto? Latest,
+    string State,
+    DateTimeOffset? MissedRunUtc);
+
+/// <summary>One VM with its jobs; <see cref="State"/> is <c>stale</c> if one of its jobs is, else <c>nopoint</c> without any restore point, else <c>ok</c>.</summary>
+public sealed record BackupVmDto(
+    string VmNativeId,
+    string VmName,
+    Guid? ConnectionId,
+    IReadOnlyList<BackupVmJobDto> Jobs,
+    int PointCount,
+    long StoredBytes,
+    BackupVmPointDto? Latest,
+    string State);
+
 // ---- Dashboard ----
 public sealed record DashboardDto(
     int JobsSucceeded24h,

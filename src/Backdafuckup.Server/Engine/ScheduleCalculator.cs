@@ -36,6 +36,35 @@ public static class ScheduleCalculator
         return null;
     }
 
+    /// <summary>Returns the last run at or before <paramref name="atOrBeforeUtc"/>, or null if the job is not scheduled.</summary>
+    public static DateTimeOffset? Previous(JobSchedule schedule, DateTimeOffset atOrBeforeUtc)
+    {
+        ArgumentNullException.ThrowIfNull(schedule);
+        if (schedule.Kind == ScheduleKind.None || (schedule.Kind == ScheduleKind.Weekly && schedule.DaysOfWeek == 0))
+        {
+            return null;
+        }
+
+        var zone = FindZone(schedule.TimeZoneId);
+        var date = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(atOrBeforeUtc, zone).DateTime);
+        for (var i = 0; i <= 8; i++)
+        {
+            var day = date.AddDays(-i);
+            if (schedule.Kind == ScheduleKind.Weekly && (schedule.DaysOfWeek & (1 << (int)day.DayOfWeek)) == 0)
+            {
+                continue;
+            }
+
+            var candidate = ToUtc(day.ToDateTime(schedule.TimeOfDay), zone);
+            if (candidate <= atOrBeforeUtc)
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// The first slot strictly after <paramref name="afterUtc"/> of an interval schedule: every
     /// <paramref name="minutes"/> from local midnight of <paramref name="timeZoneId"/> (e.g. :00/:15/:30/:45); a day

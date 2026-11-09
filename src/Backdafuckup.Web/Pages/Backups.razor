@@ -1,149 +1,556 @@
 @page "/backups"
+@using System.Globalization
 @inject ApiClient Api
+@inject NavigationManager Nav
 @inject ISnackbar Snackbar
-@inject IDialogService Dialogs
 
 <PageTitle>Backups – backdafuckup</PageTitle>
-<PageHeader Title="Backups &amp; Restore" Description="The restore points of each VM. Restore the whole VM, single files, SQL Server databases or Active Directory objects from any of them." />
+<PageHeader Title="Backups &amp; Restore" Description="Every backed-up VM with its newest restore point, by job or by VM. Expand a VM for all its restore points; restore the whole VM, files, SQL Server databases or Active Directory objects from any of them.">
+    <Actions>
+        <MudToggleGroup T="string" Value="@Grouping" ValueChanged="@(v => Navigate(("group", v == "vm" ? "vm" : null)))" Size="Size.Small" Outlined="true" Color="Color.Primary">
+            <MudToggleItem Value="@("job")" Text="By job" />
+            <MudToggleItem Value="@("vm")" Text="By VM" />
+        </MudToggleGroup>
+    </Actions>
+</PageHeader>
 
-@if (_points is null)
+<MudPaper Elevation="1" Class="pa-2 mb-3">
+    <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Wrap="Wrap.Wrap">
+        <MudTextField T="string" @bind-Value="_text" DebounceInterval="300" OnDebounceIntervalElapsed="@(v => Navigate(("q", string.IsNullOrWhiteSpace(v) ? null : v.Trim())))"
+                      Placeholder="VM or job" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Clearable="true"
+                      Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:180px;max-width:260px" />
+        <MudSelect T="Guid" SelectedValues="@(JobIds ?? [])" SelectedValuesChanged="@(v => Navigate(("job", Values(v.Select(g => g.ToString())))))" MultiSelection="true"
+                   Label="Jobs" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:160px;max-width:260px"
+                   MultiSelectionTextFunc="@(values => values.Count == 0 ? "All" : string.Join(", ", values.Select(v => JobName(Guid.Parse(v)))))">
+            @foreach (var job in _jobs)
+            {
+                <MudSelectItem T="Guid" Value="@job.Id">@job.Name</MudSelectItem>
+            }
+            <MudSelectItem T="Guid" Value="@Guid.Empty">Without job</MudSelectItem>
+        </MudSelect>
+        @if (_repositories.Count > 1)
+        {
+            <MudSelect T="Guid?" Value="@Repository" ValueChanged="@(v => Navigate(("repo", v?.ToString())))" Label="Repository" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:150px">
+                <MudSelectItem T="Guid?" Value="@((Guid?)null)">All</MudSelectItem>
+                @foreach (var repository in _repositories)
+                {
+                    <MudSelectItem T="Guid?" Value="@((Guid?)repository.Id)">@repository.Name</MudSelectItem>
+                }
+            </MudSelect>
+        }
+        <MudSelect T="string" SelectedValues="@(Content ?? [])" SelectedValuesChanged="@(v => Navigate(("content", Values(v))))" MultiSelection="true"
+                   Label="Contains" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:120px"
+                   MultiSelectionTextFunc="@(values => values.Count == 0 ? "Anything" : string.Join(", ", values.Select(v => v.ToUpperInvariant())))">
+            <MudSelectItem T="string" Value="@("ad")">Active Directory</MudSelectItem>
+            <MudSelectItem T="string" Value="@("sql")">SQL Server</MudSelectItem>
+        </MudSelect>
+        <MudSelect T="string" Value="@(Consistency ?? string.Empty)" ValueChanged="@(v => Navigate(("consistency", string.IsNullOrEmpty(v) ? null : v)))"
+                   Label="Consistency" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:140px">
+            <MudSelectItem T="string" Value="@string.Empty">Any</MudSelectItem>
+            <MudSelectItem T="string" Value="@("application")">Application</MudSelectItem>
+            <MudSelectItem T="string" Value="@("crash")">Crash</MudSelectItem>
+            <MudSelectItem T="string" Value="@("warning")">Crash with a warning</MudSelectItem>
+        </MudSelect>
+        <MudSelect T="string" SelectedValues="@(States ?? [])" SelectedValuesChanged="@(v => Navigate(("state", Values(v))))" MultiSelection="true"
+                   Label="State" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:140px"
+                   MultiSelectionTextFunc="@(values => values.Count == 0 ? "Any" : string.Join(", ", values.Select(StateLabel)))">
+            <MudSelectItem T="string" Value="@BackupVmStates.Stale">Missed a run</MudSelectItem>
+            <MudSelectItem T="string" Value="@BackupVmStates.NoPoint">No restore point</MudSelectItem>
+            <MudSelectItem T="string" Value="@BackupVmStates.Ok">Up to date</MudSelectItem>
+        </MudSelect>
+        <MudSelect T="int?" Value="@OlderThan" ValueChanged="@(v => Navigate(("older", v?.ToString(CultureInfo.InvariantCulture))))"
+                   Label="Newest point" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:140px">
+            <MudSelectItem T="int?" Value="@((int?)null)">Any age</MudSelectItem>
+            @foreach (var days in new[] { 1, 2, 7, 30 })
+            {
+                <MudSelectItem T="int?" Value="@((int?)days)">Older than @days day@(days == 1 ? string.Empty : "s")</MudSelectItem>
+            }
+        </MudSelect>
+        <MudSelect T="string" Value="@Sorting" ValueChanged="@(v => Navigate(("sort", v == "name" ? null : v)))" Label="Sort" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:150px">
+            <MudSelectItem T="string" Value="@("name")">Name</MudSelectItem>
+            <MudSelectItem T="string" Value="@("oldest")">Oldest point first</MudSelectItem>
+            <MudSelectItem T="string" Value="@("size")">Largest first</MudSelectItem>
+        </MudSelect>
+        @if (Filtered)
+        {
+            <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Filled.FilterAltOff" OnClick="ResetAsync">Reset</MudButton>
+        }
+        <MudSpacer />
+        @if (_vms is not null)
+        {
+            <MudText Typo="Typo.body2" Color="Color.Secondary">@Summary()</MudText>
+        }
+    </MudStack>
+    @if (_loading)
+    {
+        <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mt-1" />
+    }
+</MudPaper>
+
+<MudMenu @ref="_restoreMenu" PositionAtCursor="true" Dense="true">
+    <ActivatorContent><span></span></ActivatorContent>
+    <ChildContent>
+        @if (_menuPoint is { } point)
+        {
+            <MudMenuItem Icon="@Icons.Material.Filled.Computer" Href="@($"/restore/{point.Id}")">Entire VM</MudMenuItem>
+            <MudMenuItem Icon="@Icons.Material.Filled.FolderOpen" Href="@($"/files/{point.Id}")">Files and folders</MudMenuItem>
+            @if (point.SqlDatabaseCount > 0)
+            {
+                <MudMenuItem Icon="@Icons.Material.Filled.TableChart" Href="@($"/sql/{point.Id}")">SQL Server databases</MudMenuItem>
+            }
+            @if (point.DomainController)
+            {
+                <MudMenuItem Icon="@Icons.Material.Filled.Domain" Href="@($"/ad/{point.Id}")">Active Directory objects</MudMenuItem>
+            }
+        }
+    </ChildContent>
+</MudMenu>
+
+@if (_vms is null)
 {
-    <MudProgressLinear Indeterminate="true" />
+    if (_error is not null)
+    {
+        <MudAlert Severity="Severity.Error">@_error</MudAlert>
+    }
 }
-else if (_points.Count == 0)
+else if (_vms.Count == 0)
 {
-    <MudAlert Severity="Severity.Info">No restore points yet.</MudAlert>
+    <MudAlert Severity="Severity.Info">@(Filtered ? "No VM matches the filters." : "No restore points yet: run a backup job.")</MudAlert>
 }
 else
 {
-    <MudTextField @bind-Value="_filter" Placeholder="Filter by VM or job" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true"
-                  Variant="Variant.Outlined" Margin="Margin.Dense" Class="mb-3" Style="max-width:400px" />
-    <MudExpansionPanels MultiExpansion="true">
-        @foreach (var vm in _points.Where(Matches).GroupBy(p => (p.VmNativeId, p.VmName)).OrderBy(g => g.Key.VmName))
-        {
-            var latest = vm.OrderByDescending(p => p.CreatedUtc).First();
-            <MudExpansionPanel>
-                <TitleContent>
-                    <div class="d-flex align-center flex-wrap" style="gap:4px 12px">
-                        <MudIcon Icon="@Icons.Material.Filled.Computer" Color="Color.Secondary" />
-                        <MudText Typo="Typo.subtitle1" Style="font-weight:600">@vm.Key.VmName</MudText>
-                        <MudText Typo="Typo.body2" Color="Color.Secondary">@vm.Count() restore point(s) · latest @Fmt.Time(latest.CreatedUtc) · job @latest.JobName</MudText>
-                    </div>
-                </TitleContent>
-                <ChildContent>
-                    <div class="cq">
-                    <MudSimpleTable Dense="true" Hover="true" Elevation="0">
-                        <thead><tr><th>Created</th><th class="c-560">Type</th><th class="c-420">Consistency</th><th class="c-760 num">Disks</th><th class="c-560 num">New data</th><th class="c-950">Job</th><th></th></tr></thead>
+    @foreach (var group in Groups())
+    {
+        var collapsed = _collapsed.Contains(group.Key);
+        <MudPaper Elevation="1" Class="mb-3">
+            @if (group.Title is not null)
+            {
+                <div class="backup-group-head cursor-pointer" @onclick="@(() => ToggleGroup(group.Key))">
+                    <MudIcon Icon="@(collapsed ? Icons.Material.Filled.ChevronRight : Icons.Material.Filled.ExpandMore)" Size="Size.Small" />
+                    <MudText Typo="Typo.subtitle1" Class="section-title">@group.Title</MudText>
+                    <MudText Typo="Typo.body2" Color="Color.Secondary">@group.Detail · @group.Rows.Count VM@(group.Rows.Count == 1 ? string.Empty : "s")</MudText>
+                    @if (group.Stale > 0)
+                    {
+                        <MudChip T="string" Size="Size.Small" Color="Color.Warning" Icon="@Icons.Material.Filled.Schedule">@group.Stale missed a run</MudChip>
+                    }
+                    @if (group.NoPoint > 0)
+                    {
+                        <MudChip T="string" Size="Size.Small" Color="Color.Error" Icon="@Icons.Material.Filled.ErrorOutline">@group.NoPoint without restore point</MudChip>
+                    }
+                    @if (group.Warnings > 0)
+                    {
+                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Warning" Icon="@Icons.Material.Filled.Warning">@group.Warnings crash-consistent with a warning</MudChip>
+                    }
+                </div>
+            }
+            @if (!collapsed)
+            {
+                var all = _showAll.Contains(group.Key);
+                var rows = all ? group.Rows : group.Rows.Take(RowLimit).ToList();
+                <div class="cq">
+                    <MudSimpleTable Dense="true" Hover="true" Elevation="0" Class="backup-vms">
+                        <thead>
+                            <tr>
+                                <th style="width:28px"></th><th>VM</th><th class="c-560">State</th><th class="c-560">Newest restore point</th><th class="c-760 num">Points</th>
+                                <th class="c-950 num">Stored</th><th class="c-420">Contains</th>@if (Grouping == "vm") {<th class="c-760">Jobs</th>}<th></th>
+                            </tr>
+                        </thead>
                         <tbody>
-                            @foreach (var p in vm.OrderByDescending(p => p.CreatedUtc))
+                            @foreach (var row in rows)
                             {
-                                <tr>
-                                    <td class="nowrap-wide">@Fmt.Time(p.CreatedUtc)</td>
-                                    <td class="c-560">@p.Kind</td>
-                                    <td class="c-420">
-                                        @if (p.Consistency == "application")
+                                var key = RowKey(group, row);
+                                var open = _open.Contains(key);
+                                var latest = row.Latest;
+                                <tr class="cursor-pointer" @key="key" @onclick="@(() => ToggleRowAsync(group, row))">
+                                    @* Plain HTML in the rows: with 300 VMs every component per row counts (rendering and filtering). *@
+                                    <td><span class="@(open ? "row-chevron open" : "row-chevron")"></span></td>
+                                    <td>
+                                        <span style="font-weight:600">@row.Vm.VmName</span>
+                                        <span class="cell-sub n-560">@(latest is null ? "no restore point" : Ago(latest.CreatedUtc))@(row.State == BackupVmStates.Stale ? " · missed a run" : string.Empty)</span>
+                                    </td>
+                                    <td class="c-560">@StateChip(row)</td>
+                                    <td class="c-560 nowrap-wide">
+                                        @if (latest is not null)
                                         {
-                                            <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Success" Icon="@Icons.Material.Filled.VerifiedUser">application</MudChip>
+                                            <span title="@Fmt.Time(latest.CreatedUtc)">@Ago(latest.CreatedUtc)</span>
+                                            <span class="cell-sub">@Fmt.Time(latest.CreatedUtc)</span>
                                         }
                                         else
                                         {
-                                            <MudTooltip Text="@(p.ConsistencyReason ?? "Without guest processing: like a power failure; most applications recover by themselves.")">
-                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@(p.ConsistencyReason is null ? Color.Default : Color.Warning)">crash</MudChip>
-                                            </MudTooltip>
-                                        }
-                                        @if (p.SqlDatabaseCount > 0)
-                                        {
-                                            <MudTooltip Text="@($"{p.SqlDatabaseCount} SQL Server database(s) in this restore point")">
-                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Info" Icon="@Icons.Material.Filled.TableChart">SQL @p.SqlDatabaseCount</MudChip>
-                                            </MudTooltip>
-                                        }
-                                        @if (p.DomainController)
-                                        {
-                                            <MudTooltip Text="@(string.IsNullOrEmpty(p.AdDomain) ? "Domain controller: its Active Directory database is in this restore point" : $"Domain controller of {p.AdDomain}: its Active Directory database is in this restore point")">
-                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Info" Icon="@Icons.Material.Filled.Domain">AD</MudChip>
-                                            </MudTooltip>
+                                            <span class="cell-sub">–</span>
                                         }
                                     </td>
-                                    <td class="c-760 num">@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))</td>
-                                    <td class="c-560 num">@Fmt.Bytes(p.NewStoredBytes)</td>
-                                    <td class="c-950">@p.JobName</td>
-                                    <td style="text-align:right;white-space:nowrap">
-                                        <MudMenu AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true">
-                                            <ActivatorContent>
-                                                @* MudBlazor 9: a custom activator opens the menu itself. *@
-                                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Restore" EndIcon="@Icons.Material.Filled.ArrowDropDown"
-                                                           OnClick="@context.ToggleAsync">Restore</MudButton>
-                                            </ActivatorContent>
-                                            <ChildContent>
-                                                <MudMenuItem Icon="@Icons.Material.Filled.Computer" Href="@($"/restore/{p.Id}")">Entire VM</MudMenuItem>
-                                                <MudMenuItem Icon="@Icons.Material.Filled.FolderOpen" Href="@($"/files/{p.Id}")">Files and folders</MudMenuItem>
-                                                @if (p.SqlDatabaseCount > 0)
-                                                {
-                                                    <MudMenuItem Icon="@Icons.Material.Filled.TableChart" Href="@($"/sql/{p.Id}")">SQL Server databases</MudMenuItem>
-                                                }
-                                                @if (p.DomainController)
-                                                {
-                                                    <MudMenuItem Icon="@Icons.Material.Filled.Domain" Href="@($"/ad/{p.Id}")">Active Directory objects</MudMenuItem>
-                                                }
-                                            </ChildContent>
-                                        </MudMenu>
-                                        <MudMenu Icon="@Icons.Material.Filled.MoreVert" Size="Size.Small" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="More actions">
-                                            <MudMenuItem Icon="@Icons.Material.Filled.FactCheck" OnClick="@(() => VerifyAsync(p))">Verify all data</MudMenuItem>
-                                            <MudDivider />
-                                            <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => DeleteAsync(p))">Delete restore point</MudMenuItem>
-                                        </MudMenu>
+                                    <td class="c-760 num">@row.PointCount</td>
+                                    <td class="c-950 num">@Fmt.Bytes(row.StoredBytes)</td>
+                                    <td class="c-420">
+                                        @if (latest is not null)
+                                        {
+                                            @if (latest.DomainController)
+                                            {
+                                                <span class="mini-chip info" title="@($"Domain controller{(string.IsNullOrEmpty(latest.AdDomain) ? string.Empty : $" of {latest.AdDomain}")}: its Active Directory database is in the newest restore point")">AD</span>
+                                            }
+                                            @if (latest.SqlDatabaseCount > 0)
+                                            {
+                                                <span class="mini-chip info" title="@($"{latest.SqlDatabaseCount} SQL Server database(s) in the newest restore point")">SQL @latest.SqlDatabaseCount</span>
+                                            }
+                                            @if (latest.Consistency != "application")
+                                            {
+                                                <span class="@(latest.ConsistencyReason is null ? "mini-chip" : "mini-chip warning")"
+                                                      title="@(latest.ConsistencyReason ?? "Without guest processing: like a power failure; most applications recover by themselves.")">crash</span>
+                                            }
+                                        }
+                                    </td>
+                                    @if (Grouping == "vm")
+                                    {
+                                        <td class="c-760">@string.Join(", ", row.Vm.Jobs.Select(j => j.JobName))</td>
+                                    }
+                                    <td style="text-align:right;white-space:nowrap" @onclick:stopPropagation="true">
+                                        @if (latest is not null)
+                                        {
+                                            @* One shared menu for all rows: a menu per row costs a popover each (300 VMs, 300 popovers). *@
+                                            <button type="button" class="mud-button-root mud-button mud-button-outlined mud-button-outlined-primary mud-button-outlined-size-small"
+                                                    @onclick="@(e => OpenRestoreMenuAsync(e, latest))" title="@($"From the newest restore point ({Fmt.Time(latest.CreatedUtc)})")"><span class="mud-button-label">Restore</span></button>
+                                        }
                                     </td>
                                 </tr>
+                                @if (open)
+                                {
+                                    <tr class="vm-points" @key="@(key + "|points")">
+                                        <td colspan="@(Grouping == "vm" ? 9 : 8)">
+                                            @if (_points.TryGetValue(key, out var points) && points is not null)
+                                            {
+                                                @if (points.Count == 0)
+                                                {
+                                                    <MudText Typo="Typo.body2" Color="Color.Secondary">No restore point@(row.Job is { } j ? $" of {j.JobName}" : string.Empty) yet.</MudText>
+                                                }
+                                                else
+                                                {
+                                                    <RestorePointTable Points="points" ShowJob="@(Grouping == "vm")" Deleted="@(_ => ReloadRowAsync(key, group, row))" />
+                                                }
+                                            }
+                                            else
+                                            {
+                                                <MudProgressLinear Indeterminate="true" />
+                                            }
+                                        </td>
+                                    </tr>
+                                }
                             }
                         </tbody>
                     </MudSimpleTable>
+                </div>
+                @if (!all && group.Rows.Count > RowLimit)
+                {
+                    <div class="pa-2">
+                        <MudButton Variant="Variant.Text" OnClick="@(() => _showAll.Add(group.Key))">Show all @group.Rows.Count VMs</MudButton>
                     </div>
-                </ChildContent>
-            </MudExpansionPanel>
-        }
-    </MudExpansionPanels>
+                }
+            }
+        </MudPaper>
+    }
 }
 
 @code {
-    private List<RestorePointDto>? _points;
-    private string _filter = string.Empty;
+    /// <summary>Rows of a group (or of the flat list) rendered before "Show all".</summary>
+    private const int RowLimit = 100;
 
-    protected override Task OnInitializedAsync() => LoadAsync();
+    [SupplyParameterFromQuery(Name = "group")] public string? GroupParameter { get; set; }
 
-    private async Task LoadAsync() => _points = await Api.GetAsync<List<RestorePointDto>>("api/restore-points");
+    [SupplyParameterFromQuery(Name = "q")] public string? Q { get; set; }
 
-    private bool Matches(RestorePointDto p) => string.IsNullOrWhiteSpace(_filter)
-        || p.VmName.Contains(_filter, StringComparison.OrdinalIgnoreCase) || p.JobName.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+    [SupplyParameterFromQuery(Name = "job")] public Guid[]? JobIds { get; set; }
 
-    private async Task VerifyAsync(RestorePointDto point)
+    [SupplyParameterFromQuery(Name = "repo")] public Guid? Repository { get; set; }
+
+    [SupplyParameterFromQuery(Name = "content")] public string[]? Content { get; set; }
+
+    [SupplyParameterFromQuery(Name = "consistency")] public string? Consistency { get; set; }
+
+    [SupplyParameterFromQuery(Name = "state")] public string[]? States { get; set; }
+
+    [SupplyParameterFromQuery(Name = "older")] public int? OlderThan { get; set; }
+
+    [SupplyParameterFromQuery(Name = "sort")] public string? SortParameter { get; set; }
+
+    private List<BackupVmDto>? _vms;
+    private List<JobDto> _jobs = [];
+    private List<RepositoryDto> _repositories = [];
+    private string? _error;
+    private bool _loading;
+    private string? _text;
+    private string? _appliedQ;
+    private string? _loadedFilter;
+    private int _version;
+    private readonly HashSet<string> _collapsed = [];
+    private readonly HashSet<string> _showAll = [];
+    private readonly HashSet<string> _open = [];
+    private readonly Dictionary<string, List<RestorePointDto>?> _points = [];
+
+    private string Grouping => GroupParameter == "vm" ? "vm" : "job";
+
+    private string Sorting => SortParameter is "oldest" or "size" ? SortParameter : "name";
+
+    private bool Filtered => !string.IsNullOrEmpty(Q) || JobIds is { Length: > 0 } || Repository is not null || Content is { Length: > 0 }
+        || !string.IsNullOrEmpty(Consistency) || States is { Length: > 0 } || OlderThan is not null;
+
+    /// <summary>A row: a VM in a job (by job), or the VM with all its jobs (by VM).</summary>
+    private sealed record Row(BackupVmDto Vm, BackupVmJobDto? Job)
     {
-        Snackbar.Add($"Verifying restore point of {point.VmName}…", Severity.Info);
+        public BackupVmPointDto? Latest => Job is null ? Vm.Latest : Job.Latest;
+
+        public int PointCount => Job?.PointCount ?? Vm.PointCount;
+
+        public long StoredBytes => Job?.StoredBytes ?? Vm.StoredBytes;
+
+        public string State => Job is null ? Vm.State : Job.State;
+
+        public DateTimeOffset? MissedRunUtc => Job is null ? Vm.Jobs.Where(j => j.MissedRunUtc is not null).Min(j => j.MissedRunUtc) : Job.MissedRunUtc;
+    }
+
+    private sealed record Group(string Key, string? Title, string Detail, List<Row> Rows)
+    {
+        public int Stale => Rows.Count(r => r.State == BackupVmStates.Stale);
+
+        public int NoPoint => Rows.Count(r => r.State == BackupVmStates.NoPoint);
+
+        public int Warnings => Rows.Count(r => r.Latest is { Consistency: not "application", ConsistencyReason: not null });
+    }
+
+    // The job and repository lists only fill the filters: they load next to the VMs, not before them.
+    protected override void OnInitialized() => _ = LoadListsAsync();
+
+    private async Task LoadListsAsync()
+    {
         try
         {
-            var result = await Api.PostAsync<VerifyResultDto>($"api/restore-points/{point.Id}/verify?full=true");
-            Snackbar.Add(result.Ok ? $"All {result.CheckedChunks} blocks are intact." : $"{result.Problems.Count} problem(s): {string.Join("; ", result.Problems.Take(3))}", result.Ok ? Severity.Success : Severity.Error);
+            var jobs = Api.GetAsync<List<JobDto>>("api/jobs");
+            var repositories = Api.GetAsync<List<RepositoryDto>>("api/repositories");
+            _jobs = (await jobs).OrderBy(j => j.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            _repositories = await repositories;
+            StateHasChanged();
         }
         catch (ApiException ex)
         {
-            Snackbar.Add(ex.Message, Severity.Error);
+            Snackbar.Add(ex.Message, Severity.Warning);
         }
     }
 
-    private async Task DeleteAsync(RestorePointDto point)
+    protected override async Task OnParametersSetAsync()
     {
-        if (await Dialogs.ShowMessageBoxAsync("Delete restore point", $"Delete the restore point of {point.VmName} from {Fmt.Time(point.CreatedUtc)}? This cannot be undone.", yesText: "Delete", cancelText: "Cancel") != true)
+        // The search box follows the URL when it changes from outside (Back, Reset, a link), not while typing.
+        if (Q != _appliedQ)
+        {
+            _appliedQ = Q;
+            _text = Q;
+        }
+
+        var filter = Query();
+        if (filter != _loadedFilter)
+        {
+            _loadedFilter = filter;
+            await LoadAsync(filter);
+        }
+    }
+
+    /// <summary>The API's query string for the URL's filters (grouping and sort are applied here).</summary>
+    private string Query()
+    {
+        var parts = new List<string>();
+        void Add(string name, string? value)
+        {
+            if (!string.IsNullOrEmpty(value))
+            {
+                parts.Add($"{name}={Uri.EscapeDataString(value)}");
+            }
+        }
+
+        Add("q", Q);
+        foreach (var job in JobIds ?? [])
+        {
+            Add("jobId", job.ToString());
+        }
+
+        Add("repositoryId", Repository?.ToString());
+        foreach (var content in Content ?? [])
+        {
+            Add("content", content);
+        }
+
+        Add("consistency", Consistency);
+        foreach (var state in States ?? [])
+        {
+            Add("state", state);
+        }
+
+        Add("olderThanDays", OlderThan?.ToString(CultureInfo.InvariantCulture));
+        return parts.Count == 0 ? string.Empty : "?" + string.Join("&", parts);
+    }
+
+    private async Task LoadAsync(string filter)
+    {
+        var version = ++_version;
+        _loading = true;
+        try
+        {
+            var vms = await Api.GetAsync<List<BackupVmDto>>("api/restore-points/vms" + filter);
+            if (version == _version)
+            {
+                _vms = vms;
+                _error = null;
+            }
+        }
+        catch (ApiException ex)
+        {
+            if (version == _version)
+            {
+                _error = ex.Message;
+                Snackbar.Add(ex.Message, Severity.Error);
+            }
+        }
+        finally
+        {
+            if (version == _version)
+            {
+                _loading = false;
+            }
+        }
+    }
+
+    private void Navigate(params (string Name, object? Value)[] changes) =>
+        Nav.NavigateTo(Nav.GetUriWithQueryParameters(changes.ToDictionary(c => c.Name, c => c.Value)), replace: true);
+
+    private static string[]? Values(IEnumerable<string>? values) => values?.ToArray() is { Length: > 0 } array ? array : null;
+
+    private Task ResetAsync()
+    {
+        _text = null;
+        Navigate(("q", null), ("job", null), ("repo", null), ("content", null), ("consistency", null), ("state", null), ("older", null));
+        return Task.CompletedTask;
+    }
+
+    private string JobName(Guid id) => id == Guid.Empty ? "Without job" : _jobs.FirstOrDefault(j => j.Id == id)?.Name ?? "?";
+
+    private static string StateLabel(string state) => state switch
+    {
+        BackupVmStates.Stale => "Missed a run",
+        BackupVmStates.NoPoint => "No restore point",
+        _ => "Up to date",
+    };
+
+    private static string Ago(DateTimeOffset time) => Fmt.Span(DateTimeOffset.UtcNow - time) + " ago";
+
+    private IEnumerable<Group> Groups()
+    {
+        if (Grouping == "vm")
+        {
+            yield return new Group("all", null, string.Empty, Sort(_vms!.Select(v => new Row(v, null))));
+            yield break;
+        }
+
+        var rows = _vms!.SelectMany(v => v.Jobs.Select(j => new Row(v, j))).ToList();
+        foreach (var job in rows.Where(r => r.Job!.JobExists).GroupBy(r => r.Job!.JobId!.Value).OrderBy(g => g.First().Job!.JobName, StringComparer.OrdinalIgnoreCase))
+        {
+            var first = job.First().Job!;
+            var detail = !first.Enabled ? "disabled" : first.Schedule is { } schedule ? Pages.Jobs.Describe(schedule) : "not scheduled";
+            yield return new Group(job.Key.ToString(), first.JobName, detail, Sort(job));
+        }
+
+        var orphans = rows.Where(r => !r.Job!.JobExists).ToList();
+        if (orphans.Count > 0)
+        {
+            yield return new Group("none", "Without job", "restore points of deleted jobs, kept until they are deleted", Sort(orphans));
+        }
+    }
+
+    private List<Row> Sort(IEnumerable<Row> rows) => Sorting switch
+    {
+        "oldest" => rows.OrderBy(r => r.Latest?.CreatedUtc ?? DateTimeOffset.MinValue).ThenBy(r => r.Vm.VmName, StringComparer.OrdinalIgnoreCase).ToList(),
+        "size" => rows.OrderByDescending(r => r.StoredBytes).ThenBy(r => r.Vm.VmName, StringComparer.OrdinalIgnoreCase).ToList(),
+        _ => rows.OrderBy(r => r.Vm.VmName, StringComparer.OrdinalIgnoreCase).ToList(),
+    };
+
+    private string Summary()
+    {
+        var vms = _vms!;
+        var text = $"{vms.Count} VM{(vms.Count == 1 ? string.Empty : "s")}";
+        var stale = vms.Count(v => v.State == BackupVmStates.Stale);
+        var none = vms.Count(v => v.State == BackupVmStates.NoPoint);
+        return text + (stale > 0 ? $" · {stale} missed a run" : string.Empty) + (none > 0 ? $" · {none} without restore point" : string.Empty);
+    }
+
+    private RenderFragment StateChip(Row row) => __builder =>
+    {
+        if (row.State == BackupVmStates.Stale)
+        {
+            <span class="mini-chip warning" title="@($"No restore point since the scheduled run of {Fmt.Time(row.MissedRunUtc)}")">missed a run</span>
+        }
+        else if (row.State == BackupVmStates.NoPoint)
+        {
+            <span class="mini-chip error" title="In the job, but without a restore point: added recently, or every run failed for it.">no restore point</span>
+        }
+        else if (row.Job is { State: BackupVmStates.Disabled })
+        {
+            <span class="cell-sub">job disabled</span>
+        }
+    };
+
+    private string RowKey(Group group, Row row) => group.Key + "|" + row.Vm.VmNativeId;
+
+    private MudMenu? _restoreMenu;
+    private BackupVmPointDto? _menuPoint;
+
+    private async Task OpenRestoreMenuAsync(MouseEventArgs args, BackupVmPointDto point)
+    {
+        _menuPoint = point;
+        await _restoreMenu!.OpenMenuAsync(args);
+    }
+
+    private void ToggleGroup(string key)
+    {
+        if (!_collapsed.Remove(key))
+        {
+            _collapsed.Add(key);
+        }
+    }
+
+    private async Task ToggleRowAsync(Group group, Row row)
+    {
+        var key = RowKey(group, row);
+        if (_open.Remove(key))
         {
             return;
         }
 
+        _open.Add(key);
+        if (!_points.ContainsKey(key))
+        {
+            await LoadPointsAsync(key, row);
+        }
+    }
+
+    private async Task LoadPointsAsync(string key, Row row)
+    {
+        _points[key] = null;
+        var url = $"api/restore-points?vmId={Uri.EscapeDataString(row.Vm.VmNativeId)}" + (row.Job is { JobExists: true, JobId: { } jobId } ? $"&jobId={jobId}" : string.Empty);
         try
         {
-            await Api.DeleteAsync($"api/restore-points/{point.Id}");
-            await LoadAsync();
+            var points = await Api.GetAsync<List<RestorePointDto>>(url);
+            _points[key] = row.Job is { JobExists: false } ? points.Where(p => p.JobId is null).ToList() : points;
         }
         catch (ApiException ex)
         {
+            _points.Remove(key);
+            _open.Remove(key);
             Snackbar.Add(ex.Message, Severity.Error);
         }
+    }
+
+    private async Task ReloadRowAsync(string key, Group group, Row row)
+    {
+        Snackbar.Add("Restore point deleted.", Severity.Success);
+        await LoadPointsAsync(key, row);
+        var filter = Query();
+        _loadedFilter = filter;
+        await LoadAsync(filter);
     }
 }

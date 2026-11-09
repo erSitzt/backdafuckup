@@ -204,6 +204,16 @@ public static class OperationEndpoints
             return (await query.OrderBy(r => r.VmName).ThenByDescending(r => r.CreatedUtc).ToListAsync(ct)).Select(r => r.ToDto());
         });
 
+        points.MapGet("/vms", async (AppDbContext db, TimeProvider time, string? q, Guid[]? jobId, Guid? repositoryId, string[]? content, string? consistency,
+            string[]? state, int? olderThanDays, CancellationToken ct) =>
+        {
+            var filter = new BackupVms.Filter(q, jobId, repositoryId, content, consistency, state, olderThanDays);
+            return BackupVms.Validate(filter) is { } problem
+                ? Results.Problem(problem, statusCode: StatusCodes.Status400BadRequest)
+                : Results.Ok(await BackupVms.ListAsync(db, filter, time.GetUtcNow(), ct));
+        }).WithSummary("One row per VM: its jobs, the newest restore point in each and whether it missed a scheduled run")
+          .WithDescription("Filters (all optional, repeatable where noted): q (part of the VM's or a job's name), jobId (repeatable; 00000000-0000-0000-0000-000000000000 = restore points without a job, i.e. of a deleted job), repositoryId, content (repeatable: ad, sql), consistency (application, crash, warning), state (repeatable: stale, nopoint, ok), olderThanDays. A VM keeps only the jobs that match. The restore points of a VM: GET /api/restore-points?vmId=…&jobId=….");
+
         points.MapGet("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>
             await db.RestorePoints.Include(r => r.Disks).FirstOrDefaultAsync(r => r.Id == id, ct) is { } point ? Results.Ok(point.ToDto()) : Results.NotFound());
 

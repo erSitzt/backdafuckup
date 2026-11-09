@@ -5,6 +5,7 @@ using Backdafuckup.Server.Engine;
 using Backdafuckup.Server.Hosting;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
 using Scalar.AspNetCore;
 using Serilog;
@@ -96,6 +97,16 @@ try
         return Task.CompletedTask;
     }));
     builder.Services.AddHealthChecks();
+    builder.Services.AddResponseCompression(options =>
+    {
+        // JSON only: the console's static files come precompressed from the static asset manifest.
+        options.EnableForHttps = true;
+        options.MimeTypes = ["application/json"];
+        options.Providers.Add<BrotliCompressionProvider>();
+        options.Providers.Add<GzipCompressionProvider>();
+    });
+    builder.Services.Configure<BrotliCompressionProviderOptions>(options => options.Level = System.IO.Compression.CompressionLevel.Fastest);
+    builder.Services.Configure<GzipCompressionProviderOptions>(options => options.Level = System.IO.Compression.CompressionLevel.Fastest);
 
     var app = builder.Build();
     app.Logger.LogInformation("backdafuckup {Version} starting.", ProductInfo.Current.Describe());
@@ -116,6 +127,10 @@ try
 
     app.UseSerilogRequestLogging();
     app.UseExceptionHandler();
+
+    // Compressed JSON, except where a response can carry a secret (setup, sign-in, API tokens): the length of a compressed
+    // secret next to attacker-chosen text can leak it (BREACH).
+    app.UseWhen(context => !ResponseCompressionPaths.CarriesSecrets(context.Request.Path), branch => branch.UseResponseCompression());
     app.UseStatusCodePages();
     app.UseRouting();
     app.UseAuthentication();

@@ -1,0 +1,133 @@
+@* The restore points of one VM, newest first, with Restore, Verify and Delete. Rendered only for an expanded VM. *@
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+
+@* One menu of each kind for all rows, opened where the row's button was clicked: a menu per row costs a popover each. *@
+<MudMenu @ref="_restore" PositionAtCursor="true" Dense="true">
+    <ActivatorContent><span></span></ActivatorContent>
+    <ChildContent>
+        @if (_point is { } point)
+        {
+            <MudMenuItem Icon="@Icons.Material.Filled.Computer" Href="@($"/restore/{point.Id}")">Entire VM</MudMenuItem>
+            <MudMenuItem Icon="@Icons.Material.Filled.FolderOpen" Href="@($"/files/{point.Id}")">Files and folders</MudMenuItem>
+            @if (point.SqlDatabaseCount > 0)
+            {
+                <MudMenuItem Icon="@Icons.Material.Filled.TableChart" Href="@($"/sql/{point.Id}")">SQL Server databases</MudMenuItem>
+            }
+            @if (point.DomainController)
+            {
+                <MudMenuItem Icon="@Icons.Material.Filled.Domain" Href="@($"/ad/{point.Id}")">Active Directory objects</MudMenuItem>
+            }
+        }
+    </ChildContent>
+</MudMenu>
+<MudMenu @ref="_more" PositionAtCursor="true" Dense="true">
+    <ActivatorContent><span></span></ActivatorContent>
+    <ChildContent>
+        @if (_point is { } point)
+        {
+            <MudMenuItem Icon="@Icons.Material.Filled.FactCheck" OnClick="@(() => VerifyAsync(point))">Verify all data</MudMenuItem>
+            <MudDivider />
+            <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => DeleteAsync(point))">Delete restore point</MudMenuItem>
+        }
+    </ChildContent>
+</MudMenu>
+
+<div class="cq">
+    <MudSimpleTable Dense="true" Hover="true" Elevation="0" Class="points-table">
+        <thead><tr><th>Created</th><th class="c-560">Type</th><th class="c-420">Consistency</th><th class="c-760 num">Disks</th><th class="c-560 num">New data</th>@if (ShowJob) {<th class="c-950">Job</th>}<th></th></tr></thead>
+        <tbody>
+            @foreach (var p in Points)
+            {
+                <tr>
+                    <td class="nowrap-wide">@Fmt.Time(p.CreatedUtc)</td>
+                    <td class="c-560">@p.Kind</td>
+                    <td class="c-420">
+                        @if (p.Consistency == "application")
+                        {
+                            <span class="mini-chip success">application</span>
+                        }
+                        else
+                        {
+                            <span class="@(p.ConsistencyReason is null ? "mini-chip" : "mini-chip warning")"
+                                  title="@(p.ConsistencyReason ?? "Without guest processing: like a power failure; most applications recover by themselves.")">crash</span>
+                        }
+                        @if (p.SqlDatabaseCount > 0)
+                        {
+                            <span class="mini-chip info" title="@($"{p.SqlDatabaseCount} SQL Server database(s) in this restore point")">SQL @p.SqlDatabaseCount</span>
+                        }
+                        @if (p.DomainController)
+                        {
+                            <span class="mini-chip info" title="@(string.IsNullOrEmpty(p.AdDomain) ? "Domain controller: its Active Directory database is in this restore point" : $"Domain controller of {p.AdDomain}: its Active Directory database is in this restore point")">AD</span>
+                        }
+                    </td>
+                    <td class="c-760 num">@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))</td>
+                    <td class="c-560 num">@Fmt.Bytes(p.NewStoredBytes)</td>
+                    @if (ShowJob)
+                    {
+                        <td class="c-950">@p.JobName</td>
+                    }
+                    <td style="text-align:right;white-space:nowrap">
+                        <button type="button" class="mud-button-root mud-button mud-button-filled mud-button-filled-primary mud-button-filled-size-small"
+                                @onclick="@(e => OpenAsync(_restore, e, p))"><span class="mud-button-label">Restore</span></button>
+                        <button type="button" class="mud-button-root mud-icon-button mud-icon-button-size-small" aria-label="More actions" title="Verify or delete"
+                                @onclick="@(e => OpenAsync(_more, e, p))"><span class="mud-icon-button-label">⋮</span></button>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </MudSimpleTable>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<RestorePointDto> Points { get; set; } = [];
+
+    /// <summary>A column with each point's job (the VM's points of all its jobs).</summary>
+    [Parameter] public bool ShowJob { get; set; }
+
+    /// <summary>A restore point was deleted: the page reloads the VM.</summary>
+    [Parameter] public EventCallback<RestorePointDto> Deleted { get; set; }
+
+    private MudMenu? _restore;
+    private MudMenu? _more;
+    private RestorePointDto? _point;
+
+    private async Task OpenAsync(MudMenu? menu, MouseEventArgs args, RestorePointDto point)
+    {
+        _point = point;
+        await menu!.OpenMenuAsync(args);
+    }
+
+    private async Task VerifyAsync(RestorePointDto point)
+    {
+        Snackbar.Add($"Verifying the restore point of {point.VmName} from {Fmt.Time(point.CreatedUtc)}…", Severity.Info);
+        try
+        {
+            var result = await Api.PostAsync<VerifyResultDto>($"api/restore-points/{point.Id}/verify?full=true");
+            Snackbar.Add(result.Ok ? $"All {result.CheckedChunks} blocks are intact." : $"{result.Problems.Count} problem(s): {string.Join("; ", result.Problems.Take(3))}", result.Ok ? Severity.Success : Severity.Error);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task DeleteAsync(RestorePointDto point)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Delete restore point", $"Delete the restore point of {point.VmName} from {Fmt.Time(point.CreatedUtc)}? This cannot be undone.", yesText: "Delete", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await Api.DeleteAsync($"api/restore-points/{point.Id}");
+            await Deleted.InvokeAsync(point);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+}

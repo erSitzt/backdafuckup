@@ -2,7 +2,7 @@
 
 ## Phase 1: MVP
 
-- **Web UI:** easy-to-use web console on par with Veeam, so admins can switch easily. It covers the dashboard, backup job setup, browsing restore points, guided restore wizards, and job status/history
+- **Web UI:** easy-to-use web console on par with Veeam, so admins can switch easily. It covers the dashboard, backup job setup, browsing restore points, guided restore wizards, and job status/history. Backups & Restore stays usable with hundreds of VMs: one row per VM grouped by job, filters in the address, VMs that missed a scheduled run or have no restore point marked
 - **VM backup (XCP-ng / XenServer):** VM snapshot via XAPI, disks read over NBD into our own chunk repository (compressed, deduplicated). Full backups plus **CBT-based incrementals** (forever-incremental: every restore point is complete on its own). Built on a hypervisor-agnostic core so other platforms can be added later
 - **Backup from storage snapshots (XCP-ng + HPE Alletra Storage MP B10000):** keeps the live cluster almost unstressed during backup:
   1. A short VM snapshot, held only seconds, gives application consistency

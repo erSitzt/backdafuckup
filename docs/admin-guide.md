@@ -214,6 +214,23 @@ Restore points show their consistency ("application", or "crash" plus the reason
 
 **Endpoint protection:** a push installation looks like lateral movement to EDR products (file copied to an admin share, service created remotely). See [Microsoft Defender for Endpoint](defender.md).
 
+## Backups & Restore
+
+The page lists every VM with restore points once, with its newest restore point. Expanding a VM loads all its restore points (Restore, Verify, Delete); the *Restore* button of a VM restores from its newest one.
+
+- **By job** (the default): one block per job, with its schedule and how many of its VMs missed a run, have no restore point, or are crash-consistent with a warning.
+  - A VM in two jobs is listed under both, each with its own restore points.
+  - VMs that are in a job but have no restore point of it yet (just added, or every run failed for them) are listed with *no restore point*.
+  - Restore points of deleted jobs are listed last under *Without job*.
+- **By VM:** one row per VM with all its jobs.
+- **Missed a run:** a VM's newest restore point in a job is older than the job's most recent scheduled start that is at least 12 hours ago (a job with hundreds of VMs runs for hours). Jobs without a schedule and disabled jobs never mark a VM.
+- **Filters:** name (VM or job), jobs, repository, content (Active Directory, SQL Server), consistency of the newest restore point, state (missed a run, no restore point, up to date) and the age of the newest restore point. Sorting by name, oldest restore point first, or size.
+- **Links:** filters, grouping and sort are in the address, e.g. `/backups?state=stale&state=nopoint` for every VM that needs attention; reload and Back keep them.
+- Long lists show 100 VMs per block, then *Show all*.
+- **API:** `GET /api/restore-points/vms` returns one row per VM with the same filters (`q`, `jobId`, `repositoryId`, `content`, `consistency`, `state`, `olderThanDays`; see the API reference). The restore points of a VM: `GET /api/restore-points?vmId=…&jobId=…`.
+
+JSON responses of the API are compressed (Brotli or gzip) when the client accepts it, except those of `/api/setup`, `/api/auth` and `/api/tokens`, which can carry secrets.
+
 ## File-level restore
 
 *Backups & Restore → Restore files* opens a restore point in a file browser: volumes and folders on the left, the folder content on the right.
