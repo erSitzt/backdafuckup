@@ -220,6 +220,10 @@ public sealed class AdTests : IDisposable
         Assert.Contains(lines, l => l.Contains("answers on dc1.bdfu-lab.local:50000", StringComparison.Ordinal));
         Assert.Equal(info.Port, mounts.Use(id).Info.Port);
 
+        // Only ntds.dit (ntdsutil IFM's clean copy): no recovery, which would fail on the missing logs.
+        Assert.Equal(0, env.Recoveries);
+        Assert.Contains("Recovery of the copied database: not needed, the database was copied without logs (shut down cleanly).", lines);
+
         mounts.Unmount(id, "the explore session ended");
         Assert.Equal([4242], env.Stopped);
         Assert.False(Directory.Exists(prepared.Folder));
@@ -247,9 +251,11 @@ public sealed class AdTests : IDisposable
         env.Recovery = new AdToolResult { ExitCode = -1, Output = "Operation terminated with error -1216." };
         var folder = mounts.Prepare(id, 1L << 30, _ => { }).Folder;
         File.WriteAllText(Path.Combine(folder, "ntds.dit"), "database");
+        File.WriteAllText(Path.Combine(folder, "edb.log"), "log");
         var failed = Assert.Throws<InvalidOperationException>(() => mounts.Mount(id, Admin, TimeSpan.FromMinutes(60), TimeSpan.FromSeconds(5), _ => { }, Ct));
         Assert.Contains("dsamain on dc1.bdfu-lab.local (port 50000) ended with 1 before it served the backup: Database version mismatch.", failed.Message, StringComparison.Ordinal);
         Assert.Contains("error -1216", failed.Message, StringComparison.Ordinal);
+        Assert.Equal(1, env.Recoveries);
 
         // A wrong password is named as such.
         env.ServerFails = null;

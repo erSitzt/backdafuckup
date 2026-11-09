@@ -189,8 +189,12 @@ public sealed class AdMounts
             throw new InvalidOperationException($"{dit} is missing on {_env.HostName}: the transfer of the backup's directory did not complete.");
         }
 
-        var recovery = _env.Recover(mount.Folder);
-        var recoveryText = recovery.ExitCode == 0 ? "the database is consistent" : $"esentutl ended with {recovery.ExitCode}: {Tail(recovery.Output)}";
+        // A database copied without logs (the copy ntdsutil IFM made before the snapshot) was shut down cleanly; esentutl /r
+        // would only fail on the missing logs (-528, JET_errMissingLogFile).
+        var withLogs = _env.FileExists(_env.Join(mount.Folder, "edb.chk")) || _env.FileExists(_env.Join(mount.Folder, "edb.log"));
+        var recovery = withLogs ? _env.Recover(mount.Folder) : new AdToolResult { ExitCode = 0, Output = string.Empty };
+        var recoveryText = !withLogs ? "not needed, the database was copied without logs (shut down cleanly)"
+            : recovery.ExitCode == 0 ? "the database is consistent" : $"esentutl ended with {recovery.ExitCode}: {Tail(recovery.Output)}";
         log($"Recovery of the copied database: {recoveryText}.");
 
         var port = _env.FreePort();

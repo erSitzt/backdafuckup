@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Security.AccessControl;
@@ -37,7 +38,7 @@ internal static class WindowsAdIfm
             var free = new DriveInfo(root).AvailableFreeSpace;
             if (free < needed)
             {
-                facts.IfmError = $"not enough free space on {root} for the copy of the directory: {free / (1 << 20):N0} MiB free, {needed / (1 << 20):N0} MiB needed";
+                facts.IfmError = string.Format(CultureInfo.InvariantCulture, "not enough free space on {0} for the copy of the directory: {1:N0} MiB free, {2:N0} MiB needed", root, free / (1 << 20), needed / (1 << 20));
                 return;
             }
 
@@ -88,7 +89,7 @@ internal static class WindowsAdIfm
             facts.IfmCreatedUtc = DateTime.UtcNow;
             facts.IfmSeconds = Math.Round(watch.Elapsed.TotalSeconds, 1);
             facts.IfmBytes = new FileInfo(copy).Length;
-            log.Write($"Directory copied with ntdsutil IFM into {Folder} in {facts.IfmSeconds:0.0} s ({facts.IfmBytes / (1 << 20):N0} MiB).");
+            log.Write(string.Format(CultureInfo.InvariantCulture, "Directory copied with ntdsutil IFM into {0} in {1:0.0} s ({2:N0} MiB).", Folder, facts.IfmSeconds, facts.IfmBytes / (1 << 20)));
         }
         catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is InvalidOperationException || ex is System.ComponentModel.Win32Exception)
         {

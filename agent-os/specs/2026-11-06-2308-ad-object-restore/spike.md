@@ -55,7 +55,7 @@ The lab forest `bdfu-lab.local` (deploy/lab: `dc1` with `ad_forest`, later `dc2`
 
 | Spike | Date | Result |
 |---|---|---|
-| S1 | 2026-11-08 | Open: the VSS freeze ran out (snapshot 28.1 s on shared LVM, two disks), so no backup was recorded; again with the config drive left out. |
+| S1 | 2026-11-08 | The VSS freeze ran out (snapshot 28.1 s on shared LVM with two disks, 10.6–12.6 s with one), so no backup was recorded. Instead the agent copies the directory with `ntdsutil "activate instance ntds" ifm "create full …"` before the snapshot (2.5 s for 96 MB, its own shadow copy, clean shutdown): `repadmin /showbackup` shows the copy's time (`dSASignature`), no 2089, dsamain opens the copy without recovery. Event 1917 came only for the first copy. A later VSS full of the VM snapshot (NTDS *Stable*, 7.7 s) did not raise the `dSASignature` version again. |
 | S2 | 2026-11-08 | dsamain opens a copy from a VSS snapshot after `esentutl /r` ("consistent"); `/logpath` and `/allowUpgrade` are accepted; Negotiate bind as the domain admin over the DC's FQDN works; queries fast. Ports and firewall not checked yet. |
 | S3 | 2026-11-08 | Without the Recycle Bin (Windows Server 2025, forest level 2025): a deleted object has `isDeleted` and `isRecycled` at once; reanimation with the Show-Deleted modify works, the tombstone kept sAMAccountName and objectSid. With the Recycle Bin: open. |
 | S4 | 2026-11-08 | `unicodePwd` over the sealed Negotiate connection works; enabling the account after it works too. |

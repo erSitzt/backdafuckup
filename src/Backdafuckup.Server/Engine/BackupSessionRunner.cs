@@ -276,7 +276,7 @@ internal sealed class VmBackupTask(
                 if (directory is { IfmPath: not null, IfmError: null })
                 {
                     _log.Info($"Active Directory: a consistent copy of the database ({VmBackupTask.Format(directory.IfmBytes ?? 0)}) was made with ntdsutil IFM " +
-                        $"in {directory.IfmSeconds:0.0} s before the snapshot; AD records it as a backup.");
+                        $"in {(directory.IfmSeconds ?? 0).ToString("0.0 s", CultureInfo.InvariantCulture)} before the snapshot; AD records it as a backup.");
                 }
                 else if (directory?.IfmError is { } ifmError)
                 {

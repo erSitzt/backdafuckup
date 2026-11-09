@@ -433,7 +433,14 @@ internal sealed class FakeAdEnvironment : IAdEnvironment
     public IReadOnlyList<string> WorkFolders() =>
         Directory.Exists(Map(WorkRoot)) ? [.. Directory.GetDirectories(Map(WorkRoot)).Select(d => Join(WorkRoot, Path.GetFileName(d)))] : [];
 
-    public AdToolResult Recover(string folder) => Recovery;
+    public AdToolResult Recover(string folder)
+    {
+        Recoveries++;
+        return Recovery;
+    }
+
+    /// <summary>How often esentutl's recovery ran.</summary>
+    public int Recoveries { get; private set; }
 
     public int FreePort() => 50000;
 
