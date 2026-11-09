@@ -179,7 +179,7 @@ The state before each change is in `C:\bdfu-lab-setup\ad-before.xml` and `gpo-be
 | H12 | Open an explore session, then: (a) *Close*; (b) restart the agent service on dc1; (c) restart the backup server; (d) leave it for an hour. | Each time `dsamain` is gone and the work folder deleted: (a) at once, (b) at the agent's start, (c) when the agent is reachable again (the session says so), (d) after 60 minutes. |
 | H13 | Restore the dc1 VM to another location, powered off; then once more with *Power on*, isolated network only. | The wizard's note; the session logs the old and the new VM generation id; with power on a warning about the copy. In the copy: event 2179/2180 (generation id changed), a new invocationId (`repadmin /showrepl`). |
 | H14 | Open dc1's restore point on `dc2`; restore `lab-user09` after deleting it. | Works on dc2; the change replicates to dc1. |
-| H15 | A delegated account without "Reanimate Tombstones": restore a deleted user. | The object fails with `InsufficientAccessRights (50)`, the DN and the DC in the session; nothing else is written. |
+| H15 | A delegated account that is no domain admin (write and create users in `Lab\Users`, group members in `Lab\Groups`, no "Reanimate Tombstones"): delete a user, open an explore with this account. | The explore fails when it opens: "The account … may not read the backup's directory on <DC>:<port>: dsamain serves it only to Domain Admins and Enterprise Admins …"; dsamain stopped and the work folder deleted at once; nothing written. |
 
 ## Results
 

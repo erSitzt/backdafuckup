@@ -413,7 +413,7 @@ For domain controllers backed up with guest processing. AD records each backup, 
 **Opening a backup's directory** (*Backups & Restore → Restore → Active Directory objects*)
 - **Choose:**
   - a domain controller of the same domain with the agent, online and with the AD DS tools (`dsamain.exe`);
-  - a Windows account of the domain (under *Credentials*).
+  - a domain admin of the domain (member of Domain Admins or Enterprise Admins; under *Credentials*). The explore checks it when it opens and refuses another account (see *The account* below).
 - **The database and its logs are copied into a work folder on that DC:**
   - The IFM copy's `ntds.dit` if the restore point has one, else the live `ntds.dit` with `edb.chk` and `edb*.log`, go into `%ProgramData%\backdafuckup\ad\<session>`. Only SYSTEM and Administrators can open the folder.
   - The copy goes through the agent, each file checked with SHA-256.
@@ -421,7 +421,7 @@ For domain controllers backed up with guest processing. AD records each backup, 
 - **The copy is served there:**
   - `esentutl /r` recovers the copy.
   - `dsamain` serves it read-only over LDAP on four free ports from 50000 (LDAP, LDAPS, GC, GC-SSL).
-  - dsamain listens on all interfaces and lets only administrators in. Block 50000–50999 in the Windows Firewall if other machines could reach the DC on them.
+  - dsamain listens on all interfaces. It gives data only to Domain Admins and Enterprise Admins; any other account gets the rootDSE and then `operationsError` (1, `000004DC`) on every search. Block 50000–50999 in the Windows Firewall if other machines could reach the DC on them.
 - **The DC's Windows version must be the same or newer:** dsamain cannot open a database from a newer Windows (e.g. Windows Server 2025's database on a 2022 DC).
 - **The copy holds every password hash of the domain.** It is deleted:
   - when the session is closed (*Close*, or *Stop* on the Sessions page);
@@ -477,13 +477,10 @@ For domain controllers backed up with guest processing. AD records each backup, 
   - no security descriptors of objects (except those of group policies);
   - no links with binary data (e.g. `msDS-KeyCredentialLink`);
   - nothing in the configuration partition (sites), in DNS zones or in other domains of the forest.
-- **Rights of the account:**
-  - write the objects and attributes and create objects in their containers;
-  - "Reanimate Tombstones" on the domain;
-  - reset passwords;
-  - for group policies, write SYSVOL.
-
-  Domain admins have all of these.
+- **The account:** a member of Domain Admins (or Enterprise Admins).
+  - dsamain serves the backup's directory only to them. The agent does not start it with `/allowNonAdminAccess`: that would let every account of the domain that reaches the port read the backup while the explore is open.
+  - A delegated account would also not see the tombstones: only Administrators may list `CN=Deleted Objects`, so a deleted object would look *gone* to it.
+  - A restore writes as this account, so the domain's own permissions and auditing apply ("Reanimate Tombstones", write and create the objects, reset passwords, write SYSVOL); domain admins have all of these.
 
 **Restoring group policies** (tab *Group policies*)
 1. A staging folder `<SYSVOL>\<domain>\Policies\{GUID}.bdfu-new` is created in the DC's SYSVOL, with SYSVOL's permissions.

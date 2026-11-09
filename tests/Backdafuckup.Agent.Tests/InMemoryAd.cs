@@ -467,6 +467,9 @@ internal sealed class FakeAdEnvironment : IAdEnvironment
     /// <summary>Simulates a dsamain left running by an agent that stopped.</summary>
     public void Running(int processId) => _running.Add(processId);
 
+    /// <summary>An account that is no domain admin: dsamain answers its rootDSE, but refuses every search.</summary>
+    public string? NotAdmin { get; set; }
+
     public IAdDirectory Connect(int port, AdAccount account)
     {
         Accounts.Add(account);
@@ -480,7 +483,38 @@ internal sealed class FakeAdEnvironment : IAdEnvironment
             return Live;
         }
 
-        return _running.Count > 0 ? Backup : throw new AdDirectoryException($"{HostName}:{port}: the LDAP server is unavailable.", 81);
+        if (_running.Count == 0)
+        {
+            throw new AdDirectoryException($"{HostName}:{port}: the LDAP server is unavailable.", 81);
+        }
+
+        return string.Equals(account.UserName, NotAdmin, StringComparison.OrdinalIgnoreCase) ? new AdminsOnly(Backup) : Backup;
+    }
+
+    /// <summary>dsamain without /allowNonAdminAccess to an account that is no domain admin.</summary>
+    private sealed class AdminsOnly(InMemoryDirectory backup) : IAdDirectory
+    {
+        public string Endpoint => backup.Endpoint;
+
+        public AdRecord RootDse() => backup.RootDse();
+
+        public AdPage Search(string baseDn, string filter, AdScope scope, IReadOnlyList<string> attributes, int pageSize, byte[]? cookie,
+            bool showDeleted = false, bool extendedDn = false, bool fullValues = false) =>
+            throw new AdDirectoryException($"LDAP search on {Endpoint} below '{baseDn}' failed: OperationsError (1) An operation error occurred. 000004DC: LdapErr: DSID-0C090D9D, comment: In order to perform this operation a successful bind must be completed on the connection., data 0, v65f4", 1);
+
+        public void Add(string dn, IReadOnlyDictionary<string, List<object>> attributes) => throw new NotSupportedException();
+
+        public void Modify(string dn, IReadOnlyList<AdModification> changes, bool showDeleted = false) => throw new NotSupportedException();
+
+        public void Move(string dn, string newRdn, string newParentDn) => throw new NotSupportedException();
+
+        public byte[]? ReadSecurityDescriptor(string dn) => throw new NotSupportedException();
+
+        public void WriteSecurityDescriptor(string dn, byte[] descriptor) => throw new NotSupportedException();
+
+        public void Dispose()
+        {
+        }
     }
 
     private sealed class Server(int pid, string? fails) : IAdServer

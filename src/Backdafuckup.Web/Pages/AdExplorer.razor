@@ -72,7 +72,7 @@ else if (_explore is null)
             </MudItem>
             <MudItem xs="12" md="6">
                 <MudSelect T="Guid?" @bind-Value="_credentialId" Label="Windows account of the domain" Variant="Variant.Outlined" Dense="true"
-                           HelperText="Reads the directory; a restore also writes the objects, reanimates tombstones and writes SYSVOL (a domain admin can).">
+                           HelperText="A domain admin: the backup's directory (dsamain) answers only to Domain Admins and Enterprise Admins. A restore writes as this account.">
                     @foreach (var credential in _credentials ?? [])
                     {
                         <MudSelectItem T="Guid?" Value="@credential.Id">@credential.UserName@(credential.Description is null ? string.Empty : $" – {credential.Description}")</MudSelectItem>

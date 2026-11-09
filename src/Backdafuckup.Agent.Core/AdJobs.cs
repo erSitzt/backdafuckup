@@ -295,6 +295,26 @@ public sealed class AdMounts
             ReadLiveFacts(live, liveRoot, info);
         }
 
+        // rootDSE answers anyone. dsamain (without /allowNonAdminAccess, which would open the backup to every account of the
+        // domain that reaches the port) serves the data only to Domain Admins and Enterprise Admins; to anyone else each
+        // search ends with operationsError (1, 000004DC "a successful bind must be completed").
+        try
+        {
+            using (var backup = _env.Connect(port, account))
+            {
+                backup.Search(info.BackupDomainDn ?? string.Empty, "(objectClass=*)", AdScope.Base, new[] { "objectGUID" }, 1, null);
+            }
+        }
+        catch (AdDirectoryException ex) when (ex.ResultCode == 1)
+        {
+            throw new InvalidOperationException(
+                $"The account {account.UserName} may not read the backup's directory on {_env.HostName}:{port}: dsamain serves it only to Domain Admins and Enterprise Admins of the domain. Open it with such an account. ({ex.Message.TrimEnd('.')})", ex);
+        }
+        catch (AdDirectoryException ex)
+        {
+            throw new InvalidOperationException($"Reading the backup's directory on {_env.HostName}:{port} as {account.UserName} failed: {ex.Message}", ex);
+        }
+
         return info;
     }
 

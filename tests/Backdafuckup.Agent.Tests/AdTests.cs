@@ -264,6 +264,15 @@ public sealed class AdTests : IDisposable
         File.WriteAllText(Path.Combine(folder, "ntds.dit"), "database");
         var logon = Assert.Throws<InvalidOperationException>(() => mounts.Mount(id, new AdAccount { UserName = "BDFU-LAB\\x", Password = "wrong" }, TimeSpan.FromMinutes(60), TimeSpan.FromSeconds(5), _ => { }, Ct));
         Assert.Contains("The account BDFU-LAB\\x cannot log on to the backup's directory on dc1.bdfu-lab.local:50000", logon.Message, StringComparison.Ordinal);
+
+        // An account that is no domain admin gets rootDSE from dsamain, but no data: refused at the mount, dsamain stopped.
+        env.NotAdmin = "BDFU-LAB\\helpdesk";
+        var running = env.Started.Count;
+        var refused = Assert.Throws<InvalidOperationException>(() => mounts.Mount(id, new AdAccount { UserName = "BDFU-LAB\\helpdesk", Password = "secret" }, TimeSpan.FromMinutes(60), TimeSpan.FromSeconds(5), _ => { }, Ct));
+        Assert.StartsWith("The account BDFU-LAB\\helpdesk may not read the backup's directory on dc1.bdfu-lab.local:50000: dsamain serves it only to Domain Admins and Enterprise Admins of the domain. Open it with such an account. (LDAP search on dc1.bdfu-lab.local:50000 below 'DC=bdfu-lab,DC=local' failed: OperationsError (1)", refused.Message, StringComparison.Ordinal);
+        Assert.Equal(running + 1, env.Started.Count);
+        Assert.Contains(4242 + running, env.Stopped);
+        Assert.False(env.IsServer(4242 + running));
     }
 
     [Fact]
