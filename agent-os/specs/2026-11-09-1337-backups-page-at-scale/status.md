@@ -32,4 +32,32 @@ Local instance, headless Chrome in Docker on WSL (no GPU), seed with 280 VMs and
 
 **Found while measuring:**
 - **MudMenu cost:** a `MudMenu` per row keeps a popover each, which made 300 popovers and about 50 DOM nodes plus JS interop per row. Rows now use plain HTML and one menu opened at the click position.
-- **Narrow screens:** on a phone the filters fill the first screen. A collapsible filter panel would help; not done.
+- **Narrow screens:** on a phone the filters fill the first screen. A collapsible filter panel would help; not done (see the follow-up).
+
+## Follow-up (2026-11-09, evening)
+
+Same machine and seed (285 VMs, 305 rows by job), median of 5 runs (3 for grouping and expanding):
+
+| | Before | After |
+|---|---|---|
+| Search, incl. 300 ms debounce | 0.69 s | 0.54 s |
+| A filter by link (in-app navigation) | 0.17 s | 0.13 s |
+| Search cleared (all 305 rows again) | 0.83 s | 0.75 s |
+| By VM | 0.29 s | 0.22 s |
+| Expand a VM | 0.34 s | 0.19 s |
+| First row on a phone (390 × 844) | at 782 px | at 482 px |
+
+- **Where the time went:** in the old build about 0.27 s passed between the debounce and the API answer, while the API itself took about 0.05 s. Most likely these were page renders over all rows, each with new event handlers: the search box's value, its debounce event and the loading bar. Expanding a VM also rendered all rows twice.
+- **Change:**
+  - every row is a component (`BackupVmRow`) that renders again only when its row object, open state or points change;
+  - the page builds the groups once per data, grouping and sort, so unchanged rows keep their objects.
+- **Targets:**
+  - a narrowing filter is now 0.13–0.24 s after the debounce, under the 0.3 s target, and expanding is 0.19 s;
+  - bringing all 305 rows back is 0.40 s after the answer: 0.25 s script (rendering the rows in WebAssembly), 0.1 s layout. That is the same work as the first view; not chased further.
+- **Phone:** under 600 px only the search and a *Filters (n)* button show; the button opens the other filters, which then fill the width. At 1400 px the toolbar is unchanged.
+- **Checked again** (Playwright):
+  - the Restore menus of the rows and of the restore points, and *More* (Verify, Delete);
+  - deleting a restore point reloads the row (14 → 13 points, size updated);
+  - *Show all*;
+  - no horizontal overflow at 1024 and 390 px.
+

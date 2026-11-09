@@ -1,0 +1,131 @@
+@* One VM of Backups & Restore and, when expanded, its restore points. A component of its own so that a render of the page
+   (search, a filter, the loading bar, another VM expanded) renders only the rows whose data changed: with 300 VMs every
+   page render rendered all rows, several times per filter change. Plain HTML inside: every component per row counts. *@
+
+<tr class="cursor-pointer" @onclick="ToggleAsync">
+    <td><span class="@(Open ? "row-chevron open" : "row-chevron")"></span></td>
+    <td>
+        <span style="font-weight:600">@Row.Vm.VmName</span>
+        <span class="cell-sub n-560">@(Latest is null ? "no restore point" : Ago(Latest.CreatedUtc))@(Row.State == BackupVmStates.Stale ? " · missed a run" : string.Empty)</span>
+    </td>
+    <td class="c-560">
+        @if (Row.State == BackupVmStates.Stale)
+        {
+            <span class="mini-chip warning" title="@($"No restore point since the scheduled run of {Fmt.Time(Row.MissedRunUtc)}")">missed a run</span>
+        }
+        else if (Row.State == BackupVmStates.NoPoint)
+        {
+            <span class="mini-chip error" title="In the job, but without a restore point: added recently, or every run failed for it.">no restore point</span>
+        }
+        else if (Row.Job is { State: BackupVmStates.Disabled })
+        {
+            <span class="cell-sub">job disabled</span>
+        }
+    </td>
+    <td class="c-560 nowrap-wide">
+        @if (Latest is not null)
+        {
+            <span title="@Fmt.Time(Latest.CreatedUtc)">@Ago(Latest.CreatedUtc)</span>
+            <span class="cell-sub">@Fmt.Time(Latest.CreatedUtc)</span>
+        }
+        else
+        {
+            <span class="cell-sub">–</span>
+        }
+    </td>
+    <td class="c-760 num">@Row.PointCount</td>
+    <td class="c-950 num">@Fmt.Bytes(Row.StoredBytes)</td>
+    <td class="c-420">
+        @if (Latest is not null)
+        {
+            @if (Latest.DomainController)
+            {
+                <span class="mini-chip info" title="@($"Domain controller{(string.IsNullOrEmpty(Latest.AdDomain) ? string.Empty : $" of {Latest.AdDomain}")}: its Active Directory database is in the newest restore point")">AD</span>
+            }
+            @if (Latest.SqlDatabaseCount > 0)
+            {
+                <span class="mini-chip info" title="@($"{Latest.SqlDatabaseCount} SQL Server database(s) in the newest restore point")">SQL @Latest.SqlDatabaseCount</span>
+            }
+            @if (Latest.Consistency != "application")
+            {
+                <span class="@(Latest.ConsistencyReason is null ? "mini-chip" : "mini-chip warning")"
+                      title="@(Latest.ConsistencyReason ?? "Without guest processing: like a power failure; most applications recover by themselves.")">crash</span>
+            }
+        }
+    </td>
+    @if (ByVm)
+    {
+        <td class="c-760">@string.Join(", ", Row.Vm.Jobs.Select(j => j.JobName))</td>
+    }
+    <td style="text-align:right;white-space:nowrap" @onclick:stopPropagation="true">
+        @if (Latest is not null)
+        {
+            @* The page has one menu for all rows, opened at the click: a menu per row costs a popover each. *@
+            <button type="button" class="mud-button-root mud-button mud-button-outlined mud-button-outlined-primary mud-button-outlined-size-small"
+                    @onclick="RestoreAsync" title="@($"From the newest restore point ({Fmt.Time(Latest.CreatedUtc)})")"><span class="mud-button-label">Restore</span></button>
+        }
+    </td>
+</tr>
+@if (Open)
+{
+    <tr class="vm-points">
+        <td colspan="@(ByVm ? 9 : 8)">
+            @if (Points is null)
+            {
+                <MudProgressLinear Indeterminate="true" />
+            }
+            else if (Points.Count == 0)
+            {
+                <MudText Typo="Typo.body2" Color="Color.Secondary">No restore point@(Row.Job is { } j ? $" of {j.JobName}" : string.Empty) yet.</MudText>
+            }
+            else
+            {
+                <RestorePointTable Points="Points" ShowJob="ByVm" Deleted="@(_ => Deleted.InvokeAsync(Row))" />
+            }
+        </td>
+    </tr>
+}
+
+@code {
+    [Parameter, EditorRequired] public BackupRow Row { get; set; } = null!;
+
+    /// <summary>Grouped by VM: the row lists the VM's jobs.</summary>
+    [Parameter] public bool ByVm { get; set; }
+
+    [Parameter] public bool Open { get; set; }
+
+    /// <summary>The VM's restore points once loaded; <c>null</c> while they load.</summary>
+    [Parameter] public List<RestorePointDto>? Points { get; set; }
+
+    [Parameter] public EventCallback<BackupRow> Toggle { get; set; }
+
+    [Parameter] public EventCallback<(MouseEventArgs Args, BackupVmPointDto Point)> Restore { get; set; }
+
+    /// <summary>A restore point of the VM was deleted.</summary>
+    [Parameter] public EventCallback<BackupRow> Deleted { get; set; }
+
+    private BackupVmPointDto? Latest => Row.Latest;
+
+    // What the row was last rendered with. The page passes the same row object until its data changes.
+    private (BackupRow Row, bool ByVm, bool Open, List<RestorePointDto>? Points) _rendered;
+
+    protected override void OnInitialized() => _rendered = (Row, ByVm, Open, Points);
+
+    protected override bool ShouldRender()
+    {
+        var now = (Row, ByVm, Open, Points);
+        if (ReferenceEquals(now.Row, _rendered.Row) && now.ByVm == _rendered.ByVm && now.Open == _rendered.Open && ReferenceEquals(now.Points, _rendered.Points))
+        {
+            return false;
+        }
+
+        _rendered = now;
+        return true;
+    }
+
+    private Task ToggleAsync() => Toggle.InvokeAsync(Row);
+
+    private Task RestoreAsync(MouseEventArgs args) => Restore.InvokeAsync((args, Latest!));
+
+    private static string Ago(DateTimeOffset time) => Fmt.Span(DateTimeOffset.UtcNow - time) + " ago";
+}

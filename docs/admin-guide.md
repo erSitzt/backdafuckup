@@ -224,7 +224,7 @@ The page lists every VM with restore points once, with its newest restore point.
   - Restore points of deleted jobs are listed last under *Without job*.
 - **By VM:** one row per VM with all its jobs.
 - **Missed a run:** a VM's newest restore point in a job is older than the job's most recent scheduled start that is at least 12 hours ago (a job with hundreds of VMs runs for hours). Jobs without a schedule and disabled jobs never mark a VM.
-- **Filters:** name (VM or job), jobs, repository, content (Active Directory, SQL Server), consistency of the newest restore point, state (missed a run, no restore point, up to date) and the age of the newest restore point. Sorting by name, oldest restore point first, or size.
+- **Filters:** name (VM or job), jobs, repository, content (Active Directory, SQL Server), consistency of the newest restore point, state (missed a run, no restore point, up to date) and the age of the newest restore point. Sorting by name, oldest restore point first, or size. On a phone only the search is shown; *Filters* opens the rest and shows how many are set.
 - **Links:** filters, grouping and sort are in the address, e.g. `/backups?state=stale&state=nopoint` for every VM that needs attention; reload and Back keep them.
 - Long lists show 100 VMs per block, then *Show all*.
 - **API:** `GET /api/restore-points/vms` returns one row per VM with the same filters (`q`, `jobId`, `repositoryId`, `content`, `consistency`, `state`, `olderThanDays`; see the API reference). The restore points of a VM: `GET /api/restore-points?vmId=…&jobId=…`.

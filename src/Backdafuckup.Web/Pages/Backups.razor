@@ -18,7 +18,13 @@
     <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Wrap="Wrap.Wrap">
         <MudTextField T="string" @bind-Value="_text" DebounceInterval="300" OnDebounceIntervalElapsed="@(v => Navigate(("q", string.IsNullOrWhiteSpace(v) ? null : v.Trim())))"
                       Placeholder="VM or job" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Clearable="true"
-                      Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:180px;max-width:260px" />
+                      Variant="Variant.Outlined" Margin="Margin.Dense" Class="backup-search" Style="min-width:180px;max-width:260px" />
+        @* On a phone the filters fill the first screen: there they fold away behind this button. *@
+        <MudButton Class="backup-filters-toggle" Variant="Variant.Text" Size="Size.Small" StartIcon="@Icons.Material.Filled.FilterList"
+                   EndIcon="@(_filtersOpen ? Icons.Material.Filled.ExpandLess : Icons.Material.Filled.ExpandMore)" OnClick="@(() => _filtersOpen = !_filtersOpen)">
+            Filters@(ActiveFilters > 0 ? $" ({ActiveFilters})" : string.Empty)
+        </MudButton>
+        <div class="@(_filtersOpen ? "backup-filters open" : "backup-filters")">
         <MudSelect T="Guid" SelectedValues="@(JobIds ?? [])" SelectedValuesChanged="@(v => Navigate(("job", Values(v.Select(g => g.ToString())))))" MultiSelection="true"
                    Label="Jobs" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:160px;max-width:260px"
                    MultiSelectionTextFunc="@(values => values.Count == 0 ? "All" : string.Join(", ", values.Select(v => JobName(Guid.Parse(v)))))">
@@ -71,6 +77,7 @@
             <MudSelectItem T="string" Value="@("oldest")">Oldest point first</MudSelectItem>
             <MudSelectItem T="string" Value="@("size")">Largest first</MudSelectItem>
         </MudSelect>
+        </div>
         @if (Filtered)
         {
             <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Filled.FilterAltOff" OnClick="ResetAsync">Reset</MudButton>
@@ -158,83 +165,8 @@ else
                         <tbody>
                             @foreach (var row in rows)
                             {
-                                var key = RowKey(group, row);
-                                var open = _open.Contains(key);
-                                var latest = row.Latest;
-                                <tr class="cursor-pointer" @key="key" @onclick="@(() => ToggleRowAsync(group, row))">
-                                    @* Plain HTML in the rows: with 300 VMs every component per row counts (rendering and filtering). *@
-                                    <td><span class="@(open ? "row-chevron open" : "row-chevron")"></span></td>
-                                    <td>
-                                        <span style="font-weight:600">@row.Vm.VmName</span>
-                                        <span class="cell-sub n-560">@(latest is null ? "no restore point" : Ago(latest.CreatedUtc))@(row.State == BackupVmStates.Stale ? " · missed a run" : string.Empty)</span>
-                                    </td>
-                                    <td class="c-560">@StateChip(row)</td>
-                                    <td class="c-560 nowrap-wide">
-                                        @if (latest is not null)
-                                        {
-                                            <span title="@Fmt.Time(latest.CreatedUtc)">@Ago(latest.CreatedUtc)</span>
-                                            <span class="cell-sub">@Fmt.Time(latest.CreatedUtc)</span>
-                                        }
-                                        else
-                                        {
-                                            <span class="cell-sub">–</span>
-                                        }
-                                    </td>
-                                    <td class="c-760 num">@row.PointCount</td>
-                                    <td class="c-950 num">@Fmt.Bytes(row.StoredBytes)</td>
-                                    <td class="c-420">
-                                        @if (latest is not null)
-                                        {
-                                            @if (latest.DomainController)
-                                            {
-                                                <span class="mini-chip info" title="@($"Domain controller{(string.IsNullOrEmpty(latest.AdDomain) ? string.Empty : $" of {latest.AdDomain}")}: its Active Directory database is in the newest restore point")">AD</span>
-                                            }
-                                            @if (latest.SqlDatabaseCount > 0)
-                                            {
-                                                <span class="mini-chip info" title="@($"{latest.SqlDatabaseCount} SQL Server database(s) in the newest restore point")">SQL @latest.SqlDatabaseCount</span>
-                                            }
-                                            @if (latest.Consistency != "application")
-                                            {
-                                                <span class="@(latest.ConsistencyReason is null ? "mini-chip" : "mini-chip warning")"
-                                                      title="@(latest.ConsistencyReason ?? "Without guest processing: like a power failure; most applications recover by themselves.")">crash</span>
-                                            }
-                                        }
-                                    </td>
-                                    @if (Grouping == "vm")
-                                    {
-                                        <td class="c-760">@string.Join(", ", row.Vm.Jobs.Select(j => j.JobName))</td>
-                                    }
-                                    <td style="text-align:right;white-space:nowrap" @onclick:stopPropagation="true">
-                                        @if (latest is not null)
-                                        {
-                                            @* One shared menu for all rows: a menu per row costs a popover each (300 VMs, 300 popovers). *@
-                                            <button type="button" class="mud-button-root mud-button mud-button-outlined mud-button-outlined-primary mud-button-outlined-size-small"
-                                                    @onclick="@(e => OpenRestoreMenuAsync(e, latest))" title="@($"From the newest restore point ({Fmt.Time(latest.CreatedUtc)})")"><span class="mud-button-label">Restore</span></button>
-                                        }
-                                    </td>
-                                </tr>
-                                @if (open)
-                                {
-                                    <tr class="vm-points" @key="@(key + "|points")">
-                                        <td colspan="@(Grouping == "vm" ? 9 : 8)">
-                                            @if (_points.TryGetValue(key, out var points) && points is not null)
-                                            {
-                                                @if (points.Count == 0)
-                                                {
-                                                    <MudText Typo="Typo.body2" Color="Color.Secondary">No restore point@(row.Job is { } j ? $" of {j.JobName}" : string.Empty) yet.</MudText>
-                                                }
-                                                else
-                                                {
-                                                    <RestorePointTable Points="points" ShowJob="@(Grouping == "vm")" Deleted="@(_ => ReloadRowAsync(key, group, row))" />
-                                                }
-                                            }
-                                            else
-                                            {
-                                                <MudProgressLinear Indeterminate="true" />
-                                            }
-                                        </td>
-                                    </tr>
-                                }
+                                <BackupVmRow @key="row.Key" Row="row" ByVm="@(Grouping == "vm")" Open="@_open.Contains(row.Key)" Points="@_points.GetValueOrDefault(row.Key)"
+                                             Toggle="ToggleRowAsync" Restore="OpenRestoreMenuAsync" Deleted="ReloadRowAsync" />
                             }
                         </tbody>
                     </MudSimpleTable>
@@ -293,28 +225,32 @@ else
     private bool Filtered => !string.IsNullOrEmpty(Q) || JobIds is { Length: > 0 } || Repository is not null || Content is { Length: > 0 }
         || !string.IsNullOrEmpty(Consistency) || States is { Length: > 0 } || OlderThan is not null;
 
-    /// <summary>A row: a VM in a job (by job), or the VM with all its jobs (by VM).</summary>
-    private sealed record Row(BackupVmDto Vm, BackupVmJobDto? Job)
+    private bool _filtersOpen;
+
+    private int ActiveFilters => (JobIds is { Length: > 0 } ? 1 : 0) + (Repository is null ? 0 : 1) + (Content is { Length: > 0 } ? 1 : 0)
+        + (string.IsNullOrEmpty(Consistency) ? 0 : 1) + (States is { Length: > 0 } ? 1 : 0) + (OlderThan is null ? 0 : 1);
+
+    private sealed class Group(string key, string? title, string detail, List<BackupRow> rows)
     {
-        public BackupVmPointDto? Latest => Job is null ? Vm.Latest : Job.Latest;
+        public string Key => key;
 
-        public int PointCount => Job?.PointCount ?? Vm.PointCount;
+        public string? Title => title;
 
-        public long StoredBytes => Job?.StoredBytes ?? Vm.StoredBytes;
+        public string Detail => detail;
 
-        public string State => Job is null ? Vm.State : Job.State;
+        public List<BackupRow> Rows => rows;
 
-        public DateTimeOffset? MissedRunUtc => Job is null ? Vm.Jobs.Where(j => j.MissedRunUtc is not null).Min(j => j.MissedRunUtc) : Job.MissedRunUtc;
+        public int Stale { get; } = rows.Count(r => r.State == BackupVmStates.Stale);
+
+        public int NoPoint { get; } = rows.Count(r => r.State == BackupVmStates.NoPoint);
+
+        public int Warnings { get; } = rows.Count(r => r.Latest is { Consistency: not "application", ConsistencyReason: not null });
     }
 
-    private sealed record Group(string Key, string? Title, string Detail, List<Row> Rows)
-    {
-        public int Stale => Rows.Count(r => r.State == BackupVmStates.Stale);
-
-        public int NoPoint => Rows.Count(r => r.State == BackupVmStates.NoPoint);
-
-        public int Warnings => Rows.Count(r => r.Latest is { Consistency: not "application", ConsistencyReason: not null });
-    }
+    // The groups are built once per data, grouping and sort: the rows keep their objects between renders, so a row
+    // component renders again only when its own data changed.
+    private List<Group> _groups = [];
+    private (List<BackupVmDto>? Vms, string Grouping, string Sorting) _groupedFor;
 
     // The job and repository lists only fill the filters: they load next to the VMs, not before them.
     protected override void OnInitialized() => _ = LoadListsAsync();
@@ -437,32 +373,44 @@ else
         _ => "Up to date",
     };
 
-    private static string Ago(DateTimeOffset time) => Fmt.Span(DateTimeOffset.UtcNow - time) + " ago";
+    private List<Group> Groups()
+    {
+        var key = (_vms, Grouping, Sorting);
+        if (ReferenceEquals(key._vms, _groupedFor.Vms) && key.Grouping == _groupedFor.Grouping && key.Sorting == _groupedFor.Sorting)
+        {
+            return _groups;
+        }
 
-    private IEnumerable<Group> Groups()
+        _groupedFor = key;
+        _groups = BuildGroups().ToList();
+        return _groups;
+    }
+
+    private IEnumerable<Group> BuildGroups()
     {
         if (Grouping == "vm")
         {
-            yield return new Group("all", null, string.Empty, Sort(_vms!.Select(v => new Row(v, null))));
+            yield return new Group("all", null, string.Empty, Sort(_vms!.Select(v => new BackupRow("all|" + v.VmNativeId, v, null))));
             yield break;
         }
 
-        var rows = _vms!.SelectMany(v => v.Jobs.Select(j => new Row(v, j))).ToList();
-        foreach (var job in rows.Where(r => r.Job!.JobExists).GroupBy(r => r.Job!.JobId!.Value).OrderBy(g => g.First().Job!.JobName, StringComparer.OrdinalIgnoreCase))
+        var rows = _vms!.SelectMany(v => v.Jobs.Select(j => (Vm: v, Job: j))).ToList();
+        foreach (var job in rows.Where(r => r.Job.JobExists).GroupBy(r => r.Job.JobId!.Value).OrderBy(g => g.First().Job.JobName, StringComparer.OrdinalIgnoreCase))
         {
-            var first = job.First().Job!;
+            var first = job.First().Job;
             var detail = !first.Enabled ? "disabled" : first.Schedule is { } schedule ? Pages.Jobs.Describe(schedule) : "not scheduled";
-            yield return new Group(job.Key.ToString(), first.JobName, detail, Sort(job));
+            var key = job.Key.ToString();
+            yield return new Group(key, first.JobName, detail, Sort(job.Select(r => new BackupRow(key + "|" + r.Vm.VmNativeId, r.Vm, r.Job))));
         }
 
-        var orphans = rows.Where(r => !r.Job!.JobExists).ToList();
+        var orphans = rows.Where(r => !r.Job.JobExists).Select(r => new BackupRow("none|" + r.Vm.VmNativeId, r.Vm, r.Job)).ToList();
         if (orphans.Count > 0)
         {
             yield return new Group("none", "Without job", "restore points of deleted jobs, kept until they are deleted", Sort(orphans));
         }
     }
 
-    private List<Row> Sort(IEnumerable<Row> rows) => Sorting switch
+    private List<BackupRow> Sort(IEnumerable<BackupRow> rows) => Sorting switch
     {
         "oldest" => rows.OrderBy(r => r.Latest?.CreatedUtc ?? DateTimeOffset.MinValue).ThenBy(r => r.Vm.VmName, StringComparer.OrdinalIgnoreCase).ToList(),
         "size" => rows.OrderByDescending(r => r.StoredBytes).ThenBy(r => r.Vm.VmName, StringComparer.OrdinalIgnoreCase).ToList(),
@@ -478,31 +426,13 @@ else
         return text + (stale > 0 ? $" · {stale} missed a run" : string.Empty) + (none > 0 ? $" · {none} without restore point" : string.Empty);
     }
 
-    private RenderFragment StateChip(Row row) => __builder =>
-    {
-        if (row.State == BackupVmStates.Stale)
-        {
-            <span class="mini-chip warning" title="@($"No restore point since the scheduled run of {Fmt.Time(row.MissedRunUtc)}")">missed a run</span>
-        }
-        else if (row.State == BackupVmStates.NoPoint)
-        {
-            <span class="mini-chip error" title="In the job, but without a restore point: added recently, or every run failed for it.">no restore point</span>
-        }
-        else if (row.Job is { State: BackupVmStates.Disabled })
-        {
-            <span class="cell-sub">job disabled</span>
-        }
-    };
-
-    private string RowKey(Group group, Row row) => group.Key + "|" + row.Vm.VmNativeId;
-
     private MudMenu? _restoreMenu;
     private BackupVmPointDto? _menuPoint;
 
-    private async Task OpenRestoreMenuAsync(MouseEventArgs args, BackupVmPointDto point)
+    private async Task OpenRestoreMenuAsync((MouseEventArgs Args, BackupVmPointDto Point) click)
     {
-        _menuPoint = point;
-        await _restoreMenu!.OpenMenuAsync(args);
+        _menuPoint = click.Point;
+        await _restoreMenu!.OpenMenuAsync(click.Args);
     }
 
     private void ToggleGroup(string key)
@@ -513,23 +443,23 @@ else
         }
     }
 
-    private async Task ToggleRowAsync(Group group, Row row)
+    private async Task ToggleRowAsync(BackupRow row)
     {
-        var key = RowKey(group, row);
-        if (_open.Remove(key))
+        if (_open.Remove(row.Key))
         {
             return;
         }
 
-        _open.Add(key);
-        if (!_points.ContainsKey(key))
+        _open.Add(row.Key);
+        if (!_points.ContainsKey(row.Key))
         {
-            await LoadPointsAsync(key, row);
+            await LoadPointsAsync(row);
         }
     }
 
-    private async Task LoadPointsAsync(string key, Row row)
+    private async Task LoadPointsAsync(BackupRow row)
     {
+        var key = row.Key;
         _points[key] = null;
         var url = $"api/restore-points?vmId={Uri.EscapeDataString(row.Vm.VmNativeId)}" + (row.Job is { JobExists: true, JobId: { } jobId } ? $"&jobId={jobId}" : string.Empty);
         try
@@ -545,10 +475,10 @@ else
         }
     }
 
-    private async Task ReloadRowAsync(string key, Group group, Row row)
+    private async Task ReloadRowAsync(BackupRow row)
     {
         Snackbar.Add("Restore point deleted.", Severity.Success);
-        await LoadPointsAsync(key, row);
+        await LoadPointsAsync(row);
         var filter = Query();
         _loadedFilter = filter;
         await LoadAsync(filter);
