@@ -88,5 +88,6 @@ internal static class ApiMapping
         r.ConsistencyReason,
         r.SqlDatabaseCount,
         r.DomainController == true,
-        r.AdDomain);
+        r.AdDomain,
+        VmGenerationIds.IsSet(r.Vm?.GenerationId));
 }

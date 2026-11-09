@@ -179,3 +179,12 @@ public sealed record RestoreDiskTarget(string DiskKey, string SourceDiskId, stri
 
 /// <param name="GenerationId">The VM generation id the hypervisor gave the VM (Xen: <c>generation_id</c>), if known.</param>
 public sealed record RestoredVm(string VmId, string Name, string? GenerationId = null);
+
+/// <summary>
+/// VM generation ids (Xen: <c>generation_id</c>). An empty one means the VM has none: it was created from a template
+/// without one, and the hypervisor never gives it one (not at a restore either); "0:0" means none generated yet.
+/// </summary>
+public static class VmGenerationIds
+{
+    public static bool IsSet(string? id) => !string.IsNullOrEmpty(id) && id != "0:0";
+}

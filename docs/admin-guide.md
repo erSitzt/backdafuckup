@@ -518,6 +518,7 @@ Only folders named `{GUID}` or `{GUID}.bdfu-*` directly in `Policies` are ever t
 - **New VM generation id:** XCP-ng gives a restored VM a new VM generation id. At the first start, Windows Server 2012 and later then restore AD non-authoritatively: a new invocation id, the RID pool dropped, and the newer changes taken from the other DCs.
   - The restore session logs the old and the new id.
   - If the id is missing or unchanged, it warns: start the VM without network and handle it by hand (USN rollback risk).
+  - **Only a VM with a generation id gets a new one.** A VM created from a template without one has an empty `generation_id` (`xe vm-param-get uuid=<vm> param-name=generation_id`), which XAPI never fills in later, and its restored copies get none either. On such a DC `msDS-GenerationId` of its computer object stays empty. Every backup of such a DC ends with a warning, and the restore wizard and session warn. Create domain controllers from a template with a VM generation id (XCP-ng's Windows templates have one).
 - **A copy beside the original:** a copy at another location has the same name, addresses and computer account as the original. Connect it only to an isolated network; the wizard and the session warn when it is powered on.
 - **Not done by the product:**
   - Authoritative restores (e.g. a deleted OU with everything below it on all DCs, without object restore) are done with `ntdsutil` in Directory Services Restore Mode on a DC restored to an isolated network.

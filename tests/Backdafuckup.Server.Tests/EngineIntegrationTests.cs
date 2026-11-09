@@ -327,6 +327,40 @@ public sealed class EngineIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_domain_controller_without_a_vm_generation_id_warns_in_every_backup_and_at_its_restore()
+    {
+        // A VM created from a template without a generation id has none, and XAPI gives its copies none either.
+        var (vmUuid, _) = _pool.AddVm("dc02", DiskSize);
+        _pool.RemoveGenerationId(vmUuid);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 3);
+        await EnableGuestProcessingAsync(jobId, GuestFailurePolicy.CrashConsistentWithWarning);
+        await using var agent = new FakeGuestAgent(Services, vmUuid) { DomainController = true, SqlDatabases = [] };
+        await agent.StartAsync(Ct);
+
+        var session = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(jobId, SessionRunMode.Incremental, "test", Ct));
+
+        Assert.Equal(SessionState.Warning, session.State);
+        var point = await LatestRestorePointAsync();
+        Assert.Equal("application", point.Consistency);
+        Assert.True(point.DomainController);
+        Assert.Null(point.Vm!.GenerationId);
+        await using var db = await DbAsync();
+        var log = await db.SessionLog.Where(l => l.SessionId == session.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains("Domain controller dc02: its VM has no VM generation id (created from a template without one)", StringComparison.Ordinal)
+            && m.Contains($"xe vm-param-get uuid={vmUuid} param-name=generation_id", StringComparison.Ordinal));
+
+        var restore = await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueRestoreAsync(
+            new RestoreRequestDto { RestorePointId = point.Id, Mode = RestoreModeDto.AlternateLocation, VmName = "dc02-copy", DiskStorage = new Dictionary<string, string>() },
+            "dc02", "test", Ct));
+        Assert.Equal(SessionState.Warning, restore.State);
+        var copy = _pool.Records("VM").Single(v => v.Str("name_label") == "dc02-copy");
+        Assert.Equal(string.Empty, copy.Str("generation_id"));
+        log = await db.SessionLog.Where(l => l.SessionId == restore.Id).Select(l => l.Message).ToListAsync(Ct);
+        Assert.Contains(log, m => m.Contains($"The restored VM 'dc02-copy' ({copy.Str("uuid")}) has no VM generation id", StringComparison.Ordinal)
+            && m.Contains("The backed-up VM dc02 had none either", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task A_domain_controller_whose_freeze_runs_out_keeps_a_consistent_directory_through_its_ifm_copy()
     {
         var (vmUuid, _) = _pool.AddVm("dc03", DiskSize);

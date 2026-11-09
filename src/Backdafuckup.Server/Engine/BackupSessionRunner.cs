@@ -308,6 +308,15 @@ internal sealed class VmBackupTask(
                 }
             }
 
+            // Without a VM generation id Windows cannot tell a restored copy of this DC that it was restored. The hypervisor
+            // gives a VM none after its creation (Xen: generation_id is read-only), so only a new VM from another template helps.
+            if (directory is not null && !VmGenerationIds.IsSet(backup.Vm.GenerationId))
+            {
+                _log.Warning($"Domain controller {backup.Vm.Name}: its VM has no VM generation id (created from a template without one), so Windows cannot tell that a VM restore of it was restored: " +
+                    $"restoring it risks a USN rollback. Create domain controllers from a template with a VM generation id (XCP-ng's Windows templates have one; on the pool: xe vm-param-get uuid={vm.NativeId} param-name=generation_id). Single objects come back safely under Restore → Active Directory objects.");
+                warnings = true;
+            }
+
             var metadata = await writer.WriteBlobAsync("vm-metadata", backup.Metadata.Format, new MemoryStream(backup.Metadata.Content), cancellationToken).ConfigureAwait(false);
             var kind = manifestDisks.All(d => d.Stats.Mode == DiskBackupMode.Cbt) && manifestDisks.Count > 0 ? RestorePointKind.Incremental : RestorePointKind.Full;
             var manifest = new RestorePointManifest

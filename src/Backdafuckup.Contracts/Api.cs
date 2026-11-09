@@ -260,7 +260,8 @@ public sealed record RestorePointDto(
     string? ConsistencyReason = null,
     int? SqlDatabaseCount = null,
     bool DomainController = false,
-    string? AdDomain = null);
+    string? AdDomain = null,
+    bool HasVmGenerationId = true);
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 

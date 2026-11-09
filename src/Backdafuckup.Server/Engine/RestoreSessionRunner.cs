@@ -150,7 +150,7 @@ public sealed class RestoreSessionRunner(
             var created = await restore.CreateVmAsync(mapping, cancellationToken).ConfigureAwait(false);
             if (manifest.DomainController == true)
             {
-                warnings |= CheckGenerationId(manifest, created, log);
+                warnings |= CheckGenerationId(manifest, created, plan.VmName, log);
             }
 
             var restored = await restore.CompleteAsync(cancellationToken).ConfigureAwait(false);
@@ -230,24 +230,27 @@ public sealed class RestoreSessionRunner(
     }
 
     /// <summary>Without a new VM generation id Windows cannot tell that the DC was restored (risk of a USN rollback).</summary>
-    private static bool CheckGenerationId(RestorePointManifest manifest, RestoredVm created, IOperationLog log)
+    /// <param name="name">The restored VM's name (<paramref name="created"/> still has the backed-up one).</param>
+    private static bool CheckGenerationId(RestorePointManifest manifest, RestoredVm created, string name, IOperationLog log)
     {
         var before = manifest.Vm.GenerationId;
-        if (string.IsNullOrEmpty(created.GenerationId) || created.GenerationId == "0:0")
+        if (!VmGenerationIds.IsSet(created.GenerationId))
         {
-            log.Warning($"The restored VM {created.Name} ({created.VmId}) has no VM generation id, so Windows cannot tell that this domain controller was restored " +
-                "(risk of a USN rollback). Start it without network and follow \"Restoring a domain controller\" in the admin guide before connecting it.");
+            var cause = VmGenerationIds.IsSet(before) ? string.Empty
+                : $" The backed-up VM {manifest.Vm.Name} had none either (created from a template without one), so the hypervisor gives none to its copies.";
+            log.Warning($"The restored VM '{name}' ({created.VmId}) has no VM generation id, so Windows cannot tell that this domain controller was restored " +
+                $"(risk of a USN rollback).{cause} Start it without network and follow \"Restoring a whole domain controller\" in the admin guide before connecting it.");
             return true;
         }
 
         if (before is not null && string.Equals(before, created.GenerationId, StringComparison.Ordinal))
         {
-            log.Warning($"The restored VM {created.Name} ({created.VmId}) kept the VM generation id of the backup ({before}), so Windows cannot tell that this domain controller was restored " +
-                "(risk of a USN rollback). Start it without network and follow \"Restoring a domain controller\" in the admin guide before connecting it.");
+            log.Warning($"The restored VM '{name}' ({created.VmId}) kept the VM generation id of the backup ({before}), so Windows cannot tell that this domain controller was restored " +
+                "(risk of a USN rollback). Start it without network and follow \"Restoring a whole domain controller\" in the admin guide before connecting it.");
             return true;
         }
 
-        log.Info($"The restored VM {created.Name} has a new VM generation id ({created.GenerationId}{(before is null ? string.Empty : $", backup: {before}")}).");
+        log.Info($"The restored VM '{name}' has a new VM generation id ({created.GenerationId}{(before is null ? string.Empty : $", backup: {before}")}).");
         return false;
     }
 

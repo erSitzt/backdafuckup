@@ -387,6 +387,18 @@ public sealed class FakeXenPool : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// A VM created from a template without a VM generation id: <c>generation_id</c> is empty (read-only in XAPI), and
+    /// its snapshots and imported copies get none either.
+    /// </summary>
+    public void RemoveGenerationId(string vmUuid)
+    {
+        lock (_lock)
+        {
+            Get("VM", RefByUuid("VM", vmUuid)!)["generation_id"] = string.Empty;
+        }
+    }
+
     /// <summary>Called when VM.snapshot runs (e.g. to check that the guest is frozen at that moment).</summary>
     public Action<string>? OnSnapshot { get; set; }
 
