@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Backdafuckup.Agent.Protocol;
@@ -248,7 +249,7 @@ public sealed class AdMounts
             if (server.HasExited)
             {
                 throw new InvalidOperationException(
-                    $"dsamain on {_env.HostName} (port {port}) ended with {server.ExitCode?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "an unknown code"} before it served the backup: {Tail(server.Output)}" +
+                    $"dsamain on {_env.HostName} (port {port}) ended with {server.ExitCode?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "an unknown code"} before it served the backup: {DsamainExit(server.Output)}" +
                     (recovery.ExitCode == 0 ? string.Empty : $" (the recovery reported: {Tail(recovery.Output)})"));
             }
 
@@ -519,6 +520,24 @@ public sealed class AdMounts
         }
 
         File.Move(temporary, _journalFile);
+    }
+
+    /// <summary>
+    /// Why dsamain ended: the events it printed (localized lines <c>EVENTLOG (…): source / category : id</c>), with an
+    /// explanation for those we know, and its last lines.
+    /// </summary>
+    internal static string DsamainExit(string output)
+    {
+        var ids = Regex.Matches(output ?? string.Empty, @"^\s*EVENTLOG \([^)]*\):.*:\s*(\d+)\s*$", RegexOptions.Multiline)
+            .Cast<Match>().Select(m => m.Groups[1].Value).Distinct().ToList();
+        var text = ids.Count == 0 ? Tail(output ?? string.Empty) : $"events {string.Join(", ", ids)}; {Tail(output ?? string.Empty)}";
+
+        // On a VM with a VM generation id (event 2168) dsamain compares it with msDS-GenerationId of the backup's DC object
+        // and does not start when it cannot read it (2173): the backup is from another DC whose VM had no generation id.
+        return ids.Contains("2173")
+            ? "it runs on a hypervisor with a VM generation id and could not read msDS-GenerationId of the domain controller the backup is from " +
+              $"(that DC had none, e.g. its VM was made from a template without one). Open the backup on the domain controller it is from, or on one without a VM generation id ({text})"
+            : text;
     }
 
     private static string Tail(string text)

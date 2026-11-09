@@ -141,7 +141,10 @@ public sealed class AdExplores(
 
     public AdExploreOptions Options => options.Value;
 
-    /// <summary>The DCs that could open the restore point's directory, usable ones first.</summary>
+    /// <summary>
+    /// The DCs that could open the restore point's directory: usable ones first, among them the DC the backup is from (a DC
+    /// with a VM generation id cannot open the backup of a DC without one).
+    /// </summary>
     public async Task<List<AdTargetDto>> TargetsAsync(Guid restorePointId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -149,8 +152,9 @@ public sealed class AdExplores(
             ?? throw new KeyNotFoundException("The restore point no longer exists.");
         var candidates = await db.Agents.AsNoTracking().Where(a => a.DomainRole == 4 || a.DomainRole == 5).ToListAsync(cancellationToken).ConfigureAwait(false);
         return [.. candidates
-            .Select(a => new AdTargetDto(a.Id, a.HostName, a.IpAddresses ?? a.RemoteAddress, a.Domain, agents.IsOnline(a.Id), Usable(point, a) is null, Usable(point, a)))
-            .OrderByDescending(t => t.Usable).ThenBy(t => t.HostName, StringComparer.OrdinalIgnoreCase)];
+            .Select(a => new AdTargetDto(a.Id, a.HostName, a.IpAddresses ?? a.RemoteAddress, a.Domain, agents.IsOnline(a.Id), Usable(point, a) is null, Usable(point, a),
+                string.Equals(a.VmNativeId, point.VmNativeId, StringComparison.OrdinalIgnoreCase)))
+            .OrderByDescending(t => t.Usable).ThenByDescending(t => t.BackupSource).ThenBy(t => t.HostName, StringComparer.OrdinalIgnoreCase)];
     }
 
     public async Task<AdExplore> OpenAsync(OpenAdExploreDto request, string user, CancellationToken cancellationToken)

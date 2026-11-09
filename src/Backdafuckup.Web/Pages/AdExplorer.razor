@@ -61,11 +61,12 @@ else if (_explore is null)
         }
         <MudGrid Spacing="2">
             <MudItem xs="12" md="6">
-                <MudSelect T="Guid?" @bind-Value="_agentId" Label="Domain controller" Variant="Variant.Outlined" Dense="true">
+                <MudSelect T="Guid?" @bind-Value="_agentId" Label="Domain controller" Variant="Variant.Outlined" Dense="true"
+                           HelperText="Best the DC the backup is from: a DC with a VM generation id cannot open the backup of a DC without one.">
                     @foreach (var target in _targets ?? [])
                     {
                         <MudSelectItem T="Guid?" Value="@target.AgentId" Disabled="@(!target.Usable)">
-                            @target.HostName @(target.Domain is null ? string.Empty : $"({target.Domain})")@(target.Usable ? string.Empty : $" – {target.Reason}")
+                            @target.HostName @(target.Domain is null ? string.Empty : $"({target.Domain})")@(target.BackupSource ? " – the backup is from this DC" : string.Empty)@(target.Usable ? string.Empty : $" – {target.Reason}")
                         </MudSelectItem>
                     }
                 </MudSelect>

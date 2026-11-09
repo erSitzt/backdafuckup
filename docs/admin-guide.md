@@ -429,7 +429,7 @@ For domain controllers backed up with guest processing. AD records each backup, 
 
 **Opening a backup's directory** (*Backups & Restore → Restore → Active Directory objects*)
 - **Choose:**
-  - a domain controller of the same domain with the agent, online and with the AD DS tools (`dsamain.exe`);
+  - a domain controller of the same domain with the agent, online and with the AD DS tools (`dsamain.exe`). Best is the DC the backup is from (listed first and marked): on a DC with a VM generation id, dsamain does not open the backup of another DC that has none (events 2168, 2173, 1001), and the session says so;
   - a domain admin of the domain (member of Domain Admins or Enterprise Admins; under *Credentials*). The explore checks it when it opens and refuses another account (see *The account* below).
 - **The database and its logs are copied into a work folder on that DC:**
   - The IFM copy's `ntds.dit` if the restore point has one, else the live `ntds.dit` with `edb.chk` and `edb*.log`, go into `%ProgramData%\backdafuckup\ad\<session>`. Only SYSTEM and Administrators can open the folder.

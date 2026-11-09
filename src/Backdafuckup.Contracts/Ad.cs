@@ -3,7 +3,8 @@ namespace Backdafuckup.Contracts;
 /// <summary>A domain controller that can open a restore point's directory (its agent runs dsamain).</summary>
 /// <param name="Usable">Online, with the capability, and of the restore point's domain.</param>
 /// <param name="Reason">Why it cannot be used.</param>
-public sealed record AdTargetDto(Guid AgentId, string HostName, string? Address, string? Domain, bool Online, bool Usable, string? Reason);
+/// <param name="BackupSource">The DC the restore point is from: it can always open its own backup, also on a VM with a VM generation id.</param>
+public sealed record AdTargetDto(Guid AgentId, string HostName, string? Address, string? Domain, bool Online, bool Usable, string? Reason, bool BackupSource = false);
 
 /// <summary>Opens a restore point's directory on a live DC of the same domain, as a Windows account of the domain.</summary>
 public sealed record OpenAdExploreDto(Guid RestorePointId, Guid AgentId, Guid CredentialId);

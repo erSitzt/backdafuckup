@@ -276,6 +276,40 @@ public sealed class AdTests : IDisposable
     }
 
     [Fact]
+    public void Dsamain_ending_for_a_missing_vm_generation_id_says_why_and_where_the_backup_opens()
+    {
+        // dsamain's own console output on a DC with a VM generation id, given the backup of a DC without one (lab check H14).
+        const string Output = """
+            EVENTLOG (Warning): NTDS General / Sicherheit : 3051
+            Das Verzeichnis wurde so konfiguriert, dass bei LDAP-Add-Vorgängen keine Autorisierung pro Attribut erzwungen wird.
+            EVENTLOG (Informational): NTDS General / Interne Konfiguration : 2168
+            Der Domänencontroller wird auf einem unterstützten Hypervisor ausgeführt. Eine VM-Generations-ID wurde erkannt.
+            EVENTLOG (Informational): NTDS General / Interne Konfiguration : 2173
+            Fehler beim Lesen des msDS-GenerationId-Attributs des Computerobjekts des Domänencontrollers.
+            Fehlercode:
+            8995
+            EVENTLOG (Informational): NTDS General / Dienststeuerung : 1001
+            Die Active Directory Domain Services konnten nicht gestartet werden.
+            Fehlercode:
+            8431
+            Interne ID (DSID):
+            2080836
+            EVENTLOG (Informational): NTDS General / Dienststeuerung : 1004
+            Die Active Directory Domain Services wurden heruntergefahren.
+            """;
+
+        var text = AdMounts.DsamainExit(Output.Replace("\n", "\r\n", StringComparison.Ordinal));
+
+        Assert.StartsWith("it runs on a hypervisor with a VM generation id and could not read msDS-GenerationId of the domain controller the backup is from", text, StringComparison.Ordinal);
+        Assert.Contains("Open the backup on the domain controller it is from, or on one without a VM generation id", text, StringComparison.Ordinal);
+        Assert.Contains("events 3051, 2168, 2173, 1001, 1004;", text, StringComparison.Ordinal);
+
+        // Other endings keep the events and the last lines; output without events stays as it was.
+        Assert.StartsWith("events 1001, 1004;", AdMounts.DsamainExit("EVENTLOG (Error): NTDS General / Service Control : 1001\nfailed\nEVENTLOG (Informational): NTDS General / Service Control : 1004\n"), StringComparison.Ordinal);
+        Assert.Equal("Database version mismatch.", AdMounts.DsamainExit("Database version mismatch."));
+    }
+
+    [Fact]
     public void A_backup_of_another_domain_is_refused()
     {
         var other = new InMemoryDirectory("dc1.bdfu-lab.local:50000", "DC=other,DC=local");

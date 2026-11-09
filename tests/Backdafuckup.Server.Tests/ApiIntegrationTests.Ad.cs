@@ -45,6 +45,7 @@ public sealed partial class ApiIntegrationTests
         var target = Assert.Single((await client.GetFromJsonAsync<List<AdTargetDto>>($"/api/ad/restore-points/{point.Id}/targets", Ct))!);
         Assert.True(target.Usable, target.Reason);
         Assert.Equal("bdfu-lab.local", target.Domain);
+        Assert.True(target.BackupSource);
         var account = await Read<WindowsCredentialDto>(client.PostAsJsonAsync("/api/credentials", new SaveWindowsCredentialDto(@"BDFU-LAB\Administrator", "secret", null), Ct));
         var opened = await Read<AdExploreDto>(client.PostAsJsonAsync("/api/ad/explores", new OpenAdExploreDto(point.Id, target.AgentId, account.Id), Ct));
         var explore = await WaitForExploreAsync(client, opened.Id);
