@@ -89,7 +89,8 @@ public sealed class AdRestorer
             item.Reason ??= "Nothing to restore: it is as in the backup.";
         }
 
-        return items;
+        // In the order they are written (parents first), so the preview and the session read as it happens.
+        return items.OrderBy(i => i.Dn is null ? int.MaxValue : Depth(i.Dn)).ToList();
     }
 
     /// <summary>The password value of unicodePwd: the password in quotes, UTF-16LE ([MS-ADTS] 3.1.1.3.1.5.1).</summary>

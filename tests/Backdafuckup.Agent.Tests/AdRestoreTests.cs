@@ -124,6 +124,7 @@ public sealed class AdRestoreTests
     public void Gone_objects_are_re_created_parents_first_disabled_without_a_password()
     {
         var items = Restorer(false).Run(Request(true, Choice("lab-user05"), Choice("Gone"), Choice("lab-user04")), write: true, _log.Add);
+        Assert.Equal(["Gone", "lab-user05", "lab-user04"], items.Select(i => AdText.RdnValue(i.Dn!)));
 
         var ou = Item(items, "Gone");
         Assert.Equal(AdRestoreActions.Recreate, ou.Action);
