@@ -5,9 +5,9 @@ The pool is XCP-ng 8.3 with two hosts. The VM is bdfu-lab-sql2: Windows Server, 
 | # | Question | Result |
 |---|---|---|
 | S1 | How long does the VM pause? What does the checkpoint look like? Is anything left over? | Answered: 310–323 s with the host's local suspend storage, 118 s with the Alletra. Nothing left over. |
-| S2 | Does a restored VM resume? | Open (restore part). |
+| S2 | Does a restored VM resume? | Yes, as far as XAPI shows (suspended import, `VM.resume`, Running). The guest's view is open. See below. |
 | S3 | Does a VSS freeze survive the pause? | No. VSS and the checkpoint stay exclusive. See below. |
-| S4 | Can a copy resume without network connections? | Open (restore part). |
+| S4 | Can a copy resume without network connections? | Yes: XAPI removes the NIC of the suspended VM. |
 | S5 | Can the suspend VDI be read over NBD? | Partly answered. See below. |
 
 ## S1, 2026-11-10 18:02 (session 01a1c668)
@@ -57,6 +57,24 @@ A domain member whose clock is more than 5 minutes off fails Kerberos until its 
 - **Guest** (its clock about 5 min behind, see above): `VSS prepared` at 22:21:20. At 22:22:20 the VSS event **12298**: the writes could not be held during the shadow copy creation (the flush-and-hold limit of 10 s ran out). At the same second SQL Server's writer aborted the backups of all 10 databases (3041, 18210 with OS error 995, SQLWRITER 24583). They were copy-only, so the backup history is untouched.
 
 **Decision (task 6):** VSS and the checkpoint stay exclusive, as built: a VM with memory gets no guest processing. The pause is far longer than VSS can hold writes, and the guest notices the gap only after the resume. `Engine:CheckpointWithVss` stays a spike switch (default false), and it was removed from the service's environment afterwards (22:35).
+
+## S2 and S4, 2026-11-10 22:41–22:51 (build `ed24db3`)
+
+**Backup** (session 01a1c769, guest processing off, the pool's suspend storage on the Alletra): paused **119.8 s**; the memory image (10.2 GiB, 8.0 GiB allocated) read in 32 s, 1.4 GB stored. The restore point records the checkpoint's disk ids (`MemoryDiskIds`).
+
+**Restore** (session 01a1c76e) to another location as `bdfu-lab-sql2-resumed`, *Resume with memory*, *Resume the VM*, all on alletra-mp02: **3:47 min**.
+- **Upload:** 3 disks (22.7 + 2.3 GiB and 2 MiB of data) and the memory image as a `suspend` VDI (7.4 of 10.2 GiB with data).
+- **Import (S2):** `import_metadata` of the checkpoint's metadata with the disk map and `check_cpu=true` gave a **Suspended** VM with the uploaded memory image as its suspend VDI. The VM had no VM generation id; sql2 has none either.
+- **NIC (S4):** `VIF.destroy` on the suspended VM worked: "NIC 0 (MAC a6:20:0b:33:64:4a) removed".
+- **Resume:** `VM.resume` succeeded. The inventory (rescan) shows the copy **Running**; the suspend VDI is gone after the resume, and 3 disks remain.
+
+**Open:** the guest's view on the console (uptime from before the backup, programs and SQL Server running, the clock). The copy has no network, so it can only be checked there.
+
+**Noticed:**
+- The copy keeps the original's description ("Created and removed by OpenTofu only"), as every restored VM does.
+- The log said the VM "continues where it was at the backup (22:46)", the restore point's time; the memory is from the checkpoint at 22:41. The message now names the snapshot with memory of the restore point.
+
+**Left in the pool for the user to delete:** the VM `bdfu-lab-sql2-resumed` (2a0f4a11-cdd3-d45d-64df-2f21132e503b) with its 3 disks.
 
 ## S5
 

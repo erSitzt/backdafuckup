@@ -338,7 +338,7 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
             var at = plan.Manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
             if (plan.PowerOn)
             {
-                log.Info($"Resuming the restored VM: it continues where it was at the backup ({at}).");
+                log.Info($"Resuming the restored VM: it continues where it was at the snapshot with memory of the restore point from {at}.");
                 if (hostRef is not null)
                 {
                     await xapi.RunTaskAsync("VM.resume_on", null, owner.Provider.Options.TaskTimeout, cancellationToken, _vmRef, hostRef, false, false).ConfigureAwait(false);
@@ -350,7 +350,7 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
             }
             else
             {
-                log.Info($"The restored VM stays suspended. Resumed (e.g. in Xen Orchestra), it continues where it was at the backup ({at}).");
+                log.Info($"The restored VM stays suspended. Resumed (e.g. in Xen Orchestra), it continues where it was at the snapshot with memory of the restore point from {at}.");
             }
         }
         else if (plan.PowerOn)

@@ -107,7 +107,7 @@ public sealed partial class EngineIntegrationTests
         Assert.DoesNotContain(_pool.Records("VDI"), v => v.Str("type") == "suspend");
         var log = await LogAsync(restore.Id);
         Assert.Contains(log, m => m.Contains("suspended, with its memory as at the backup", StringComparison.Ordinal));
-        Assert.Contains(log, m => m.Contains("Resuming the restored VM: it continues where it was at the backup", StringComparison.Ordinal));
+        Assert.Contains(log, m => m.Contains("Resuming the restored VM: it continues where it was at the snapshot with memory", StringComparison.Ordinal));
     }
 
     [Fact]
