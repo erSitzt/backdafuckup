@@ -77,9 +77,9 @@ public sealed class NbdConnectionPool : IAsyncDisposable
     public async ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        var (slot, client) = await AcquireAsync(cancellationToken).ConfigureAwait(false);
         for (var attempt = 0; ; attempt++)
         {
-            var client = await AcquireAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 await client.ReadAsync(offset, destination, cancellationToken).ConfigureAwait(false);
@@ -88,7 +88,18 @@ public sealed class NbdConnectionPool : IAsyncDisposable
             catch (Exception ex) when (ex is (NbdException and not NbdCommandException) or IOException or ObjectDisposedException
                                        && attempt < _maxRetries && !cancellationToken.IsCancellationRequested)
             {
-                // Connection-level failure: the slot reconnects on the next acquire.
+                // Connection-level failure.
+            }
+
+            // The retry goes to a connection opened after this failure: when the server dropped all connections, the
+            // others may be just as dead without knowing it yet, and trying them one by one would use up the retries.
+            if (await TryEnsureAsync(slot, cancellationToken, failed: client).ConfigureAwait(false) is { } replaced)
+            {
+                client = replaced;
+            }
+            else
+            {
+                (slot, client) = await AcquireAsync(cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -111,15 +122,17 @@ public sealed class NbdConnectionPool : IAsyncDisposable
         }
     }
 
-    private async ValueTask<NbdClient> AcquireAsync(CancellationToken cancellationToken)
+    private async ValueTask<(Slot Slot, NbdClient Client)> AcquireAsync(CancellationToken cancellationToken)
     {
         NbdClient? best = null;
+        Slot? bestSlot = null;
         foreach (var slot in _slots)
         {
             var client = slot.Client;
             if (client is { IsFaulted: false } && (best is null || client.InFlight < best.InFlight))
             {
                 best = client;
+                bestSlot = slot;
             }
         }
 
@@ -133,7 +146,7 @@ public sealed class NbdConnectionPool : IAsyncDisposable
                     var repaired = await TryEnsureAsync(slot, cancellationToken).ConfigureAwait(false);
                     if (repaired is not null)
                     {
-                        return repaired;
+                        return (slot, repaired);
                     }
 
                     break;
@@ -143,18 +156,18 @@ public sealed class NbdConnectionPool : IAsyncDisposable
 
         if (best is not null)
         {
-            return best;
+            return (bestSlot!, best);
         }
 
         // Every connection is broken: reconnect one, letting the error surface.
-        return await EnsureAsync(_slots[0], cancellationToken).ConfigureAwait(false);
+        return (_slots[0], await EnsureAsync(_slots[0], cancellationToken).ConfigureAwait(false));
     }
 
-    private async Task<NbdClient?> TryEnsureAsync(Slot slot, CancellationToken cancellationToken)
+    private async Task<NbdClient?> TryEnsureAsync(Slot slot, CancellationToken cancellationToken, NbdClient? failed = null)
     {
         try
         {
-            return await EnsureAsync(slot, cancellationToken).ConfigureAwait(false);
+            return await EnsureAsync(slot, cancellationToken, failed).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is NbdException or IOException or TimeoutException or System.Net.Sockets.SocketException)
         {
@@ -162,12 +175,13 @@ public sealed class NbdConnectionPool : IAsyncDisposable
         }
     }
 
-    private async Task<NbdClient> EnsureAsync(Slot slot, CancellationToken cancellationToken)
+    /// <summary>The slot's connection, opened again if it is missing, faulted or <paramref name="failed"/>.</summary>
+    private async Task<NbdClient> EnsureAsync(Slot slot, CancellationToken cancellationToken, NbdClient? failed = null)
     {
         await slot.Lock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (slot.Client is { IsFaulted: false } healthy)
+            if (slot.Client is { IsFaulted: false } healthy && !ReferenceEquals(healthy, failed))
             {
                 return healthy;
             }
