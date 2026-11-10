@@ -439,6 +439,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("order");
 
+                    b.Property<bool>("WithMemory")
+                        .HasColumnType("boolean")
+                        .HasColumnName("with_memory");
+
                     b.HasKey("Id")
                         .HasName("pk_job_objects");
 
@@ -948,6 +952,10 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<string>("ManifestPath")
                         .HasColumnType("text")
                         .HasColumnName("manifest_path");
+
+                    b.Property<long?>("MemoryImageBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("memory_image_bytes");
 
                     b.Property<long>("NewStoredBytes")
                         .HasColumnType("bigint")

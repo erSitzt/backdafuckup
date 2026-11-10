@@ -37,7 +37,7 @@ internal static class ApiMapping
     public static JobDto ToDto(this BackupJob j, bool running) => new(
         j.Id, j.Name, j.Description, j.Enabled, j.ConnectionId, j.Connection?.DisplayName ?? string.Empty, j.RepositoryId,
         j.Repository?.Name ?? string.Empty, j.RetentionPoints, j.Schedule.ToDto(),
-        j.Objects.OrderBy(o => o.Order).Select(o => new JobObjectDto(o.NativeId, o.CachedName)).ToList(),
+        j.Objects.OrderBy(o => o.Order).Select(o => new JobObjectDto(o.NativeId, o.CachedName, o.WithMemory)).ToList(),
         j.NextRunUtc, j.LastRunUtc, j.LastResult?.ToString(), running, j.MaxParallelVms, j.NbdConnectionsPerDisk, j.RetryCount, j.TransportMode.ToString(), j.MaxParallelDisks,
         j.GuestProcessing, j.GuestFailurePolicy.ToString(), j.GuestCredentialId, j.GuestProcessingMode.ToString(), j.SqlCredentialId, j.SqlSnapshotCopyOnly,
         j.SqlBackup.ToDto());
@@ -89,5 +89,6 @@ internal static class ApiMapping
         r.SqlDatabaseCount,
         r.DomainController == true,
         r.AdDomain,
-        VmGenerationIds.IsSet(r.Vm?.GenerationId));
+        VmGenerationIds.IsSet(r.Vm?.GenerationId),
+        r.MemoryImageBytes);
 }

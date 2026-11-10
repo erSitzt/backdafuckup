@@ -36,6 +36,7 @@ internal sealed partial class XenHypervisorSession
             case XenArtifactKinds.SnapshotVdi:
             case XenArtifactKinds.CbtMetadataVdi:
             case XenArtifactKinds.RestoredVdi:
+            case XenArtifactKinds.DiscardedVdi:
                 await DestroyVdiByUuidAsync(Xapi, artifact.NativeId, log, cancellationToken).ConfigureAwait(false);
                 break;
             case XenArtifactKinds.RestoredVm:
@@ -112,6 +113,7 @@ internal sealed partial class XenHypervisorSession
             }
 
             var kind = vdi.Str("type") == "cbt_metadata" ? XenArtifactKinds.CbtMetadataVdi
+                : vdi.Str("type") == "suspend" ? XenArtifactKinds.DiscardedVdi
                 : vdi.Bool("is_a_snapshot") ? XenArtifactKinds.SnapshotVdi
                 : XenArtifactKinds.RestoredVdi;
             yield return Artifact(kind, vdi.Str("uuid"), session, tags);
@@ -265,6 +267,12 @@ internal sealed partial class XenHypervisorSession
                 {
                     vdis.Add(vbd.Str("VDI"));
                 }
+            }
+
+            // A snapshot with memory also holds the RAM image.
+            if (!XapiRecord.IsNullRef(vm.Str("suspend_VDI")))
+            {
+                vdis.Add(vm.Str("suspend_VDI"));
             }
         }
 

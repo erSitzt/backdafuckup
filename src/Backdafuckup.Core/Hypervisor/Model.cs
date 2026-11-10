@@ -119,7 +119,11 @@ public sealed record SnapshotDisk(
     bool Bootable,
     string StorageId,
     string StorageName,
-    IReadOnlyDictionary<string, string> Locator);
+    IReadOnlyDictionary<string, string> Locator)
+{
+    /// <summary>The key of a RAM image (snapshot with memory) in the reader path and the repository.</summary>
+    public const string MemoryKey = "memory";
+}
 
 /// <summary>What changed on a disk since a change token, or "read everything" with a reason.</summary>
 public sealed record ChangedExtents(bool IsFull, string? FullReason, IReadOnlyList<Extents.DiskExtent> Extents)
@@ -135,7 +139,11 @@ public sealed record VmMetadataBlob(string Format, byte[] Content);
 
 /// <param name="Quiescer">Freezes the guest around the snapshot (application-consistent backup); null: crash-consistent.</param>
 /// <param name="Telemetry">Receives transport events of the backup (NBD connects, fallbacks) for metrics; null: none.</param>
-public sealed record VmBackupRequest(string VmId, Guid JobId, Guid SessionId, Guid RestorePointId, string SnapshotName, IGuestQuiescer? Quiescer = null, IBackupTelemetry? Telemetry = null);
+/// <param name="WithMemory">
+/// Snapshot with memory (Xen: <c>VM.checkpoint</c>) when the VM runs: the VM is paused while its RAM is written and all disks
+/// are captured, and the RAM image is backed up (<see cref="IVmBackupSession.Memory"/>). A VM that does not run gets a normal snapshot.
+/// </param>
+public sealed record VmBackupRequest(string VmId, Guid JobId, Guid SessionId, Guid RestorePointId, string SnapshotName, IGuestQuiescer? Quiescer = null, IBackupTelemetry? Telemetry = null, bool WithMemory = false);
 
 public enum RestoreMode
 {

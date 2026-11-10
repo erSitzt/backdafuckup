@@ -45,7 +45,7 @@ public sealed class BackupMetrics
     public BackupMetrics(IMeterFactory meterFactory, RunningSessions running)
     {
         var meter = meterFactory.Create(MeterName);
-        _snapshotDuration = Seconds(meter, "bdfu_snapshot_duration_seconds", "VM snapshot call (Xen: VM.snapshot), by pool, storage and number of disks.", SnapshotBuckets);
+        _snapshotDuration = Seconds(meter, "bdfu_snapshot_duration_seconds", "VM snapshot call by pool, storage, number of disks and kind (snapshot; checkpoint = snapshot with memory, the VM's pause).", SnapshotBuckets);
         _gateWait = Seconds(meter, "bdfu_snapshot_gate_wait_seconds", "Wait for snapshots of other VMs on the same storage before the snapshot (one at a time per storage).", SnapshotBuckets);
         _diskSkew = Seconds(meter, "bdfu_snapshot_disk_skew_seconds", "Time between the first and the last disk capture of a VM snapshot (VMs with two or more disks).", SnapshotBuckets);
         _release = Seconds(meter, "bdfu_snapshot_release_seconds", "Removing the snapshot after the backup (VM.destroy and VDI.data_destroy).", SnapshotBuckets);
@@ -84,7 +84,7 @@ public sealed class BackupMetrics
     public void RecordSnapshot(string pool, string vm, SnapshotFacts facts, GuestFreezeResult? freeze, TimeSpan? sqlSuspended, string consistency)
     {
         var storage = facts.StorageLabel;
-        _snapshotDuration.Record(facts.Duration.TotalSeconds, Tag("pool", pool), Tag("storage", storage), Tag("disks", facts.DiskCount.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        _snapshotDuration.Record(facts.Duration.TotalSeconds, Tag("pool", pool), Tag("storage", storage), Tag("disks", facts.DiskCount.ToString(System.Globalization.CultureInfo.InvariantCulture)), Tag("kind", facts.Method));
         _gateWait.Record(facts.GateWait.TotalSeconds, Tag("pool", pool), Tag("storage", storage));
         if (facts.DiskSkew is { } skew)
         {
@@ -120,9 +120,10 @@ public sealed class BackupMetrics
         _release.Record(release.TotalSeconds, Tag("pool", pool), Tag("storage", facts.StorageLabel));
 
     /// <summary>One disk backed up.</summary>
-    public void RecordDisk(string pool, string storage, string transport, DiskBackupCounters counters, string? fullReason)
+    /// <param name="image"><c>disk</c>, or <c>memory</c> for the RAM image of a snapshot with memory.</param>
+    public void RecordDisk(string pool, string storage, string transport, DiskBackupCounters counters, string image, string? fullReason)
     {
-        var tags = new[] { Tag("pool", pool), Tag("storage", storage), Tag("transport", transport) };
+        var tags = new[] { Tag("pool", pool), Tag("storage", storage), Tag("transport", transport), Tag("image", image) };
         void Add(string category, long bytes)
         {
             if (bytes > 0)

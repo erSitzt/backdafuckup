@@ -100,7 +100,7 @@ public sealed partial class LocalDirectoryRepository
 
         public async Task<ChunkIndex> ReadDiskIndexAsync(string diskKey, CancellationToken cancellationToken)
         {
-            var disk = Manifest.Disks.FirstOrDefault(d => d.Key == diskKey)
+            var disk = Manifest.AllImages.FirstOrDefault(d => d.Key == diskKey)
                 ?? throw new KeyNotFoundException($"Restore point {Manifest.RestorePointId} has no disk '{diskKey}'.");
             var raw = ChunkIndexFormat.Decompress(await File.ReadAllBytesAsync(Path.Combine(directory, disk.Index.File), cancellationToken).ConfigureAwait(false));
             if (ChunkIndexFormat.Sha256Hex(raw) != disk.Index.Sha256)

@@ -27,6 +27,12 @@ public sealed class EngineOptions
 
     public int SessionHistoryDays { get; set; } = 180;
 
+    /// <summary>
+    /// Lab spike only: freeze the guest with VSS around a snapshot with memory too. Off by default: a VM backed up with
+    /// memory gets no guest processing, the checkpoint pauses the whole VM instead.
+    /// </summary>
+    public bool CheckpointWithVss { get; set; }
+
     /// <summary>Identifies this server process; sessions owned by another instance are stale after a restart.</summary>
     public string ServerInstanceId { get; } = Guid.NewGuid().ToString("N");
 }

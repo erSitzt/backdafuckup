@@ -88,6 +88,12 @@ public static class XenArtifactKinds
     public const string CbtMetadataVdi = "CbtMetadataVdi";
     public const string RestoredVdi = "RestoredVdi";
     public const string RestoredVm = "RestoredVm";
+
+    /// <summary>
+    /// A VDI of a snapshot that is not kept: the suspend VDI (RAM image) of a snapshot with memory, or the snapshot of a
+    /// disk marked [NOBAK] that a checkpoint captured anyway. Destroyed on commit and on cleanup.
+    /// </summary>
+    public const string DiscardedVdi = "DiscardedVdi";
 }
 
 public static class XenTags

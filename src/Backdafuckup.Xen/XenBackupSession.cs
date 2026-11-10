@@ -56,7 +56,7 @@ internal sealed class XenBackupSession : IVmBackupSession
         _snapshotArtifact = snapshotArtifact;
         _disks = disks;
         Metadata = metadata;
-        Disks = disks.Values.Select(d => d.Disk).OrderBy(d => d.Key, StringComparer.Ordinal).ToList();
+        Disks = disks.Values.Where(d => !d.Discard).Select(d => d.Disk).OrderBy(d => d.Key, StringComparer.Ordinal).ToList();
     }
 
     public VmDescriptor Vm { get; }
@@ -81,6 +81,13 @@ internal sealed class XenBackupSession : IVmBackupSession
         if (vm.Bool("is_a_template") || vm.Bool("is_a_snapshot") || vm.Bool("is_control_domain"))
         {
             throw new InvalidOperationException($"{vm.Str("name_label")} is not a regular VM.");
+        }
+
+        // Snapshot with memory: only a running VM has memory to capture.
+        var checkpoint = request.WithMemory && vm.Str("power_state") == "Running";
+        if (request.WithMemory && !checkpoint)
+        {
+            log.Info($"{vm.Str("name_label")} is {vm.Str("power_state")}: it gets a snapshot without memory (only a running VM has memory to capture).");
         }
 
         // Make sure every disk tracks changes; disks where CBT was just enabled need a full read this time. Disks marked
@@ -130,6 +137,29 @@ internal sealed class XenBackupSession : IVmBackupSession
             }
         }
 
+        // A snapshot with memory writes the RAM to the VM's suspend storage (else the pool's suspend or default storage):
+        // that storage takes part in the gate and needs room for the RAM.
+        var memoryBytes = vm.Long("memory_static_max");
+        var needs = new Dictionary<string, long>(StringComparer.Ordinal);
+        if (checkpoint)
+        {
+            var suspendSr = await SuspendStorageAsync(xapi, vm, cancellationToken).ConfigureAwait(false);
+            if (suspendSr is null)
+            {
+                throw new InvalidOperationException(
+                    $"{vm.Str("name_label")}: no storage for its memory image. Set the VM's suspend storage (xe vm-param-set uuid={request.VmId} suspend-SR-uuid=<sr>) " +
+                    "or the pool's default storage, or back it up without memory.");
+            }
+
+            if (!storages.ContainsKey(suspendSr))
+            {
+                storages[suspendSr] = await xapi.GetRecordAsync("SR", suspendSr, cancellationToken).ConfigureAwait(false);
+            }
+
+            snapshotStorages.Add(suspendSr);
+            needs[suspendSr] = memoryBytes;
+        }
+
         var storageText = snapshotStorages.Count == 0 ? "no storage"
             : string.Join(", ", snapshotStorages.Select(s => $"'{storages[s].Str("name_label")}'"));
         var options = owner.Provider.Options;
@@ -152,7 +182,7 @@ internal sealed class XenBackupSession : IVmBackupSession
         string free;
         try
         {
-            free = await CheckStorageSpaceAsync(xapi, snapshotStorages, options.MinStorageFreePercent, vm.Str("name_label"), cancellationToken).ConfigureAwait(false);
+            free = await CheckStorageSpaceAsync(xapi, snapshotStorages, options.MinStorageFreePercent, vm.Str("name_label"), needs, cancellationToken).ConfigureAwait(false);
 
             // Guest processing: freeze the guest as late as possible. Everything slow (CBT, record reads, waiting for
             // other snapshots) is done by now, because VSS holds writes for at most 10 s and only the snapshot itself
@@ -160,12 +190,23 @@ internal sealed class XenBackupSession : IVmBackupSession
             (var freeze, freezeResult) = await FreezeGuestAsync(request.Quiescer, log, cancellationToken).ConfigureAwait(false);
 
             // Snapshot. The task is recorded before waiting so a crash never leaks the snapshot.
-            log.Info($"Creating snapshot of {vm.Str("name_label")}: {diskCount} disk(s) on {free}.", "snapshot");
+            log.Info(checkpoint
+                ? $"Creating snapshot with memory (checkpoint) of {vm.Str("name_label")}: the VM pauses while {XenFormat.Bytes(memoryBytes)} RAM are written and {diskCount + excluded.Count} disk(s) are captured, on {free}."
+                : $"Creating snapshot of {vm.Str("name_label")}: {diskCount} disk(s) on {free}.", "snapshot");
             var snapshotWatch = Stopwatch.StartNew();
             try
             {
                 try
                 {
+                    snapshotRef = checkpoint
+                        ? await CheckpointAsync().ConfigureAwait(false)
+                        : await SnapshotAsync(excluded.Count == 0 ? null : new JsonArray([.. excluded.Select(e => (JsonNode?)e.VdiRef)])).ConfigureAwait(false);
+                }
+                catch (XapiException ex) when (checkpoint && ex.Code == "VM_BAD_POWER_STATE")
+                {
+                    // The VM stopped (or was suspended) since it was read.
+                    log.Warning($"{vm.Str("name_label")} is no longer running ({ex.Code}): it gets a snapshot without memory.");
+                    checkpoint = false;
                     snapshotRef = await SnapshotAsync(excluded.Count == 0 ? null : new JsonArray([.. excluded.Select(e => (JsonNode?)e.VdiRef)])).ConfigureAwait(false);
                 }
                 catch (XapiException ex) when (ex.Code == "MESSAGE_PARAMETER_COUNT_MISMATCH" && excluded.Count > 0)
@@ -187,6 +228,16 @@ internal sealed class XenBackupSession : IVmBackupSession
         {
             gate?.Dispose();
         }
+
+        // A checkpoint cannot leave disks out: [NOBAK] disks are captured too and their snapshots discarded below.
+        Task<string> CheckpointAsync() => xapi.RunTaskAsync(
+            "VM.checkpoint",
+            async taskRef => taskArtifact = await ledger.RecordAsync(XenArtifactKinds.XapiTask, string.Empty, taskRef, null, cancellationToken).ConfigureAwait(false),
+            options.TaskTimeout,
+            TimeSpan.FromMilliseconds(250),
+            cancellationToken,
+            vmRef,
+            request.SnapshotName);
 
         // Polled every 250 ms: with a frozen guest, every second after the snapshot completes counts against the 10 s.
         Task<string> SnapshotAsync(JsonArray? ignoredDisks)
@@ -215,7 +266,9 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
 
         // Same log key as "Creating snapshot", which this line replaces: it repeats the storages with their free space.
-        log.Info($"Snapshot {request.SnapshotName} created in {Seconds(snapshotTime)}: {diskCount} disk(s) on {free}.", "snapshot");
+        log.Info(checkpoint
+            ? $"Snapshot with memory {request.SnapshotName} created; the VM was paused for {Seconds(snapshotTime)}: {diskCount + excluded.Count} disk(s) on {free}."
+            : $"Snapshot {request.SnapshotName} created in {Seconds(snapshotTime)}: {diskCount} disk(s) on {free}.", "snapshot");
 
         var disks = new Dictionary<string, DiskState>(StringComparer.Ordinal);
         var captured = new List<(string Disk, DateTimeOffset Time)>();
@@ -235,6 +288,20 @@ internal sealed class XenBackupSession : IVmBackupSession
 
                 var snapVdiRef = vbd.Str("VDI");
                 var snapVdi = await xapi.GetRecordAsync("VDI", snapVdiRef, cancellationToken).ConfigureAwait(false);
+                if (checkpoint && excluded.FindIndex(e => e.VdiRef == snapVdi.Str("snapshot_of")) is var nobak and >= 0)
+                {
+                    // A checkpoint captured the [NOBAK] disk: its snapshot is not backed up and goes at commit.
+                    var discardArtifact = await ledger.RecordAsync(XenArtifactKinds.DiscardedVdi, snapVdi.Str("uuid"), snapVdiRef, null, cancellationToken).ConfigureAwait(false);
+                    await TagAsync(snapVdiRef).ConfigureAwait(false);
+                    var discardKey = $"discard-{vbd.Str("userdevice")}";
+                    disks[discardKey] = new DiskState(excluded[nobak].Disk with { Key = discardKey, SnapshotDiskId = snapVdi.Str("uuid") }, snapVdiRef, XapiRecord.NullRef, discardArtifact, false)
+                    {
+                        CbtUsable = false,
+                        Discard = true,
+                    };
+                    continue;
+                }
+
                 if (excluded.FindIndex(e => e.VdiRef == snapVdi.Str("snapshot_of")) is var index and >= 0)
                 {
                     // XAPI snapshotted the disk after all: back it up rather than leave its snapshot behind.
@@ -243,8 +310,7 @@ internal sealed class XenBackupSession : IVmBackupSession
                 }
 
                 var artifact = await ledger.RecordAsync(XenArtifactKinds.SnapshotVdi, snapVdi.Str("uuid"), snapVdiRef, null, cancellationToken).ConfigureAwait(false);
-                await xapi.CallAsync("VDI.add_to_other_config", cancellationToken, snapVdiRef, XenTags.Session, request.SessionId.ToString()).ConfigureAwait(false);
-                await xapi.CallAsync("VDI.add_to_other_config", cancellationToken, snapVdiRef, XenTags.RestorePoint, request.RestorePointId.ToString()).ConfigureAwait(false);
+                await TagAsync(snapVdiRef).ConfigureAwait(false);
 
                 var sourceRef = snapVdi.Str("snapshot_of");
                 var source = XapiRecord.IsNullRef(sourceRef) ? snapVdi : await xapi.GetRecordAsync("VDI", sourceRef, cancellationToken).ConfigureAwait(false);
@@ -276,7 +342,15 @@ internal sealed class XenBackupSession : IVmBackupSession
                 log.Info($"Disk {disk.Name} ({XenFormat.Bytes(disk.CapacityBytes)}) is not backed up: its name contains {XenTags.ExcludeDiskMarker}. A restore of the VM creates it as an empty disk.");
             }
 
-            var skew = DiskSkew(captured, vm.Str("name_label"), storageText, log);
+            SnapshotDisk? memory = null;
+            VmMetadataBlob? memoryMetadata = null;
+            if (checkpoint)
+            {
+                (memory, memoryMetadata) = await TakeMemoryAsync().ConfigureAwait(false);
+            }
+
+            var diskStates = disks.Values.Count(d => !d.Discard);
+            var skew = checkpoint ? null : DiskSkew(captured, vm.Str("name_label"), storageText, log);
             var storageNames = snapshotStorages.Select(s => storages[s].Str("name_label")).Order(StringComparer.Ordinal).ToList();
             var metadata = await ExportMetadataAsync(xapi, request.VmId, cancellationToken).ConfigureAwait(false);
             var descriptor = await XenInventory.DescribeVmAsync(xapi, vm, cancellationToken).ConfigureAwait(false);
@@ -284,7 +358,12 @@ internal sealed class XenBackupSession : IVmBackupSession
             {
                 GuestFreeze = freezeResult,
                 ExcludedDisks = [.. excluded.Select(e => e.Disk).OrderBy(d => d.Key, StringComparer.Ordinal)],
-                Snapshot = new SnapshotFacts(snapshotTime, gateWait, disks.Count, storageNames, skew),
+                Snapshot = new SnapshotFacts(snapshotTime, gateWait, diskStates, storageNames, skew)
+                {
+                    Method = checkpoint ? SnapshotMethods.Checkpoint : SnapshotMethods.Snapshot,
+                },
+                Memory = memory,
+                MemoryMetadata = memoryMetadata,
             };
             return session;
         }
@@ -295,9 +374,66 @@ internal sealed class XenBackupSession : IVmBackupSession
                 await RollbackAsync(xapi, log, ledger, snapshotUuid, snapshotArtifact, disks.Values).ConfigureAwait(false);
             }
         }
+
+        async Task TagAsync(string vdiRef)
+        {
+            await xapi.CallAsync("VDI.add_to_other_config", cancellationToken, vdiRef, XenTags.Session, request.SessionId.ToString()).ConfigureAwait(false);
+            await xapi.CallAsync("VDI.add_to_other_config", cancellationToken, vdiRef, XenTags.RestorePoint, request.RestorePointId.ToString()).ConfigureAwait(false);
+        }
+
+        // The RAM image (the checkpoint's suspend VDI): read like a disk, destroyed at commit; and the checkpoint's own
+        // metadata, from which a restore resumes the VM.
+        async Task<(SnapshotDisk? Memory, VmMetadataBlob? Metadata)> TakeMemoryAsync()
+        {
+            var suspendRef = snapshot.Str("suspend_VDI");
+            log.Info($"Snapshot with memory: power state {snapshot.Str("power_state")}, template {snapshot.Bool("is_a_template")}, " +
+                     $"memory image {(XapiRecord.IsNullRef(suspendRef) ? "none" : suspendRef)}.");
+            if (XapiRecord.IsNullRef(suspendRef))
+            {
+                log.Warning($"The snapshot with memory of {vm.Str("name_label")} has no memory image (suspend VDI); only its disks are backed up.");
+                return (null, null);
+            }
+
+            var suspend = await xapi.GetRecordAsync("VDI", suspendRef, cancellationToken).ConfigureAwait(false);
+            var artifact = await ledger.RecordAsync(XenArtifactKinds.DiscardedVdi, suspend.Str("uuid"), suspendRef, null, cancellationToken).ConfigureAwait(false);
+            await TagAsync(suspendRef).ConfigureAwait(false);
+            var sr = await xapi.GetRecordAsync("SR", suspend.Str("SR"), cancellationToken).ConfigureAwait(false);
+            var image = new SnapshotDisk(
+                SnapshotDisk.MemoryKey,
+                suspend.Str("uuid"),
+                suspend.Str("uuid"),
+                "Memory (RAM image)",
+                suspend.Long("virtual_size"),
+                false,
+                sr.Str("uuid"),
+                sr.Str("name_label"),
+                new Dictionary<string, string> { ["srType"] = sr.Str("type"), ["role"] = "memory", ["vdiType"] = suspend.Str("type") });
+            disks[SnapshotDisk.MemoryKey] = new DiskState(image, suspendRef, XapiRecord.NullRef, artifact, false) { CbtUsable = false, Discard = true };
+            log.Info($"Memory image {suspend.Str("uuid")} ({XenFormat.Bytes(image.CapacityBytes)}, type {suspend.Str("type")}) on '{sr.Str("name_label")}' is backed up with the disks.");
+            return (image, await ExportMetadataAsync(xapi, snapshotUuid, cancellationToken).ConfigureAwait(false));
+        }
+    }
+
+    /// <summary>The storage a checkpoint writes the RAM to: the VM's suspend SR, else the pool's suspend image SR or default SR.</summary>
+    private static async Task<string?> SuspendStorageAsync(XapiSession xapi, JsonObject vm, CancellationToken cancellationToken)
+    {
+        if (!XapiRecord.IsNullRef(vm.Str("suspend_SR")))
+        {
+            return vm.Str("suspend_SR");
+        }
+
+        var pool = (await xapi.GetAllRecordsAsync("pool", cancellationToken).ConfigureAwait(false)).Values.FirstOrDefault();
+        return pool is null ? null
+            : !XapiRecord.IsNullRef(pool.Str("suspend_image_SR")) ? pool.Str("suspend_image_SR")
+            : !XapiRecord.IsNullRef(pool.Str("default_SR")) ? pool.Str("default_SR")
+            : null;
     }
 
     public GuestFreezeResult? GuestFreeze { get; private init; }
+
+    public SnapshotDisk? Memory { get; private init; }
+
+    public VmMetadataBlob? MemoryMetadata { get; private init; }
 
     public SnapshotFacts? Snapshot { get; private init; }
 
@@ -330,7 +466,8 @@ internal sealed class XenBackupSession : IVmBackupSession
     /// Refuses the snapshot when a storage of the VM has less than <paramref name="minPercent"/> free. Returns the
     /// storages with their free space for the log ("'Alletra' (12.3 % free)").
     /// </summary>
-    private static async Task<string> CheckStorageSpaceAsync(XapiSession xapi, IEnumerable<string> storageRefs, double minPercent, string vmName, CancellationToken cancellationToken)
+    private static async Task<string> CheckStorageSpaceAsync(
+        XapiSession xapi, IEnumerable<string> storageRefs, double minPercent, string vmName, IReadOnlyDictionary<string, long> needs, CancellationToken cancellationToken)
     {
         var parts = new List<string>();
         foreach (var storageRef in storageRefs)
@@ -352,6 +489,14 @@ internal sealed class XenBackupSession : IVmBackupSession
                     $"Storage '{storage.Str("name_label")}' ({storage.Str("uuid")}) has only {percent.ToString("0.0", CultureInfo.InvariantCulture)} % free " +
                     $"({XenFormat.Bytes(free)} of {XenFormat.Bytes(size)}); a snapshot needs at least {minPercent.ToString("0.#", CultureInfo.InvariantCulture)} % free there. " +
                     $"{vmName} was not snapshotted, so the running VMs keep that space. Free up space on the storage, or change Xen:MinStorageFreePercent.");
+            }
+
+            // A snapshot with memory writes the RAM there: it must fit and leave the minimum free.
+            if (needs.TryGetValue(storageRef, out var need) && need > 0 && (free - need) * 100.0 / size < Math.Max(0, minPercent))
+            {
+                throw new XenStorageSpaceException(
+                    $"Storage '{storage.Str("name_label")}' ({storage.Str("uuid")}) has {XenFormat.Bytes(free)} free; the snapshot with memory of {vmName} writes " +
+                    $"{XenFormat.Bytes(need)} RAM there and must leave {minPercent.ToString("0.#", CultureInfo.InvariantCulture)} % free. Free up space, give the VM another suspend storage, or back it up without memory.");
             }
 
             parts.Add($"'{storage.Str("name_label")}' ({percent.ToString("0.0", CultureInfo.InvariantCulture)} % free)");
@@ -438,6 +583,11 @@ internal sealed class XenBackupSession : IVmBackupSession
     public async Task<ChangedExtents> GetChangedExtentsAsync(SnapshotDisk disk, ChangeToken? since, IOperationLog log, CancellationToken cancellationToken)
     {
         var state = _disks[disk.Key];
+        if (disk.Key == SnapshotDisk.MemoryKey)
+        {
+            return ChangedExtents.Full("the memory image is read in full at every backup", FullReadReasons.MemoryImage);
+        }
+
         if (since is null)
         {
             return ChangedExtents.Full("no previous restore point", FullReadReasons.FirstBackup);
@@ -750,7 +900,14 @@ internal sealed class XenBackupSession : IVmBackupSession
                 }
                 else
                 {
-                    await _xapi.CallAsync("VDI.destroy", cancellationToken, state.SnapshotVdiRef).ConfigureAwait(false);
+                    try
+                    {
+                        await _xapi.CallAsync("VDI.destroy", cancellationToken, state.SnapshotVdiRef).ConfigureAwait(false);
+                    }
+                    catch (XapiException ex) when (ex.Code == "HANDLE_INVALID" && state.Discard)
+                    {
+                        // VM.destroy of a snapshot with memory may have taken its memory image along.
+                    }
                 }
             }
             catch (XenSnapshotInUseException ex)
@@ -870,6 +1027,9 @@ internal sealed class XenBackupSession : IVmBackupSession
     {
         /// <summary>CBT metadata can be kept for the next incremental only if the source disk tracks changes.</summary>
         public bool CbtUsable { get; init; } = true;
+
+        /// <summary>Not a disk of the restore point (the memory image, a [NOBAK] disk a checkpoint captured): destroyed at commit.</summary>
+        public bool Discard { get; init; }
     }
 }
 

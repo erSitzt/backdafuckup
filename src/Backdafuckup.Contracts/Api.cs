@@ -125,7 +125,8 @@ public sealed record RepositoryDto(
 // ---- Jobs ----
 public sealed record ScheduleDto(string Kind, string TimeOfDay, IReadOnlyList<DayOfWeek> Days, string TimeZoneId);
 
-public sealed record JobObjectDto(string NativeId, string Name);
+/// <summary>A VM of a job. <see cref="WithMemory"/>: back it up with a snapshot with memory (it can be resumed on restore).</summary>
+public sealed record JobObjectDto(string NativeId, string Name, bool WithMemory = false);
 
 public sealed record JobDto(
     Guid Id,
@@ -271,7 +272,8 @@ public sealed record RestorePointDto(
     int? SqlDatabaseCount = null,
     bool DomainController = false,
     string? AdDomain = null,
-    bool HasVmGenerationId = true);
+    bool HasVmGenerationId = true,
+    long? MemoryImageBytes = null);
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 
@@ -310,7 +312,8 @@ public sealed record BackupVmPointDto(
     long LogicalBytes,
     int SqlDatabaseCount,
     bool DomainController,
-    string? AdDomain);
+    string? AdDomain,
+    long? MemoryImageBytes = null);
 
 /// <summary>
 /// A VM in one job: its restore points there and its state. <see cref="JobId"/> is null (and <see cref="JobExists"/>

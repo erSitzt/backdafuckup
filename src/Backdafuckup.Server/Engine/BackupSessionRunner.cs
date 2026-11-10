@@ -24,6 +24,7 @@ public sealed class BackupSessionRunner(
     SessionQueue queue,
     GuestProcessingService guestProcessing,
     Telemetry.BackupMetrics metrics,
+    Microsoft.Extensions.Options.IOptions<EngineOptions> engineOptions,
     TimeProvider time,
     ILogger<BackupSessionRunner> logger)
 {
@@ -70,7 +71,7 @@ public sealed class BackupSessionRunner(
                 await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, metrics, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1, repository, hypervisor);
+                    var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, metrics, engineOptions.Value.CheckpointWithVss, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1, repository, hypervisor);
                     return (item, State: await task.RunAsync(cancellationToken).ConfigureAwait(false));
                 }
                 finally
@@ -152,6 +153,7 @@ internal sealed class VmBackupTask(
     SessionTracker tracker,
     GuestProcessingService guestProcessing,
     Telemetry.BackupMetrics metrics,
+    bool checkpointWithVss,
     TimeProvider time,
     ILogger logger,
     BackupJob job,
@@ -243,7 +245,7 @@ internal sealed class VmBackupTask(
             try
             {
                 started = await hypervisor.BeginBackupAsync(
-                    new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer, metrics.ForPool(Pool)), _log, ledger, cancellationToken).ConfigureAwait(false);
+                    new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer, metrics.ForPool(Pool), vm.WithMemory), _log, ledger, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -260,10 +262,11 @@ internal sealed class VmBackupTask(
                 metrics.RecordSnapshot(Pool, vm.CachedName, facts, backup.GuestFreeze, sqlSuspended, consistency);
             }
 
-            _totalBytes = Math.Max(1, backup.Disks.Sum(d => d.CapacityBytes));
+            var images = backup.Memory is { } ram ? backup.Disks.Append(ram).ToList() : backup.Disks.ToList();
+            _totalBytes = Math.Max(1, images.Sum(d => d.CapacityBytes));
             lock (_metricsLock)
             {
-                _diskMetrics = backup.Disks.Select(d => new DiskMetricsDto
+                _diskMetrics = images.Select(d => new DiskMetricsDto
                 {
                     Key = d.Key,
                     Name = d.Name,
@@ -274,6 +277,24 @@ internal sealed class VmBackupTask(
 
             await tracker.UpdateTaskAsync(taskId, t => t.Metrics = CurrentMetrics(), CancellationToken.None).ConfigureAwait(false);
             var (manifestDisks, warnings) = await BackupDisksAsync(backup, writer, baseline, baseReader, cancellationToken).ConfigureAwait(false);
+
+            // Snapshot with memory: the RAM image (read in full) and the checkpoint's metadata, for a restore that resumes.
+            ManifestDisk? memoryImage = null;
+            ManifestBlob? memoryMetadata = null;
+            if (backup.Memory is { } memory)
+            {
+                (memoryImage, _) = await BackupDiskAsync(backup, writer, memory, null, null, cancellationToken).ConfigureAwait(false);
+                if (backup.MemoryMetadata is { } checkpointMetadata)
+                {
+                    memoryMetadata = await writer.WriteBlobAsync("vm-metadata-memory", checkpointMetadata.Format, new MemoryStream(checkpointMetadata.Content), cancellationToken).ConfigureAwait(false);
+                }
+
+                lock (_metricsLock)
+                {
+                    _transferEnded = time.GetUtcNow();
+                }
+            }
+
             warnings |= consistencyWarning || guest?.Warning == true;
             ManifestBlob? guestBlob = null;
             ManifestBlob? vssBlob = null;
@@ -359,6 +380,8 @@ internal sealed class VmBackupTask(
                 Chunking = new ManifestChunking(repository.Info.ChunkSize, repository.Info.Hash, repository.Info.Compression),
                 Disks = manifestDisks,
                 ExcludedDisks = [.. backup.ExcludedDisks.Select(d => new ManifestExcludedDisk(d.Key, d.SourceDiskId, d.Name, d.CapacityBytes, d.Bootable, d.StorageId, d.StorageName))],
+                Memory = memoryImage,
+                MemoryMetadata = memoryMetadata,
             };
             var committed = await writer.CommitAsync(manifest, cancellationToken).ConfigureAwait(false);
 
@@ -442,6 +465,13 @@ internal sealed class VmBackupTask(
             return null;
         }
 
+        if (vm.WithMemory && !checkpointWithVss)
+        {
+            _log.Info($"Guest processing is not used for {vm.CachedName}: it is backed up with memory, so the snapshot pauses the whole VM instead of freezing its writes with VSS. " +
+                      "Its restore points have no SQL Server or Active Directory details.");
+            return null;
+        }
+
         var guest = await guestProcessing.PrepareAsync(job, vm, _log, cancellationToken, $"backdafuckup restore point {restorePointId}").ConfigureAwait(false);
         if (guest.Quiescer is null)
         {
@@ -465,8 +495,9 @@ internal sealed class VmBackupTask(
     /// </summary>
     private static string? AcrossDisks(string consistency, string? reason, IVmBackupSession backup)
     {
-        if (consistency == "application" || backup.Snapshot is not { DiskCount: >= 2 } facts)
+        if (consistency == "application" || backup.Snapshot is not { DiskCount: >= 2 } facts || facts.Method == SnapshotMethods.Checkpoint)
         {
+            // A snapshot with memory pauses the whole VM: its disks match.
             return reason;
         }
 
@@ -648,7 +679,7 @@ internal sealed class VmBackupTask(
         Interlocked.Add(ref _readBytes, result.Stats.ReadBytes);
         Interlocked.Add(ref _storedBytes, result.Stats.NewStoredBytes);
         var diskMetrics = ToMetrics(result.Counters);
-        metrics.RecordDisk(Pool, disk.StorageName, result.Stats.Transport ?? reader.TransportName, result.Counters,
+        metrics.RecordDisk(Pool, disk.StorageName, result.Stats.Transport ?? reader.TransportName, result.Counters, disk.Key == SnapshotDisk.MemoryKey ? "memory" : "disk",
             !changes.IsFull ? null : session.RunMode == SessionRunMode.ActiveFull ? FullReadReasons.ActiveFull : changes.FullReasonCode ?? FullReadReasons.Other);
         UpdateDisk(disk.Key, d => d with { State = "Done", Mode = result.Stats.Mode.ToString(), FullReason = result.Stats.FullReason, Transport = result.Stats.Transport, Metrics = diskMetrics });
         _log.Info($"Disk {disk.Name}: {result.Stats.Mode} via {result.Stats.Transport}: {MetricsText.Describe(diskMetrics)}.", key);
@@ -715,7 +746,8 @@ internal sealed class VmBackupTask(
         entity.AdDomain = manifest.AdDomain;
         entity.SqlBackupSetsRecorded = manifest.SqlSnapshot is null ? true : null;
         entity.LogicalBytes = manifest.Disks.Sum(d => d.CapacityBytes);
-        entity.NewStoredBytes = manifest.Disks.Sum(d => d.Stats.NewStoredBytes);
+        entity.NewStoredBytes = manifest.AllImages.Sum(d => d.Stats.NewStoredBytes);
+        entity.MemoryImageBytes = manifest.Memory?.CapacityBytes;
         entity.Disks = manifest.Disks.Select(d => new RestorePointDisk
         {
             RestorePointId = entity.Id,
