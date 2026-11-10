@@ -15,7 +15,7 @@
 | Fix: SQL log gauges leave out dropped databases | built, tested; not deployed yet |
 | The rke2 scrape | done 2026-11-10: Secret `backdafuckup-scrape` (token, `ca.pem`) and `ScrapeConfig` `backdafuckup` in namespace `prometheus` of rke2-infra; target `up` (0.04 s) |
 | Grafana dashboard | done 2026-11-10: grafana-rke2, folder *backdafuckup*, uid `backdafuckup-overview`, data source `prom-rke2-infra`; queries return data (no image renderer there, so not looked at as a picture) |
-| Alert rules in rke2 | open: not applied, waiting for the user's decision (they would go to the existing Alertmanager) |
+| Alert rules in rke2 | done 2026-11-10 14:55: `PrometheusRule` `backdafuckup` in namespace `prometheus`, 13 rules loaded, all healthy, none active. The Alertmanager routes them to its `null` receiver (only some Kubernetes alerts go to MS Teams), so they are visible in Prometheus, Alertmanager and Grafana but notify no one |
 
 ## Checks (2026-11-10)
 
