@@ -1,6 +1,6 @@
 {
   "title": "backdafuckup",
-  "uid": "backdafuckup",
+  "uid": "backdafuckup-overview",
   "description": "Backups, VM snapshots, transports, pool storage and the server of backdafuckup (metrics at /metrics).",
   "tags": [
     "backdafuckup",

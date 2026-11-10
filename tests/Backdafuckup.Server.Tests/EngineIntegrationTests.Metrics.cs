@@ -69,6 +69,35 @@ public sealed partial class EngineIntegrationTests
         Assert.Contains(metrics.Of("bdfu_vm_last_disk_skew_seconds", pool), m => m.Value == 3);
     }
 
+    [Fact]
+    public async Task Sql_log_gauges_leave_out_databases_the_newest_run_no_longer_saw()
+    {
+        var (vmUuid, _) = _pool.AddVm("sql-vm", DiskSize);
+        var (jobId, _) = await SeedAsync(vmUuid, retention: 3);
+        var now = DateTimeOffset.UtcNow;
+        await using (var db = await DbAsync())
+        {
+            var job = await db.Jobs.FirstAsync(j => j.Id == jobId, Ct);
+            job.SqlBackup.Enabled = true;
+            job.SqlBackup.LogIntervalMinutes = 15;
+            SqlDatabaseEntity Row(string name, DateTimeOffset lastLog, DateTimeOffset lastSeen) => new()
+            {
+                PlatformId = "pool", VmNativeId = vmUuid, VmName = "sql-vm", Instance = "SQLEXPRESS", Name = name, JobId = jobId,
+                LastLogUtc = lastLog, LastSeenUtc = lastSeen, FirstSeenUtc = now.AddDays(-3),
+            };
+            db.SqlDatabases.AddRange(
+                Row("current", now.AddMinutes(-5), now.AddMinutes(-5)),
+                Row("late", now.AddHours(-3), now.AddMinutes(-5)),
+                Row("dropped", now.AddDays(-1), now.AddDays(-1)));
+            await db.SaveChangesAsync(Ct);
+        }
+
+        var service = Services.GetServices<IHostedService>().OfType<MetricsStateService>().Single();
+        var logs = (await service.ReadCatalogAsync(Ct)).SqlLogs.Where(l => l.Vm == "sql-vm").ToList();
+        Assert.Equal(["current", "late"], logs.Select(l => l.Database).Order(StringComparer.Ordinal));
+        Assert.All(logs, l => Assert.Equal(900, l.IntervalSeconds));
+    }
+
     /// <summary>Collects the measurements of the server's meter (all hosts in the process; filter by pool or job).</summary>
     private sealed class MetricsRecorder : IDisposable
     {

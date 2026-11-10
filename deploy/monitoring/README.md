@@ -34,10 +34,10 @@ The server issues a new certificate shortly before the old one expires, or when 
 
 ### Prometheus Operator (kube-prometheus-stack on rke2)
 
-Store the token and the certificate as a Secret in the namespace of the `ScrapeConfig`:
+Store the token and the certificate as a Secret in the namespace of the `ScrapeConfig`. The examples use `prometheus`, the namespace of kube-prometheus-stack on rke2-infra, where this is set up since 2026-11-10:
 
 ```sh
-kubectl -n monitoring create secret generic backdafuckup-scrape \
+kubectl -n prometheus create secret generic backdafuckup-scrape \
   --from-literal=token='bdfu_…' \
   --from-file=ca.pem=backdafuckup-server.pem
 ```
@@ -47,7 +47,7 @@ apiVersion: monitoring.coreos.com/v1alpha1
 kind: ScrapeConfig
 metadata:
   name: backdafuckup
-  namespace: monitoring
+  namespace: prometheus
   labels:
     release: kube-prometheus-stack   # must match the Prometheus' scrapeConfigSelector
 spec:
@@ -130,7 +130,7 @@ EOF
 
 ## 5. Dashboard
 
-In Grafana go to *Dashboards* → *New* → *Import*, upload `grafana-dashboard.json` and pick the Prometheus data source. It has three variables:
+In Grafana go to *Dashboards* → *New* → *Import*, upload `grafana-dashboard.json` (uid `backdafuckup-overview`) and pick the Prometheus data source. On grafana-rke2 it is in the folder *backdafuckup* with the data source `prom-rke2-infra`. It has three variables:
 - data source;
 - scrape job;
 - pool.

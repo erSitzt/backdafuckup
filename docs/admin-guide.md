@@ -592,7 +592,7 @@ What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the S
 | `bdfu_pool_poll_success`, `bdfu_pool_poll_seconds` {pool} | gauge | The last read of the pool. On failure the storage values stay as last read |
 | `bdfu_repository_size_bytes`, `bdfu_repository_free_bytes`, `bdfu_repository_stored_bytes`, `bdfu_repository_restore_points` {repository} | gauge | Volume of each repository, and what its VM restore points stored |
 | `bdfu_agents` {state}, `bdfu_agent_last_contact_timestamp_seconds` {agent} | gauge | Guest agents online and offline |
-| `bdfu_sql_last_log_backup_timestamp_seconds`, `bdfu_sql_log_backup_interval_seconds` {vm, sql_instance, database} | gauge | Newest log backup per database and the job's interval |
+| `bdfu_sql_last_log_backup_timestamp_seconds`, `bdfu_sql_log_backup_interval_seconds` {vm, sql_instance, database} | gauge | Newest log backup per database and the job's interval. A database that the newest run of its VM no longer saw (dropped) is left out |
 | `bdfu_artifacts_pending` | gauge | Snapshots and disks still to be removed or reduced (retried every 10 minutes) |
 
 The .NET runtime (`dotnet_*`), HTTP (`http_server_*`), Kestrel and Npgsql (`db_client_*`) metrics come along. The session log also names the disk-to-disk gap of every snapshot with two or more disks: "Disks of … captured over 9 s …".

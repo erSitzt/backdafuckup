@@ -306,9 +306,16 @@ public sealed class MetricsStateService(
 
         var sqlJobs = await db.Jobs.AsNoTracking().Where(j => j.SqlBackup.Enabled).Select(j => new { j.Id, j.SqlBackup.LogIntervalMinutes })
             .ToDictionaryAsync(j => j.Id, j => j.LogIntervalMinutes, cancellationToken).ConfigureAwait(false);
-        var sqlLogs = (await db.SqlDatabases.AsNoTracking().Where(d => d.JobId != null && d.LastLogUtc != null)
-                .Select(d => new { d.JobId, d.VmName, d.Instance, d.Name, d.LastLogUtc }).ToListAsync(cancellationToken).ConfigureAwait(false))
+        // A database dropped in the guest stays in the catalog with its last log backup: it is left out when the newest run of
+        // its VM and instance saw other databases but not it (more than one interval later), so it raises no alert. When
+        // the whole VM stops being backed up, its databases stay in and their age grows.
+        var sqlRows = (await db.SqlDatabases.AsNoTracking().Where(d => d.JobId != null && d.LastLogUtc != null)
+                .Select(d => new { d.JobId, d.VmNativeId, d.VmName, d.Instance, d.Name, d.LastLogUtc, d.LastSeenUtc }).ToListAsync(cancellationToken).ConfigureAwait(false))
             .Where(d => sqlJobs.ContainsKey(d.JobId!.Value))
+            .ToList();
+        var newestSeen = sqlRows.GroupBy(d => (d.VmNativeId, d.Instance)).ToDictionary(g => g.Key, g => g.Max(d => d.LastSeenUtc));
+        var sqlLogs = sqlRows
+            .Where(d => d.LastSeenUtc >= newestSeen[(d.VmNativeId, d.Instance)] - TimeSpan.FromMinutes(sqlJobs[d.JobId!.Value]))
             .Select(d => new StateMetrics.SqlLogRow(d.VmName, d.Instance, d.Name, d.LastLogUtc!.Value.ToUnixTimeSeconds(), sqlJobs[d.JobId!.Value] * 60L))
             .ToList();
 
