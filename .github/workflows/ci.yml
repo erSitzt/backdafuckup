@@ -4,26 +4,39 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the run still going: the result of an outdated commit is not needed.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-unit-test:
     strategy:
+      # A failure on one OS should not hide the result on the other.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
       - run: dotnet build backdafuckup.slnx -c Release
-      - run: dotnet test --solution backdafuckup.slnx -c Release --no-build --filter-not-trait "Category=Integration" --filter-not-trait "Category=Lab"
+      # Exit code 8 is "zero tests ran": test projects that hold only integration or lab tests have none left after the
+      # filter. Failed tests still fail the step (exit code 2).
+      - run: dotnet test --solution backdafuckup.slnx -c Release --no-build --filter-not-trait "Category=Integration" --filter-not-trait "Category=Lab" --ignore-exit-code 8
 
   integration-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
       - run: dotnet build backdafuckup.slnx -c Release
-      - run: dotnet test --solution backdafuckup.slnx -c Release --no-build --filter-trait "Category=Integration"
+      # Integration tests run PostgreSQL (and SQL Server) in Docker through Testcontainers.
+      - run: dotnet test --solution backdafuckup.slnx -c Release --no-build --filter-trait "Category=Integration" --ignore-exit-code 8
