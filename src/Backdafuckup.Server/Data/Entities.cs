@@ -419,6 +419,12 @@ public sealed class BackupJobObject
     public required string CachedName { get; set; }
 
     public int Order { get; set; }
+
+    /// <summary>
+    /// Snapshot with memory (Xen: <c>VM.checkpoint</c>): the VM is paused while its RAM is written and all its disks are
+    /// captured, so the disks match and a restore can resume it. Only for a running VM; no guest processing then.
+    /// </summary>
+    public bool WithMemory { get; set; }
 }
 
 /// <summary>
@@ -491,6 +497,9 @@ public sealed class RestorePointEntity
     public int? SqlDatabaseCount { get; set; }
 
     /// <summary>The VM was a domain controller; null until known (older restore points are checked at start).</summary>
+    /// <summary>Size of the RAM image of a snapshot with memory (a restore can resume the VM); null without memory.</summary>
+    public long? MemoryImageBytes { get; set; }
+
     public bool? DomainController { get; set; }
 
     /// <summary>The domain controller's DNS domain ("" if unknown).</summary>

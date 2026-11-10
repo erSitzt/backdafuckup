@@ -78,6 +78,15 @@ public interface IVmBackupSession : IAsyncDisposable
     TimeSpan? ReleaseDuration => null;
 
     /// <summary>
+    /// The RAM image of a snapshot with memory (key <see cref="SnapshotDisk.MemoryKey"/>), read like a disk but not a disk of
+    /// the VM: it is not in <see cref="Disks"/>. Null without memory.
+    /// </summary>
+    SnapshotDisk? Memory => null;
+
+    /// <summary>The metadata of the snapshot with memory itself, for a restore that resumes the VM; null without memory.</summary>
+    VmMetadataBlob? MemoryMetadata => null;
+
+    /// <summary>
     /// Returns the changed extents of <paramref name="disk"/> since <paramref name="since"/>, or a full read with a reason.
     /// Must be called before <see cref="OpenReaderAsync"/> for the same disk.
     /// </summary>

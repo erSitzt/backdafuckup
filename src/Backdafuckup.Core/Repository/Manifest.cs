@@ -75,6 +75,19 @@ public sealed record RestorePointManifest
 
     /// <summary>Disks of the VM that were deliberately not backed up; a restore of the VM creates them empty.</summary>
     public IReadOnlyList<ManifestExcludedDisk> ExcludedDisks { get; init; } = [];
+
+    /// <summary>
+    /// The RAM image of a snapshot with memory (key <c>memory</c>), stored like a disk but not a disk of the VM; null without
+    /// memory. A restore that resumes the VM uploads it as the VM's suspend image.
+    /// </summary>
+    public ManifestDisk? Memory { get; init; }
+
+    /// <summary>The metadata of the snapshot with memory itself (Xen: export_metadata of the checkpoint), for a resume.</summary>
+    public ManifestBlob? MemoryMetadata { get; init; }
+
+    /// <summary>The disks and, with memory, the RAM image: everything whose chunks the restore point references.</summary>
+    [JsonIgnore]
+    public IEnumerable<ManifestDisk> AllImages => Memory is null ? Disks : Disks.Append(Memory);
 }
 
 /// <summary>A disk that was left out of the backup (e.g. marked [NOBAK]): what is needed to create it empty again.</summary>

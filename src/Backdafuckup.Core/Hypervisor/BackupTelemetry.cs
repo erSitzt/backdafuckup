@@ -13,6 +13,21 @@ public sealed record SnapshotFacts(TimeSpan Duration, TimeSpan GateWait, int Dis
 {
     /// <summary>The storages as one metric label: "alletra-mp01" or "alletra-mp01+alletra-mp02".</summary>
     public string StorageLabel => Storages.Count == 0 ? "none" : string.Join('+', Storages);
+
+    /// <summary>
+    /// <c>snapshot</c>, or <c>checkpoint</c> for a snapshot with memory: then <see cref="Duration"/> is the VM's pause and the
+    /// disks match each other (<see cref="DiskSkew"/> does not matter).
+    /// </summary>
+    public string Method { get; init; } = SnapshotMethods.Snapshot;
+}
+
+/// <summary>How a VM snapshot was taken (metric label values).</summary>
+public static class SnapshotMethods
+{
+    public const string Snapshot = "snapshot";
+
+    /// <summary>Snapshot with memory (Xen: <c>VM.checkpoint</c>).</summary>
+    public const string Checkpoint = "checkpoint";
 }
 
 /// <summary>
@@ -55,6 +70,7 @@ public static class FullReadReasons
     public const string SizeChanged = "size_changed";
     public const string IndexUnreadable = "index_unreadable";
     public const string ActiveFull = "active_full";
+    public const string MemoryImage = "memory_image";
     public const string Other = "other";
 }
 

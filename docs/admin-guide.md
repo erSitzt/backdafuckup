@@ -61,6 +61,18 @@ Parallel streams help as long as the network has room. On a 1 Gbit/s link (about
 - **One snapshot per storage at a time** (`"Xen": { "OneSnapshotPerStorage": true }`, the default): VMs on the same storage repository are snapshotted one after another. On shared LVM storage the storage manager handles snapshots one by one anyway; started together, each one takes as long as all of them. The wait happens before the guest is frozen and shows in the session log ("Waited 12.3 s for the snapshot of another VM on 'storage'"). Reading the disks still runs in parallel.
 - **Disks left out (`[NOBAK]`):** a disk with `[NOBAK]` in its name (the same marker as in Xen Orchestra) is not snapshotted and not backed up, e.g. a scratch disk or the cloud-init config drive. A restore of the VM creates it again as an empty disk of the same size: on the storage chosen for it, at the original location on its original storage, otherwise next to the first restored disk. It needs XCP-ng 8.3 (`VM.snapshot` with `ignore_vdis`); older pools back the disk up anyway and log a warning.
 - **Free space:** before the snapshot every storage of the VM must have at least `"Xen": { "MinStorageFreePercent": 5 }` percent free (0 turns the check off). A snapshot takes space until it is released, and a full storage stops the running VMs and the storage's own coalesce. The VM then fails with the storage name, its free space and the limit; nothing is snapshotted and the guest is not frozen. The session log shows the free space of every snapshot.
+- **Snapshot with memory** (per VM, the switch *With memory* in the job's VM list): the VM is backed up with `VM.checkpoint`.
+  - **How it works:** XAPI pauses the VM, writes its RAM to a memory image (suspend VDI) on the VM's suspend storage (else the pool's suspend or default storage), captures all its disks and resumes it.
+  - **What you get:** the disks match each other, and the memory image goes into the restore point (chip *RAM*). A restore can resume the VM where it was, or boot it cold, which is like a power failure of the whole VM at one moment.
+  - **Costs:**
+    - the VM pauses for the RAM write plus every disk; the session log names the pause, and the metrics `bdfu_snapshot_duration_seconds{kind="checkpoint"}`;
+    - RAM-sized space on the suspend storage during the backup (checked like the free space above);
+    - the compressed RAM image in every restore point, read in full each time.
+  - **Limits:**
+    - `[NOBAK]` disks are captured too: they are not backed up, and their snapshots are removed;
+    - such VMs get no guest processing (VSS), so their restore points have no SQL Server or Active Directory details;
+    - a VM that is not running gets a normal snapshot.
+  - **Cleanup:** the memory image and the checkpoint are removed after the backup like any snapshot.
 
 ### Restore upload
 
@@ -568,15 +580,15 @@ What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the S
 
 | Metric | Type | What |
 |---|---|---|
-| `bdfu_snapshot_duration_seconds` {pool, storage, disks} | histogram | The `VM.snapshot` call. The bucket 10 s is the limit of a VSS freeze |
+| `bdfu_snapshot_duration_seconds` {pool, storage, disks, kind} | histogram | The `VM.snapshot` call (`kind` `snapshot`), or the VM's pause in a snapshot with memory (`kind` `checkpoint`). The bucket 10 s is the limit of a VSS freeze |
 | `bdfu_snapshot_gate_wait_seconds` {pool, storage} | histogram | Wait for snapshots of other VMs on the same storage |
 | `bdfu_snapshot_disk_skew_seconds` {pool, storage} | histogram | Time between the first and the last disk capture (XAPI snapshots disks one after another; from the disks' `snapshot_time`, whole seconds). VMs with two or more disks |
 | `bdfu_snapshot_release_seconds` {pool, storage} | histogram | Removing the snapshot after the backup (`VM.destroy`, `VDI.data_destroy`) |
 | `bdfu_guest_writes_held_seconds`, `bdfu_guest_freeze_seconds` {method} | histogram | How long the guest held its writes (`vss` or `sql`), and how long the freeze took |
 | `bdfu_snapshots_total` {pool, storage, consistency, method} | counter | Snapshots by consistency (`application`, `crash`) and guest processing (`vss`, `sql`, `none`) |
-| `bdfu_backup_disk_bytes_total` {pool, storage, transport, category} | counter | Disk bytes by transport (`nbd`, `http-export-vhd`, `http-export-raw`) and category (`read`, `unchanged`, `zero`, `deduped`, `new`, `stored`) |
+| `bdfu_backup_disk_bytes_total` {pool, storage, transport, image, category} | counter | Disk bytes (`image` `disk`, or `memory` for the RAM image of a snapshot with memory) by transport (`nbd`, `http-export-vhd`, `http-export-raw`) and category (`read`, `unchanged`, `zero`, `deduped`, `new`, `stored`) |
 | `bdfu_backup_disk_read_seconds_total` {pool, storage, transport} | counter | Time spent reading disks; read bytes divided by it is the throughput |
-| `bdfu_backup_full_reads_total` {pool, reason} | counter | Disks read in full: `first_backup`, `active_full`, `cbt_reenabled`, `cbt_disabled`, `change_data_gone`, `cbt_error`, `size_changed`, `index_unreadable`, `no_change_data`, `other` |
+| `bdfu_backup_full_reads_total` {pool, reason} | counter | Disks read in full: `first_backup`, `active_full`, `memory_image`, `cbt_reenabled`, `cbt_disabled`, `change_data_gone`, `cbt_error`, `size_changed`, `index_unreadable`, `no_change_data`, `other` |
 | `bdfu_transport_fallbacks_total` {pool, storage, from, to, reason} | counter | Disks read with the HTTP export instead of NBD: `no_endpoint`, `insecure_only`, `unreachable` |
 | `bdfu_nbd_connect_seconds` {pool, host, result} | histogram | NBD connection attempts: `ok`, `timeout`, `refused`, `tls`, `error` |
 | `bdfu_nbd_reconnects_total` {pool, host} | counter | NBD connections that broke while a disk was read and were opened again |

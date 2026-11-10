@@ -48,6 +48,10 @@
                         {
                             <span class="mini-chip success">application</span>
                         }
+                        else if (p.MemoryImageBytes is { } ram)
+                        {
+                            <span class="mini-chip info" title="@($"Snapshot with memory ({Fmt.Bytes(ram)} RAM): the disks match each other; a restore can resume the VM where it was, or boot it like after a power failure.")">RAM</span>
+                        }
                         else
                         {
                             <span class="@(p.ConsistencyReason is null ? "mini-chip" : "mini-chip warning")"

@@ -382,7 +382,7 @@ public static class OperationEndpoints
         job.SqlSnapshotCopyOnly = request.SqlSnapshotCopyOnly;
         job.RetryCount = Math.Clamp(request.RetryCount, 0, 10);
         job.TransportMode = Enum.TryParse<Backdafuckup.Core.DataMover.DiskTransportMode>(request.TransportMode, true, out var transport) ? transport : Backdafuckup.Core.DataMover.DiskTransportMode.Automatic;
-        job.Objects = request.Objects.Select((o, i) => new BackupJobObject { JobId = job.Id, NativeId = o.NativeId, CachedName = o.Name, Order = i }).ToList();
+        job.Objects = request.Objects.Select((o, i) => new BackupJobObject { JobId = job.Id, NativeId = o.NativeId, CachedName = o.Name, Order = i, WithMemory = o.WithMemory }).ToList();
         job.NextRunUtc = job.Enabled ? ScheduleCalculator.Next(job.Schedule, time.GetUtcNow()) : null;
     }
 }

@@ -259,7 +259,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
                 }
 
                 await using var reader = new RestorePointReader(this, directory, manifest);
-                foreach (var disk in manifest.Disks)
+                foreach (var disk in manifest.AllImages)
                 {
                     var index = await reader.ReadDiskIndexAsync(disk.Key, cancellationToken).ConfigureAwait(false);
                     foreach (var entry in index.Entries)
@@ -370,7 +370,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
         try
         {
             var seen = new HashSet<ChunkId>();
-            foreach (var disk in reader.Manifest.Disks)
+            foreach (var disk in reader.Manifest.AllImages)
             {
                 ChunkIndex index;
                 try

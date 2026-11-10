@@ -39,8 +39,9 @@ public sealed class FakeXenPool : IAsyncDisposable
             ["enabled"] = true,
             ["software_version"] = new JsonObject { ["product_brand"] = "XCP-ng", ["product_version"] = "8.3.0" },
         });
-        Add("pool", new JsonObject { ["name_label"] = "lab-pool", ["master"] = HostRef });
+        var poolRef = Add("pool", new JsonObject { ["name_label"] = "lab-pool", ["master"] = HostRef });
         SrRef = AddSr("Local storage", shared: false);
+        _tables["pool"][poolRef]["default_SR"] = SrRef;
         SecondSrRef = AddSr("NFS storage", shared: true);
         NetworkRef = Add("network", new JsonObject { ["name_label"] = "Pool-wide network", ["bridge"] = "xenbr0", ["MTU"] = 1500, ["purpose"] = new JsonArray("nbd") });
         SecondNetworkRef = Add("network", new JsonObject { ["name_label"] = "Backup network", ["bridge"] = "xenbr1", ["MTU"] = 1500, ["purpose"] = new JsonArray() });
@@ -108,6 +109,9 @@ public sealed class FakeXenPool : IAsyncDisposable
         }
     }
 
+    /// <summary>Size of the RAM image a checkpoint writes (small in tests; XAPI writes the VM's memory).</summary>
+    public long MemoryImageSize { get; set; } = 8L << 20;
+
     /// <summary>Like XAPI, VM.snapshot captures the disks one after another: each disk's snapshot_time is this much later.</summary>
     public TimeSpan DiskSnapshotInterval { get; set; } = TimeSpan.FromSeconds(3);
 
@@ -154,6 +158,8 @@ public sealed class FakeXenPool : IAsyncDisposable
                 ["power_state"] = "Running",
                 ["VCPUs_max"] = 2,
                 ["memory_static_max"] = 2L << 30,
+                ["suspend_VDI"] = "OpaqueRef:NULL",
+                ["suspend_SR"] = "OpaqueRef:NULL",
                 ["resident_on"] = HostRef,
                 ["VBDs"] = new JsonArray(),
                 ["VIFs"] = new JsonArray(),
@@ -329,6 +335,7 @@ public sealed class FakeXenPool : IAsyncDisposable
             (_, "remove_from_other_config") => SetMap(Get(table, S(1)), "other_config", S(2), null),
             ("host", "get_server_certificate") => HostCertificatePem,
             ("VM", "snapshot") => Snapshot(S(1), S(2), p.Count > 3 ? (JsonArray)p[3]! : null),
+            ("VM", "checkpoint") => Checkpoint(S(1), S(2)),
             ("VM", "destroy") => DestroyVm(S(1)),
             ("VM", "set_name_label") => Set(Get("VM", S(1)), "name_label", S(2)),
             ("VM", "set_affinity") => Set(Get("VM", S(1)), "affinity", S(2)),
@@ -430,6 +437,15 @@ public sealed class FakeXenPool : IAsyncDisposable
     }
 
     /// <summary>Sets the used space of the default storage (SrRef).</summary>
+    /// <summary>Sets the power state of a VM (e.g. Halted, to check what a backup does with a VM that is off).</summary>
+    public void SetPowerState(string vmUuid, string state)
+    {
+        lock (_lock)
+        {
+            _tables["VM"][RefByUuid("VM", vmUuid)]["power_state"] = state;
+        }
+    }
+
     public void SetStorageUsage(long physicalUtilisation)
     {
         lock (_lock)
@@ -437,6 +453,43 @@ public sealed class FakeXenPool : IAsyncDisposable
             Get("SR", SrRef)["physical_utilisation"] = physicalUtilisation;
         }
     }
+
+    /// <summary>
+    /// Like XAPI VM.checkpoint: only a running VM; all disks (no list of disks to leave out); the snapshot is Suspended and
+    /// marked as a template, and holds the RAM image as its suspend VDI.
+    /// </summary>
+    private JsonNode? Checkpoint(string vmRef, string name)
+    {
+        var vm = Get("VM", vmRef);
+        if (vm["power_state"]!.GetValue<string>() != "Running")
+        {
+            throw new FakeXapiError("VM_BAD_POWER_STATE", vmRef, "Running", vm["power_state"]!.GetValue<string>());
+        }
+
+        var snapRef = Snapshot(vmRef, name, null)!.GetValue<string>();
+        var snapshot = Get("VM", snapRef);
+        var suspendRef = Add("VDI", new JsonObject
+        {
+            ["name_label"] = $"Suspend image of {vm["name_label"]}",
+            ["virtual_size"] = MemoryImageSize,
+            ["SR"] = SrRef,
+            ["cbt_enabled"] = false,
+            ["type"] = "suspend",
+            ["managed"] = true,
+            ["is_a_snapshot"] = false,
+            ["snapshot_of"] = "OpaqueRef:NULL",
+            ["other_config"] = new JsonObject(),
+        });
+        _data[suspendRef] = InMemoryDisk.Random(MemoryImageSize, seed: _nextRef).Content;
+        snapshot["power_state"] = "Suspended";
+        snapshot["is_a_template"] = true;
+        snapshot["suspend_VDI"] = suspendRef;
+        Checkpoints++;
+        return snapRef;
+    }
+
+    /// <summary>VM.checkpoint calls so far.</summary>
+    public int Checkpoints { get; private set; }
 
     private JsonNode? Snapshot(string vmRef, string name, JsonArray? ignoredVdis)
     {

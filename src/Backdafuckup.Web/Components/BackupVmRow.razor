@@ -46,7 +46,11 @@
             {
                 <span class="mini-chip info" title="@($"{Latest.SqlDatabaseCount} SQL Server database(s) in the newest restore point")">SQL @Latest.SqlDatabaseCount</span>
             }
-            @if (Latest.Consistency != "application")
+            @if (Latest.MemoryImageBytes is { } ram && Latest.Consistency != "application")
+            {
+                <span class="mini-chip info" title="@($"Snapshot with memory ({Fmt.Bytes(ram)} RAM): the disks match each other; a restore can resume the VM.")">RAM</span>
+            }
+            else if (Latest.Consistency != "application")
             {
                 <span class="@(Latest.ConsistencyReason is null ? "mini-chip" : "mini-chip warning")"
                       title="@(Latest.ConsistencyReason ?? "Without guest processing: like a power failure; most applications recover by themselves.")">crash</span>

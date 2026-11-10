@@ -45,7 +45,7 @@ else
                 </MudSelect>
                 <MudTextField @bind-Value="_vmFilter" Placeholder="Filter VMs" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Class="mb-2" />
                 <MudSimpleTable Dense="true" Hover="true" Elevation="0" Style="max-height:420px;overflow-y:auto">
-                    <thead><tr><th></th><th>VM</th><th>Power</th><th>Disks</th></tr></thead>
+                    <thead><tr><th></th><th>VM</th><th>Power</th><th>Disks</th><th title="Snapshot with memory: the VM can be resumed on restore">With memory</th></tr></thead>
                     <tbody>
                         @foreach (var vm in _vms.Where(v => string.IsNullOrWhiteSpace(_vmFilter) || v.Name.Contains(_vmFilter, StringComparison.OrdinalIgnoreCase)))
                         {
@@ -54,11 +54,22 @@ else
                                 <td>@vm.Name</td>
                                 <td>@vm.Properties.GetValueOrDefault("powerState")</td>
                                 <td>@vm.Properties.GetValueOrDefault("diskCount") (@Fmt.Bytes(long.TryParse(vm.Properties.GetValueOrDefault("diskBytes"), out var b) ? b : null))</td>
+                                <td>
+                                    <MudSwitch T="bool" Value="@_withMemory.Contains(vm.NativeId)" ValueChanged="@(on => ToggleMemory(vm.NativeId, on))" Size="Size.Small" Color="Color.Primary"
+                                               Disabled="@(!_selected.ContainsKey(vm.NativeId))"
+                                               title="@($"RAM {Fmt.Bytes(long.TryParse(vm.Properties.GetValueOrDefault("memoryBytes"), out var m) ? m : null)}: written at every backup")" />
+                                </td>
                             </tr>
                         }
                     </tbody>
                 </MudSimpleTable>
-                <MudText Typo="Typo.body2" Class="mt-2">@_selected.Count VM(s) selected</MudText>
+                <MudText Typo="Typo.body2" Class="mt-2">@_selected.Count VM(s) selected@(_withMemory.Count > 0 ? $", {_withMemory.Count} with memory" : string.Empty)</MudText>
+                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block mt-1" Style="max-width:80ch">
+                    <b>With memory</b> (snapshot with RAM): the VM is paused while its RAM is written and all its disks are captured, so the disks match each other and a
+                    restore can resume the VM where it was. It costs a pause of the RAM write plus every disk (about a minute for 16 GB and four disks on shared LVM),
+                    RAM-sized space on the VM's storage during the backup and in every restore point, and disks marked [NOBAK] are captured too (not backed up).
+                    These VMs get no guest processing (VSS). A VM that is not running gets a normal snapshot.
+                </MudText>
                 break;
 
             case 2:
@@ -289,7 +300,7 @@ else
                     <tbody>
                         <tr><td style="width:220px">Name</td><td>@_name</td></tr>
                         <tr><td>Pool</td><td>@_pools.FirstOrDefault(p => p.Id == _connectionId)?.DisplayName</td></tr>
-                        <tr><td>VMs</td><td>@string.Join(", ", _selected.Values)</td></tr>
+                        <tr><td>VMs</td><td>@string.Join(", ", _selected.Select(kv => _withMemory.Contains(kv.Key) ? $"{kv.Value} (with memory)" : kv.Value))</td></tr>
                         <tr><td>Repository</td><td>@_repositories.FirstOrDefault(r => r.Id == _repositoryId)?.Name</td></tr>
                         <tr><td>Retention</td><td>@_retention restore points</td></tr>
                         <tr><td>Schedule</td><td>@Jobs.Describe(Schedule())</td></tr>
@@ -344,6 +355,7 @@ else
     private List<RepositoryDto>? _repositories;
     private List<InventoryItemDto> _vms = [];
     private readonly Dictionary<string, string> _selected = [];
+    private readonly HashSet<string> _withMemory = [];
     private readonly HashSet<DayOfWeek> _days = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday];
     private int _step;
     private string _name = string.Empty;
@@ -438,6 +450,10 @@ else
             foreach (var o in job.Objects)
             {
                 _selected[o.NativeId] = o.Name;
+                if (o.WithMemory)
+                {
+                    _withMemory.Add(o.NativeId);
+                }
             }
         }
         else
@@ -453,6 +469,7 @@ else
     {
         _connectionId = id;
         _selected.Clear();
+        _withMemory.Clear();
         await LoadVmsAsync();
     }
 
@@ -468,6 +485,19 @@ else
         else
         {
             _selected.Remove(vm.NativeId);
+            _withMemory.Remove(vm.NativeId);
+        }
+    }
+
+    private void ToggleMemory(string nativeId, bool on)
+    {
+        if (on)
+        {
+            _withMemory.Add(nativeId);
+        }
+        else
+        {
+            _withMemory.Remove(nativeId);
         }
     }
 
@@ -546,7 +576,7 @@ else
             RepositoryId = _repositoryId,
             RetentionPoints = _retention,
             Schedule = Schedule(),
-            Objects = _selected.Select(kv => new JobObjectDto(kv.Key, kv.Value)).ToList(),
+            Objects = _selected.Select(kv => new JobObjectDto(kv.Key, kv.Value, _withMemory.Contains(kv.Key))).ToList(),
             MaxParallelVms = _parallelVms,
             NbdConnectionsPerDisk = _nbdConnections,
             MaxParallelDisks = _parallelDisks,
