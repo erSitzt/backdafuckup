@@ -2,12 +2,16 @@
 # Builds the server for Windows (self-contained, with the agent package) and installs or updates it on a Windows host
 # over SMB and WinRM. Refuses to restart while sessions run (pass --force to bdfu_deploy.py to override).
 #
-# Usage: scripts/deploy/update-windows.sh [host]        (default: backup01.corp.example)
+# Usage: scripts/deploy/update-windows.sh [host]        (default: $BDFU_DEPLOY_HOST, e.g. backup01.corp.example)
 # Needs: ~/.config/backdafuckup/<host-short>.env with BDFU_DEPLOY_USER / BDFU_DEPLOY_PASSWORD, and the venv:
 #   python3 -m venv --system-site-packages scripts/deploy/.venv && scripts/deploy/.venv/bin/pip install smbprotocol pywinrm
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-host="${1:-backup01.corp.example}"
+host="${1:-${BDFU_DEPLOY_HOST:-}}"
+if [[ -z "$host" ]]; then
+  echo "Name the Windows host to install on: scripts/deploy/update-windows.sh <host>, or set BDFU_DEPLOY_HOST." >&2
+  exit 2
+fi
 env_file="$HOME/.config/backdafuckup/${host%%.*}.env"
 dotnet="${DOTNET:-$(command -v dotnet || echo "$HOME/.dotnet/dotnet")}"
 out="$(mktemp -d)"

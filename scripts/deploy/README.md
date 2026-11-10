@@ -22,7 +22,7 @@ Generated passwords (PostgreSQL) go to `~/.config/backdafuckup/backup01.secrets`
 | `restore-db --dump FILE [--sql …]` | Restores a `pg_dump -Fc` into the empty catalog, then runs SQL (paths, server address). |
 | `install --publish DIR [--data DIR]` | Installs or updates: files to `C:\Program Files\backdafuckup` (swapped as a whole), config and data in `C:\ProgramData\backdafuckup` (SYSTEM and Administrators only), service `backdafuckup` (depends on PostgreSQL), firewall rule 9555, health check. Refuses to restart while sessions run unless `--force`. `--data` takes over the key ring and certificate of an existing installation. |
 
-Update after a change: `scripts/deploy/update-windows.sh` (builds win-x64, builds the agent package with `scripts/build-agent.sh` and runs `install`; the agents in the VMs then update themselves). `SKIP_AGENT_BUILD=1` reuses the package in `artifacts/agent` instead.
+Update after a change: `scripts/deploy/update-windows.sh <host>`, or set `BDFU_DEPLOY_HOST` (builds win-x64, builds the agent package with `scripts/build-agent.sh` and runs `install`; the agents in the VMs then update themselves). `SKIP_AGENT_BUILD=1` reuses the package in `artifacts/agent` instead.
 
 ## backup01.corp.example (since 2026-11-02)
 
