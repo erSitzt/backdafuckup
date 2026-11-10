@@ -341,7 +341,9 @@ public sealed class FakeXenPool : IAsyncDisposable
             ("VM", "set_name_label") => Set(Get("VM", S(1)), "name_label", S(2)),
             ("VM", "set_affinity") => Set(Get("VM", S(1)), "affinity", S(2)),
             ("VM", "start" or "start_on") => Set(Get("VM", S(1)), "power_state", "Running"),
-            ("VM", "clean_shutdown" or "hard_shutdown") => Set(Get("VM", S(1)), "power_state", "Halted"),
+            ("VM", "clean_shutdown" or "hard_shutdown") => Shutdown(S(1)),
+            ("VM", "resume" or "resume_on") => Resume(S(1)),
+            ("VM", "set_is_a_template") => Set(Get("VM", S(1)), "is_a_template", p[2]!.GetValue<bool>()),
             ("VDI", "enable_cbt") => Set(Get("VDI", S(1)), "cbt_enabled", true),
             ("VDI", "list_changed_blocks") => ListChangedBlocks(S(1), S(2)),
             ("VDI", "data_destroy") => DataDestroy(S(1)),
@@ -492,6 +494,54 @@ public sealed class FakeXenPool : IAsyncDisposable
     /// <summary>VM.checkpoint calls so far.</summary>
     public int Checkpoints { get; private set; }
 
+    /// <summary>Like XAPI VM.resume: only a suspended VM; it runs again and its suspend image is gone.</summary>
+    private JsonNode? Resume(string vmRef)
+    {
+        var vm = Get("VM", vmRef);
+        if (vm["power_state"]!.GetValue<string>() != "Suspended")
+        {
+            throw new FakeXapiError("VM_BAD_POWER_STATE", vmRef, "Suspended", vm["power_state"]!.GetValue<string>());
+        }
+
+        ResumedImages.Add(_data[vm["suspend_VDI"]!.GetValue<string>()]);
+        DropSuspendImage(vm);
+        vm["power_state"] = "Running";
+        return null;
+    }
+
+    /// <summary>Simulates a metadata import that creates a suspended VM halted (its memory image is not attached).</summary>
+    public bool ImportIgnoresSuspendImage { get; set; }
+
+    /// <summary>Simulates a pool that refuses to remove or add NICs of a suspended VM.</summary>
+    public bool RefuseNicChangesWhenSuspended { get; set; }
+
+    /// <summary>The memory images VMs resumed from (copies, in order).</summary>
+    public List<byte[]> ResumedImages { get; } = [];
+
+    /// <summary>A shutdown of a suspended VM throws its memory away (the suspend image is destroyed).</summary>
+    private JsonNode? Shutdown(string vmRef)
+    {
+        var vm = Get("VM", vmRef);
+        if (vm["power_state"]?.GetValue<string>() == "Suspended")
+        {
+            DropSuspendImage(vm);
+        }
+
+        vm["power_state"] = "Halted";
+        return null;
+    }
+
+    private void DropSuspendImage(JsonObject vm)
+    {
+        if (vm["suspend_VDI"]?.GetValue<string>() is { } suspendRef && _tables["VDI"].ContainsKey(suspendRef))
+        {
+            _tables["VDI"].Remove(suspendRef);
+            _data.Remove(suspendRef);
+        }
+
+        vm["suspend_VDI"] = "OpaqueRef:NULL";
+    }
+
     private JsonNode? Snapshot(string vmRef, string name, JsonArray? ignoredVdis)
     {
         if (ignoredVdis is not null && SnapshotWithoutIgnoreVdis)
@@ -547,6 +597,17 @@ public sealed class FakeXenPool : IAsyncDisposable
             captured += DiskSnapshotInterval;
             _data[snapVdi] = (byte[])_data[sourceRef].Clone();
             AddVbd(snapRef, snapVdi, vbd["userdevice"]!.GetValue<string>(), vbd["bootable"]!.GetValue<bool>());
+        }
+
+        // Like XAPI: the snapshot has copies of the VM's NICs (same network and MAC).
+        foreach (var vif in ((JsonArray?)vm["VIFs"] ?? []).Select(n => Get("VIF", n!.GetValue<string>())))
+        {
+            var copy = Add("VIF", new JsonObject
+            {
+                ["device"] = vif["device"]!.DeepClone(), ["network"] = vif["network"]!.DeepClone(), ["VM"] = snapRef,
+                ["MAC"] = vif["MAC"]!.DeepClone(), ["MTU"] = vif["MTU"]!.DeepClone(),
+            });
+            ((JsonArray)Get("VM", snapRef)["VIFs"]!).Add(copy);
         }
 
         return snapRef;
@@ -662,6 +723,11 @@ public sealed class FakeXenPool : IAsyncDisposable
     private JsonNode? DestroyVm(string vmRef)
     {
         var vm = Get("VM", vmRef);
+        if (vm["power_state"]?.GetValue<string>() == "Suspended" && vm["is_a_snapshot"]?.GetValue<bool>() != true)
+        {
+            throw new FakeXapiError("VM_BAD_POWER_STATE", vmRef, "Halted", "Suspended");
+        }
+
         foreach (var vbd in ((JsonArray)vm["VBDs"]!).Select(n => n!.GetValue<string>()))
         {
             _tables["VBD"].Remove(vbd);
@@ -726,7 +792,7 @@ public sealed class FakeXenPool : IAsyncDisposable
             ["virtual_size"] = size,
             ["SR"] = record["SR"]!.DeepClone(),
             ["cbt_enabled"] = false,
-            ["type"] = "user",
+            ["type"] = record["type"]?.DeepClone() ?? "user",
             ["managed"] = true,
             ["is_a_snapshot"] = false,
             ["snapshot_of"] = "OpaqueRef:NULL",
@@ -740,6 +806,11 @@ public sealed class FakeXenPool : IAsyncDisposable
     {
         var vif = Get("VIF", vifRef);
         var vm = Get("VM", vif["VM"]!.GetValue<string>());
+        if (RefuseNicChangesWhenSuspended && vm["power_state"]?.GetValue<string>() == "Suspended")
+        {
+            throw new FakeXapiError("VM_BAD_POWER_STATE", vif["VM"]!.GetValue<string>(), "Halted", "Suspended");
+        }
+
         var list = (JsonArray)vm["VIFs"]!;
         var item = list.First(n => n!.GetValue<string>() == vifRef);
         list.Remove(item);
@@ -788,6 +859,11 @@ public sealed class FakeXenPool : IAsyncDisposable
                 ["MTU"] = vif["MTU"]!.DeepClone(),
             }).ToArray()),
         };
+        if (vm["power_state"]?.GetValue<string>() == "Suspended" && vm["suspend_VDI"]?.GetValue<string>() is { } suspendRef && _tables["VDI"].ContainsKey(suspendRef))
+        {
+            export["suspend_vdi_uuid"] = Get("VDI", suspendRef)["uuid"]!.DeepClone();
+        }
+
         return Encoding.UTF8.GetBytes(export.ToJsonString());
     }
 
@@ -809,6 +885,15 @@ public sealed class FakeXenPool : IAsyncDisposable
 
         vm["uuid"] = restore ? uuid : Guid.NewGuid().ToString();
         vm["power_state"] = "Halted";
+        vm["suspend_VDI"] = "OpaqueRef:NULL";
+        vm["is_a_snapshot"] = false;
+        vm["snapshot_of"] = "OpaqueRef:NULL";
+        if (export["suspend_vdi_uuid"]?.GetValue<string>() is { } suspendUuid && !ImportIgnoresSuspendImage)
+        {
+            var mappedSuspend = vdiMap.TryGetValue(suspendUuid, out var newSuspend) ? newSuspend : throw new FakeXapiError("VDI_MISSING", suspendUuid);
+            vm["power_state"] = "Suspended";
+            vm["suspend_VDI"] = RefByUuid("VDI", mappedSuspend);
+        }
 
         // Like XAPI: a metadata import (not a live migration) gets a fresh VM generation id, unless it is disabled ("0:0").
         if (!ImportKeepsGenerationId && vm["generation_id"]?.GetValue<string>() is { Length: > 0 } generation && generation != "0:0")

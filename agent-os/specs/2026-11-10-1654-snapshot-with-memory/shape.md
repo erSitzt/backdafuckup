@@ -42,7 +42,7 @@ Multi-disk VMs therefore end up not even crash-consistent across their disks; si
 ### Confirmed by the user (2026-11-10)
 - **Memory image:** backed up, so a restore can resume the VM.
 - **Where it is switched on:** per VM in the job (the job editor's VM list).
-- **VSS:** spike first, then decide. Until then the checkpoint replaces VSS for those VMs.
+- **VSS:** spike first, then decide. Until then the checkpoint replaces VSS for those VMs. **Decided after S3 (2026-11-10):** they stay exclusive; the VSS hold runs out during the pause and SQL Server's writer aborts (`spike.md`).
 - **Resume:** in the same pool; copies too, but without network connections.
 
 ### Technical

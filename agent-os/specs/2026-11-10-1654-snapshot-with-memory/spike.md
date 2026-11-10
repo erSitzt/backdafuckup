@@ -4,9 +4,9 @@ The pool is XCP-ng 8.3 with two hosts. The VM is bdfu-lab-sql2: Windows Server, 
 
 | # | Question | Result |
 |---|---|---|
-| S1 | How long does the VM pause? What does the checkpoint look like? Is anything left over? | Partly answered. See below. |
+| S1 | How long does the VM pause? What does the checkpoint look like? Is anything left over? | Answered: 310–323 s with the host's local suspend storage, 118 s with the Alletra. Nothing left over. |
 | S2 | Does a restored VM resume? | Open (restore part). |
-| S3 | Does a VSS freeze survive the pause? | Open (needs `Engine:CheckpointWithVss=true`). |
+| S3 | Does a VSS freeze survive the pause? | No. VSS and the checkpoint stay exclusive. See below. |
 | S4 | Can a copy resume without network connections? | Open (restore part). |
 | S5 | Can the suspend VDI be read over NBD? | Partly answered. See below. |
 
@@ -38,6 +38,25 @@ The fix takes XAPI's order, without the pool default storage. When the image goe
 - or for the pool: `xe pool-param-set suspend-image-SR=<sr>`.
 
 This is a pool setting and the user's decision.
+
+**Again with the fix, 2026-11-10 22:17** (session 01a1c752, build `7a76f58`, host suspend storage still local): paused **323.0 s**. The session log named the local storage ("its memory image goes to the local storage 'xcp-ng1-local' of its host …"), and the free-space line now lists both storages: "3 disk(s) on 'alletra-mp02' (25.8 % free), 'xcp-ng1-local' (96.6 % free)". The memory image: 8.0 GiB read, 1.9 GB of it already stored from the first run, 1.6 GB stored. The user then set the pool's suspend storage to the Alletra.
+
+**With the Alletra as the pool's suspend storage, 2026-11-10 22:26** (session 01a1c75b, the S3 run below): paused **118.0 s**, the memory image on alletra-mp02, no hint about local storage. 10.2 GiB (8.0 GiB allocated) plus three disk snapshots (about 25 s) gives roughly 90 MB/s for the RAM write: still about two minutes for 8 GiB.
+
+**The guest's clock after the pause:** at 22:35 sql2's clock was **421 s behind** (WinRM `[DateTime]::UtcNow` against this machine).
+- **After S1 (18:05):** Windows set the clock from the hardware clock (Kernel-General 1: "System time synchronized with the hardware clock", +310,464 ms).
+- **After the two checkpoints of 22:17 and 22:26:** no such event.
+- **Time source:** sql2 has none (`w32tm`: "Free-running System Clock", time.windows.com unreachable), so nothing corrected the clock.
+
+A domain member whose clock is more than 5 minutes off fails Kerberos until its next time sync. A VM backed up with memory needs a working time source, and a short pause.
+
+## S3, 2026-11-10 22:26 (session 01a1c75b)
+
+`BDFU_Engine__CheckpointWithVss=true` in the service's environment, guest processing VSS (copy-only) in the spike job, the agent connected.
+- **Server:** "VSS prepared … 10 VSS writer(s) … 10 SQL database(s)", then the checkpoint paused the VM for 118.0 s, then "thawing the guest failed: the agent … did not answer within 120 s". The restore point is crash-consistent; the backup itself worked.
+- **Guest** (its clock about 5 min behind, see above): `VSS prepared` at 22:21:20. At 22:22:20 the VSS event **12298**: the writes could not be held during the shadow copy creation (the flush-and-hold limit of 10 s ran out). At the same second SQL Server's writer aborted the backups of all 10 databases (3041, 18210 with OS error 995, SQLWRITER 24583). They were copy-only, so the backup history is untouched.
+
+**Decision (task 6):** VSS and the checkpoint stay exclusive, as built: a VM with memory gets no guest processing. The pause is far longer than VSS can hold writes, and the guest notices the gap only after the resume. `Engine:CheckpointWithVss` stays a spike switch (default false), and it was removed from the service's environment afterwards (22:35).
 
 ## S5
 

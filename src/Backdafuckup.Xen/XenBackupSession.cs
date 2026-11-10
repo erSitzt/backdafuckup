@@ -67,6 +67,8 @@ internal sealed class XenBackupSession : IVmBackupSession
 
     public string SnapshotId { get; }
 
+    public IReadOnlyDictionary<string, string> MemoryDiskIds { get; private init; } = new Dictionary<string, string>();
+
     public static async Task<XenBackupSession> CreateAsync(
         XenHypervisorSession owner,
         XapiSession xapi,
@@ -369,6 +371,11 @@ internal sealed class XenBackupSession : IVmBackupSession
                 },
                 Memory = memory,
                 MemoryMetadata = memoryMetadata,
+
+                // The checkpoint's metadata names its own disk snapshots, also those of [NOBAK] disks.
+                MemoryDiskIds = memory is null ? new Dictionary<string, string>() : disks.Values
+                    .Where(d => d.Disk.Locator.ContainsKey("userdevice"))
+                    .ToDictionary(d => d.Disk.Locator["userdevice"], d => d.Disk.SnapshotDiskId, StringComparer.Ordinal),
             };
             return session;
         }

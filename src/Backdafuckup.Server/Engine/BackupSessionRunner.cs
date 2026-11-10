@@ -382,6 +382,7 @@ internal sealed class VmBackupTask(
                 ExcludedDisks = [.. backup.ExcludedDisks.Select(d => new ManifestExcludedDisk(d.Key, d.SourceDiskId, d.Name, d.CapacityBytes, d.Bootable, d.StorageId, d.StorageName))],
                 Memory = memoryImage,
                 MemoryMetadata = memoryMetadata,
+                MemoryDiskIds = memoryImage is null ? null : backup.MemoryDiskIds,
             };
             var committed = await writer.CommitAsync(manifest, cancellationToken).ConfigureAwait(false);
 

@@ -87,6 +87,12 @@ public interface IVmBackupSession : IAsyncDisposable
     VmMetadataBlob? MemoryMetadata => null;
 
     /// <summary>
+    /// The VM's disks as <see cref="MemoryMetadata"/> names them (disk key → the id of the disk in the snapshot with memory),
+    /// including disks left out of the backup: a restore that resumes the VM maps them to the restored disks. Empty without memory.
+    /// </summary>
+    IReadOnlyDictionary<string, string> MemoryDiskIds => new Dictionary<string, string>();
+
+    /// <summary>
     /// Returns the changed extents of <paramref name="disk"/> since <paramref name="since"/>, or a full read with a reason.
     /// Must be called before <see cref="OpenReaderAsync"/> for the same disk.
     /// </summary>

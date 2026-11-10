@@ -54,12 +54,32 @@ else
                         <MudCheckBox @bind-Value="_deleteReplaced" Label="Delete the replaced VM and its disks after a successful restore" Color="Color.Error" />
                     }
                 }
+                @if (_point.MemoryImageBytes is > 0)
+                {
+                    <MudText Typo="Typo.subtitle1" Class="mt-4">Memory</MudText>
+                    <MudRadioGroup T="bool" Value="_resume" ValueChanged="OnResumeChangedAsync">
+                        <MudRadio T="bool" Value="false">Boot from the disks (cold start)</MudRadio>
+                        <MudRadio T="bool" Value="true" Disabled="@_point.DomainController">Resume with memory: the VM continues where it was at the backup</MudRadio>
+                    </MudRadioGroup>
+                    @if (_point.DomainController)
+                    {
+                        <MudText Typo="Typo.caption">A domain controller does not resume: it would continue its directory from the backup without Windows noticing a restore (USN rollback).</MudText>
+                    }
+                    else if (_resume)
+                    {
+                        <MudAlert Severity="Severity.Info" Dense="true" Class="mt-2">
+                            The memory image (@Fmt.Bytes(_point.MemoryImageBytes.Value) stored) is restored as well, and the VM is created suspended. It resumes only in the pool it was
+                            backed up in. A copy at another location gets no network connections, since its memory holds the original's addresses and connections.
+                        </MudAlert>
+                    }
+                }
                 break;
 
             case 1:
                 @if (_mode == RestoreModeDto.AlternateLocation)
                 {
-                    <MudSelect T="Guid" Value="_targetPool" ValueChanged="OnPoolChangedAsync" Label="Target pool" Variant="Variant.Outlined" Class="mb-3">
+                    <MudSelect T="Guid" Value="_targetPool" ValueChanged="OnPoolChangedAsync" Label="Target pool" Variant="Variant.Outlined" Class="mb-3" Disabled="_resume"
+                               HelperText="@(_resume ? "A VM with memory resumes only in the pool it was backed up in." : null)">
                         @foreach (var pool in _pools)
                         {
                             <MudSelectItem T="Guid" Value="pool.Id">@pool.DisplayName</MudSelectItem>
@@ -86,7 +106,11 @@ else
                 break;
 
             case 2:
-                @if (_mode == RestoreModeDto.AlternateLocation)
+                @if (_resume && _mode == RestoreModeDto.AlternateLocation)
+                {
+                    <MudText>The copy resumes without network connections: its NICs are removed, since its memory holds the original's addresses. Add a NIC (e.g. on an isolated network) once it may be connected.</MudText>
+                }
+                else if (_mode == RestoreModeDto.AlternateLocation)
                 {
                     @foreach (var nic in _point.Nics)
                     {
@@ -103,7 +127,7 @@ else
                 {
                     <MudText>The VM keeps its original networks and MAC addresses.</MudText>
                 }
-                <MudCheckBox @bind-Value="_powerOn" Label="Power on the VM after the restore" Class="mt-2" />
+                <MudCheckBox @bind-Value="_powerOn" Label="@(_resume ? "Resume the VM after the restore (otherwise it stays suspended)" : "Power on the VM after the restore")" Class="mt-2" />
                 @if (_point.DomainController && _mode == RestoreModeDto.AlternateLocation && _powerOn)
                 {
                     <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">
@@ -119,7 +143,11 @@ else
                         <tr><td>Restore point</td><td>@Fmt.Time(_point.CreatedUtc)</td></tr>
                         <tr><td>Location</td><td>@(_mode == RestoreModeDto.OriginalLocation ? "Original location" : _pools.FirstOrDefault(p => p.Id == _targetPool)?.DisplayName)</td></tr>
                         <tr><td>Disks</td><td>@string.Join(", ", _point.Disks.Select(d => $"{d.Name} → {StorageName(_storage.GetValueOrDefault(d.Key))}"))</td></tr>
-                        <tr><td>Power on</td><td>@(_powerOn ? "yes" : "no")</td></tr>
+                        @if (_point.MemoryImageBytes is > 0)
+                        {
+                            <tr><td>Memory</td><td>@(_resume ? "resume where it was at the backup" + (_mode == RestoreModeDto.AlternateLocation ? ", without network connections" : string.Empty) : "cold start from the disks")</td></tr>
+                        }
+                        <tr><td>@(_resume ? "Resume" : "Power on")</td><td>@(_powerOn ? "yes" : "no")</td></tr>
                     </tbody>
                 </MudSimpleTable>
                 @if (_mode == RestoreModeDto.OriginalLocation && _replace)
@@ -168,6 +196,7 @@ else
     private bool _deleteReplaced;
     private bool _regenerateMacs = true;
     private bool _powerOn;
+    private bool _resume;
     private int _step;
     private bool _busy;
     private string? _error;
@@ -200,6 +229,16 @@ else
         await LoadInventoryAsync();
     }
 
+    /// <summary>A VM resumes only in the pool it was backed up in.</summary>
+    private async Task OnResumeChangedAsync(bool resume)
+    {
+        _resume = resume;
+        if (resume && _point!.ConnectionId is { } pool && pool != _targetPool)
+        {
+            await OnPoolChangedAsync(pool);
+        }
+    }
+
     private async Task LoadInventoryAsync() =>
         _inventory = _targetPool == Guid.Empty ? [] : await Api.GetAsync<List<InventoryItemDto>>($"api/connections/{_targetPool}/inventory");
 
@@ -225,6 +264,7 @@ else
                 PowerOn = _powerOn,
                 ReplaceExisting = !alternate && _replace,
                 DeleteReplaced = !alternate && _replace && _deleteReplaced,
+                ResumeWithMemory = _resume,
             });
             Navigation.NavigateTo($"/sessions/{started.SessionId}");
         }

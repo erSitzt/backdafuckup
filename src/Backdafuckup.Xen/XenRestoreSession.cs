@@ -44,8 +44,14 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
 
         // Disks left out of the backup are created empty, but on LVM storage they still take their full size.
         var needed = new Dictionary<string, long>(StringComparer.Ordinal);
-        foreach (var (key, name, capacity) in plan.Manifest.Disks.Select(d => (d.Key, d.Name, d.CapacityBytes))
-                     .Concat(plan.Manifest.ExcludedDisks.Select(d => (d.Key, d.Name, d.CapacityBytes))))
+        var images = plan.Manifest.Disks.Select(d => (d.Key, d.Name, d.CapacityBytes))
+            .Concat(plan.Manifest.ExcludedDisks.Select(d => (d.Key, d.Name, d.CapacityBytes)));
+        if (plan.Resume && plan.Manifest.Memory is { } memory)
+        {
+            images = images.Append((memory.Key, "the memory image", memory.CapacityBytes));
+        }
+
+        foreach (var (key, name, capacity) in images)
         {
             if (!plan.DiskStorage.TryGetValue(key, out var srUuid))
             {
@@ -128,6 +134,11 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
             errors.Add($"Target host {plan.TargetHostId} does not exist.");
         }
 
+        if (plan.Resume && plan.Manifest.Memory is null)
+        {
+            errors.Add($"The restore point of {plan.Manifest.Vm.Name} from {plan.Manifest.CreatedUtc:yyyy-MM-dd HH:mm} UTC has no memory image: it can only be booted from its disks.");
+        }
+
         return new RestoreValidation(errors, warnings);
     }
 
@@ -152,7 +163,7 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
             ["name_description"] = $"Restored by backdafuckup from {plan.Manifest.CreatedUtc:yyyy-MM-dd HH:mm} UTC",
             ["SR"] = srRef,
             ["virtual_size"] = target.CapacityBytes.ToString(CultureInfo.InvariantCulture),
-            ["type"] = "user",
+            ["type"] = target.MemoryImage ? "suspend" : "user",
             ["sharable"] = false,
             ["read_only"] = false,
             ["other_config"] = XenHypervisorSession.Map((XenTags.Session, plan.SessionId.ToString())),
@@ -194,6 +205,12 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
                 $"restore={(keepIdentity ? "true" : "false")}",
                 $"force={(owner.Provider.Options.ForceMetadataImport ? "true" : "false")}",
             };
+            if (plan.Resume)
+            {
+                // XAPI checks that the pool's CPUs can run the suspended VM (its last boot CPU flags).
+                query.Add("check_cpu=true");
+            }
+
             query.AddRange(sourceToNewDiskId.Select(kv => $"vdi:{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
 
             using var content = new ByteArrayContent(plan.Metadata.Content);
@@ -219,8 +236,44 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
 
         var vm = await xapi.GetRecordAsync("VM", _vmRef, cancellationToken).ConfigureAwait(false);
         _vmArtifact = await ledger.RecordAsync(XenArtifactKinds.RestoredVm, vm.Str("uuid"), _vmRef, null, cancellationToken).ConfigureAwait(false);
-        log.Info($"Created VM {vm.Str("name_label")} from the backed-up configuration.");
+        if (plan.Resume)
+        {
+            await CheckSuspendedAsync(vm, sourceToNewDiskId, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            log.Info($"Created VM {vm.Str("name_label")} from the backed-up configuration.");
+        }
+
         return new RestoredVm(vm.Str("uuid"), vm.Str("name_label"), vm.Str("generation_id"));
+    }
+
+    /// <summary>
+    /// The snapshot with memory's metadata gives a suspended VM whose suspend image is the restored RAM image. It is marked
+    /// as a template like the snapshot it came from; a VM that is to resume must not be one.
+    /// </summary>
+    private async Task CheckSuspendedAsync(JsonObject vm, IReadOnlyDictionary<string, string> sourceToNewDiskId, CancellationToken cancellationToken)
+    {
+        var expected = plan.Manifest.Memory is { } memory && sourceToNewDiskId.TryGetValue(memory.SourceDiskId, out var id) ? id : null;
+        var suspendRef = vm.Str("suspend_VDI");
+        var suspendUuid = XapiRecord.IsNullRef(suspendRef) ? null
+            : (await xapi.GetRecordAsync("VDI", suspendRef, cancellationToken).ConfigureAwait(false)).Str("uuid");
+        if (vm.Str("power_state") != "Suspended" || suspendUuid is null || suspendUuid != expected)
+        {
+            throw new InvalidOperationException(
+                $"XAPI created the VM {vm.Str("name_label")} ({vm.Str("uuid")}) {vm.Str("power_state")} with suspend image {suspendUuid ?? "none"} " +
+                $"(expected Suspended with the restored memory image {expected ?? "?"}), so it cannot resume. Restore it without memory: it then boots from its disks.");
+        }
+
+        if (vm.Bool("is_a_template"))
+        {
+            await xapi.CallAsync("VM.set_is_a_template", cancellationToken, _vmRef!, false).ConfigureAwait(false);
+        }
+
+        var generation = vm.Str("generation_id");
+        var generationText = string.IsNullOrEmpty(generation) || generation == "0:0" ? "no VM generation id"
+            : generation == plan.Manifest.Vm.GenerationId ? $"the VM generation id of the backup ({generation})" : $"a new VM generation id ({generation})";
+        log.Info($"Created VM {vm.Str("name_label")} suspended, with its memory as at the backup (memory image {suspendUuid}) and {generationText}.");
     }
 
     public async Task<RestoredVm> CompleteAsync(CancellationToken cancellationToken)
@@ -231,7 +284,14 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         }
 
         await xapi.CallAsync("VM.set_name_label", cancellationToken, _vmRef, plan.VmName).ConfigureAwait(false);
-        await ReconfigureNicsAsync(cancellationToken).ConfigureAwait(false);
+        if (plan.Resume && plan.Mode == RestoreMode.AlternateLocation)
+        {
+            await RemoveNicsAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await ReconfigureNicsAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         string? hostRef = null;
         if (!string.IsNullOrEmpty(plan.TargetHostId))
@@ -273,7 +333,27 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
             }
         }
 
-        if (plan.PowerOn)
+        if (plan.Resume)
+        {
+            var at = plan.Manifest.CreatedUtc.ToLocalTime().ToString("g", CultureInfo.CurrentCulture);
+            if (plan.PowerOn)
+            {
+                log.Info($"Resuming the restored VM: it continues where it was at the backup ({at}).");
+                if (hostRef is not null)
+                {
+                    await xapi.RunTaskAsync("VM.resume_on", null, owner.Provider.Options.TaskTimeout, cancellationToken, _vmRef, hostRef, false, false).ConfigureAwait(false);
+                }
+                else
+                {
+                    await xapi.RunTaskAsync("VM.resume", null, owner.Provider.Options.TaskTimeout, cancellationToken, _vmRef, false, false).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                log.Info($"The restored VM stays suspended. Resumed (e.g. in Xen Orchestra), it continues where it was at the backup ({at}).");
+            }
+        }
+        else if (plan.PowerOn)
         {
             log.Info("Starting the restored VM.");
             if (hostRef is not null)
@@ -316,6 +396,11 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
             {
                 if (_vmRef is not null)
                 {
+                    if ((await xapi.GetRecordAsync("VM", _vmRef, timeout.Token).ConfigureAwait(false)).Str("power_state") != "Halted")
+                    {
+                        await xapi.CallAsync("VM.hard_shutdown", timeout.Token, _vmRef).ConfigureAwait(false);
+                    }
+
                     await xapi.CallAsync("VM.destroy", timeout.Token, _vmRef).ConfigureAwait(false);
                 }
 
@@ -418,7 +503,6 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
                 log.Info($"NIC {device}: MAC {wanted} as in the backup (the import had given it {mac}).");
             }
 
-            await xapi.CallAsync("VIF.destroy", cancellationToken, vifRef).ConfigureAwait(false);
             var record = new JsonObject
             {
                 ["device"] = device,
@@ -433,7 +517,43 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
                 ["ipv4_allowed"] = new JsonArray(),
                 ["ipv6_allowed"] = new JsonArray(),
             };
-            await xapi.CallAsync("VIF.create", cancellationToken, record).ConfigureAwait(false);
+            try
+            {
+                await xapi.CallAsync("VIF.destroy", cancellationToken, vifRef).ConfigureAwait(false);
+                await xapi.CallAsync("VIF.create", cancellationToken, record).ConfigureAwait(false);
+            }
+            catch (XapiException ex) when (plan.Resume)
+            {
+                throw new InvalidOperationException(
+                    $"NIC {device} of the suspended VM {plan.VmName} could not be set to network {networkRef} and MAC {(wanted.Length == 0 ? "(new)" : wanted)} ({ex.Code}). " +
+                    "Restore it without memory (cold start), or keep its networks and MAC addresses.", ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A copy that resumes has the original's addresses and connections in its memory: it gets no network connections, so it
+    /// never appears beside the original on the network.
+    /// </summary>
+    private async Task RemoveNicsAsync(CancellationToken cancellationToken)
+    {
+        var vm = await xapi.GetRecordAsync("VM", _vmRef!, cancellationToken).ConfigureAwait(false);
+        foreach (var vifRef in vm.Set("VIFs"))
+        {
+            var vif = await xapi.GetRecordAsync("VIF", vifRef, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await xapi.CallAsync("VIF.destroy", cancellationToken, vifRef).ConfigureAwait(false);
+            }
+            catch (XapiException ex)
+            {
+                throw new InvalidOperationException(
+                    $"NIC {vif.Str("device")} (MAC {vif.Str("MAC")}) of the suspended copy {plan.VmName} could not be removed ({ex.Code}); a copy resumes only " +
+                    "without network connections. Restore it to the original location, or without memory (cold start).", ex);
+            }
+
+            log.Info($"NIC {vif.Str("device")} (MAC {vif.Str("MAC")}) removed: the copy resumes without network connections, since its memory holds the original's addresses. " +
+                     "Add a NIC (e.g. on an isolated network) once it may be connected.");
         }
     }
 
