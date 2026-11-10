@@ -183,6 +183,18 @@ The state before each change is in `C:\bdfu-lab-setup\ad-before.xml` and `gpo-be
 | H14 | Delete `lab-user09`. (a) Open dc2's restore point on `dc2` and restore it. (b) Open dc1's restore point on `dc2` (dc2 has a VM generation id, dc1 none). | (a) Works on dc2; the change replicates to dc1. (b) Refused when it opens: "could not read msDS-GenerationId of the domain controller the backup is from … Open the backup on the domain controller it is from"; the target list puts the backup's own DC first. |
 | H15 | A delegated account that is no domain admin (write and create users in `Lab\Users`, group members in `Lab\Groups`, no "Reanimate Tombstones"): delete a user, open an explore with this account. | The explore fails when it opens: "The account … may not read the backup's directory on <DC>:<port>: dsamain serves it only to Domain Admins and Enterprise Admins …"; dsamain stopped and the work folder deleted at once; nothing written. |
 
+### I. Snapshot with memory
+
+A Windows lab VM (e.g. `sql2`) in a job of its own, with *With memory* in the job's VM list. The lab spikes are in [`spike.md`](../agent-os/specs/2026-11-10-1654-snapshot-with-memory/spike.md).
+
+| # | Steps | Expected |
+|---|---|---|
+| I1 | Back up the VM, guest processing off. Once with the host's local suspend storage, once with a shared one (`xe pool-param-set uuid=<pool> suspend-image-SR=<sr>`). | Session log: "the VM was paused for N s", the memory image (size, type `suspend`, storage), with local storage the hint about it. The restore point has the chip *RAM*. Afterwards no checkpoint, memory image or disk snapshot of the session in the pool (`bdfu_pool_snapshots{owner="backdafuckup"}` 0). |
+| I2 | Guest processing on, `BDFU_Engine__CheckpointWithVss=true` in the service's environment, the agent connected. Back up. | The VSS freeze and the pause in the log; the result of the freeze (held or timed out) in the log and in the VM's VSS events. |
+| I3 | *Restore* the restore point of I1 to another location with *Resume with memory* and *Resume the VM*. | The VM is created suspended and resumes; it has no NIC (log: "removed: the copy resumes without network connections"). On its console the uptime goes back to before the backup, and programs open at the backup are still open. |
+| I4 | Restore the same restore point without memory, *Power on*. | Boots from its disks like any crash-consistent restore point; no memory image is uploaded. |
+| I5 | *Resume with memory* for a restore point of a domain controller, and one from before resume existed. | The wizard offers only the cold start for the DC; the old restore point fails at once: "… by a version that could not resume yet …". Nothing is created in the pool. |
+
 ## Results
 
 | Check | Date | Server / agent version | Result | Notes |

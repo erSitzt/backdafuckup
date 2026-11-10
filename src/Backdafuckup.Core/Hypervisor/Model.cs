@@ -186,6 +186,13 @@ public sealed record VmRestorePlan
     /// <summary>Original location only: delete the replaced VM after a successful restore (otherwise renamed and halted).</summary>
     public bool DeleteReplaced { get; init; }
 
+    /// <summary>
+    /// Resume the VM with its memory: <see cref="Metadata"/> is the snapshot with memory's own metadata, the RAM image is
+    /// restored as the VM's suspend image (<see cref="RestoreDiskTarget.MemoryImage"/>), and the VM is created suspended.
+    /// <see cref="PowerOn"/> resumes it. A copy (another location) resumes without network connections.
+    /// </summary>
+    public bool Resume { get; init; }
+
     public Guid SessionId { get; init; }
 }
 
@@ -194,7 +201,8 @@ public sealed record RestoreValidation(IReadOnlyList<string> Errors, IReadOnlyLi
     public bool Ok => Errors.Count == 0;
 }
 
-public sealed record RestoreDiskTarget(string DiskKey, string SourceDiskId, string Name, long CapacityBytes, string StorageId);
+/// <param name="MemoryImage">The RAM image of a snapshot with memory, restored as the suspend image of a VM that resumes.</param>
+public sealed record RestoreDiskTarget(string DiskKey, string SourceDiskId, string Name, long CapacityBytes, string StorageId, bool MemoryImage = false);
 
 /// <param name="GenerationId">The VM generation id the hypervisor gave the VM (Xen: <c>generation_id</c>), if known.</param>
 /// <param name="ReplacedVmId">The id of the VM this one replaced at the original location (renamed or deleted), if any.</param>

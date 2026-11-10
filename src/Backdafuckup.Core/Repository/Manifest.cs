@@ -85,6 +85,13 @@ public sealed record RestorePointManifest
     /// <summary>The metadata of the snapshot with memory itself (Xen: export_metadata of the checkpoint), for a resume.</summary>
     public ManifestBlob? MemoryMetadata { get; init; }
 
+    /// <summary>
+    /// The disks as <see cref="MemoryMetadata"/> names them: disk key (of <see cref="Disks"/> and <see cref="ExcludedDisks"/>)
+    /// → the disk's id in the snapshot with memory. A resume maps these ids to the restored disks. Null without memory, and
+    /// in restore points with memory from before resume existed (they cannot be resumed).
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? MemoryDiskIds { get; init; }
+
     /// <summary>The disks and, with memory, the RAM image: everything whose chunks the restore point references.</summary>
     [JsonIgnore]
     public IEnumerable<ManifestDisk> AllImages => Memory is null ? Disks : Disks.Append(Memory);

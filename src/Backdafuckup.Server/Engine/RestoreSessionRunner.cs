@@ -43,8 +43,16 @@ public sealed class RestoreSessionRunner(
             using var pin = repository.Pin(point.Id);
             await using var reader = await repository.OpenRestorePointAsync(point.Id, cancellationToken).ConfigureAwait(false);
             var manifest = reader.Manifest;
+            var resume = request.ResumeWithMemory;
+            if (resume)
+            {
+                await CheckResumeAsync(manifest, point, targetConnection, cancellationToken).ConfigureAwait(false);
+            }
+
+            // A resume creates the VM from the snapshot with memory's own metadata: suspended, with the RAM image.
+            var metadataBlob = resume ? manifest.MemoryMetadata! : manifest.Metadata ?? throw new InvalidDataException("The restore point has no VM metadata.");
             byte[] metadata;
-            await using (var blob = await reader.OpenBlobAsync(manifest.Metadata ?? throw new InvalidDataException("The restore point has no VM metadata."), cancellationToken).ConfigureAwait(false))
+            await using (var blob = await reader.OpenBlobAsync(metadataBlob, cancellationToken).ConfigureAwait(false))
             {
                 using var memory = new MemoryStream();
                 await blob.CopyToAsync(memory, cancellationToken).ConfigureAwait(false);
@@ -52,14 +60,23 @@ public sealed class RestoreSessionRunner(
             }
 
             var originalLocation = request.Mode == RestoreModeDto.OriginalLocation;
+            var storage = DiskStorage(manifest, request.DiskStorage, originalLocation: request.Mode == RestoreModeDto.OriginalLocation);
+            if (resume)
+            {
+                // The RAM image goes where it is chosen, else next to the first disk (the host that resumes must reach it).
+                storage[manifest.Memory!.Key] = request.DiskStorage.GetValueOrDefault(manifest.Memory.Key)
+                    ?? manifest.Disks.OrderBy(d => d.Key, StringComparer.Ordinal).Select(d => storage[d.Key]).FirstOrDefault(s => s.Length > 0) ?? string.Empty;
+            }
+
             var plan = new VmRestorePlan
             {
                 Mode = request.Mode == RestoreModeDto.OriginalLocation ? RestoreMode.OriginalLocation : RestoreMode.AlternateLocation,
                 Manifest = manifest,
-                Metadata = new VmMetadataBlob(manifest.Metadata.Format, metadata),
+                Metadata = new VmMetadataBlob(metadataBlob.Format, metadata),
                 VmName = string.IsNullOrWhiteSpace(request.VmName) ? manifest.Vm.Name : request.VmName,
                 TargetHostId = request.TargetHostId,
-                DiskStorage = DiskStorage(manifest, request.DiskStorage, originalLocation: request.Mode == RestoreModeDto.OriginalLocation),
+                DiskStorage = storage,
+                Resume = resume,
                 NetworkMap = request.NetworkMap,
                 RegenerateMacs = request.Mode == RestoreModeDto.AlternateLocation && request.RegenerateMacs,
                 PowerOn = request.PowerOn,
@@ -69,7 +86,8 @@ public sealed class RestoreSessionRunner(
                 SessionId = session.Id,
             };
 
-            log.Info($"Restoring {manifest.Vm.Name} from {manifest.CreatedUtc.ToLocalTime():g} to {(plan.Mode == RestoreMode.OriginalLocation ? "the original location" : "an alternate location")} as '{plan.VmName}'.");
+            log.Info($"Restoring {manifest.Vm.Name} from {manifest.CreatedUtc.ToLocalTime():g} to {(plan.Mode == RestoreMode.OriginalLocation ? "the original location" : "an alternate location")} as '{plan.VmName}'" +
+                     (resume ? ", with its memory: it resumes where it was at the backup." : "."));
             await using var hypervisor = await connections.OpenAsync(targetConnection, cancellationToken).ConfigureAwait(false);
             var ledger = new DbArtifactLedger(dbFactory, targetConnection, session.Id, null, time);
             await using var restore = await hypervisor.BeginRestoreAsync(plan, log, ledger, cancellationToken).ConfigureAwait(false);
@@ -97,7 +115,7 @@ public sealed class RestoreSessionRunner(
                 warnings |= DomainControllerNotes(manifest, plan, log);
             }
 
-            var total = Math.Max(1, manifest.Disks.Sum(d => d.CapacityBytes));
+            var total = Math.Max(1, manifest.Disks.Sum(d => d.CapacityBytes) + (resume ? manifest.Memory!.CapacityBytes : 0));
             long done = 0;
             long transferred = 0;
             var transferStarted = time.GetUtcNow();
@@ -114,18 +132,22 @@ public sealed class RestoreSessionRunner(
                 Seconds = Math.Round((time.GetUtcNow() - transferStarted).TotalSeconds, 3),
                 CurrentBytesPerSecond = rate.Current,
             };
+            // The metadata names each disk by its id at the backup: the VM's own disks, or for a resume the disks of the
+            // snapshot with memory. Each of them maps to the restored disk.
+            string MetadataId(string key, string sourceDiskId) => resume ? manifest.MemoryDiskIds![key] : sourceDiskId;
             var mapping = new Dictionary<string, string>();
-            foreach (var disk in manifest.Disks)
+
+            async Task<string> RestoreImageAsync(RestoreDiskTarget target, string label)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                await using var writer = await restore.CreateDiskAsync(new RestoreDiskTarget(disk.Key, disk.SourceDiskId, disk.Name, disk.CapacityBytes, plan.DiskStorage[disk.Key]), cancellationToken).ConfigureAwait(false);
-                var image = await RestorePointDiskImage.OpenAsync(reader, disk.Key, cancellationToken).ConfigureAwait(false);
+                await using var writer = await restore.CreateDiskAsync(target, cancellationToken).ConfigureAwait(false);
+                var image = await RestorePointDiskImage.OpenAsync(reader, target.DiskKey, cancellationToken).ConfigureAwait(false);
                 var start = done;
                 var sentBefore = transferred;
                 var lastUpdate = DateTimeOffset.MinValue;
                 var progress = new Progress<long>(bytes =>
                 {
-                    log.Info($"Disk {disk.Name}: {bytes * 100.0 / disk.CapacityBytes:0}% restored", $"disk-{disk.Key}");
+                    log.Info($"{label}: {bytes * 100.0 / target.CapacityBytes:0}% restored", $"disk-{target.DiskKey}");
                     if (time.GetUtcNow() - lastUpdate > TimeSpan.FromSeconds(2))
                     {
                         lastUpdate = time.GetUtcNow();
@@ -136,18 +158,31 @@ public sealed class RestoreSessionRunner(
                     }
                 });
                 await writer.WriteAsync(image, progress, cancellationToken).ConfigureAwait(false);
-                done += disk.CapacityBytes;
+                done += target.CapacityBytes;
                 transferred += writer.TransferredBytes;
-                mapping[disk.SourceDiskId] = writer.DiskId;
-                log.Info($"Disk {disk.Name}: restored ({BackupFormat(disk.CapacityBytes)}, {BackupFormat(writer.TransferredBytes)} transferred).", $"disk-{disk.Key}");
+                log.Info($"{label}: restored ({BackupFormat(target.CapacityBytes)}, {BackupFormat(writer.TransferredBytes)} transferred).", $"disk-{target.DiskKey}");
+                return writer.DiskId;
+            }
+
+            foreach (var disk in manifest.Disks)
+            {
+                mapping[MetadataId(disk.Key, disk.SourceDiskId)] = await RestoreImageAsync(
+                    new RestoreDiskTarget(disk.Key, disk.SourceDiskId, disk.Name, disk.CapacityBytes, plan.DiskStorage[disk.Key]), $"Disk {disk.Name}").ConfigureAwait(false);
             }
 
             foreach (var disk in manifest.ExcludedDisks)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                mapping[disk.SourceDiskId] = await restore.CreateEmptyDiskAsync(
+                mapping[MetadataId(disk.Key, disk.SourceDiskId)] = await restore.CreateEmptyDiskAsync(
                     new RestoreDiskTarget(disk.Key, disk.SourceDiskId, disk.Name, disk.CapacityBytes, plan.DiskStorage[disk.Key]), cancellationToken).ConfigureAwait(false);
                 log.Info($"Disk {disk.Name}: created empty ({BackupFormat(disk.CapacityBytes)}); it was left out of the backup.", $"disk-{disk.Key}");
+            }
+
+            if (resume && manifest.Memory is { } ram)
+            {
+                mapping[ram.SourceDiskId] = await RestoreImageAsync(
+                    new RestoreDiskTarget(ram.Key, ram.SourceDiskId, $"{plan.VmName} memory image", ram.CapacityBytes, plan.DiskStorage[ram.Key], MemoryImage: true),
+                    "Memory image").ConfigureAwait(false);
             }
 
             var created = await restore.CreateVmAsync(mapping, cancellationToken).ConfigureAwait(false);
@@ -186,6 +221,45 @@ public sealed class RestoreSessionRunner(
             log.Error($"Restore failed: {ex.Message}");
             await FinishAsync(task.Id, SessionState.Failed, ex.Message, 0).ConfigureAwait(false);
             return (SessionState.Failed, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// A resume needs the RAM image, the snapshot with memory's metadata and its disk ids, the pool the VM was backed up in
+    /// (its memory needs the same kind of CPUs), and no domain controller: XAPI keeps the snapshot's VM generation id, so
+    /// Windows would continue the directory of the backup without noticing a restore (USN rollback).
+    /// </summary>
+    private async Task CheckResumeAsync(RestorePointManifest manifest, RestorePointEntity point, Guid targetConnection, CancellationToken cancellationToken)
+    {
+        var at = $"{point.VmName} from {manifest.CreatedUtc.ToLocalTime():g}";
+        if (manifest.Memory is null || manifest.MemoryMetadata is null)
+        {
+            throw new InvalidOperationException($"The restore point of {at} has no memory image: it can only be booted from its disks.");
+        }
+
+        var missing = manifest.Disks.Select(d => d.Key).Concat(manifest.ExcludedDisks.Select(d => d.Key))
+            .Where(k => manifest.MemoryDiskIds?.ContainsKey(k) != true).ToList();
+        if (manifest.MemoryDiskIds is null || missing.Count > 0)
+        {
+            throw new InvalidOperationException(manifest.MemoryDiskIds is null
+                ? $"The restore point of {at} was backed up with memory by a version that could not resume yet: it can only be booted from its disks. Back the VM up again to resume it."
+                : $"The restore point of {at} does not name the disk(s) {string.Join(", ", missing)} in its snapshot with memory, so it cannot resume. Restore it without memory.");
+        }
+
+        if (manifest.DomainController == true)
+        {
+            throw new InvalidOperationException($"{point.VmName} was a domain controller: resumed, it would continue its directory from the backup without Windows noticing a restore " +
+                "(USN rollback). Restore it without memory: Windows then restores Active Directory non-authoritatively at its first start.");
+        }
+
+        if (point.ConnectionId != targetConnection)
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            var names = await db.Connections.Where(c => c.Id == targetConnection || c.Id == point.ConnectionId)
+                .ToDictionaryAsync(c => c.Id, c => c.DisplayName, cancellationToken).ConfigureAwait(false);
+            var source = point.ConnectionId is { } id ? $"'{names.GetValueOrDefault(id, id.ToString())}'" : "(unknown)";
+            throw new InvalidOperationException($"{point.VmName} resumes only in the pool it was backed up in ({source}), not in '{names.GetValueOrDefault(targetConnection, targetConnection.ToString())}': " +
+                "its memory needs the same kind of CPUs. Restore it to that pool, or without memory.");
         }
     }
 

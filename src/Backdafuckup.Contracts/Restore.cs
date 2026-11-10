@@ -33,4 +33,10 @@ public sealed record RestoreRequestDto
     public bool ReplaceExisting { get; init; }
 
     public bool DeleteReplaced { get; init; }
+
+    /// <summary>
+    /// Restore point with memory: resume the VM where it was at the backup instead of booting it from its disks. Only in the
+    /// pool the restore point came from; a copy (another location) resumes without network connections.
+    /// </summary>
+    public bool ResumeWithMemory { get; init; }
 }

@@ -63,15 +63,16 @@ Parallel streams help as long as the network has room. On a 1 Gbit/s link (about
 - **Free space:** before the snapshot every storage of the VM must have at least `"Xen": { "MinStorageFreePercent": 5 }` percent free (0 turns the check off). A snapshot takes space until it is released, and a full storage stops the running VMs and the storage's own coalesce. The VM then fails with the storage name, its free space and the limit; nothing is snapshotted and the guest is not frozen. The session log shows the free space of every snapshot.
 - **Snapshot with memory** (per VM, the switch *With memory* in the job's VM list): the VM is backed up with `VM.checkpoint`.
   - **How it works:** XAPI pauses the VM, writes its RAM to a memory image (suspend VDI) on the VM's suspend storage, else the pool's, else the suspend storage of the host it runs on, captures all its disks and resumes it.
-  - **What you get:** the disks match each other, and the memory image goes into the restore point (chip *RAM*). A restore can resume the VM where it was, or boot it cold, which is like a power failure of the whole VM at one moment.
-  - **Suspend storage:** the host's suspend storage is often its local disk. In the lab, 8 GiB RAM written to a local disk paused the VM for over 5 minutes. Give the VM (`xe vm-param-set uuid=<vm> suspend-SR-uuid=<sr>`) or the pool (`xe pool-param-set uuid=<pool> suspend-image-SR=<sr>`) a fast shared storage as suspend storage; the session log says when the image goes to a local storage.
+  - **What you get:** the disks match each other, and the memory image goes into the restore point (chip *RAM*). A restore can resume the VM where it was (see *Resume with memory* below), or boot it cold, which is like a power failure of the whole VM at one moment.
+  - **Suspend storage:** the host's suspend storage is often its local disk. In the lab, 8 GiB RAM written to a local disk paused the VM for over 5 minutes, to a shared iSCSI storage (HPE Alletra) for 2 minutes. Give the VM (`xe vm-param-set uuid=<vm> suspend-SR-uuid=<sr>`) or the pool (`xe pool-param-set uuid=<pool> suspend-image-SR=<sr>`) a fast shared storage as suspend storage; the session log says when the image goes to a local storage.
   - **Costs:**
     - the VM pauses for the RAM write plus every disk; the session log names the pause, and the metrics `bdfu_snapshot_duration_seconds{kind="checkpoint"}`;
     - RAM-sized space on the suspend storage during the backup (checked like the free space above);
     - the compressed RAM image in every restore point, read in full each time.
+  - **The guest's clock** stops during the pause. Windows does not always set it again afterwards (in the lab once yes, twice no), so it stays behind until its next time sync. A domain member more than 5 minutes off fails Kerberos: give such VMs a working time source (the domain hierarchy or NTP) and keep the pause short.
   - **Limits:**
     - `[NOBAK]` disks are captured too: they are not backed up, and their snapshots are removed;
-    - such VMs get no guest processing (VSS), so their restore points have no SQL Server or Active Directory details;
+    - such VMs get no guest processing (VSS), so their restore points have no SQL Server or Active Directory details. VSS cannot hold the writes through the pause: in the lab the freeze ran out and SQL Server's writer aborted its backups;
     - a VM that is not running gets a normal snapshot.
   - **Cleanup:** the memory image and the checkpoint are removed after the backup like any snapshot.
 
@@ -255,6 +256,17 @@ JSON responses of the API are compressed (Brotli or gzip) when the client accept
   - the restored VM gets a new VM id, because the original still holds the old one. Its jobs then back up the restored VM, starting with a full backup; the session log names each job.
 - **Restore points from before a replace:** the catalog records which VM replaced which. A later restore to the original location from an older restore point treats the VM in use now as the original (the session log says so), not the renamed one.
 - **A running VM with the same name** that is not the original (e.g. one that replaced it by hand) stops a restore to the original location before anything is written: restore to another location, or shut that VM down or rename it first. A halted one only gives a warning.
+
+**Resume with memory** (restore points with the chip *RAM*, step *Mode* of the wizard): instead of booting from its disks, the VM continues where it was at the backup, with its programs, sessions and caches.
+- **How it works:**
+  - the disks and the memory image are uploaded; the memory image becomes the VM's suspend image (`type suspend`), next to its first disk;
+  - the VM is created from the snapshot with memory's own metadata (`import_metadata` with `check_cpu`), so it is *Suspended*;
+  - *Resume the VM* calls `VM.resume` (or `VM.resume_on` the chosen host). Without it the VM stays suspended and can be resumed in Xen Orchestra.
+- **Only in the pool it was backed up in:** its memory needs the same kind of CPUs, and XAPI checks them at the import.
+- **A copy (another location)** resumes **without network connections**: its NICs are removed, since its memory holds the original's addresses and open connections. Add a NIC (e.g. on an isolated network) once it may be connected. At the original location the VM keeps its networks and MAC addresses.
+- **Not for domain controllers:** XAPI keeps the snapshot's VM generation id, so a resumed DC would continue its directory from the backup without Windows noticing a restore (USN rollback). Restore points known to be of a DC offer only a cold start. Restore points with memory have no guest details (no guest processing), so do not resume a DC whose restore point does not show it as one.
+- **Restore points with memory from before this version** do not name the disks of their snapshot with memory and cannot resume; back the VM up again.
+- If XAPI does not create the VM suspended, or refuses to remove the NICs of a suspended copy, the restore fails with that message and removes everything it created; restore without memory instead.
 
 ## File-level restore
 
