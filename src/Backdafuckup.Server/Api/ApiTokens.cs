@@ -28,6 +28,9 @@ public static class ApiTokens
     /// <summary>The claim that marks a request authenticated by a token (its value: the token's id).</summary>
     public const string TokenClaim = "bdfu:api-token";
 
+    /// <summary>The token's scope (<see cref="ApiTokenScopes"/>).</summary>
+    public const string ScopeClaim = "bdfu:token-scope";
+
     public static string NewToken() => Prefix + Base64Url(RandomNumberGenerator.GetBytes(32));
 
     public static string Hash(string token) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
@@ -41,9 +44,12 @@ public static class ApiTokens
 
     public static bool IsTokenRequest(this ClaimsPrincipal user) => user.HasClaim(c => c.Type == TokenClaim);
 
+    /// <summary>The request carries a metrics-only token: it may read <c>/metrics</c> and nothing else.</summary>
+    public static bool IsMetricsToken(this ClaimsPrincipal user) => user.HasClaim(ScopeClaim, ApiTokenScopes.Metrics);
+
     private static string Base64Url(byte[] bytes) => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
-    internal static ApiTokenDto ToDto(ApiTokenEntity t) => new(t.Id, t.Name, t.Prefix, t.CreatedUtc, t.ExpiresUtc, t.LastUsedUtc, t.LastUsedFrom);
+    internal static ApiTokenDto ToDto(ApiTokenEntity t) => new(t.Id, t.Name, t.Prefix, t.CreatedUtc, t.ExpiresUtc, t.LastUsedUtc, t.LastUsedFrom, t.Scope);
 
     public static AuthenticationBuilder AddApiTokens(this AuthenticationBuilder builder) =>
         builder
@@ -82,6 +88,12 @@ public static class ApiTokens
                 return Results.Problem("A token expires after 1 to 3650 days, or never.", statusCode: StatusCodes.Status400BadRequest);
             }
 
+            var scope = string.IsNullOrWhiteSpace(request.Scope) ? ApiTokenScopes.Full : request.Scope.Trim().ToLowerInvariant();
+            if (scope is not (ApiTokenScopes.Full or ApiTokenScopes.Metrics))
+            {
+                return Results.Problem($"Unknown token scope '{request.Scope}': use '{ApiTokenScopes.Full}' (everything you may do) or '{ApiTokenScopes.Metrics}' (only {Telemetry.MetricsEndpoint.Path}, for Prometheus).", statusCode: StatusCodes.Status400BadRequest);
+            }
+
             var token = NewToken();
             var now = time.GetUtcNow();
             var entity = new ApiTokenEntity
@@ -92,10 +104,11 @@ public static class ApiTokens
                 Hash = Hash(token),
                 CreatedUtc = now,
                 ExpiresUtc = request.ExpiresInDays is { } days ? now.AddDays(days) : null,
+                Scope = scope,
             };
             db.ApiTokens.Add(entity);
             await db.SaveChangesAsync(ct);
-            logger.LogInformation("API token {Name} ({Prefix}…) created by {User}, expires {Expires}.", entity.Name, entity.Prefix, http.User.Identity?.Name, entity.ExpiresUtc?.ToString("u") ?? "never");
+            logger.LogInformation("API token {Name} ({Prefix}…, scope {Scope}) created by {User}, expires {Expires}.", entity.Name, entity.Prefix, entity.Scope, http.User.Identity?.Name, entity.ExpiresUtc?.ToString("u") ?? "never");
             return Results.Ok(new CreatedApiTokenDto(ToDto(entity), token));
         });
 
@@ -161,6 +174,7 @@ public sealed class ApiTokenAuthenticationHandler(
             new(ClaimTypes.NameIdentifier, found.User.Id.ToString()),
             new(ClaimTypes.Name, found.User.UserName ?? string.Empty),
             new(ApiTokens.TokenClaim, found.Token.Id.ToString()),
+            new(ApiTokens.ScopeClaim, found.Token.Scope),
         };
         claims.AddRange(roles.OfType<string>().Select(r => new Claim(ClaimTypes.Role, r)));
 
@@ -172,6 +186,19 @@ public sealed class ApiTokenAuthenticationHandler(
         }
 
         return AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(new ClaimsIdentity(claims, ApiTokens.Scheme)), ApiTokens.Scheme));
+    }
+
+    /// <summary>A metrics-only token outside <c>/metrics</c>: say why, so the 403 is not a riddle.</summary>
+    protected override async Task HandleForbiddenAsync(AuthenticationProperties properties)
+    {
+        Response.StatusCode = StatusCodes.Status403Forbidden;
+        if (Context.User.IsMetricsToken() && !Response.HasStarted)
+        {
+            await Results.Problem(
+                $"This API token has the scope '{ApiTokenScopes.Metrics}': it can read {Telemetry.MetricsEndpoint.Path} (Prometheus) and nothing else. " +
+                $"Use a token with the scope '{ApiTokenScopes.Full}' for {Request.Path}.",
+                statusCode: StatusCodes.Status403Forbidden).ExecuteAsync(Context).ConfigureAwait(false);
+        }
     }
 
     protected override Task HandleChallengeAsync(AuthenticationProperties properties)

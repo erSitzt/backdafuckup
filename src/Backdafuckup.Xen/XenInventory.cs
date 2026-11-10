@@ -27,6 +27,56 @@ internal static class XenInventory
             software.GetValueOrDefault("product_version") ?? software.GetValueOrDefault("platform_version") ?? string.Empty);
     }
 
+    /// <summary>
+    /// Storages with space and disks by kind, the VM snapshots in the pool, and how many disks track changes. Read only:
+    /// three get_all_records calls (SR, VDI, VM).
+    /// </summary>
+    public static async Task<StorageState> GetStorageStateAsync(XapiSession session, CancellationToken cancellationToken)
+    {
+        var srs = await session.GetAllRecordsAsync("SR", cancellationToken).ConfigureAwait(false);
+        var vdis = await session.GetAllRecordsAsync("VDI", cancellationToken).ConfigureAwait(false);
+        var vms = await session.GetAllRecordsAsync("VM", cancellationToken).ConfigureAwait(false);
+
+        var byStorage = vdis.Values.GroupBy(v => v.Str("SR")).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+        var storages = new List<StorageUsage>();
+        foreach (var (srRef, sr) in srs)
+        {
+            if (sr.Str("content_type") == "iso" || sr.Str("type") is "udev" or "iso")
+            {
+                continue;
+            }
+
+            var onIt = byStorage.TryGetValue(srRef, out var list) ? list : [];
+            storages.Add(new StorageUsage(
+                sr.Str("uuid"),
+                sr.Str("name_label"),
+                sr.Str("type"),
+                sr.Bool("shared"),
+                sr.Long("physical_size"),
+                sr.Long("physical_utilisation"),
+                sr.Long("virtual_allocation"),
+                Disks: onIt.Count(v => Kind(v) == "disk"),
+                SnapshotDisks: onIt.Count(v => Kind(v) == "snapshot"),
+                ChangeTrackingMetadata: onIt.Count(v => Kind(v) == "cbt_metadata"),
+                Unmanaged: onIt.Count(v => Kind(v) == "unmanaged")));
+        }
+
+        var snapshots = vms.Values
+            .Where(vm => vm.Bool("is_a_snapshot"))
+            .Select(vm => new VmSnapshotInfo(vm.Str("name_label"), vm.Map("other_config").ContainsKey(XenTags.Session), vm.Time("snapshot_time")))
+            .ToList();
+
+        var isoStorages = srs.Where(s => s.Value.Str("content_type") == "iso" || s.Value.Str("type") is "udev" or "iso").Select(s => s.Key).ToHashSet(StringComparer.Ordinal);
+        var regular = vdis.Values.Where(v => Kind(v) == "disk" && !isoStorages.Contains(v.Str("SR"))).ToList();
+        return new StorageState(storages, snapshots, regular.Count(v => v.Bool("cbt_enabled")), regular.Count(v => !v.Bool("cbt_enabled")));
+
+        static string Kind(JsonObject vdi) =>
+            vdi.Str("type") == "cbt_metadata" ? "cbt_metadata"
+            : !vdi.Bool("managed") ? "unmanaged"
+            : vdi.Bool("is_a_snapshot") ? "snapshot"
+            : "disk";
+    }
+
     public static async Task<Inventory> GetAsync(XapiSession session, PlatformInfo platform, CancellationToken cancellationToken)
     {
         var hosts = await session.GetAllRecordsAsync("host", cancellationToken).ConfigureAwait(false);

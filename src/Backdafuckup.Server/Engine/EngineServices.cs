@@ -23,6 +23,7 @@ public sealed class SessionRunnerService(
     Sql.SqlPublishSessionRunner sqlPublishes,
     Sql.SqlRestoreSessionRunner sqlRestores,
     StartupRecovery recovery,
+    Telemetry.BackupMetrics metrics,
     IOptions<EngineOptions> options,
     IOptions<Sql.SqlRestoreOptions> sqlOptions,
     TimeProvider time,
@@ -154,6 +155,7 @@ public sealed class SessionRunnerService(
         }
 
         log.Info($"Session finished: {state}. {summary}");
+        metrics.RecordSession(session.Kind, state, time.GetUtcNow() - (session.StartedUtc ?? session.CreatedUtc));
         await events.FlushAsync().ConfigureAwait(false);
         await tracker.RollUpAsync(session.Id, CancellationToken.None).ConfigureAwait(false);
         await tracker.UpdateSessionAsync(session.Id, s =>
@@ -481,6 +483,11 @@ public static class EngineServiceCollectionExtensions
     {
         services.Configure<EngineOptions>(configuration.GetSection("Engine"));
         services.TryAddSingleton(TimeProvider.System);
+        services.AddMetrics();
+        services.AddSingleton<Telemetry.BackupMetrics>();
+        services.Configure<Telemetry.MetricsOptions>(configuration.GetSection("Metrics"));
+        services.AddSingleton<Telemetry.StateMetrics>();
+        services.AddHostedService<Telemetry.MetricsStateService>();
         if (services.All(d => d.ServiceType != typeof(IHypervisorProvider)))
         {
             var xen = configuration.GetSection("Xen").Get<XenOptions>() ?? new XenOptions();

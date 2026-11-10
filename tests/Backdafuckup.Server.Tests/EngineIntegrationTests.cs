@@ -28,7 +28,7 @@ namespace Backdafuckup.Server.Tests;
 /// crash recovery.
 /// </summary>
 [Trait("Category", "Integration")]
-public sealed class EngineIntegrationTests : IAsyncLifetime
+public sealed partial class EngineIntegrationTests : IAsyncLifetime
 {
     private const long DiskSize = 6L * 1024 * 1024;
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17").Build();

@@ -10,6 +10,7 @@ public sealed class NbdConnectionPool : IAsyncDisposable
     private readonly Slot[] _slots;
     private readonly int _maxRetries;
     private int _disposed;
+    private int _reconnects;
 
     private NbdConnectionPool(Func<CancellationToken, Task<NbdClient>> connect, NbdClient first, int connections, int maxRetries)
     {
@@ -42,6 +43,9 @@ public sealed class NbdConnectionPool : IAsyncDisposable
 
     /// <summary>Connections that are currently established.</summary>
     public int OpenConnections => _slots.Count(s => s.Client is { IsFaulted: false });
+
+    /// <summary>Connections that broke and were opened again since the pool was created.</summary>
+    public int Reconnects => Volatile.Read(ref _reconnects);
 
     public int Connections => _slots.Length;
 
@@ -168,6 +172,7 @@ public sealed class NbdConnectionPool : IAsyncDisposable
                 return healthy;
             }
 
+            var replacing = slot.Client is not null;
             if (slot.Client is { } broken)
             {
                 slot.Client = null;
@@ -182,6 +187,11 @@ public sealed class NbdConnectionPool : IAsyncDisposable
             }
 
             slot.Client = client;
+            if (replacing)
+            {
+                Interlocked.Increment(ref _reconnects);
+            }
+
             return client;
         }
         finally

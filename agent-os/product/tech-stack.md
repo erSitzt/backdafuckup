@@ -12,6 +12,7 @@
 - **ASP.NET Core:** REST API for managing jobs, restore points and status. Errors are ProblemDetails. Auth uses local accounts (ASP.NET Core Identity, cookies); AD/LDAP/OIDC come later
 - **Runs on Linux and Windows:** systemd service (`AddSystemd`) or Windows service (`AddWindowsService`). Kestrel serves HTTPS with a self-signed certificate on first start
 - **Logging:** Serilog
+- **Metrics:** `System.Diagnostics.Metrics` instruments, exported for Prometheus at `/metrics` through OpenTelemetry's Prometheus exporter (Apache-2.0). Pull only: nothing is sent out. A metrics-only API token protects the endpoint
 - **Own XAPI client:** thin async JSON-RPC client with per-host TLS certificate pinning. The XenServer.NET SDK (BSD-2) is a reference only
 - **Own NBD client:** C# implementation of the public-domain NBD protocol spec, with TLS, pipelining and multiple connections. Reads VM disks for full and CBT-incremental backups
 

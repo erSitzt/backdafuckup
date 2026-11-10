@@ -16,6 +16,7 @@
 | From → to | Port | Used for |
 |---|---|---|
 | Browser → backup server | TCP 9555 (HTTPS) | Web console |
+| Prometheus → backup server | TCP 9555 (HTTPS) | Metrics at `/metrics` (with a metrics token) |
 | Guest agent in the VM → backup server | TCP 9555 (HTTPS) | Agent connection, self-update, file restore into Windows VMs. Outbound from the VM only. |
 | Backup server → XCP-ng hosts | TCP 443 (HTTPS) | XAPI, HTTP export, restore upload |
 | Backup server → XCP-ng hosts on the NBD network | TCP 10809 (TLS) | NBD disk reads |
@@ -537,11 +538,64 @@ Only folders named `{GUID}` or `{GUID}.bdfu-*` directly in `Policies` are ever t
 
 The console's API is described under *API reference* (`/api-docs`). Scripts and tools use an **API token** instead of a password:
 
-- **Create** one under *API tokens*, signed in with your password: a name (what uses it) and when it expires (30 or 90 days, a year, or never). The token (`bdfu_…`) is shown once; the server keeps only its SHA-256, so copy it then.
+- **Create** one under *API tokens*, signed in with your password: a name (what uses it), its access, and when it expires (30 or 90 days, a year, or never). The token (`bdfu_…`) is shown once; the server keeps only its SHA-256, so copy it then.
+- **Access:** *Full API access* acts as you. *Metrics only* reads `/metrics` (Prometheus) and gets 403 everywhere else, with a message that names its scope; the API calls it scope `full` or `metrics`.
 - **Use** it as `Authorization: Bearer bdfu_…`. The request acts as the token's user, with that user's rights. Requests with a token need no `X-BDFU-Request` header (that header protects the console's cookie, which a browser sends on its own; a token it never sends on its own).
 - **Limits:** a token cannot create tokens. A deleted or expired token, or one whose user is locked out, gets 401 at once. The list shows when and from which address each token was used last.
 - **Example:** `curl -X POST -H "Authorization: Bearer bdfu_…" -H "Content-Type: application/json" -d '{}' https://<server>:9555/api/jobs/<job id>/run` starts a job.
 - Creating and deleting a token is noted in the server log (name, prefix, user).
+
+## Monitoring with Prometheus
+
+The server serves Prometheus metrics at `https://<server>:9555/metrics`. It only answers the scrape and sends nothing anywhere. `deploy/monitoring/` has:
+- the scrape configuration for plain Prometheus and the Prometheus Operator;
+- alert rules, as a rule group and as a `PrometheusRule`;
+- a Grafana dashboard.
+
+- **Access:** create a token with *Metrics only* under *API tokens* and put it into the scrape configuration (`authorization: credentials_file`). Signed-in users and full tokens may read `/metrics` too. Metric labels name VMs, jobs, pools, storages and repositories.
+- **TLS:** Prometheus verifies the server certificate. With the server's own self-signed certificate, give Prometheus that certificate as `ca_file`. Replace it when the server issues a new one, which happens shortly before expiry (5 years) or when the host name changes. A certificate from your CA (`Kestrel:Certificates:Default`) avoids this.
+- **Settings** (`"Metrics": { … }`):
+  - `Enabled` (default `true`; `false` removes `/metrics`);
+  - `CatalogInterval` (default `00:01:00`): how often VM, repository, agent and SQL state are read;
+  - `PoolInterval` (default `00:05:00`): how often each pool's storages and snapshots are read, read only with three XAPI calls per pool;
+  - `AgentOfflineAfter` (default `00:10:00`).
+  
+  A scrape never waits for the database or a pool: it reads the last values.
+
+What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the SR name, or several joined with `+`):
+
+| Metric | Type | What |
+|---|---|---|
+| `bdfu_snapshot_duration_seconds` {pool, storage, disks} | histogram | The `VM.snapshot` call. The bucket 10 s is the limit of a VSS freeze |
+| `bdfu_snapshot_gate_wait_seconds` {pool, storage} | histogram | Wait for snapshots of other VMs on the same storage |
+| `bdfu_snapshot_disk_skew_seconds` {pool, storage} | histogram | Time between the first and the last disk capture (XAPI snapshots disks one after another; from the disks' `snapshot_time`, whole seconds). VMs with two or more disks |
+| `bdfu_snapshot_release_seconds` {pool, storage} | histogram | Removing the snapshot after the backup (`VM.destroy`, `VDI.data_destroy`) |
+| `bdfu_guest_writes_held_seconds`, `bdfu_guest_freeze_seconds` {method} | histogram | How long the guest held its writes (`vss` or `sql`), and how long the freeze took |
+| `bdfu_snapshots_total` {pool, storage, consistency, method} | counter | Snapshots by consistency (`application`, `crash`) and guest processing (`vss`, `sql`, `none`) |
+| `bdfu_backup_disk_bytes_total` {pool, storage, transport, category} | counter | Disk bytes by transport (`nbd`, `http-export-vhd`, `http-export-raw`) and category (`read`, `unchanged`, `zero`, `deduped`, `new`, `stored`) |
+| `bdfu_backup_disk_read_seconds_total` {pool, storage, transport} | counter | Time spent reading disks; read bytes divided by it is the throughput |
+| `bdfu_backup_full_reads_total` {pool, reason} | counter | Disks read in full: `first_backup`, `active_full`, `cbt_reenabled`, `cbt_disabled`, `change_data_gone`, `cbt_error`, `size_changed`, `index_unreadable`, `no_change_data`, `other` |
+| `bdfu_transport_fallbacks_total` {pool, storage, from, to, reason} | counter | Disks read with the HTTP export instead of NBD: `no_endpoint`, `insecure_only`, `unreachable` |
+| `bdfu_nbd_connect_seconds` {pool, host, result} | histogram | NBD connection attempts: `ok`, `timeout`, `refused`, `tls`, `error` |
+| `bdfu_nbd_reconnects_total` {pool, host} | counter | NBD connections that broke while a disk was read and were opened again |
+| `bdfu_sessions_total`, `bdfu_session_duration_seconds` {kind, result} | counter, histogram | Finished sessions |
+| `bdfu_sessions_running`, `bdfu_sessions_queued` {kind} | gauge | Sessions now |
+| `bdfu_vm_backups_total` {backup_job, result} | counter | Backups of single VMs, each attempt |
+| `bdfu_restore_bytes_total` {pool} | counter | Bytes written by VM restores |
+| `bdfu_vm_last_backup_timestamp_seconds`, `bdfu_vm_stale`, `bdfu_vm_no_restore_point`, `bdfu_vm_restore_points` {backup_job, vm} | gauge | Per VM and job, with the same rules as *Backups & Restore* |
+| `bdfu_vm_last_backup_result` {backup_job, vm, result} | gauge | 1 for the result of the VM's last attempt (last 14 days) |
+| `bdfu_vm_last_snapshot_seconds`, `bdfu_vm_last_disk_skew_seconds`, `bdfu_vm_last_writes_held_seconds` {pool, vm} | gauge | The VM's last snapshot, since the server started |
+| `bdfu_storage_size_bytes`, `bdfu_storage_used_bytes`, `bdfu_storage_virtual_allocation_bytes`, `bdfu_storage_min_free_ratio` {pool, storage, type} | gauge | Space of each storage, and the free share below which backups refuse to snapshot (`Xen:MinStorageFreePercent`) |
+| `bdfu_storage_vdis` {pool, storage, kind} | gauge | Disks by kind: `disk`, `snapshot`, `cbt_metadata`, `unmanaged` (base copies). On LVM storage each is a logical volume, and more of them make every snapshot slower |
+| `bdfu_pool_snapshots`, `bdfu_pool_snapshot_oldest_seconds` {pool, owner} | gauge | VM snapshots in the pool, ours (`backdafuckup`, tagged) or `other` |
+| `bdfu_pool_vm_disks` {pool, cbt} | gauge | Regular disks with and without changed block tracking |
+| `bdfu_pool_poll_success`, `bdfu_pool_poll_seconds` {pool} | gauge | The last read of the pool. On failure the storage values stay as last read |
+| `bdfu_repository_size_bytes`, `bdfu_repository_free_bytes`, `bdfu_repository_stored_bytes`, `bdfu_repository_restore_points` {repository} | gauge | Volume of each repository, and what its VM restore points stored |
+| `bdfu_agents` {state}, `bdfu_agent_last_contact_timestamp_seconds` {agent} | gauge | Guest agents online and offline |
+| `bdfu_sql_last_log_backup_timestamp_seconds`, `bdfu_sql_log_backup_interval_seconds` {vm, sql_instance, database} | gauge | Newest log backup per database and the job's interval |
+| `bdfu_artifacts_pending` | gauge | Snapshots and disks still to be removed or reduced (retried every 10 minutes) |
+
+The .NET runtime (`dotnet_*`), HTTP (`http_server_*`), Kestrel and Npgsql (`db_client_*`) metrics come along. The session log also names the disk-to-disk gap of every snapshot with two or more disks: "Disks of … captured over 9 s …".
 
 ## Data and backups of the server itself
 

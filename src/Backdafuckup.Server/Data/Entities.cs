@@ -39,6 +39,9 @@ public sealed class ApiTokenEntity
 
     /// <summary>The address of the last request with the token.</summary>
     public string? LastUsedFrom { get; set; }
+
+    /// <summary>What the token may do: <c>full</c> (as its user) or <c>metrics</c> (only <c>/metrics</c>).</summary>
+    public string Scope { get; set; } = Backdafuckup.Contracts.ApiTokenScopes.Full;
 }
 
 public enum ConnectionStatus

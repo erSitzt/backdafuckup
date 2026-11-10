@@ -26,6 +26,7 @@ internal sealed class XenBackupSession : IVmBackupSession
     private readonly Dictionary<string, DiskState> _disks;
     private readonly string _snapshotRef;
     private readonly Guid _snapshotArtifact;
+    private readonly IBackupTelemetry? _telemetry;
     private NbdOverview? _nbdOverview;
     private bool _committed;
     private bool _commitDeferred;
@@ -41,9 +42,11 @@ internal sealed class XenBackupSession : IVmBackupSession
         string snapshotUuid,
         Guid snapshotArtifact,
         Dictionary<string, DiskState> disks,
-        VmMetadataBlob metadata)
+        VmMetadataBlob metadata,
+        IBackupTelemetry? telemetry)
     {
         _owner = owner;
+        _telemetry = telemetry;
         _xapi = xapi;
         _log = log;
         _ledger = ledger;
@@ -131,11 +134,13 @@ internal sealed class XenBackupSession : IVmBackupSession
             : string.Join(", ", snapshotStorages.Select(s => $"'{storages[s].Str("name_label")}'"));
         var options = owner.Provider.Options;
         XenSnapshotGate.Lease? gate = null;
+        var gateWait = TimeSpan.Zero;
         if (options.OneSnapshotPerStorage)
         {
             gate = await owner.Provider.SnapshotGate.EnterAsync(snapshotStorages.Select(s => storages[s].Str("uuid")), cancellationToken).ConfigureAwait(false);
             if (gate.Waited is { } waited)
             {
+                gateWait = waited;
                 log.Info($"Waited {Seconds(waited)} for the snapshot of another VM on {storageText} (one snapshot at a time per storage).");
             }
         }
@@ -213,6 +218,7 @@ internal sealed class XenBackupSession : IVmBackupSession
         log.Info($"Snapshot {request.SnapshotName} created in {Seconds(snapshotTime)}: {diskCount} disk(s) on {free}.", "snapshot");
 
         var disks = new Dictionary<string, DiskState>(StringComparer.Ordinal);
+        var captured = new List<(string Disk, DateTimeOffset Time)>();
         XenBackupSession? session = null;
         try
         {
@@ -242,6 +248,11 @@ internal sealed class XenBackupSession : IVmBackupSession
 
                 var sourceRef = snapVdi.Str("snapshot_of");
                 var source = XapiRecord.IsNullRef(sourceRef) ? snapVdi : await xapi.GetRecordAsync("VDI", sourceRef, cancellationToken).ConfigureAwait(false);
+                if (snapVdi.Time("snapshot_time") is { } capturedAt)
+                {
+                    captured.Add((source.Str("name_label"), capturedAt));
+                }
+
                 var sr = await xapi.GetRecordAsync("SR", snapVdi.Str("SR"), cancellationToken).ConfigureAwait(false);
                 var key = vbd.Str("userdevice");
                 var disk = new SnapshotDisk(
@@ -265,12 +276,15 @@ internal sealed class XenBackupSession : IVmBackupSession
                 log.Info($"Disk {disk.Name} ({XenFormat.Bytes(disk.CapacityBytes)}) is not backed up: its name contains {XenTags.ExcludeDiskMarker}. A restore of the VM creates it as an empty disk.");
             }
 
+            var skew = DiskSkew(captured, vm.Str("name_label"), storageText, log);
+            var storageNames = snapshotStorages.Select(s => storages[s].Str("name_label")).Order(StringComparer.Ordinal).ToList();
             var metadata = await ExportMetadataAsync(xapi, request.VmId, cancellationToken).ConfigureAwait(false);
             var descriptor = await XenInventory.DescribeVmAsync(xapi, vm, cancellationToken).ConfigureAwait(false);
-            session = new XenBackupSession(owner, xapi, log, ledger, descriptor, snapshotRef, snapshotUuid, snapshotArtifact, disks, metadata)
+            session = new XenBackupSession(owner, xapi, log, ledger, descriptor, snapshotRef, snapshotUuid, snapshotArtifact, disks, metadata, request.Telemetry)
             {
                 GuestFreeze = freezeResult,
                 ExcludedDisks = [.. excluded.Select(e => e.Disk).OrderBy(d => d.Key, StringComparer.Ordinal)],
+                Snapshot = new SnapshotFacts(snapshotTime, gateWait, disks.Count, storageNames, skew),
             };
             return session;
         }
@@ -284,6 +298,31 @@ internal sealed class XenBackupSession : IVmBackupSession
     }
 
     public GuestFreezeResult? GuestFreeze { get; private init; }
+
+    public SnapshotFacts? Snapshot { get; private init; }
+
+    public TimeSpan? ReleaseDuration { get; private set; }
+
+    /// <summary>
+    /// XAPI snapshots the disks of a VM one after another (each disk paused on its own), so they are captured at
+    /// different moments. The gap between the first and the last <c>snapshot_time</c> (whole seconds) goes to the log and
+    /// the metrics; null with fewer than two disks.
+    /// </summary>
+    private static TimeSpan? DiskSkew(List<(string Disk, DateTimeOffset Time)> captured, string vmName, string storageText, IOperationLog log)
+    {
+        if (captured.Count < 2)
+        {
+            return null;
+        }
+
+        var first = captured.MinBy(c => c.Time);
+        var last = captured.MaxBy(c => c.Time);
+        var skew = last.Time - first.Time;
+        log.Info(
+            $"Disks of {vmName} captured over {skew.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} s on {storageText}: XAPI snapshots them one after another " +
+            $"(first {first.Disk} at {first.Time:HH:mm:ss}, last {last.Disk} at {last.Time:HH:mm:ss} UTC).");
+        return skew;
+    }
 
     public IReadOnlyList<SnapshotDisk> ExcludedDisks { get; private init; } = [];
 
@@ -401,17 +440,17 @@ internal sealed class XenBackupSession : IVmBackupSession
         var state = _disks[disk.Key];
         if (since is null)
         {
-            return ChangedExtents.Full("no previous restore point");
+            return ChangedExtents.Full("no previous restore point", FullReadReasons.FirstBackup);
         }
 
         if (since.Kind != XenTags.ChangeTokenKind)
         {
-            return ChangedExtents.Full("previous restore point has no Xen change tracking data");
+            return ChangedExtents.Full("previous restore point has no Xen change tracking data", FullReadReasons.NoChangeData);
         }
 
         if (state.CbtJustEnabled)
         {
-            return ChangedExtents.Full("changed block tracking was (re-)enabled on this disk, e.g. for the first backup or after it was reset by a host or storage crash");
+            return ChangedExtents.Full("changed block tracking was (re-)enabled on this disk, e.g. for the first backup or after it was reset by a host or storage crash", FullReadReasons.CbtReenabled);
         }
 
         if (!XapiRecord.IsNullRef(state.SourceVdiRef))
@@ -419,14 +458,14 @@ internal sealed class XenBackupSession : IVmBackupSession
             var source = await _xapi.GetRecordAsync("VDI", state.SourceVdiRef, cancellationToken).ConfigureAwait(false);
             if (!source.Bool("cbt_enabled"))
             {
-                return ChangedExtents.Full("changed block tracking was disabled on the disk (e.g. after a host or storage crash)");
+                return ChangedExtents.Full("changed block tracking was disabled on the disk (e.g. after a host or storage crash)", FullReadReasons.CbtDisabled);
             }
         }
 
         var baseRef = await _xapi.TryGetByUuidAsync("VDI", since.Value, cancellationToken).ConfigureAwait(false);
         if (baseRef is null)
         {
-            return ChangedExtents.Full("the change tracking data of the previous backup no longer exists");
+            return ChangedExtents.Full("the change tracking data of the previous backup no longer exists", FullReadReasons.ChangeDataGone);
         }
 
         try
@@ -445,11 +484,11 @@ internal sealed class XenBackupSession : IVmBackupSession
             var detail = Detail(ex);
             log.Warning($"Disk {disk.Name}: XAPI VDI.list_changed_blocks failed: {ex.Code}{(detail.Length > 0 ? ": " + detail : string.Empty)}. " +
                 await DescribeCbtAsync(baseRef, state, cancellationToken).ConfigureAwait(false));
-            return ChangedExtents.Full($"changed blocks could not be determined ({ex.Code}{(detail.Length > 0 ? ": " + detail : string.Empty)})");
+            return ChangedExtents.Full($"changed blocks could not be determined ({ex.Code}{(detail.Length > 0 ? ": " + detail : string.Empty)})", FullReadReasons.CbtError);
         }
         catch (FormatException ex)
         {
-            return ChangedExtents.Full($"invalid changed block bitmap ({ex.Message})");
+            return ChangedExtents.Full($"invalid changed block bitmap ({ex.Message})", FullReadReasons.CbtError);
         }
     }
 
@@ -468,6 +507,7 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
         catch (XenNbdUnavailableException ex) when (options.Transport == DiskTransportMode.Automatic)
         {
+            _telemetry?.TransportFallback(disk.StorageName, "nbd", "http-export", ex.Reason);
             _log.Warning(ex.Message);
             _log.Warning(
                 $"Disk {disk.Name}: falling back to the HTTP export (export_raw_vdi over HTTPS). It uses one stream per disk and transfers the whole " +
@@ -493,7 +533,7 @@ internal sealed class XenBackupSession : IVmBackupSession
             (candidates.Count == 0 ? "." : $": {string.Join(", ", candidates.Select(c => DescribeEndpoint(c, overview.InterfaceNames)))}."));
         if (candidates.Count == 0)
         {
-            throw new XenNbdUnavailableException(DescribeMissingNbd(disk, overview));
+            throw new XenNbdUnavailableException(DescribeMissingNbd(disk, overview), "no_endpoint");
         }
 
         var secure = candidates.Where(c => !string.IsNullOrWhiteSpace(c.Str("cert"))).ToList();
@@ -501,7 +541,7 @@ internal sealed class XenBackupSession : IVmBackupSession
         {
             throw new XenNbdUnavailableException(
                 $"Disk {disk.Name}: the pool offers only unencrypted NBD (purpose insecure_nbd): {string.Join(", ", candidates.Select(c => DescribeEndpoint(c, overview.InterfaceNames)))}. " +
-                "Allow unencrypted NBD for this pool or set the purpose nbd (TLS) on the network.");
+                "Allow unencrypted NBD for this pool or set the purpose nbd (TLS) on the network.", "insecure_only");
         }
 
         // Start at a random endpoint to spread disks across hosts, but try every endpoint before giving up.
@@ -525,6 +565,7 @@ internal sealed class XenBackupSession : IVmBackupSession
             catch (Exception ex) when (ex is IOException or TimeoutException or SocketException or AuthenticationException && !cancellationToken.IsCancellationRequested)
             {
                 var reason = ConnectFailureReason(ex);
+                _telemetry?.NbdConnect(disk.StorageName, connect.Host, watch.Elapsed, ConnectResult(ex));
                 failures.Add($"{endpoint}: {reason}");
                 _log.Warning($"Disk {disk.Name}: NBD: connection to {endpoint} failed after {watch.ElapsedMilliseconds} ms: {reason}");
                 continue;
@@ -536,17 +577,20 @@ internal sealed class XenBackupSession : IVmBackupSession
                 throw new InvalidOperationException($"Disk {disk.Name}: NBD export size {pool.Size} at {endpoint} does not match the disk size {disk.CapacityBytes}.");
             }
 
+            _telemetry?.NbdConnect(disk.StorageName, connect.Host, watch.Elapsed, NbdConnectResults.Ok);
             _log.Info(
                 $"Disk {disk.Name}: NBD: connected to {endpoint} in {watch.ElapsedMilliseconds} ms " +
                 $"({(pool.UsesTls ? $"TLS {TlsVersion(pool.TlsProtocol)}" : "unencrypted")}, {(pool.NegotiatedWithGo ? "NBD_OPT_GO" : "NBD_OPT_EXPORT_NAME")}, " +
                 $"export size {XenFormat.Bytes(pool.Size)}, max request {XenFormat.Bytes(pool.MaxPayload)}, {pool.OpenConnections} of {connections} connection(s) open). Reading via NBD.");
-            return new NbdDiskReader(pool, connections * options.MaxInFlightPerConnection);
+            var host = connect.Host;
+            return new NbdDiskReader(pool, connections * options.MaxInFlightPerConnection,
+                reconnects => _telemetry?.NbdReconnects(disk.StorageName, host, reconnects));
         }
 
         throw new XenNbdUnavailableException(
             $"Disk {disk.Name}: no NBD endpoint offered by the pool is usable from this backup server ({Environment.MachineName}). Tried: {string.Join("; ", failures)}. " +
             "Check that the backup server reaches these addresses on the listed TCP ports, that the service xapi-nbd runs on the hosts (systemctl status xapi-nbd) " +
-            "and that no firewall between them blocks the port.");
+            "and that no firewall between them blocks the port.", "unreachable");
     }
 
     private static string TlsVersion(SslProtocols protocol) => protocol switch
@@ -583,6 +627,15 @@ internal sealed class XenBackupSession : IVmBackupSession
         var tls = string.IsNullOrWhiteSpace(info.Str("cert")) ? "unencrypted" : "TLS";
         return interfaceNames.TryGetValue(address, out var where) ? $"{endpoint} ({where}, {tls})" : $"{endpoint} ({tls})";
     }
+
+    private static string ConnectResult(Exception ex) => ex switch
+    {
+        TimeoutException => NbdConnectResults.Timeout,
+        AuthenticationException => NbdConnectResults.Tls,
+        NbdException { InnerException: SocketException { SocketErrorCode: SocketError.TimedOut } } or SocketException { SocketErrorCode: SocketError.TimedOut } => NbdConnectResults.Timeout,
+        NbdException { InnerException: SocketException { SocketErrorCode: SocketError.ConnectionRefused } } or SocketException { SocketErrorCode: SocketError.ConnectionRefused } => NbdConnectResults.Refused,
+        _ => NbdConnectResults.Error,
+    };
 
     private static string ConnectFailureReason(Exception ex) => ex switch
     {
@@ -674,6 +727,7 @@ internal sealed class XenBackupSession : IVmBackupSession
 
     public async Task CommitAsync(IOperationLog log, CancellationToken cancellationToken)
     {
+        var watch = Stopwatch.StartNew();
         foreach (var state in _disks.Values)
         {
             await _ledger.UpdateAsync(state.Artifact, ArtifactState.CommitPending, null, cancellationToken).ConfigureAwait(false);
@@ -713,6 +767,7 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
 
         _committed = true;
+        ReleaseDuration = watch.Elapsed;
         log.Info("Snapshot removed; change tracking data kept for the next incremental backup.");
     }
 
@@ -819,7 +874,7 @@ internal sealed class XenBackupSession : IVmBackupSession
 }
 
 /// <summary>Exposes an NBD connection pool as a data-mover disk reader.</summary>
-internal sealed class NbdDiskReader(NbdConnectionPool pool, int maxConcurrentRequests) : IDiskReader
+internal sealed class NbdDiskReader(NbdConnectionPool pool, int maxConcurrentRequests, Action<int>? reportReconnects = null) : IDiskReader
 {
     public long Capacity => pool.Size;
 
@@ -832,5 +887,13 @@ internal sealed class NbdDiskReader(NbdConnectionPool pool, int maxConcurrentReq
     public ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken) =>
         pool.ReadAsync(offset, destination, cancellationToken);
 
-    public ValueTask DisposeAsync() => pool.DisposeAsync();
+    public ValueTask DisposeAsync()
+    {
+        if (pool.Reconnects > 0)
+        {
+            reportReconnects?.Invoke(pool.Reconnects);
+        }
+
+        return pool.DisposeAsync();
+    }
 }

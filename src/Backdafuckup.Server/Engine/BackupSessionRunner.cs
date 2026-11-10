@@ -23,6 +23,7 @@ public sealed class BackupSessionRunner(
     SessionTracker tracker,
     SessionQueue queue,
     GuestProcessingService guestProcessing,
+    Telemetry.BackupMetrics metrics,
     TimeProvider time,
     ILogger<BackupSessionRunner> logger)
 {
@@ -69,7 +70,7 @@ public sealed class BackupSessionRunner(
                 await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1, repository, hypervisor);
+                    var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, metrics, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1, repository, hypervisor);
                     return (item, State: await task.RunAsync(cancellationToken).ConfigureAwait(false));
                 }
                 finally
@@ -150,6 +151,7 @@ internal sealed class VmBackupTask(
     SessionEventWriter events,
     SessionTracker tracker,
     GuestProcessingService guestProcessing,
+    Telemetry.BackupMetrics metrics,
     TimeProvider time,
     ILogger logger,
     BackupJob job,
@@ -171,7 +173,17 @@ internal sealed class VmBackupTask(
     private readonly RateMeter _rate = new();
     private List<DiskMetricsDto> _diskMetrics = [];
 
+    /// <summary>The pool label of this task's metrics: the connection's name.</summary>
+    private string Pool => job.Connection.DisplayName;
+
     public async Task<SessionState> RunAsync(CancellationToken cancellationToken)
+    {
+        var state = await RunCoreAsync(cancellationToken).ConfigureAwait(false);
+        metrics.RecordVmBackup(job.Name, state);
+        return state;
+    }
+
+    private async Task<SessionState> RunCoreAsync(CancellationToken cancellationToken)
     {
         var restorePointId = Guid.CreateVersion7();
         await tracker.UpdateTaskAsync(taskId, t =>
@@ -231,7 +243,7 @@ internal sealed class VmBackupTask(
             try
             {
                 started = await hypervisor.BeginBackupAsync(
-                    new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer), _log, ledger, cancellationToken).ConfigureAwait(false);
+                    new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer, metrics.ForPool(Pool)), _log, ledger, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -241,6 +253,11 @@ internal sealed class VmBackupTask(
 
             await using var backup = started;
             var (consistency, consistencyReason, consistencyWarning) = CheckConsistency(guest, backup.GuestFreeze);
+            if (backup.Snapshot is { } facts)
+            {
+                var sqlSuspended = guest?.Quiescer is { SqlSuspendedMs: > 0 } q ? TimeSpan.FromMilliseconds(q.SqlSuspendedMs) : (TimeSpan?)null;
+                metrics.RecordSnapshot(Pool, vm.CachedName, facts, backup.GuestFreeze, sqlSuspended, consistency);
+            }
 
             _totalBytes = Math.Max(1, backup.Disks.Sum(d => d.CapacityBytes));
             lock (_metricsLock)
@@ -359,6 +376,11 @@ internal sealed class VmBackupTask(
             try
             {
                 await backup.CommitAsync(_log, CancellationToken.None).ConfigureAwait(false);
+                if (backup.Snapshot is { } snapshotFacts && backup.ReleaseDuration is { } release)
+                {
+                    metrics.RecordRelease(Pool, snapshotFacts, release);
+                }
+
                 await ReleaseBaseTokensAsync(baseline, manifestDisks).ConfigureAwait(false);
             }
             catch (SnapshotCleanupDeferredException ex)
@@ -555,7 +577,7 @@ internal sealed class VmBackupTask(
         {
             if (baseDisk.CapacityBytes != disk.CapacityBytes)
             {
-                changes = ChangedExtents.Full("the disk size changed");
+                changes = ChangedExtents.Full("the disk size changed", FullReadReasons.SizeChanged);
             }
             else
             {
@@ -565,7 +587,7 @@ internal sealed class VmBackupTask(
                 }
                 catch (Exception ex) when (ex is IOException or InvalidDataException or KeyNotFoundException)
                 {
-                    changes = ChangedExtents.Full($"the index of the previous restore point is unreadable ({ex.Message})");
+                    changes = ChangedExtents.Full($"the index of the previous restore point is unreadable ({ex.Message})", FullReadReasons.IndexUnreadable);
                 }
             }
         }
@@ -605,6 +627,8 @@ internal sealed class VmBackupTask(
         Interlocked.Add(ref _readBytes, result.Stats.ReadBytes);
         Interlocked.Add(ref _storedBytes, result.Stats.NewStoredBytes);
         var diskMetrics = ToMetrics(result.Counters);
+        metrics.RecordDisk(Pool, disk.StorageName, result.Stats.Transport ?? reader.TransportName, result.Counters,
+            !changes.IsFull ? null : session.RunMode == SessionRunMode.ActiveFull ? FullReadReasons.ActiveFull : changes.FullReasonCode ?? FullReadReasons.Other);
         UpdateDisk(disk.Key, d => d with { State = "Done", Mode = result.Stats.Mode.ToString(), FullReason = result.Stats.FullReason, Transport = result.Stats.Transport, Metrics = diskMetrics });
         _log.Info($"Disk {disk.Name}: {result.Stats.Mode} via {result.Stats.Transport}: {MetricsText.Describe(diskMetrics)}.", key);
 

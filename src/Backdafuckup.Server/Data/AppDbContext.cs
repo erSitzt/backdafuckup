@@ -65,6 +65,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
         {
             e.ToTable("api_tokens");
             e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.Scope).HasMaxLength(20).HasDefaultValue(Backdafuckup.Contracts.ApiTokenScopes.Full);
             e.Property(x => x.Prefix).HasMaxLength(16);
             e.Property(x => x.Hash).HasMaxLength(64);
             e.Property(x => x.LastUsedFrom).HasMaxLength(64);

@@ -124,14 +124,18 @@ public sealed record SnapshotDisk(
 /// <summary>What changed on a disk since a change token, or "read everything" with a reason.</summary>
 public sealed record ChangedExtents(bool IsFull, string? FullReason, IReadOnlyList<Extents.DiskExtent> Extents)
 {
-    public static ChangedExtents Full(string reason) => new(true, reason, []);
+    /// <summary>Why everything is read, as one of the fixed <see cref="FullReadReasons"/> (for metrics).</summary>
+    public string? FullReasonCode { get; init; }
+
+    public static ChangedExtents Full(string reason, string code = FullReadReasons.Other) => new(true, reason, []) { FullReasonCode = code };
 }
 
 /// <summary>Raw provider-specific VM metadata needed to re-create the VM (Xen: export_metadata output).</summary>
 public sealed record VmMetadataBlob(string Format, byte[] Content);
 
 /// <param name="Quiescer">Freezes the guest around the snapshot (application-consistent backup); null: crash-consistent.</param>
-public sealed record VmBackupRequest(string VmId, Guid JobId, Guid SessionId, Guid RestorePointId, string SnapshotName, IGuestQuiescer? Quiescer = null);
+/// <param name="Telemetry">Receives transport events of the backup (NBD connects, fallbacks) for metrics; null: none.</param>
+public sealed record VmBackupRequest(string VmId, Guid JobId, Guid SessionId, Guid RestorePointId, string SnapshotName, IGuestQuiescer? Quiescer = null, IBackupTelemetry? Telemetry = null);
 
 public enum RestoreMode
 {

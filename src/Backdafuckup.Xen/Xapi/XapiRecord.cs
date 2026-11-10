@@ -86,4 +86,22 @@ public static class XapiRecord
         record[field] is JsonObject map ? map.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty) : new Dictionary<string, string>();
 
     public static bool IsNullRef(string? reference) => string.IsNullOrEmpty(reference) || reference == NullRef;
+
+    private static readonly string[] TimeFormats = ["yyyyMMdd'T'HH:mm:ss'Z'", "yyyyMMdd'T'HH:mm:ss", "yyyyMMdd'T'HHmmss'Z'", "yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ssK"];
+
+    /// <summary>
+    /// An XAPI date-time field (e.g. <c>snapshot_time</c> "20261110T11:51:02Z", UTC, whole seconds); null when it is empty,
+    /// unparsable or the XAPI epoch "19700101T00:00:00Z" (never set).
+    /// </summary>
+    public static DateTimeOffset? Time(this JsonObject record, string field)
+    {
+        var text = record.Str(field);
+        if (text.Length == 0 ||
+            !DateTimeOffset.TryParseExact(text, TimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var time))
+        {
+            return null;
+        }
+
+        return time.ToUnixTimeSeconds() <= 0 ? null : time;
+    }
 }

@@ -1,0 +1,129 @@
+# The rules of backdafuckup.rules.yml as a PrometheusRule for the Prometheus Operator (kube-prometheus-stack).
+# Generated from backdafuckup.rules.yml: change that file and regenerate (see README.md).
+# The label "release" must match your Prometheus' ruleSelector (kube-prometheus-stack: the Helm release name).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: backdafuckup
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: backdafuckup
+      rules:
+        - alert: BackdafuckupDown
+          expr: up{job="backdafuckup"} == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "backdafuckup at {{ $labels.instance }} does not answer the scrape"
+            description: "Prometheus could not read /metrics from {{ $labels.instance }} for 10 minutes: the service is down, the port 9555 is blocked, or the scrape token was deleted (401)."
+
+        - alert: BackdafuckupVmBackupFailed
+          expr: bdfu_vm_last_backup_result{result="failed"} == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Backup of {{ $labels.vm }} failed (job {{ $labels.backup_job }})"
+            description: "The last backup attempt of VM {{ $labels.vm }} in job {{ $labels.backup_job }} failed. The session log in the console (History) names the cause."
+
+        - alert: BackdafuckupVmStale
+          expr: bdfu_vm_stale == 1
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.vm }} missed a scheduled backup (job {{ $labels.backup_job }})"
+            description: "VM {{ $labels.vm }} has no restore point from the most recent scheduled run of job {{ $labels.backup_job }} that started at least 12 hours ago."
+
+        - alert: BackdafuckupVmWithoutRestorePoint
+          expr: bdfu_vm_no_restore_point == 1
+          for: 26h
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.vm }} has no restore point (job {{ $labels.backup_job }})"
+            description: "VM {{ $labels.vm }} is in job {{ $labels.backup_job }} for more than a day but has no restore point of it: added recently and not run yet, or every run failed for it."
+
+        - alert: BackdafuckupStorageBelowMinimum
+          expr: (1 - bdfu_storage_used_bytes / bdfu_storage_size_bytes) < bdfu_storage_min_free_ratio and bdfu_storage_size_bytes > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Storage {{ $labels.storage }} of pool {{ $labels.pool }} is below the snapshot minimum"
+            description: "{{ $labels.storage }} ({{ $labels.type }}) has less free space than Xen:MinStorageFreePercent: backups refuse to snapshot VMs on it. Free up space on the storage."
+
+        - alert: BackdafuckupStorageLow
+          expr: (1 - bdfu_storage_used_bytes / bdfu_storage_size_bytes) < 2 * bdfu_storage_min_free_ratio and bdfu_storage_size_bytes > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Storage {{ $labels.storage }} of pool {{ $labels.pool }} is running out of space"
+            description: "{{ $labels.storage }} has less than twice the snapshot minimum free. A snapshot of a running VM on thick LVM needs about the VM's allocated disk size."
+
+        - alert: BackdafuckupTransportFallback
+          expr: increase(bdfu_transport_fallbacks_total[24h]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Disks of pool {{ $labels.pool }} were read with {{ $labels.to }} instead of {{ $labels.from }}"
+            description: "Reason {{ $labels.reason }} on storage {{ $labels.storage }}. The HTTP export reads the whole allocated disk on every backup. Check that the backup server reaches the hosts' NBD addresses on TCP 10809."
+
+        - alert: BackdafuckupSnapshotLeftOver
+          expr: bdfu_pool_snapshot_oldest_seconds{owner="backdafuckup"} > 6 * 3600
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "A backup snapshot in pool {{ $labels.pool }} is older than 6 hours"
+            description: "A snapshot tagged by backdafuckup is still in the pool. It holds space on thick LVM storage and lengthens the disk chain. The server retries the cleanup every 10 minutes; see bdfu_artifacts_pending and the server log."
+
+        - alert: BackdafuckupCleanupPending
+          expr: bdfu_artifacts_pending > 0
+          for: 2h
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $value }} snapshot cleanup(s) pending for over 2 hours"
+            description: "Snapshots or disks of backups could not be removed or reduced to change tracking data yet (retried every 10 minutes)."
+
+        - alert: BackdafuckupPoolUnreadable
+          expr: bdfu_pool_poll_success == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "backdafuckup cannot read pool {{ $labels.pool }}"
+            description: "Reading the storages of pool {{ $labels.pool }} failed for 15 minutes; the storage metrics keep their last values. The server log names the error."
+
+        - alert: BackdafuckupRepositoryLow
+          expr: bdfu_repository_free_bytes / bdfu_repository_size_bytes < 0.10
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Repository {{ $labels.repository }} has less than 10 % free"
+            description: "The volume of repository {{ $labels.repository }} is running out of space."
+
+        - alert: BackdafuckupSqlLogBackupLate
+          expr: time() - bdfu_sql_last_log_backup_timestamp_seconds > 2 * bdfu_sql_log_backup_interval_seconds
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "No log backup of {{ $labels.database }} on {{ $labels.vm }} for over twice the interval"
+            description: "SQL Server {{ $labels.sql_instance }} on {{ $labels.vm }}: the newest log backup of {{ $labels.database }} is older than twice the job's log backup interval."
+
+        - alert: BackdafuckupAgentOffline
+          expr: bdfu_agents{state="offline"} > 0
+          for: 2h
+          labels:
+            severity: info
+          annotations:
+            summary: "{{ $value }} guest agent(s) without contact"
+            description: "Guest agents have not reported for over 10 minutes (VM off, agent stopped, or the VM cannot reach the server on 9555). See Infrastructure → Guest Agents."

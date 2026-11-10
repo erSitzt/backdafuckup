@@ -22,6 +22,7 @@ backdafuckup uses the following third-party components. Keep this list in sync w
 | SSH.NET | MIT | Ssh (file restore into Linux VMs over SSH/SFTP) |
 | Microsoft.Data.SqlClient (and its dependencies, incl. System.Security.Cryptography.Pkcs) | MIT | Guest agent, .NET 10 build (SQL Server restores; the .NET Framework build uses the built-in System.Data.SqlClient) |
 | Scalar.AspNetCore | MIT | Server (API reference at /api-docs; telemetry and cloud features switched off) |
+| OpenTelemetry, OpenTelemetry.Extensions.Hosting, OpenTelemetry.Exporter.Prometheus.AspNetCore | Apache-2.0 | Server (Prometheus metrics at /metrics; pull only, nothing is sent out) |
 | mingw-w64 runtime (headers, libraries) and GCC runtime libraries | mingw-w64: ZPL / public domain; libgcc, libstdc++: GPL-3.0 with GCC Runtime Library Exception | bdfu-vss.dll (statically linked runtime) |
 
 Build tools (not shipped): mingw-w64 GCC (GPL-3.0) and osslsigncode (GPL-3.0) in the Docker image of `native/bdfu-vss`.

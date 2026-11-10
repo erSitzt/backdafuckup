@@ -108,6 +108,11 @@ public sealed class FakeXenPool : IAsyncDisposable
         }
     }
 
+    /// <summary>Like XAPI, VM.snapshot captures the disks one after another: each disk's snapshot_time is this much later.</summary>
+    public TimeSpan DiskSnapshotInterval { get; set; } = TimeSpan.FromSeconds(3);
+
+    private static string XapiTime(DateTimeOffset time) => time.UtcDateTime.ToString("yyyyMMdd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+
     public string Uuid(string table, string reference)
     {
         lock (_lock)
@@ -168,6 +173,7 @@ public sealed class FakeXenPool : IAsyncDisposable
                     ["SR"] = SrRef,
                     ["cbt_enabled"] = false,
                     ["type"] = "user",
+                    ["managed"] = true,
                     ["is_a_snapshot"] = false,
                     ["snapshot_of"] = "OpaqueRef:NULL",
                     ["other_config"] = new JsonObject(),
@@ -457,7 +463,9 @@ public sealed class FakeXenPool : IAsyncDisposable
             ["VBDs"] = new JsonArray(),
             ["VIFs"] = new JsonArray(),
             ["other_config"] = new JsonObject(),
+            ["snapshot_time"] = XapiTime(DateTimeOffset.UtcNow),
         });
+        var captured = DateTimeOffset.UtcNow;
         foreach (var vbdRef in ((JsonArray)vm["VBDs"]!).Select(n => n!.GetValue<string>()))
         {
             var vbd = Get("VBD", vbdRef);
@@ -475,11 +483,14 @@ public sealed class FakeXenPool : IAsyncDisposable
                 ["SR"] = source["SR"]!.DeepClone(),
                 ["cbt_enabled"] = source["cbt_enabled"]!.DeepClone(),
                 ["type"] = "user",
+                ["managed"] = true,
                 ["is_a_snapshot"] = true,
                 ["snapshot_of"] = sourceRef,
                 ["other_config"] = new JsonObject(),
                 ["cbt_generation"] = _generation,
+                ["snapshot_time"] = XapiTime(captured),
             });
+            captured += DiskSnapshotInterval;
             _data[snapVdi] = (byte[])_data[sourceRef].Clone();
             AddVbd(snapRef, snapVdi, vbd["userdevice"]!.GetValue<string>(), vbd["bootable"]!.GetValue<bool>());
         }
@@ -662,6 +673,7 @@ public sealed class FakeXenPool : IAsyncDisposable
             ["SR"] = record["SR"]!.DeepClone(),
             ["cbt_enabled"] = false,
             ["type"] = "user",
+            ["managed"] = true,
             ["is_a_snapshot"] = false,
             ["snapshot_of"] = "OpaqueRef:NULL",
             ["other_config"] = record["other_config"]?.DeepClone() ?? new JsonObject(),

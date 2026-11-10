@@ -7,7 +7,7 @@
 
 <PageTitle>API tokens – backdafuckup</PageTitle>
 <PageHeader Title="API tokens"
-            Description="Scripts call the API with a token instead of a password and act as you. Only a hash of each token is stored: copy it when you create it.">
+            Description="Scripts call the API with a token instead of a password and act as you; a metrics token lets Prometheus read /metrics and nothing else. Only a hash of each token is stored: copy it when you create it.">
     <Actions>
         <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="OpenNew">New token</MudButton>
     </Actions>
@@ -49,7 +49,14 @@ else
             <MudTh></MudTh>
         </HeaderContent>
         <RowTemplate>
-            <MudTd><b>@context.Name</b><span class="cell-sub n-560 mono">@context.Prefix…</span></MudTd>
+            <MudTd>
+                <b>@context.Name</b>
+                @if (context.Scope == ApiTokenScopes.Metrics)
+                {
+                    <span class="mini-chip info" title="Reads /metrics (Prometheus) and nothing else">metrics only</span>
+                }
+                <span class="cell-sub n-560 mono">@context.Prefix…</span>
+            </MudTd>
             <MudTd Class="c-560 mono nowrap">@context.Prefix…</MudTd>
             <MudTd Class="c-950 nowrap">@Fmt.Time(context.CreatedUtc)</MudTd>
             <MudTd Class="nowrap">
@@ -80,7 +87,8 @@ else
         with your password; a token cannot create tokens. The <MudLink Href="/api-docs" Target="_blank">API reference</MudLink> lists the endpoints.
     </MudText>
     <pre class="session-log" style="white-space:pre-wrap;margin:0">curl -H "Authorization: Bearer bdfu_…" @(Navigation.BaseUri)api/jobs
-curl -X POST -H "Authorization: Bearer bdfu_…" -H "Content-Type: application/json" -d '{}' @(Navigation.BaseUri)api/jobs/&lt;job id&gt;/run</pre>
+curl -X POST -H "Authorization: Bearer bdfu_…" -H "Content-Type: application/json" -d '{}' @(Navigation.BaseUri)api/jobs/&lt;job id&gt;/run
+curl -H "Authorization: Bearer bdfu_…" @(Navigation.BaseUri)metrics</pre>
 </MudPaper>
 
 <MudDialog @bind-Visible="_newOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Small, FullWidth = true, CloseOnEscapeKey = true })">
@@ -88,13 +96,21 @@ curl -X POST -H "Authorization: Bearer bdfu_…" -H "Content-Type: application/j
     <DialogContent>
         <MudStack Spacing="2">
             <MudTextField T="string" @bind-Value="_name" Label="Name" HelperText="What uses it, e.g. lab scripts or monitoring." Variant="Variant.Outlined" Immediate="true" MaxLength="100" />
+            <MudSelect T="string" @bind-Value="_scope" Label="Access" Variant="Variant.Outlined" Dense="true">
+                <MudSelectItem T="string" Value="@ApiTokenScopes.Full">Full API access (acts as you)</MudSelectItem>
+                <MudSelectItem T="string" Value="@ApiTokenScopes.Metrics">Metrics only (Prometheus reads /metrics)</MudSelectItem>
+            </MudSelect>
             <MudSelect T="int?" @bind-Value="_days" Label="Expires" Variant="Variant.Outlined" Dense="true">
                 <MudSelectItem T="int?" Value="30">after 30 days</MudSelectItem>
                 <MudSelectItem T="int?" Value="90">after 90 days</MudSelectItem>
                 <MudSelectItem T="int?" Value="365">after a year</MudSelectItem>
                 <MudSelectItem T="int?" Value="null">never</MudSelectItem>
             </MudSelect>
-            <MudText Typo="Typo.caption" Color="Color.Secondary">The token can do everything you can in the console, until it expires or you delete it.</MudText>
+            <MudText Typo="Typo.caption" Color="Color.Secondary">
+                @(_scope == ApiTokenScopes.Metrics
+                    ? "The token can read /metrics and nothing else: put it into Prometheus' scrape configuration. Metrics name VMs, jobs, pools and storages."
+                    : "The token can do everything you can in the console, until it expires or you delete it.")
+            </MudText>
         </MudStack>
     </DialogContent>
     <DialogActions>
@@ -111,6 +127,7 @@ curl -X POST -H "Authorization: Bearer bdfu_…" -H "Content-Type: application/j
     private bool _creating;
     private string _name = string.Empty;
     private int? _days = 90;
+    private string _scope = ApiTokenScopes.Full;
 
     protected override Task OnInitializedAsync() => LoadAsync();
 
@@ -131,6 +148,7 @@ curl -X POST -H "Authorization: Bearer bdfu_…" -H "Content-Type: application/j
     {
         _name = string.Empty;
         _days = 90;
+        _scope = ApiTokenScopes.Full;
         _newOpen = true;
     }
 
@@ -139,7 +157,7 @@ curl -X POST -H "Authorization: Bearer bdfu_…" -H "Content-Type: application/j
         _creating = true;
         try
         {
-            _created = await Api.PostAsync<CreatedApiTokenDto>("api/tokens", new CreateApiTokenDto(_name.Trim(), _days));
+            _created = await Api.PostAsync<CreatedApiTokenDto>("api/tokens", new CreateApiTokenDto(_name.Trim(), _days, _scope));
             _newOpen = false;
             await LoadAsync();
         }

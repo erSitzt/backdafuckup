@@ -16,6 +16,7 @@ public sealed class RestoreSessionRunner(
     RepositoryManager repositories,
     SessionEventWriter events,
     SessionTracker tracker,
+    Telemetry.BackupMetrics metrics,
     TimeProvider time)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
@@ -162,6 +163,12 @@ public sealed class RestoreSessionRunner(
             }
 
             var final = Metrics(done, transferred) with { CurrentBytesPerSecond = 0 };
+            await using (var db = await dbFactory.CreateDbContextAsync(CancellationToken.None).ConfigureAwait(false))
+            {
+                var pool = await db.Connections.Where(c => c.Id == targetConnection).Select(c => c.DisplayName).FirstOrDefaultAsync(CancellationToken.None).ConfigureAwait(false);
+                metrics.RecordRestoredBytes(pool ?? targetConnection.ToString(), transferred);
+            }
+
             log.Info(
                 $"Restore finished: VM '{restored.Name}' ({restored.VmId}), {VmBackupTask.Format(done)} restored in {MetricsText.Duration(final.Seconds)} " +
                 $"({MetricsText.Rate(final.ProcessingRate)}), {VmBackupTask.Format(transferred)} transferred ({MetricsText.Rate(transferred / Math.Max(0.001, final.Seconds))}).");

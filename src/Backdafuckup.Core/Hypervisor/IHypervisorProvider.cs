@@ -23,6 +23,9 @@ public interface IHypervisorSession : IAsyncDisposable
 
     Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken);
 
+    /// <summary>Space and contents of the pool's storages and the snapshots in the pool, read only (for monitoring).</summary>
+    Task<StorageState> GetStorageStateAsync(CancellationToken cancellationToken);
+
     /// <summary>The IP addresses the guest reports through its guest tools (IPv4 first); empty if unknown.</summary>
     Task<IReadOnlyList<string>> GetGuestAddressesAsync(string vmId, CancellationToken cancellationToken);
 
@@ -67,6 +70,12 @@ public interface IVmBackupSession : IAsyncDisposable
     /// the VM creates them empty. <see cref="SnapshotDisk.SnapshotDiskId"/> is empty for them.
     /// </summary>
     IReadOnlyList<SnapshotDisk> ExcludedDisks => [];
+
+    /// <summary>How the snapshot went (duration, wait, disks, storages, disk-to-disk gap); null if the platform does not say.</summary>
+    SnapshotFacts? Snapshot => null;
+
+    /// <summary>How long <see cref="CommitAsync"/> took to remove the snapshot data; null before the commit.</summary>
+    TimeSpan? ReleaseDuration => null;
 
     /// <summary>
     /// Returns the changed extents of <paramref name="disk"/> since <paramref name="since"/>, or a full read with a reason.

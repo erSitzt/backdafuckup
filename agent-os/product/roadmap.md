@@ -15,6 +15,14 @@
 - **Scheduling & retention:** scheduled backup jobs with retention and rotation policies
 - **Restore:** restore a VM to its original or an alternate host / SR
 - **Status & alerting:** job logs, success/failure reporting and notifications
+  - Prometheus metrics at `/metrics`, read with a metrics-only API token (spec `2026-11-10-1151-prometheus-metrics`). They cover:
+    - VM snapshots (duration, wait, disk-to-disk gap, guest hold);
+    - disks by transport, fallbacks and NBD connects;
+    - sessions, and per VM the last backup, stale and no restore point;
+    - pool storage (space, disks by kind, leftover snapshots);
+    - repositories, agents, SQL log backups.
+    
+    Alert rules and a Grafana dashboard are in `deploy/monitoring/`. Mail and webhook notifications are still to come.
 - **Application awareness:** application-consistent backups of Windows guests (VSS). Needs our own in-guest agent (VSS requester), because XAPI's quiesced snapshots were removed in XenServer / XCP-ng 8.1
   - On storage where the XAPI snapshot takes longer than VSS's 10 s (shared LVM, several disks): T-SQL snapshot backup for SQL Server 2022+, then an in-guest shadow copy that is reverted when the backup is read (spec `2026-11-04-2026-consistent-snapshots-slow-storage`)
 - **Active Directory objects:** application-aware AD backup with object-level restore (spec `2026-11-06-2308-ad-object-restore`)

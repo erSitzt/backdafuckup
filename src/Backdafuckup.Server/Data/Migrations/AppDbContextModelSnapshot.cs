@@ -162,6 +162,14 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(16)")
                         .HasColumnName("prefix");
 
+                    b.Property<string>("Scope")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasDefaultValue("full")
+                        .HasColumnName("scope");
+
                     b.Property<Guid>("UserId")
                         .HasColumnType("uuid")
                         .HasColumnName("user_id");

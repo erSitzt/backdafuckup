@@ -15,11 +15,21 @@ public sealed record LoginRequestDto(string UserName, string Password);
 
 public sealed record CurrentUserDto(string UserName, IReadOnlyList<string> Roles);
 
-/// <summary>An API token as listed (never the token itself).</summary>
-public sealed record ApiTokenDto(Guid Id, string Name, string Prefix, DateTimeOffset CreatedUtc, DateTimeOffset? ExpiresUtc, DateTimeOffset? LastUsedUtc, string? LastUsedFrom);
+/// <summary>What an API token may do.</summary>
+public static class ApiTokenScopes
+{
+    /// <summary>Everything its user may do.</summary>
+    public const string Full = "full";
 
-/// <summary>A new API token: a name, and the days until it expires (null: it does not expire).</summary>
-public sealed record CreateApiTokenDto(string Name, int? ExpiresInDays);
+    /// <summary>Read the Prometheus metrics at <c>/metrics</c>, nothing else (the scrape token).</summary>
+    public const string Metrics = "metrics";
+}
+
+/// <summary>An API token as listed (never the token itself). <see cref="Scope"/>: one of <see cref="ApiTokenScopes"/>.</summary>
+public sealed record ApiTokenDto(Guid Id, string Name, string Prefix, DateTimeOffset CreatedUtc, DateTimeOffset? ExpiresUtc, DateTimeOffset? LastUsedUtc, string? LastUsedFrom, string Scope = ApiTokenScopes.Full);
+
+/// <summary>A new API token: a name, the days until it expires (null: it does not expire), and its scope (null: full).</summary>
+public sealed record CreateApiTokenDto(string Name, int? ExpiresInDays, string? Scope = null);
 
 /// <summary>The created token: <see cref="Token"/> is shown this once and stored only as a hash.</summary>
 public sealed record CreatedApiTokenDto(ApiTokenDto Info, string Token);

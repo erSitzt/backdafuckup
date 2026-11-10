@@ -44,6 +44,9 @@
     <PackageVersion Include="LTRData.DiscUtils.Lvm" Version="1.0.90" />
     <PackageVersion Include="LTRData.DiscUtils.Registry" Version="1.0.90" />
     <PackageVersion Include="System.IO.Hashing" Version="10.0.14" />
+    <!-- Prometheus metrics at /metrics (Apache-2.0). The exporter is still labelled beta upstream; pull only, nothing is sent out. -->
+    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.20.1" />
+    <PackageVersion Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.20.1-beta.1" />
   </ItemGroup>
   <ItemGroup Label="Test">
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />

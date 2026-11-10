@@ -106,7 +106,11 @@ public static class XenTags
 }
 
 /// <summary>No NBD-enabled network reaches the storage of a disk.</summary>
-public sealed class XenNbdUnavailableException(string message) : InvalidOperationException(message);
+/// <param name="reason">Why, as a fixed metric label: <c>no_endpoint</c>, <c>insecure_only</c> or <c>unreachable</c>.</param>
+public sealed class XenNbdUnavailableException(string message, string reason) : InvalidOperationException(message)
+{
+    public string Reason { get; } = reason;
+}
 
 /// <summary>XAPI kept reporting VDI_IN_USE for a snapshot disk until the wait timed out.</summary>
 public sealed class XenSnapshotInUseException(string message, Exception? inner = null) : InvalidOperationException(message, inner);

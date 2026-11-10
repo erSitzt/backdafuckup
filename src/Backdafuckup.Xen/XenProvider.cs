@@ -173,6 +173,8 @@ internal sealed partial class XenHypervisorSession(XenProvider provider, Connect
 
     public Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken) => XenInventory.GetAsync(Xapi, Platform, cancellationToken);
 
+    public Task<StorageState> GetStorageStateAsync(CancellationToken cancellationToken) => XenInventory.GetStorageStateAsync(Xapi, cancellationToken);
+
     public async Task<IReadOnlyList<string>> GetGuestAddressesAsync(string vmId, CancellationToken cancellationToken)
     {
         var vmRef = await Xapi.TryGetByUuidAsync("VM", vmId, cancellationToken).ConfigureAwait(false);

@@ -3,10 +3,13 @@ using Backdafuckup.Server.Api;
 using Backdafuckup.Server.Data;
 using Backdafuckup.Server.Engine;
 using Backdafuckup.Server.Hosting;
+using Backdafuckup.Server.Telemetry;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
 using Scalar.AspNetCore;
 using Serilog;
 
@@ -82,8 +85,23 @@ try
         .AddEntityFrameworkStores<AppDbContext>()
         .AddSignInManager()
         .AddDefaultTokenProviders();
+    // Every endpoint needs a sign-in or a full API token; a metrics-only token (the scrape token) reads /metrics and nothing else.
+    var fullAccess = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().RequireAssertion(c => !c.User.IsMetricsToken()).Build();
     builder.Services.AddAuthorizationBuilder()
-        .SetFallbackPolicy(new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build());
+        .SetDefaultPolicy(fullAccess)
+        .SetFallbackPolicy(fullAccess)
+        .AddPolicy(MetricsEndpoint.Policy, policy => policy.RequireAuthenticatedUser());
+
+    // Prometheus metrics, pulled from /metrics: nothing is sent anywhere.
+    var metricsEnabled = builder.Configuration.GetValue("Metrics:Enabled", true);
+    if (metricsEnabled)
+    {
+        builder.Services.AddOpenTelemetry()
+            .ConfigureResource(resource => resource.AddService("backdafuckup", serviceVersion: ProductInfo.Current.Version, autoGenerateServiceInstanceId: false))
+            .WithMetrics(metrics => metrics
+            .AddMeter(BackupMetrics.MeterName, "System.Runtime", "Microsoft.AspNetCore.Hosting", "Microsoft.AspNetCore.Server.Kestrel", "System.Net.Http", "Npgsql")
+            .AddPrometheusExporter());
+    }
 
     builder.Services.AddSignalR();
     builder.Services.AddProblemDetails();
@@ -141,6 +159,10 @@ try
     // dotnet.js) map to the fingerprinted files, with compression and caching. Needed before the login.
     app.MapStaticAssets().AllowAnonymous();
     app.MapHealthChecks("/health").AllowAnonymous();
+    if (metricsEnabled)
+    {
+        app.MapPrometheusScrapingEndpoint(MetricsEndpoint.Path).RequireAuthorization(MetricsEndpoint.Policy);
+    }
     app.MapGet("/api/about", () => ProductInfo.Current.ToDto());
     app.MapOpenApi().AllowAnonymous();
 
