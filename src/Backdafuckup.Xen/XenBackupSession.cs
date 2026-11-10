@@ -137,8 +137,8 @@ internal sealed class XenBackupSession : IVmBackupSession
             }
         }
 
-        // A snapshot with memory writes the RAM to the VM's suspend storage (else the pool's suspend or default storage):
-        // that storage takes part in the gate and needs room for the RAM.
+        // A snapshot with memory writes the RAM to the VM's suspend storage (else the pool's, else its host's): that storage
+        // takes part in the gate and needs room for the RAM.
         var memoryBytes = vm.Long("memory_static_max");
         var needs = new Dictionary<string, long>(StringComparer.Ordinal);
         if (checkpoint)
@@ -148,7 +148,7 @@ internal sealed class XenBackupSession : IVmBackupSession
             {
                 throw new InvalidOperationException(
                     $"{vm.Str("name_label")}: no storage for its memory image. Set the VM's suspend storage (xe vm-param-set uuid={request.VmId} suspend-SR-uuid=<sr>) " +
-                    "or the pool's default storage, or back it up without memory.");
+                    "or the pool's (xe pool-param-set uuid=<pool> suspend-image-SR=<sr>), or back it up without memory.");
             }
 
             if (!storages.ContainsKey(suspendSr))
@@ -158,6 +158,11 @@ internal sealed class XenBackupSession : IVmBackupSession
 
             snapshotStorages.Add(suspendSr);
             needs[suspendSr] = memoryBytes;
+            if (!storages[suspendSr].Bool("shared"))
+            {
+                log.Info($"{vm.Str("name_label")}: its memory image goes to the local storage '{storages[suspendSr].Str("name_label")}' of its host (the host's suspend storage). " +
+                         "A local disk is often slow, which lengthens the pause; a fast shared storage as the VM's or the pool's suspend storage shortens it.");
+            }
         }
 
         var storageText = snapshotStorages.Count == 0 ? "no storage"
@@ -414,7 +419,10 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
     }
 
-    /// <summary>The storage a checkpoint writes the RAM to: the VM's suspend SR, else the pool's suspend image SR or default SR.</summary>
+    /// <summary>
+    /// The storage a checkpoint writes the RAM to, in XAPI's order: the VM's suspend SR, else the pool's suspend image SR,
+    /// else the suspend image SR of the host the VM runs on (often its local storage: slow, and the pause gets long).
+    /// </summary>
     private static async Task<string?> SuspendStorageAsync(XapiSession xapi, JsonObject vm, CancellationToken cancellationToken)
     {
         if (!XapiRecord.IsNullRef(vm.Str("suspend_SR")))
@@ -423,10 +431,21 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
 
         var pool = (await xapi.GetAllRecordsAsync("pool", cancellationToken).ConfigureAwait(false)).Values.FirstOrDefault();
-        return pool is null ? null
-            : !XapiRecord.IsNullRef(pool.Str("suspend_image_SR")) ? pool.Str("suspend_image_SR")
-            : !XapiRecord.IsNullRef(pool.Str("default_SR")) ? pool.Str("default_SR")
-            : null;
+        if (pool is not null && !XapiRecord.IsNullRef(pool.Str("suspend_image_SR")))
+        {
+            return pool.Str("suspend_image_SR");
+        }
+
+        if (!XapiRecord.IsNullRef(vm.Str("resident_on")))
+        {
+            var host = await xapi.GetRecordAsync("host", vm.Str("resident_on"), cancellationToken).ConfigureAwait(false);
+            if (!XapiRecord.IsNullRef(host.Str("suspend_image_sr")))
+            {
+                return host.Str("suspend_image_sr");
+            }
+        }
+
+        return null;
     }
 
     public GuestFreezeResult? GuestFreeze { get; private init; }

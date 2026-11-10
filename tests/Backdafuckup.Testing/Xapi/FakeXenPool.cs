@@ -42,6 +42,7 @@ public sealed class FakeXenPool : IAsyncDisposable
         var poolRef = Add("pool", new JsonObject { ["name_label"] = "lab-pool", ["master"] = HostRef });
         SrRef = AddSr("Local storage", shared: false);
         _tables["pool"][poolRef]["default_SR"] = SrRef;
+        _tables["host"][HostRef]["suspend_image_sr"] = SrRef;
         SecondSrRef = AddSr("NFS storage", shared: true);
         NetworkRef = Add("network", new JsonObject { ["name_label"] = "Pool-wide network", ["bridge"] = "xenbr0", ["MTU"] = 1500, ["purpose"] = new JsonArray("nbd") });
         SecondNetworkRef = Add("network", new JsonObject { ["name_label"] = "Backup network", ["bridge"] = "xenbr1", ["MTU"] = 1500, ["purpose"] = new JsonArray() });
