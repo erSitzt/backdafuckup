@@ -37,6 +37,14 @@ public sealed partial class EngineIntegrationTests
         Assert.Single(metrics.Of("bdfu_snapshot_release_seconds", pool));
         Assert.Equal("crash", Assert.Single(metrics.Of("bdfu_snapshots_total", pool)).Tags["consistency"]);
 
+        // Not application-consistent with two disks: the restore point says the disks were captured one after another.
+        await using (var db = await DbAsync())
+        {
+            var point = await db.RestorePoints.AsNoTracking().SingleAsync(r => r.JobId == jobId, Ct);
+            Assert.Equal("crash", point.Consistency);
+            Assert.Contains("The 2 disks were captured one after another over 3 s", point.ConsistencyReason, StringComparison.Ordinal);
+        }
+
         // The disks: read over NBD in full, as the first backup.
         Assert.Equal(DiskSize + DiskSize / 2, metrics.Of("bdfu_backup_disk_bytes_total", pool).Where(m => (string?)m.Tags["category"] == "read" && (string?)m.Tags["transport"] == "nbd").Sum(m => m.Value));
         Assert.All(metrics.Of("bdfu_backup_full_reads_total", pool), m => Assert.Equal(FullReadReasons.FirstBackup, m.Tags["reason"]));
