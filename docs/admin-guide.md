@@ -178,6 +178,8 @@ What it means:
 
 Restore points show their consistency ("application", or "crash" plus the reason) under *Backups & Restore*.
 
+**VMs with two or more disks:** XAPI snapshots the disks of a VM one after another, each paused on its own, so they are captured seconds apart (about 8–12 s per disk on shared LVM storage). Unless the guest held its writes for the whole snapshot (application-consistent), such a restore point is not consistent across its disks, not even like a power failure. Data that spans disks may not match after a restore, for example a database and its log, or a volume over several disks. The restore point then says "The N disks were captured one after another over X s" and counts as crash-consistent with a warning. The session log names the gap, and the metrics count it as `bdfu_snapshot_disk_skew_seconds`. The result of the session does not change.
+
 **Requirements**
 - Windows Server 2016 or later, or Windows 10/11, for the .NET 10 build (self-contained, no runtime needed). Older systems such as Server 2012 R2 get the .NET Framework 4.8 build, which needs .NET Framework 4.8 installed.
 - The VM reaches the backup server over HTTPS (port 9555). The agent connects outbound only; nothing has to be opened in the VM.

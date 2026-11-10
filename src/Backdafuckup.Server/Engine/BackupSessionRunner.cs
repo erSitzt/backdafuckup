@@ -253,6 +253,7 @@ internal sealed class VmBackupTask(
 
             await using var backup = started;
             var (consistency, consistencyReason, consistencyWarning) = CheckConsistency(guest, backup.GuestFreeze);
+            consistencyReason = AcrossDisks(consistency, consistencyReason, backup);
             if (backup.Snapshot is { } facts)
             {
                 var sqlSuspended = guest?.Quiescer is { SqlSuspendedMs: > 0 } q ? TimeSpan.FromMilliseconds(q.SqlSuspendedMs) : (TimeSpan?)null;
@@ -454,6 +455,26 @@ internal sealed class VmBackupTask(
         }
 
         return guest;
+    }
+
+    /// <summary>
+    /// The platform snapshots the disks of a VM one after another (Xen: each disk is paused and captured on its own). Unless
+    /// the guest held its writes for the whole snapshot (application-consistent), a VM with two or more disks is not
+    /// consistent across its disks, not even like a power failure: the reason says so, with the measured gap, and the
+    /// restore point shows the warning. The session's result does not change.
+    /// </summary>
+    private static string? AcrossDisks(string consistency, string? reason, IVmBackupSession backup)
+    {
+        if (consistency == "application" || backup.Snapshot is not { DiskCount: >= 2 } facts)
+        {
+            return reason;
+        }
+
+        var gap = facts.DiskSkew is { } skew ? $" over {skew.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} s" : string.Empty;
+        var scope = backup.GuestFreeze?.Sql is not null ? "Outside SQL Server, the" : "The";
+        var text = $"{scope} {facts.DiskCount} disks were captured one after another{gap}, not at one moment: data that spans disks " +
+                   "(a database and its log, a volume over several disks) may not match after a restore.";
+        return reason is null ? text : $"{reason} {text}";
     }
 
     /// <summary>
