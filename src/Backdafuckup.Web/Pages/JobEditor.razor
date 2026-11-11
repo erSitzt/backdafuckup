@@ -83,6 +83,16 @@ else
                     </div>
                     @if (IsCluster)
                     {
+                        <div class="mb-3">
+                            <MudTextField T="string" @bind-Value="_labelSelector" Immediate="true" DebounceInterval="250" Variant="Variant.Outlined" Margin="Margin.Dense"
+                                          Label="And every namespace with these labels (optional)" Placeholder="backup=daily"
+                                          Error="@(SelectorError is not null)" ErrorText="@SelectorError"
+                                          HelperText="As kubectl -l: key=value, key!=value, key in (a,b), key notin (a,b), key, !key; separated by commas, all have to hold. Checked at every run, so namespaces that get the labels later are backed up too." />
+                            @if (SelectorMatches is { } matches)
+                            {
+                                <div class="cell-sub mt-1">Has the labels now: @(matches.Count == 0 ? "no namespace" : string.Join(", ", matches))</div>
+                            }
+                        </div>
                         <div class="table-box">
                             <MudSimpleTable Dense="true" Hover="true" Elevation="0" FixedHeader="true">
                                 <thead><tr><th style="width:48px"></th><th>Namespace</th><th class="num">PVCs</th><th class="num">With data (snapshot)</th><th>Phase</th></tr></thead>
@@ -91,7 +101,13 @@ else
                                     {
                                         <tr class="@(_selected.ContainsKey(ns.NativeId) ? "row-selected" : null)">
                                             <td><MudCheckBox T="bool" Value="@_selected.ContainsKey(ns.NativeId)" ValueChanged="@(on => Toggle(ns, on))" Dense="true" Color="Color.Primary" /></td>
-                                            <td>@ns.Name</td>
+                                            <td>
+                                                @ns.Name
+                                                @if (SelectorMatches?.Contains(ns.Name) == true)
+                                                {
+                                                    <span class="mini-chip info" title="Backed up for its labels">by labels</span>
+                                                }
+                                            </td>
                                             <td class="num">@ns.Properties.GetValueOrDefault("volumeClaims")</td>
                                             <td class="num">@ns.Properties.GetValueOrDefault("snapshotVolumes")</td>
                                             <td>@ns.Properties.GetValueOrDefault("phase")</td>
@@ -453,6 +469,11 @@ else
                                         <span class="mini-chip">@vmName@(_withMemory.Contains(nativeId) ? " · RAM" : null)</span>
                                     }
                                 </dd>
+                                @if (IsCluster && !string.IsNullOrWhiteSpace(_labelSelector))
+                                {
+                                    <dt>By labels</dt>
+                                    <dd><span class="mini-chip info mono">@_labelSelector.Trim()</span> <span class="cell-sub">now @(SelectorMatches?.Count ?? 0) namespace(s)</span></dd>
+                                }
                             </dl>
                         </section>
                         <section class="summary-card">
@@ -567,7 +588,8 @@ else
     private IReadOnlyList<string?> Hints() =>
     [
         string.IsNullOrWhiteSpace(_name) ? null : _name.Trim(),
-        _selected.Count == 0 ? null : IsCluster ? $"{_selected.Count} namespace(s)" : _withMemory.Count > 0 ? $"{_selected.Count} VM(s), {_withMemory.Count} with memory" : $"{_selected.Count} VM(s)",
+        _selected.Count == 0 && string.IsNullOrWhiteSpace(_labelSelector) ? null
+            : IsCluster ? $"{_selected.Count} namespace(s){(string.IsNullOrWhiteSpace(_labelSelector) ? string.Empty : " + by labels")}" : _withMemory.Count > 0 ? $"{_selected.Count} VM(s), {_withMemory.Count} with memory" : $"{_selected.Count} VM(s)",
         _repositories?.FirstOrDefault(r => r.Id == _repositoryId) is { } repository ? $"{repository.Name} · {_retention} points" : null,
         Jobs.Describe(Schedule()),
         null,
@@ -601,6 +623,26 @@ else
     private List<RepositoryDto>? _repositories;
     private List<InventoryItemDto> _vms = [];
     private readonly Dictionary<string, string> _selected = [];
+
+    /// <summary>Kubernetes: the namespaces with these labels too, checked at every run (empty: none).</summary>
+    private string _labelSelector = string.Empty;
+
+    private string? SelectorError => string.IsNullOrWhiteSpace(_labelSelector) ? null : KubernetesLabelSelector.Parse(_labelSelector).Error;
+
+    /// <summary>The namespaces of the inventory whose labels match the selector now; null without a valid selector.</summary>
+    private List<string>? SelectorMatches
+    {
+        get
+        {
+            if (!IsCluster || string.IsNullOrWhiteSpace(_labelSelector) || KubernetesLabelSelector.Parse(_labelSelector).Requirements is not { } requirements)
+            {
+                return null;
+            }
+
+            return [.. _vms.Where(ns => ns.Name != "backdafuckup-system" && KubernetesLabelSelector.Matches(requirements, KubernetesLabelSelector.ParseLabels(ns.Properties.GetValueOrDefault("labels"))))
+                .Select(ns => ns.Name)];
+        }
+    }
     private readonly HashSet<string> _withMemory = [];
     private readonly HashSet<DayOfWeek> _days = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday];
     private int _step;
@@ -696,6 +738,12 @@ else
             _days.UnionWith(job.Schedule.Days);
             foreach (var o in job.Objects)
             {
+                if (KubernetesLabelSelector.IsJobObject(o.NativeId))
+                {
+                    _labelSelector = KubernetesLabelSelector.Of(o.NativeId);
+                    continue;
+                }
+
                 _selected[o.NativeId] = o.Name;
                 if (o.WithMemory)
                 {
@@ -719,6 +767,7 @@ else
         _connectionId = id;
         _selected.Clear();
         _withMemory.Clear();
+        _labelSelector = string.Empty;
         await LoadVmsAsync();
     }
 
@@ -776,7 +825,8 @@ else
     private string? Validate(int step) => step switch
     {
         0 when string.IsNullOrWhiteSpace(_name) => "Enter a name.",
-        1 when _selected.Count == 0 => IsCluster ? "Select at least one namespace." : "Select at least one VM.",
+        1 when IsCluster && SelectorError is { } selectorError => selectorError,
+        1 when _selected.Count == 0 && !(IsCluster && !string.IsNullOrWhiteSpace(_labelSelector)) => IsCluster ? "Select at least one namespace, or give labels." : "Select at least one VM.",
         2 when _repositoryId == Guid.Empty => "Select a repository.",
         3 when _scheduleKind == "Weekly" && _days.Count == 0 => "Select at least one weekday.",
         3 when _scheduleKind != "None" && !TimeOnly.TryParse(_time, out _) => "Enter the time as HH:mm.",
@@ -802,7 +852,10 @@ else
             RepositoryId = _repositoryId,
             RetentionPoints = _retention,
             Schedule = Schedule(),
-            Objects = _selected.Select(kv => new JobObjectDto(kv.Key, kv.Value, !IsCluster && _withMemory.Contains(kv.Key))).ToList(),
+            Objects = [.. _selected.Select(kv => new JobObjectDto(kv.Key, kv.Value, !IsCluster && _withMemory.Contains(kv.Key))),
+                .. IsCluster && !string.IsNullOrWhiteSpace(_labelSelector)
+                    ? [new JobObjectDto(KubernetesLabelSelector.JobObject(_labelSelector), KubernetesLabelSelector.Describe(_labelSelector.Trim()))]
+                    : Array.Empty<JobObjectDto>()],
             MaxParallelVms = _parallelVms,
             NbdConnectionsPerDisk = _nbdConnections,
             MaxParallelDisks = _parallelDisks,

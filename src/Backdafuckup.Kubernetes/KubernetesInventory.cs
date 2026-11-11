@@ -13,6 +13,9 @@ public static class KubernetesInventoryProperties
     public const string Phase = "phase";
     public const string VolumeClaims = "volumeClaims";
     public const string SnapshotVolumes = "snapshotVolumes";
+
+    /// <summary>A namespace's labels, <c>key=value</c> joined with commas (jobs select namespaces by them).</summary>
+    public const string Labels = "labels";
     public const string SizeBytes = "sizeBytes";
     public const string StorageClass = "storageClass";
     public const string Driver = "driver";
@@ -113,6 +116,7 @@ internal static class KubernetesInventory
                 [KubernetesInventoryProperties.Phase] = ns.Status?.Phase ?? string.Empty,
                 [KubernetesInventoryProperties.VolumeClaims] = claimCount.ToString(CultureInfo.InvariantCulture),
                 [KubernetesInventoryProperties.SnapshotVolumes] = snapshotCount.ToString(CultureInfo.InvariantCulture),
+                [KubernetesInventoryProperties.Labels] = string.Join(',', (ns.Metadata.Labels ?? new Dictionary<string, string>()).OrderBy(l => l.Key, StringComparer.Ordinal).Select(l => $"{l.Key}={l.Value}")),
             }));
         }
 
