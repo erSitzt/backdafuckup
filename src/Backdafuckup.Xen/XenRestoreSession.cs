@@ -236,16 +236,19 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
 
         var vm = await xapi.GetRecordAsync("VM", _vmRef, cancellationToken).ConfigureAwait(false);
         _vmArtifact = await ledger.RecordAsync(XenArtifactKinds.RestoredVm, vm.Str("uuid"), _vmRef, null, cancellationToken).ConfigureAwait(false);
+
+        // The metadata carries the original's name: renamed at once, so the pool never shows a second VM under it.
+        await xapi.CallAsync("VM.set_name_label", cancellationToken, _vmRef, plan.VmName).ConfigureAwait(false);
         if (plan.Resume)
         {
             await CheckSuspendedAsync(vm, sourceToNewDiskId, cancellationToken).ConfigureAwait(false);
         }
         else
         {
-            log.Info($"Created VM {vm.Str("name_label")} from the backed-up configuration.");
+            log.Info($"Created VM '{plan.VmName}' ({vm.Str("uuid")}) from the backed-up configuration of {vm.Str("name_label")}.");
         }
 
-        return new RestoredVm(vm.Str("uuid"), vm.Str("name_label"), vm.Str("generation_id"));
+        return new RestoredVm(vm.Str("uuid"), plan.VmName, vm.Str("generation_id"));
     }
 
     /// <summary>
@@ -261,7 +264,7 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         if (vm.Str("power_state") != "Suspended" || suspendUuid is null || suspendUuid != expected)
         {
             throw new InvalidOperationException(
-                $"XAPI created the VM {vm.Str("name_label")} ({vm.Str("uuid")}) {vm.Str("power_state")} with suspend image {suspendUuid ?? "none"} " +
+                $"XAPI created the VM '{plan.VmName}' ({vm.Str("uuid")}) {vm.Str("power_state")} with suspend image {suspendUuid ?? "none"} " +
                 $"(expected Suspended with the restored memory image {expected ?? "?"}), so it cannot resume. Restore it without memory: it then boots from its disks.");
         }
 
@@ -273,7 +276,7 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
         var generation = vm.Str("generation_id");
         var generationText = string.IsNullOrEmpty(generation) || generation == "0:0" ? "no VM generation id"
             : generation == plan.Manifest.Vm.GenerationId ? $"the VM generation id of the backup ({generation})" : $"a new VM generation id ({generation})";
-        log.Info($"Created VM {vm.Str("name_label")} suspended, with its memory as at the backup (memory image {suspendUuid}) and {generationText}.");
+        log.Info($"Created VM '{plan.VmName}' ({vm.Str("uuid")}) suspended, with its memory as at the backup (memory image {suspendUuid}) and {generationText}.");
     }
 
     public async Task<RestoredVm> CompleteAsync(CancellationToken cancellationToken)
@@ -283,7 +286,6 @@ internal sealed class XenRestoreSession(XenHypervisorSession owner, XapiSession 
             throw new InvalidOperationException("CreateVmAsync must be called first.");
         }
 
-        await xapi.CallAsync("VM.set_name_label", cancellationToken, _vmRef, plan.VmName).ConfigureAwait(false);
         if (plan.Resume && plan.Mode == RestoreMode.AlternateLocation)
         {
             await RemoveNicsAsync(cancellationToken).ConfigureAwait(false);
