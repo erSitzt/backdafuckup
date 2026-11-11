@@ -142,10 +142,11 @@ public static class InfrastructureEndpoints
                 return Results.NotFound();
             }
 
+            // The connection first: it refers to its credential, which goes after it.
             await db.Inventory.Where(i => i.ConnectionId == id).ExecuteDeleteAsync(ct);
             db.Connections.Remove(connection);
-            await db.Credentials.Where(c => c.Id == connection.CredentialId).ExecuteDeleteAsync(ct);
             await db.SaveChangesAsync(ct);
+            await db.Credentials.Where(c => c.Id == connection.CredentialId).ExecuteDeleteAsync(ct);
             return Results.NoContent();
         });
 
