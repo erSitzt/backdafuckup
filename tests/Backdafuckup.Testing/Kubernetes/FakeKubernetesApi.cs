@@ -272,6 +272,16 @@ public sealed class FakeKubernetesApi
 
         lock (_lock)
         {
+            // As a real API server: an object goes into an existing namespace only.
+            if (ns is not null && !_objects.Any(o => o.Plural == "namespaces" && (string?)o.Item["metadata"]?["name"] == ns))
+            {
+                return Json(HttpStatusCode.NotFound, new JsonObject
+                {
+                    ["kind"] = "Status", ["apiVersion"] = "v1", ["status"] = "Failure", ["reason"] = "NotFound", ["code"] = 404,
+                    ["message"] = $"fake: namespaces \"{ns}\" not found",
+                });
+            }
+
             if (_objects.Any(o => o.ApiPath == apiPath && o.Plural == plural && Matches(o.Item, ns, name!)))
             {
                 return Json(HttpStatusCode.Conflict, new JsonObject

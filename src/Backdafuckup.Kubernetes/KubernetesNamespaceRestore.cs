@@ -170,6 +170,12 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             Log.Info($"Namespace {Target} created.");
         }
 
+        // The snapshots of the restored volumes in the namespace, for their PVCs to come from.
+        foreach (var import in _imports)
+        {
+            await import.ExposeAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         // What the selected objects need from the cluster's scope: their CRDs and StorageClasses, when missing.
         var kinds = _objects.Where(o => _selected.Contains(KubernetesObjects.Key(o))).Select(KubernetesObjects.Kind).ToHashSet(StringComparer.Ordinal);
         var classes = _objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && _selected.Contains(KubernetesObjects.Key(o)))
@@ -313,7 +319,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         var spec = (JsonObject)prepared["spec"]!;
         var backupVolume = (string?)claim["spec"]?["volumeName"] is { } pvName ? _objects.FirstOrDefault(o => KubernetesObjects.Kind(o) == "PersistentVolume" && KubernetesObjects.Name(o) == pvName) : null;
 
-        if (sourceToNewDiskId.TryGetValue($"{Source}/{originalName}", out var snapshot) && volumes.TryGetValue(snapshot, out var import))
+        if (sourceToNewDiskId.TryGetValue($"{Source}/{originalName}", out var diskId) && volumes.TryGetValue(diskId, out var import) && import.Snapshot is { } snapshot)
         {
             // A Filesystem PVC from the snapshot of the restored volume: an ordinary volume of the driver, a copy of it.
             spec.Remove("volumeName");
