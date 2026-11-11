@@ -32,6 +32,7 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     private readonly string _root = Path.Combine(Path.GetTempPath(), "bdfu-api-tests", Guid.NewGuid().ToString("N"));
     private readonly FakeXenPool _pool = new();
     private readonly FakeRegistry _registry = new("bdfu-push", "secret-1");
+    private readonly Backdafuckup.Testing.Kubernetes.FakeKubernetesApi _cluster = new();
     private WebApplicationFactory<Program>? _factory;
     private FakeShareConnector? _shares;
 
@@ -65,6 +66,15 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
                 services.RemoveAll<Backdafuckup.Server.Movers.RegistryTransport>();
                 services.AddSingleton(new Backdafuckup.Server.Movers.RegistryTransport(() => _registry));
                 services.RemoveAll<IHypervisorProvider>();
+                services.AddSingleton<IHypervisorProvider>(sp => new Backdafuckup.Kubernetes.KubernetesProvider(
+                    _cluster.CreateHandler,
+                    sp.GetRequiredService<Backdafuckup.Core.DataMover.IMoverChannels>(),
+                    sp.GetRequiredService<Backdafuckup.Server.Movers.MoverRegistry>(),
+                    new Backdafuckup.Kubernetes.KubernetesTimings
+                    {
+                        Poll = TimeSpan.FromMilliseconds(20), SnapshotReady = TimeSpan.FromSeconds(20), Deleted = TimeSpan.FromSeconds(20), Progress = TimeSpan.FromHours(1),
+                    },
+                    new HookRecorder()));
                 services.AddSingleton<IHypervisorProvider>(new XenProvider(
                     new XenOptions { XapiRetryAttempts = 1, XapiRetryDelay = TimeSpan.FromMilliseconds(10) },
                     (_, host) => new XapiTransport(new Uri($"https://{host}/"), _pool.CreateHandler())));

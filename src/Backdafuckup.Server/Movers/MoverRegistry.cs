@@ -20,6 +20,7 @@ public sealed record MoverPush(string Registry, string Repository, string Tag, s
 /// </summary>
 public sealed partial class MoverRegistry(
     IDbContextFactory<AppDbContext> dbFactory, CredentialProtector protector, MoverImage image, RegistryTransport transport, TimeProvider time, ILogger<MoverRegistry> logger)
+    : IMoverImageSource
 {
     /// <summary>
     /// Starts like the Docker client's User-Agent, because proxies in front of registries (e.g. HAProxy before Nexus) often

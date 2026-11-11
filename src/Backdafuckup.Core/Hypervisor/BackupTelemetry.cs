@@ -71,6 +71,9 @@ public static class FullReadReasons
     public const string IndexUnreadable = "index_unreadable";
     public const string ActiveFull = "active_full";
     public const string MemoryImage = "memory_image";
+
+    /// <summary>The platform tracks no changes for this kind of disk at all (Kubernetes volumes): every backup reads it, no warning.</summary>
+    public const string NotTracked = "not_tracked";
     public const string Other = "other";
 }
 

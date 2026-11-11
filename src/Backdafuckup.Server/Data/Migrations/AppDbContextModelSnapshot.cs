@@ -965,6 +965,12 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("new_stored_bytes");
 
+                    b.Property<string>("ObjectKind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("object_kind");
+
                     b.Property<string>("PlatformId")
                         .IsRequired()
                         .HasColumnType("text")

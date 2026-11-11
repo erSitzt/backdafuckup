@@ -86,6 +86,18 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
     - It runs as root (block devices belong to root), but without capabilities and privilege escalation, with a read-only root file system. So the work namespace carries `pod-security.kubernetes.io/enforce: baseline`.
   - **Pull secret:** created as `backdafuckup-registry` from an optional read-only pull user (else the push user), or an existing secret, or none. The push is skipped when the registry already has the image (by digest); a backup pushes a newer image itself after a server update.
   - **Tags:** the image tag is `<version>-<digest prefix>`, so registries that forbid redeploying a tag (Nexus "Disable redeploy") accept every build.
+- **Backup of namespaces as built (task 7, 2026-11-11):**
+  - **The engine stays as it is:** the Kubernetes session gives a namespace to the backup engine like a VM (variant A).
+    - The namespace is the "VM", its PVCs with a CSI snapshot class are the disks (key = PVC name, matched by name across runs), and its objects are the metadata blob (`k8s-resources-jsonl-v1`, one object per line, without `managedFields`).
+    - The job's connection is the cluster, so jobs, schedules, retention, sessions and metrics need no new object kind.
+    - The restore point records `ObjectKind` (`Vm` or `KubernetesNamespace`) and the manifest a `Kubernetes` descriptor (cluster, namespace, volumes with their data path, hooks).
+  - **Objects:** every object of the built-in namespaced kinds (core, apps, batch, networking, policy, rbac, autoscaling) and of every namespaced CRD in its storage version, plus the namespace, the PVs and StorageClasses of its PVCs, and the CRDs that have objects in it. Events, endpoints and leases are left out, because the cluster makes them. A kind the account may not list is a warning.
+  - **Hooks:** Velero's annotations (`pre`/`post.hook.backup.velero.io/command`, `container`, `on-error`, `timeout`).
+    - The pre-hooks run before the first snapshot, the post-hooks after the last (also when a snapshot fails).
+    - A failed pre-hook with `on-error: Fail` stops the namespace before any snapshot. With `Continue` the restore point is crash-consistent with a warning; with every pre-hook successful it is application-consistent.
+  - **Snapshots:** taken one after another before any volume is read. Each one is deleted as soon as its volume has been read.
+  - **No change tracking:** every run reads every volume in full, logged as information, not a warning. Dedup stores only changed chunks.
+  - **The mover image is pushed before the first snapshot,** so a missing registry stops the run before anything is created.
 - **Agent path as a TCP tunnel:** exec (hooks) runs over the client's own WebSocket, which bypasses HTTP message handlers, so relaying HTTP requests is not enough.
   - The agent keeps a WebSocket to the server and carries TCP connections to the API server, as Rancher's remotedialer does.
   - The server gives each agent cluster a local port, so the same client code (HTTP, watch, exec, TLS and pinning) works unchanged on both paths.

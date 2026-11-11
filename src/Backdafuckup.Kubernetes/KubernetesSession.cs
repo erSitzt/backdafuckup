@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Operations;
 using k8s;
@@ -6,10 +7,12 @@ using k8s;
 namespace Backdafuckup.Kubernetes;
 
 /// <summary>
-/// An open connection to a cluster. Inventory only so far: backing up and restoring namespaces follow (spec
-/// 2026-11-11-1343-kubernetes-workload-backup, tasks 6–8).
+/// An open connection to a cluster: inventory, backups of namespaces, and the cleanup of leftover objects. Restores follow
+/// (spec 2026-11-11-1343-kubernetes-workload-backup, task 8).
 /// </summary>
-internal sealed class KubernetesSession(IKubernetes client, ConnectionSettings settings) : IHypervisorSession
+internal sealed class KubernetesSession(
+    IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
+    : IHypervisorSession
 {
     private PlatformInfo? _platform;
 
@@ -27,8 +30,19 @@ internal sealed class KubernetesSession(IKubernetes client, ConnectionSettings s
 
     public Task<IReadOnlyList<string>> GetGuestAddressesAsync(string vmId, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<string>>([]);
 
-    public Task<IVmBackupSession> BeginBackupAsync(VmBackupRequest request, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken) =>
-        throw new NotSupportedException($"Backing up Kubernetes namespaces is not available yet (cluster {settings.Address}).");
+    /// <summary>Backs up the namespace <see cref="VmBackupRequest.VmId"/>: its objects, hooks, and the data of its PVCs with CSI snapshots.</summary>
+    public async Task<IVmBackupSession> BeginBackupAsync(VmBackupRequest request, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (_platform is null)
+        {
+            _platform = await KubernetesInventory.GetPlatformAsync(client, settings, cancellationToken).ConfigureAwait(false);
+        }
+
+        return await KubernetesNamespaceBackup.StartAsync(
+            client, settings, _platform.ProductVersion, request, log, ledger, channels, images, executor ?? new ClientPodExecutor(client), timings ?? new KubernetesTimings(), cancellationToken)
+            .ConfigureAwait(false);
+    }
 
     public Task<IVmRestoreSession> BeginRestoreAsync(VmRestorePlan plan, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken) =>
         throw new NotSupportedException($"Restoring into a Kubernetes cluster is not available yet (cluster {settings.Address}).");

@@ -97,7 +97,12 @@
 <MudMenu @ref="_restoreMenu" PositionAtCursor="true" Dense="true">
     <ActivatorContent><span></span></ActivatorContent>
     <ChildContent>
-        @if (_menuPoint is { } point)
+        @if (_menuPoint is { ObjectKind: RestorePointObjectKinds.KubernetesNamespace })
+        {
+            @* Restores of namespaces (objects, PVCs, files) are the next step of the Kubernetes backup. *@
+            <MudMenuItem Icon="@AppIcons.Kubernetes" Disabled="true">Namespace restore: not available yet</MudMenuItem>
+        }
+        else if (_menuPoint is { } point)
         {
             <MudMenuItem Icon="@AppIcons.Vm" Href="@($"/restore/{point.Id}")">Entire VM</MudMenuItem>
             <MudMenuItem Icon="@AppIcons.Files" Href="@($"/files/{point.Id}")">Files and folders</MudMenuItem>

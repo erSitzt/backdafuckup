@@ -112,10 +112,45 @@ public sealed record RestorePointManifest
     /// </summary>
     public IReadOnlyDictionary<string, string>? MemoryDiskIds { get; init; }
 
+    /// <summary>For a Kubernetes namespace (the "VM" of the restore point): the cluster, its volumes and the hooks; null for VMs.</summary>
+    public KubernetesNamespaceDescriptor? Kubernetes { get; init; }
+
     /// <summary>The disks and, with memory, the RAM image: everything whose chunks the restore point references.</summary>
     [JsonIgnore]
     public IEnumerable<ManifestDisk> AllImages => Memory is null ? Disks : Disks.Append(Memory);
 }
+
+/// <summary>
+/// A Kubernetes namespace as it was backed up. Its objects are the restore point's <see cref="RestorePointManifest.Metadata"/>
+/// (one JSON object per line); its volumes with data are the disks (key = the PVC's name).
+/// </summary>
+public sealed record KubernetesNamespaceDescriptor
+{
+    /// <summary>The cluster's API address.</summary>
+    public required string Cluster { get; init; }
+
+    public required string Namespace { get; init; }
+
+    public string? NamespaceUid { get; init; }
+
+    public string? KubernetesVersion { get; init; }
+
+    /// <summary>The objects in the metadata blob.</summary>
+    public int ObjectCount { get; init; }
+
+    /// <summary>Every PVC of the namespace: how its data was backed up, or why only its objects were.</summary>
+    public IReadOnlyList<KubernetesVolumeRecord> Volumes { get; init; } = [];
+
+    /// <summary>The hooks that ran in pods before and after the snapshots.</summary>
+    public IReadOnlyList<KubernetesHookRecord> Hooks { get; init; } = [];
+}
+
+/// <param name="DataPath"><c>snapshot</c> (the data is the disk <paramref name="DiskKey"/>) or <c>objects-only</c> (see <paramref name="Reason"/>).</param>
+public sealed record KubernetesVolumeRecord(
+    string Claim, string DataPath, string? Reason, string? StorageClass, string? Driver, string? SnapshotClass, long SizeBytes, string VolumeMode, string? DiskKey);
+
+/// <param name="Phase"><c>pre</c> (before the snapshots) or <c>post</c>.</param>
+public sealed record KubernetesHookRecord(string Phase, string Pod, string Container, string Command, int? ExitCode, string? Error, double Seconds);
 
 /// <summary>A disk that was left out of the backup (e.g. marked [NOBAK]): what is needed to create it empty again.</summary>
 public sealed record ManifestExcludedDisk(

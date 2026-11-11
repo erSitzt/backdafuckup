@@ -139,6 +139,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.Id).ValueGeneratedNever();
             e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(16);
             e.Property(x => x.State).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.ObjectKind).HasMaxLength(32);
             e.Property(x => x.Vm).HasColumnType("jsonb").HasConversion(
                 v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
                 v => JsonSerializer.Deserialize<VmDescriptor>(v, JsonSerializerOptions.Default));

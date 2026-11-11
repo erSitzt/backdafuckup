@@ -36,18 +36,19 @@ else
                     @if (_pools.Count == 0)
                     {
                         <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">
-                            No virtualization pool yet. Add one under <MudLink Href="/infrastructure/pools">Virtualization Pools</MudLink>; its VMs are listed here then.
+                            No virtualization pool or Kubernetes cluster yet. Add one under <MudLink Href="/infrastructure/pools">Virtualization Pools</MudLink> or
+                            <MudLink Href="/infrastructure/kubernetes">Kubernetes Clusters</MudLink>; its VMs or namespaces are listed here then.
                         </MudAlert>
                     }
                     <div class="field-toolbar">
-                        <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="Pool" Variant="Variant.Outlined" Margin="Margin.Dense"
-                                   ToStringFunc="@(id => _pools.FirstOrDefault(p => p.Id == id)?.DisplayName ?? string.Empty)">
+                        <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="Pool or cluster" Variant="Variant.Outlined" Margin="Margin.Dense"
+                                   ToStringFunc="@(id => _pools.FirstOrDefault(p => p.Id == id) is { } c ? ConnectionLabel(c) : string.Empty)">
                             @foreach (var pool in _pools)
                             {
-                                <MudSelectItem T="Guid" Value="pool.Id">@pool.DisplayName</MudSelectItem>
+                                <MudSelectItem T="Guid" Value="pool.Id">@ConnectionLabel(pool)</MudSelectItem>
                             }
                         </MudSelect>
-                        <MudTextField @bind-Value="_vmFilter" Placeholder="Filter VMs" Variant="Variant.Outlined" Margin="Margin.Dense" Adornment="Adornment.Start"
+                        <MudTextField @bind-Value="_vmFilter" Placeholder="@(IsCluster ? "Filter namespaces" : "Filter VMs")" Variant="Variant.Outlined" Margin="Margin.Dense" Adornment="Adornment.Start"
                                       AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Clearable="true" />
                         <div class="field-toolbar-end">
                             <span class="mini-chip @(_selected.Count > 0 ? "success" : null)">@_selected.Count selected</span>
@@ -57,6 +58,36 @@ else
                             }
                         </div>
                     </div>
+                    @if (IsCluster)
+                    {
+                        <div class="table-box">
+                            <MudSimpleTable Dense="true" Hover="true" Elevation="0" FixedHeader="true">
+                                <thead><tr><th style="width:48px"></th><th>Namespace</th><th class="num">PVCs</th><th class="num">With data (snapshot)</th><th>Phase</th></tr></thead>
+                                <tbody>
+                                    @foreach (var ns in _vms.Where(v => string.IsNullOrWhiteSpace(_vmFilter) || v.Name.Contains(_vmFilter, StringComparison.OrdinalIgnoreCase)))
+                                    {
+                                        <tr class="@(_selected.ContainsKey(ns.NativeId) ? "row-selected" : null)">
+                                            <td><MudCheckBox T="bool" Value="@_selected.ContainsKey(ns.NativeId)" ValueChanged="@(on => Toggle(ns, on))" Dense="true" Color="Color.Primary" /></td>
+                                            <td>@ns.Name</td>
+                                            <td class="num">@ns.Properties.GetValueOrDefault("volumeClaims")</td>
+                                            <td class="num">@ns.Properties.GetValueOrDefault("snapshotVolumes")</td>
+                                            <td>@ns.Properties.GetValueOrDefault("phase")</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </MudSimpleTable>
+                        </div>
+                        <div class="form-note mt-3">
+                            <MudIcon Icon="@AppIcons.Kubernetes" Size="Size.Small" />
+                            <span>
+                                Every object of a namespace is backed up, Secrets included. PVCs on a CSI driver with a VolumeSnapshotClass are backed up with their data
+                                (a snapshot, read by a mover pod, deleted right after); other PVCs, e.g. on NFS, only as objects. Pods with the annotation
+                                <span class="mono">pre.hook.backup.velero.io/command</span> run it before the snapshots (application-consistent), and
+                                <span class="mono">post.hook.backup.velero.io/command</span> after them.
+                            </span>
+                        </div>
+                        break;
+                    }
                     <div class="table-box">
                         <MudSimpleTable Dense="true" Hover="true" Elevation="0" FixedHeader="true">
                             <thead><tr><th style="width:48px"></th><th>VM</th><th>Power</th><th>Disks</th><th title="Snapshot with memory: the VM can be resumed on restore">With memory</th></tr></thead>
@@ -108,6 +139,19 @@ else
                             </TitleContent>
                             <ChildContent>
                                 <div class="form-wide">
+                                    @if (IsCluster)
+                                    {
+                                        <div class="field-grid cols-4">
+                                            <MudNumericField @bind-Value="_parallelVms" Label="Namespaces in parallel" Min="1" Max="16" Variant="Variant.Outlined" />
+                                            <MudNumericField @bind-Value="_parallelDisks" Label="Volumes per namespace in parallel" Min="1" Max="8" Variant="Variant.Outlined" />
+                                            <MudNumericField @bind-Value="_retries" Label="Retries for failed namespaces" Min="0" Max="10" Variant="Variant.Outlined" />
+                                        </div>
+                                        <MudText Typo="Typo.caption" Class="help-text">
+                                            Each volume is read by its own mover pod. The snapshots of a namespace are taken one after another, before any volume is read.
+                                        </MudText>
+                                    }
+                                    else
+                                    {
                                     <MudSelect T="string" @bind-Value="_transport" Label="Disk transport" Variant="Variant.Outlined" Class="form-narrow">
                                         <MudSelectItem T="string" Value="@TransportModes.Automatic">Automatic (NBD, otherwise HTTP export)</MudSelectItem>
                                         <MudSelectItem T="string" Value="@TransportModes.NbdOnly">NBD only</MudSelectItem>
@@ -127,10 +171,13 @@ else
                                         Each disk is read as its own stream. Parallel streams speed up the HTTP export, which is limited per stream,
                                         until the network is full: on a 1 Gbit/s link about two streams already reach the line rate.
                                     </MudText>
+                                    }
                                 </div>
                             </ChildContent>
                         </MudExpansionPanel>
 
+                        @if (!IsCluster)
+                        {
                         <MudExpansionPanel>
                             <TitleContent>
                                 <SectionTitle Icon="@AppIcons.ApplicationConsistent" Title="Guest processing" Summary="@GuestSummary()" On="_guest" />
@@ -326,6 +373,7 @@ else
                                 </div>
                             </ChildContent>
                         </MudExpansionPanel>
+                        }
                     </MudExpansionPanels>
                     break;
 
@@ -372,10 +420,10 @@ else
                             </dl>
                         </section>
                         <section class="summary-card">
-                            <div class="summary-card-head"><MudIcon Icon="@AppIcons.Vm" Size="Size.Small" /> Virtual machines</div>
+                            <div class="summary-card-head"><MudIcon Icon="@(IsCluster ? AppIcons.Kubernetes : AppIcons.Vm)" Size="Size.Small" /> @(IsCluster ? "Namespaces" : "Virtual machines")</div>
                             <dl class="summary-list">
-                                <dt>Pool</dt><dd>@_pools.FirstOrDefault(p => p.Id == _connectionId)?.DisplayName</dd>
-                                <dt>VMs (@_selected.Count)</dt>
+                                <dt>@(IsCluster ? "Cluster" : "Pool")</dt><dd>@_pools.FirstOrDefault(p => p.Id == _connectionId)?.DisplayName</dd>
+                                <dt>@(IsCluster ? "Namespaces" : "VMs") (@_selected.Count)</dt>
                                 <dd>
                                     @foreach (var (nativeId, vmName) in _selected.OrderBy(kv => kv.Value, StringComparer.OrdinalIgnoreCase))
                                     {
@@ -389,11 +437,29 @@ else
                             <dl class="summary-list">
                                 <dt>Repository</dt><dd>@_repositories.FirstOrDefault(r => r.Id == _repositoryId)?.Name</dd>
                                 <dt>Retention</dt><dd>@_retention restore points</dd>
-                                <dt>Disk transport</dt><dd>@TransportText(_transport)</dd>
-                                <dt>In parallel</dt><dd>@_parallelVms VM(s), @_parallelDisks disk(s) per VM, @_nbdConnections NBD connection(s) per disk</dd>
+                                @if (IsCluster)
+                                {
+                                    <dt>In parallel</dt><dd>@_parallelVms namespace(s), @_parallelDisks volume(s) per namespace</dd>
+                                }
+                                else
+                                {
+                                    <dt>Disk transport</dt><dd>@TransportText(_transport)</dd>
+                                    <dt>In parallel</dt><dd>@_parallelVms VM(s), @_parallelDisks disk(s) per VM, @_nbdConnections NBD connection(s) per disk</dd>
+                                }
                                 <dt>Retries</dt><dd>@_retries</dd>
                             </dl>
                         </section>
+                        @if (IsCluster)
+                        {
+                            <section class="summary-card">
+                                <div class="summary-card-head"><MudIcon Icon="@AppIcons.ApplicationConsistent" Size="Size.Small" /> Consistency</div>
+                                <dl class="summary-list">
+                                    <dt>Volumes</dt><dd>crash-consistent snapshots; application-consistent where pods have backup hooks</dd>
+                                </dl>
+                            </section>
+                        }
+                        else
+                        {
                         <section class="summary-card">
                             <div class="summary-card-head"><MudIcon Icon="@AppIcons.ApplicationConsistent" Size="Size.Small" /> Consistency and SQL Server</div>
                             <dl class="summary-list">
@@ -403,10 +469,13 @@ else
                                 <dd>@(_sqlBackup ? $"log backups every {LogInterval()} min; full backups: {Jobs.Describe(SqlSchedule(_fullKind, _fullTime, _fullDays))}; system databases: {Jobs.Describe(SqlSchedule(_systemKind, _systemTime, _systemDays))}" : "off")</dd>
                             </dl>
                         </section>
+                        }
                     </div>
                     <MudSwitch T="bool" @bind-Value="_enabled" Color="Color.Primary" Label="Job enabled" Class="mt-4" />
                     <MudAlert Severity="Severity.Info" Dense="true" Variant="Variant.Text" Class="mt-2">
-                        Changed block tracking is enabled on the VMs' disks with the first backup. While it is enabled, storage live migration of those disks is not possible.
+                        @(IsCluster
+                            ? "Each run reads the volumes in full (Kubernetes has no change tracking); the repository stores only the chunks that changed. The mover image must be in a registry the cluster can pull from (Kubernetes Clusters → Mover image)."
+                            : "Changed block tracking is enabled on the VMs' disks with the first backup. While it is enabled, storage live migration of those disks is not possible.")
                     </MudAlert>
                     break;
             }
@@ -434,31 +503,41 @@ else
 }
 
 @code {
-    private static readonly string[] Steps = ["Name", "Virtual machines", "Storage", "Schedule", "Summary"];
+    private string[] Steps => ["Name", IsCluster ? "Namespaces" : "Virtual machines", "Storage", "Schedule", "Summary"];
 
-    private static readonly string[] StepTitles = ["Name", "Virtual machines", "Storage and processing", "Schedule", "Summary"];
+    private string[] StepTitles => ["Name", IsCluster ? "Namespaces" : "Virtual machines", "Storage and processing", "Schedule", "Summary"];
 
-    private static readonly string[] StepIntros =
+    private string[] StepIntros =>
     [
         "How the job appears in lists, sessions and notifications.",
-        "The VMs this job backs up, all from one pool. With memory takes a snapshot with RAM of a VM.",
-        "Where the restore points go and how many are kept; how the disks are read, and how the guests and their SQL Server databases are handled.",
-        "When the job runs. SQL Server log backups have their own interval (Storage and processing).",
+        IsCluster
+            ? "The namespaces this job backs up, all from one cluster: their objects, and the data of their PVCs whose storage takes CSI snapshots."
+            : "The VMs this job backs up, all from one pool. With memory takes a snapshot with RAM of a VM.",
+        IsCluster
+            ? "Where the restore points go and how many are kept; how many namespaces and volumes are read at a time."
+            : "Where the restore points go and how many are kept; how the disks are read, and how the guests and their SQL Server databases are handled.",
+        IsCluster ? "When the job runs." : "When the job runs. SQL Server log backups have their own interval (Storage and processing).",
         "Check the settings, then save the job.",
     ];
+
+    /// <summary>The job backs up namespaces of a Kubernetes cluster rather than VMs of a pool.</summary>
+    private bool IsCluster => _pools?.FirstOrDefault(p => p.Id == _connectionId)?.Kind == "Kubernetes";
+
+    private static string ConnectionLabel(ConnectionDto connection) => connection.Kind == "Kubernetes" ? $"{connection.DisplayName} (Kubernetes cluster)" : connection.DisplayName;
 
     /// <summary>What was chosen in each step, under its label in the step bar.</summary>
     private IReadOnlyList<string?> Hints() =>
     [
         string.IsNullOrWhiteSpace(_name) ? null : _name.Trim(),
-        _selected.Count == 0 ? null : _withMemory.Count > 0 ? $"{_selected.Count} VM(s), {_withMemory.Count} with memory" : $"{_selected.Count} VM(s)",
+        _selected.Count == 0 ? null : IsCluster ? $"{_selected.Count} namespace(s)" : _withMemory.Count > 0 ? $"{_selected.Count} VM(s), {_withMemory.Count} with memory" : $"{_selected.Count} VM(s)",
         _repositories?.FirstOrDefault(r => r.Id == _repositoryId) is { } repository ? $"{repository.Name} · {_retention} points" : null,
         Jobs.Describe(Schedule()),
         null,
     ];
 
-    private string TransportSummary() =>
-        $"{_transport switch { TransportModes.NbdOnly => "NBD only", TransportModes.HttpExportOnly => "HTTP export only", _ => "Automatic transport" }} · " +
+    private string TransportSummary() => IsCluster
+        ? $"{_parallelVms} namespace(s) and {_parallelDisks} volume(s) per namespace in parallel · {_retries} retries"
+        : $"{_transport switch { TransportModes.NbdOnly => "NBD only", TransportModes.HttpExportOnly => "HTTP export only", _ => "Automatic transport" }} · " +
         $"{_parallelVms} VM(s) and {_parallelDisks} disk(s) per VM in parallel · {_retries} retries";
 
     private string GuestSummary() => !_guest
@@ -528,7 +607,7 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer");
+        _pools = [.. (await Api.GetAsync<List<ConnectionDto>>("api/connections")).OrderBy(c => c.Kind == "Kubernetes").ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)];
         _repositories = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
         _credentials = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
         var logins = await Api.GetAsync<List<SqlCredentialDto>>("api/credentials/sql");
@@ -603,7 +682,8 @@ else
     }
 
     private async Task LoadVmsAsync() =>
-        _vms = _connectionId == Guid.Empty ? [] : (await Api.GetAsync<List<InventoryItemDto>>($"api/connections/{_connectionId}/inventory")).Where(i => i.Kind == "Vm").ToList();
+        _vms = _connectionId == Guid.Empty ? [] : (await Api.GetAsync<List<InventoryItemDto>>($"api/connections/{_connectionId}/inventory"))
+            .Where(i => i.Kind == (IsCluster ? "Namespace" : "Vm")).OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToList();
 
     private void Toggle(InventoryItemDto vm, bool on)
     {
@@ -655,7 +735,7 @@ else
     private string? Validate(int step) => step switch
     {
         0 when string.IsNullOrWhiteSpace(_name) => "Enter a name.",
-        1 when _selected.Count == 0 => "Select at least one VM.",
+        1 when _selected.Count == 0 => IsCluster ? "Select at least one namespace." : "Select at least one VM.",
         2 when _repositoryId == Guid.Empty => "Select a repository.",
         3 when _scheduleKind == "Weekly" && _days.Count == 0 => "Select at least one weekday.",
         3 when _scheduleKind != "None" && !TimeOnly.TryParse(_time, out _) => "Enter the time as HH:mm.",
@@ -681,18 +761,18 @@ else
             RepositoryId = _repositoryId,
             RetentionPoints = _retention,
             Schedule = Schedule(),
-            Objects = _selected.Select(kv => new JobObjectDto(kv.Key, kv.Value, _withMemory.Contains(kv.Key))).ToList(),
+            Objects = _selected.Select(kv => new JobObjectDto(kv.Key, kv.Value, !IsCluster && _withMemory.Contains(kv.Key))).ToList(),
             MaxParallelVms = _parallelVms,
             NbdConnectionsPerDisk = _nbdConnections,
             MaxParallelDisks = _parallelDisks,
-            GuestProcessing = _guest,
+            GuestProcessing = _guest && !IsCluster,
             GuestFailurePolicy = _guestPolicy,
             GuestCredentialId = _guest ? _guestCredentialId : null,
             GuestProcessingMode = _guestMode,
             SqlCredentialId = (_guest && _guestMode == GuestProcessingModes.SqlSnapshot) || _sqlBackup ? _sqlCredentialId : null,
             SqlSnapshotCopyOnly = _sqlCopyOnly,
             SqlBackup = new SqlBackupSettingsDto(
-                _sqlBackup,
+                _sqlBackup && !IsCluster,
                 LogInterval(),
                 SqlSchedule(_fullKind, _fullTime, _fullDays),
                 SqlSchedule(_systemKind, _systemTime, _systemDays),

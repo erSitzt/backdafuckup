@@ -50,3 +50,10 @@ public sealed record MoverDeployment(string Image, string? PullSecretName, strin
     /// <summary>The name of the pull secret the server creates in the work namespace.</summary>
     public const string CreatedSecretName = "backdafuckup-registry";
 }
+
+/// <summary>The mover image in a registry the clusters can pull from (the server pushes it there when it is not yet).</summary>
+public interface IMoverImageSource
+{
+    /// <param name="log">Gets a line per step of a push.</param>
+    Task<MoverDeployment> EnsurePushedAsync(Action<string>? log, CancellationToken cancellationToken);
+}

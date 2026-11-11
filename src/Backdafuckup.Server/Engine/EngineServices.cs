@@ -497,7 +497,8 @@ public static class EngineServiceCollectionExtensions
 
         if (!services.Any(d => d.ServiceType == typeof(IHypervisorProvider) && d.ImplementationInstance is IHypervisorProvider { Kind: HypervisorKind.Kubernetes }))
         {
-            services.AddSingleton<IHypervisorProvider>(new Backdafuckup.Kubernetes.KubernetesProvider());
+            services.AddSingleton<IHypervisorProvider>(sp => new Backdafuckup.Kubernetes.KubernetesProvider(
+                channels: sp.GetRequiredService<Backdafuckup.Core.DataMover.IMoverChannels>(), images: sp.GetRequiredService<Movers.MoverRegistry>()));
         }
 
         services.Configure<Agents.AgentOptions>(configuration.GetSection("Agent"));
