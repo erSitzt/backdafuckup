@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Restore application with preview</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;color:#1f2328;background:#f5f6f7}
+a{color:#00704a}a:hover{color:#005638}
+.bar{height:48px;background:#000;color:#fff;display:flex;align-items:center;gap:12px;padding:0 16px;font-size:14px}
+.logo{font-weight:800;font-style:italic;font-size:19px;letter-spacing:-.02em}
+.shell{display:flex;flex-wrap:wrap;min-height:852px}
+.nav{flex:1 1 220px;max-width:240px;background:#f7f8f8;border-right:1px solid #e3e6e8;padding:8px 0}
+.nav a{display:flex;align-items:center;gap:12px;padding:9px 16px;color:#2b2f33;text-decoration:none;font-size:14px}
+.nav a.on{background:#e6eeeb;color:#00704a;font-weight:600}
+.nav a.sub{padding-left:40px}
+.nav svg{width:18px;height:18px;flex:0 0 18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.main{flex:999 1 560px;min-width:0;padding:24px 32px;box-sizing:border-box}
+h1{font-size:24px;margin:0 0 4px;font-weight:600}
+h2{font-size:15px;margin:0 0 12px;font-weight:600}
+.lead{color:#5f6b73;font-size:14px;margin:0 0 18px}
+.card{background:#fff;border:1px solid #e3e6e8;border-radius:8px}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:0 8px;border-radius:10px;font-size:12px;line-height:20px;background:#eef0f1;color:#2b2f33;white-space:nowrap;margin:1px 4px 1px 0}
+.chip.ok{background:#e6f2ec;color:#1b5e20}.chip.info{background:#e3f0fb;color:#0d5aa7}.chip.warn{background:#fdf0e1;color:#8a4b00}.chip.err{background:#fde7e7;color:#a11d1d}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font-weight:600;color:#3b444b;background:#f7f8f8;padding:9px 12px;border-bottom:1px solid #e3e6e8;white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid #eef0f1;vertical-align:middle}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 16px;border-radius:6px;border:1px solid #00704a;background:#00704a;color:#fff;font-family:inherit;font-size:13px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;cursor:pointer}
+.btn.out{background:#fff;color:#00704a}
+.btn.text{background:transparent;border-color:transparent;color:#2b2f33}
+.s{display:block;color:#5f6b73;font-size:12px}
+.sec{padding:18px 20px;border-bottom:1px solid #e3e6e8}
+.choice{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.opt{border:1px solid #c9cfd3;border-radius:8px;padding:12px 14px;font-size:14px;display:flex;gap:10px;align-items:flex-start}
+.opt.on{border-color:#00704a;background:#f0f7f4}
+.field{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#5f6b73}
+.field select,.field input{height:40px;border:1px solid #c9cfd3;border-radius:6px;padding:0 12px;font-family:inherit;font-size:14px;color:#1f2328;background:#fff}
+</style>
+</helmet>
+<div>
+<header class="bar"><span class="logo">backdafuckup</span><span style="flex:1"></span><span>v0.4.0</span><span>admin</span></header>
+<div class="shell">
+<nav class="nav" aria-label="Main">
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>Home</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5h6v2"/></svg>Backup Jobs</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 18a5 5 0 1 1 1-9.9A6 6 0 0 1 19 10a4 4 0 0 1-1 8z"/><path d="M12 15v-5m-2.5 2.5L12 10l2.5 2.5"/></svg>Backups &amp; Restore</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><circle cx="12" cy="12" r="3"/></svg>Kubernetes</a>
+<a href="#" class="sub on" aria-current="page">Applications</a>
+<a href="#" class="sub">Policies</a>
+<a href="#" class="sub">Clusters</a>
+</nav>
+<main class="main">
+<h1>Restore redis</h1>
+<p class="lead">From the restore point of 11/11/2026 02:01 (application-consistent). Nothing is written before you confirm the preview.</p>
+<div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start">
+<div class="card" style="flex: 999 1 560px; min-width: 0">
+<div class="sec"><h2>Where to</h2>
+<div class="choice">
+<label class="opt on"><input type="radio" name="t" checked><span><b>Same namespace</b><span class="s">rke2-qa / redis</span></span></label>
+<label class="opt"><input type="radio" name="t"><span><b>New namespace</b><span class="s">e.g. redis-restored, side by side</span></span></label>
+<label class="opt"><input type="radio" name="t"><span><b>Another cluster</b><span class="s">with namespace and storage class mapping (phase 2)</span></span></label>
+</div></div>
+<div class="sec"><h2>Volumes</h2>
+<table><thead><tr><th>PVC</th><th>Restore</th><th>Now in the cluster</th></tr></thead><tbody>
+<tr><td>data-redis-shop-0</td><td><select aria-label="data-redis-shop-0"><option>replace its data</option></select></td><td><span class="chip warn">in use: StatefulSet scaled to 0, then back to 1</span></td></tr>
+<tr><td>data-redis-session-0</td><td><select aria-label="data-redis-session-0"><option>as new PVC data-redis-session-0-restored</option></select></td><td><span class="chip">left as it is</span></td></tr>
+<tr><td>data-redis-crm-0</td><td><select aria-label="data-redis-crm-0"><option>leave</option></select></td><td><span class="chip">left as it is</span></td></tr>
+</tbody></table></div>
+<div class="sec" style="border-bottom: 0"><h2>Confirm</h2>
+<label class="field">Type the namespace to replace its data<input placeholder="redis"></label></div>
+<div style="display: flex; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid #e3e6e8">
+<button class="btn text" type="button">Cancel</button><span style="flex: 1"></span><button class="btn" type="button">Restore</button>
+</div>
+</div>
+<aside class="card" style="flex: 1 1 320px; padding: 18px 20px">
+<h2>Preview</h2>
+<ul style="margin: 0; padding-left: 18px; font-size: 14px; line-height: 1.9">
+<li><span class="chip err">create</span>StatefulSet redis-shop, Service redis-shop</li>
+<li><span class="chip warn">replace</span>data of data-redis-shop-0 (8 GiB)</li>
+<li><span class="chip ok">new</span>PVC data-redis-session-0-restored</li>
+<li><span class="chip">skip</span>27 objects unchanged</li>
+<li><span class="chip info">Fleet</span>2 objects managed by Fleet: Fleet may put its version back</li>
+</ul>
+<p class="s" style="margin-top: 12px">Secrets: 3 come back (keys only shown). The restore is logged object by object in the session.</p>
+</aside>
+</div>
+</main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

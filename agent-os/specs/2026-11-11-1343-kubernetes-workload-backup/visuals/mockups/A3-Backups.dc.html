@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Backups and restore with namespaces</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;color:#1f2328;background:#f5f6f7}
+a{color:#00704a}a:hover{color:#005638}
+.bar{height:48px;background:#000;color:#fff;display:flex;align-items:center;gap:12px;padding:0 16px;font-size:14px}
+.logo{font-weight:800;font-style:italic;font-size:19px;letter-spacing:-.02em}
+.shell{display:flex;flex-wrap:wrap;min-height:852px}
+.nav{flex:1 1 220px;max-width:240px;background:#f7f8f8;border-right:1px solid #e3e6e8;padding:8px 0}
+.nav a{display:flex;align-items:center;gap:12px;padding:9px 16px;color:#2b2f33;text-decoration:none;font-size:14px}
+.nav a.on{background:#e6eeeb;color:#00704a;font-weight:600}
+.nav svg{width:18px;height:18px;flex:0 0 18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.main{flex:999 1 560px;min-width:0;padding:24px 32px;box-sizing:border-box}
+h1{font-size:24px;margin:0 0 4px;font-weight:600}
+.lead{color:#5f6b73;font-size:14px;margin:0 0 18px}
+.card{background:#fff;border:1px solid #e3e6e8;border-radius:8px}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:0 8px;border-radius:10px;font-size:12px;line-height:20px;background:#eef0f1;color:#2b2f33;white-space:nowrap;margin:1px 4px 1px 0}
+.chip.ok{background:#e6f2ec;color:#1b5e20}.chip.info{background:#e3f0fb;color:#0d5aa7}.chip.warn{background:#fdf0e1;color:#8a4b00}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font-weight:600;color:#3b444b;background:#f7f8f8;padding:10px 12px;border-bottom:1px solid #e3e6e8;white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid #eef0f1;vertical-align:middle}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 14px;border-radius:6px;border:1px solid #00704a;background:#00704a;color:#fff;font-family:inherit;font-size:12px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;cursor:pointer}
+.btn.out{background:#fff;color:#00704a}
+.s{display:block;color:#5f6b73;font-size:12px}
+.field{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#5f6b73}
+.field select,.field input{height:38px;border:1px solid #c9cfd3;border-radius:6px;padding:0 12px;font-family:inherit;font-size:14px;color:#1f2328;background:#fff;min-width:150px}
+.grp{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:10px 14px;border-bottom:1px solid #e3e6e8;background:#fff}
+.menu{position:absolute;right:16px;top:44px;width:270px;background:#fff;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.16),0 1px 3px rgba(0,0,0,.12);padding:6px 0;z-index:2}
+.menu button{display:flex;align-items:center;gap:12px;width:100%;border:0;background:none;padding:9px 16px;font-family:inherit;font-size:14px;color:#1f2328;text-align:left;cursor:pointer}
+.menu button:hover{background:#f1f3f4}
+.menu svg{width:18px;height:18px;fill:none;stroke:#5f6b73;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+tr.pts td{background:#f7f8f8}
+</style>
+</helmet>
+<div>
+<header class="bar"><span class="logo">backdafuckup</span><span style="flex:1"></span><span>v0.4.0</span><span>admin</span></header>
+<div class="shell">
+<nav class="nav" aria-label="Main">
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>Home</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5h6v2"/></svg>Backup Jobs</a>
+<a href="#" class="on" aria-current="page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 18a5 5 0 1 1 1-9.9A6 6 0 0 1 19 10a4 4 0 0 1-1 8z"/><path d="M12 15v-5m-2.5 2.5L12 10l2.5 2.5"/></svg>Backups &amp; Restore</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/></svg>SQL Server</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.6L4 8.7"/><path d="M4 4v4.7h4.7M12 8v4l3 2"/></svg>History</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="5" rx="1"/><rect x="3" y="16" width="6" height="5" rx="1"/><rect x="15" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M6 16v-4h12v4"/></svg>Backup Infrastructure</a>
+</nav>
+<main class="main">
+<h1>Backups &amp; Restore</h1>
+<p class="lead">Every backed-up VM and Kubernetes namespace with its newest restore point, by job. Expand one for all its restore points; restore the whole namespace, a single volume, files or selected objects.</p>
+<div class="card" style="display: flex; flex-wrap: wrap; gap: 12px; padding: 14px; margin-bottom: 16px">
+<label class="field">Search<input type="search" placeholder="VM, namespace or job"></label>
+<label class="field">Kind<select><option>VMs and namespaces</option></select></label>
+<label class="field">Contains<select><option>Anything</option></select></label>
+<label class="field">Consistency<select><option>Any</option></select></label>
+</div>
+<div class="card" style="overflow: visible">
+<div class="grp"><b>Kubernetes QA nightly</b><span style="color: #5f6b73; font-size: 13px">cluster rke2-qa · daily at 02:00 · 5 namespaces</span><span class="chip warn">1 objects only</span></div>
+<div style="overflow-x: auto; position: relative">
+<table>
+<thead><tr><th style="width: 24px"></th><th>Namespace</th><th>Newest restore point</th><th>Points</th><th>Stored</th><th>Contains</th><th></th></tr></thead>
+<tbody>
+<tr><td>›</td><td><b>minio</b><span class="s">rke2-qa</span></td><td>2 h ago<span class="s">11/11/2026 02:04</span></td><td>14</td><td>21.6 GB</td><td><span class="chip">crash-consistent</span><span class="chip info">7 volumes</span></td><td style="text-align: right"><button class="btn out" type="button">Restore</button></td></tr>
+<tr><td>›</td><td><b>mongodb</b><span class="s">rke2-qa</span></td><td>2 h ago<span class="s">11/11/2026 02:06</span></td><td>14</td><td>3.1 GB</td><td><span class="chip ok">application-consistent</span><span class="chip info">1 volume</span></td><td style="text-align: right"><button class="btn out" type="button">Restore</button></td></tr>
+<tr><td>›</td><td><b>portal</b><span class="s">rke2-qa</span></td><td>2 h ago<span class="s">11/11/2026 02:07</span></td><td>14</td><td>0.2 MB</td><td><span class="chip warn">21 volumes: objects only</span></td><td style="text-align: right"><button class="btn out" type="button">Restore</button></td></tr>
+<tr><td>⌄</td><td><b>redis</b><span class="s">rke2-qa</span></td><td>2 h ago<span class="s">11/11/2026 02:01</span></td><td>14</td><td>9.8 GB</td><td><span class="chip ok">application-consistent</span><span class="chip info">8 volumes</span></td><td style="text-align: right; position: relative"><button class="btn" type="button" aria-expanded="true">Restore</button>
+<div class="menu" role="menu">
+<button type="button" role="menuitem"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/></svg>Entire namespace</button>
+<button type="button" role="menuitem"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><circle cx="12" cy="10" r="4"/></svg>Single volume (PVC)</button>
+<button type="button" role="menuitem"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Files and folders</button>
+<button type="button" role="menuitem"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7"/></svg>Objects (explorer)</button>
+</div></td></tr>
+<tr class="pts"><td></td><td colspan="6">
+<table>
+<thead><tr><th>Created</th><th>Type</th><th>Consistency</th><th>Volumes</th><th>New data</th></tr></thead>
+<tbody>
+<tr><td>11/11/2026 02:01</td><td>Incremental</td><td><span class="chip ok">application-consistent</span><span class="chip info">hook redis-cli save ×8</span></td><td>8 (64 GiB)</td><td>412 MB</td></tr>
+<tr><td>10/11/2026 02:01</td><td>Incremental</td><td><span class="chip ok">application-consistent</span></td><td>8 (64 GiB)</td><td>388 MB</td></tr>
+<tr><td>09/11/2026 02:02</td><td>Incremental</td><td><span class="chip">crash-consistent</span><span class="chip warn">hook failed on redis-odin-0</span></td><td>8 (64 GiB)</td><td>401 MB</td></tr>
+</tbody>
+</table>
+</td></tr>
+<tr><td>›</td><td><b>rabbitmq</b><span class="s">rke2-qa</span></td><td>2 h ago<span class="s">11/11/2026 02:05</span></td><td>14</td><td>4.4 GB</td><td><span class="chip">crash-consistent</span><span class="chip info">3 volumes</span></td><td style="text-align: right"><button class="btn out" type="button">Restore</button></td></tr>
+</tbody>
+</table>
+</div>
+<div class="grp" style="border-top: 1px solid #e3e6e8"><b>Nightly servers</b><span style="color: #5f6b73; font-size: 13px">pool Pool A · daily at 22:00 · 3 VMs</span></div>
+<div style="overflow-x: auto">
+<table>
+<tbody>
+<tr><td style="width: 24px">›</td><td><b>app01</b><span class="s">VM</span></td><td>12 h ago<span class="s">10/11/2026 22:03</span></td><td>14</td><td>48.2 GB</td><td><span class="chip ok">application-consistent</span></td><td style="text-align: right"><button class="btn out" type="button">Restore</button></td></tr>
+</tbody>
+</table>
+</div>
+</div>
+</main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

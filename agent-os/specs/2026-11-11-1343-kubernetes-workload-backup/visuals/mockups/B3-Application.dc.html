@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Application detail</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;color:#1f2328;background:#f5f6f7}
+a{color:#00704a}a:hover{color:#005638}
+.bar{height:48px;background:#000;color:#fff;display:flex;align-items:center;gap:12px;padding:0 16px;font-size:14px}
+.logo{font-weight:800;font-style:italic;font-size:19px;letter-spacing:-.02em}
+.shell{display:flex;flex-wrap:wrap;min-height:852px}
+.nav{flex:1 1 220px;max-width:240px;background:#f7f8f8;border-right:1px solid #e3e6e8;padding:8px 0}
+.nav a{display:flex;align-items:center;gap:12px;padding:9px 16px;color:#2b2f33;text-decoration:none;font-size:14px}
+.nav a.on{background:#e6eeeb;color:#00704a;font-weight:600}
+.nav a.sub{padding-left:40px}
+.nav svg{width:18px;height:18px;flex:0 0 18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.main{flex:999 1 560px;min-width:0;padding:24px 32px;box-sizing:border-box}
+h1{font-size:24px;margin:0;font-weight:600}
+h2{font-size:15px;margin:0 0 12px;font-weight:600}
+.card{background:#fff;border:1px solid #e3e6e8;border-radius:8px}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:0 8px;border-radius:10px;font-size:12px;line-height:20px;background:#eef0f1;color:#2b2f33;white-space:nowrap;margin:1px 4px 1px 0}
+.chip.ok{background:#e6f2ec;color:#1b5e20}.chip.info{background:#e3f0fb;color:#0d5aa7}.chip.warn{background:#fdf0e1;color:#8a4b00}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th{text-align:left;font-weight:600;color:#3b444b;background:#f7f8f8;padding:9px 12px;border-bottom:1px solid #e3e6e8;white-space:nowrap}
+td{padding:8px 12px;border-bottom:1px solid #eef0f1;vertical-align:middle}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 16px;border-radius:6px;border:1px solid #00704a;background:#00704a;color:#fff;font-family:inherit;font-size:13px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;cursor:pointer}
+.btn.out{background:#fff;color:#00704a}
+.s{display:block;color:#5f6b73;font-size:12px}
+.days{display:grid;grid-template-columns:repeat(14,minmax(0,1fr));gap:6px}
+.day{height:44px;border-radius:6px;background:#e6f2ec;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:11px;color:#1b5e20;border:1px solid transparent}
+.day.sel{border-color:#00704a;background:#00704a;color:#fff}
+.day.warn{background:#fdf0e1;color:#8a4b00}
+.day.miss{background:#f1f2f3;color:#5f6b73}
+</style>
+</helmet>
+<div>
+<header class="bar"><span class="logo">backdafuckup</span><span style="flex:1"></span><span>v0.4.0</span><span>admin</span></header>
+<div class="shell">
+<nav class="nav" aria-label="Main">
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>Home</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5h6v2"/></svg>Backup Jobs</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 18a5 5 0 1 1 1-9.9A6 6 0 0 1 19 10a4 4 0 0 1-1 8z"/><path d="M12 15v-5m-2.5 2.5L12 10l2.5 2.5"/></svg>Backups &amp; Restore</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><circle cx="12" cy="12" r="3"/></svg>Kubernetes</a>
+<a href="#" class="sub on" aria-current="page">Applications</a>
+<a href="#" class="sub">Policies</a>
+<a href="#" class="sub">Clusters</a>
+<a href="#"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.6L4 8.7"/><path d="M4 4v4.7h4.7M12 8v4l3 2"/></svg>History</a>
+</nav>
+<main class="main">
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-bottom: 18px">
+<a href="#" aria-label="Back to applications" style="text-decoration: none; font-size: 20px">←</a>
+<h1>redis</h1><span class="chip info">rke2-qa</span><span class="chip ok">protected · nightly-databases</span>
+<span style="flex: 1"></span>
+<button class="btn out" type="button">Back up now</button><button class="btn" type="button">Restore…</button>
+</div>
+<div class="card" style="padding: 18px 20px; margin-bottom: 18px">
+<div style="display: flex; align-items: center; margin-bottom: 12px"><h2 style="margin: 0">Restore points</h2><span style="flex: 1"></span><span class="s">last 14 days · click a day</span></div>
+<div class="days">
+<span class="day">29.10<b>✓</b></span><span class="day">30.10<b>✓</b></span><span class="day">31.10<b>✓</b></span><span class="day">01.11<b>✓</b></span><span class="day">02.11<b>✓</b></span><span class="day">03.11<b>✓</b></span><span class="day miss">04.11<b>–</b></span>
+<span class="day">05.11<b>✓</b></span><span class="day">06.11<b>✓</b></span><span class="day">07.11<b>✓</b></span><span class="day">08.11<b>✓</b></span><span class="day warn">09.11<b>!</b></span><span class="day">10.11<b>✓</b></span><span class="day sel">11.11<b>✓</b></span>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; font-size: 14px"><b>11/11/2026 02:01</b><span class="chip ok">application-consistent</span><span class="chip info">hook redis-cli save ×8</span><span class="s" style="display: inline">46 objects · 8 volumes (64 GiB) · 412 MB new</span><span style="flex: 1"></span>
+<button class="btn out" type="button">Files</button><button class="btn out" type="button">Objects</button><button class="btn" type="button">Restore this point</button></div>
+</div>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px">
+<section class="card" style="overflow-x: auto"><div style="padding: 14px 16px 0"><h2>Workloads</h2></div>
+<table><thead><tr><th>Kind</th><th>Name</th><th>Volumes</th><th>Hooks</th></tr></thead><tbody>
+<tr><td>StatefulSet</td><td>redis-shop</td><td>1</td><td><span class="chip info">pre</span></td></tr>
+<tr><td>StatefulSet</td><td>redis-session</td><td>1</td><td><span class="chip info">pre</span></td></tr>
+<tr><td>StatefulSet</td><td>redis-crm</td><td>1</td><td><span class="chip info">pre</span></td></tr>
+<tr><td>StatefulSet</td><td>redis-cache</td><td>1</td><td><span class="chip info">pre</span></td></tr>
+</tbody></table></section>
+<section class="card" style="overflow-x: auto"><div style="padding: 14px 16px 0"><h2>Volumes</h2></div>
+<table><thead><tr><th>PVC</th><th>Size</th><th>Class</th><th>Backup</th></tr></thead><tbody>
+<tr><td>data-redis-shop-0</td><td>8 GiB</td><td>vsphere-csi-block-rwo</td><td><span class="chip ok">snapshot · 34 s</span></td></tr>
+<tr><td>data-redis-session-0</td><td>8 GiB</td><td>vsphere-csi-block-rwo</td><td><span class="chip ok">snapshot · 31 s</span></td></tr>
+<tr><td>data-redis-crm-0</td><td>8 GiB</td><td>vsphere-csi-block-rwo</td><td><span class="chip ok">snapshot · 29 s</span></td></tr>
+<tr><td>data-redis-cache-0</td><td>8 GiB</td><td>vsphere-csi-block-rwo</td><td><span class="chip ok">snapshot · 30 s</span></td></tr>
+</tbody></table></section>
+</div>
+</main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
