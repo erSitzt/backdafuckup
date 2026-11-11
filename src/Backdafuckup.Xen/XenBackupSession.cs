@@ -8,7 +8,7 @@ using Backdafuckup.Core.Extents;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Operations;
 using Backdafuckup.Nbd;
-using Backdafuckup.Xen.Tls;
+using Backdafuckup.Core.Tls;
 using Backdafuckup.Xen.Xapi;
 
 namespace Backdafuckup.Xen;

@@ -1,0 +1,258 @@
+@page "/infrastructure/kubernetes"
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+@inject IJSRuntime JS
+
+<PageTitle>Kubernetes clusters – backdafuckup</PageTitle>
+<PageHeader Title="Kubernetes Clusters"
+            Description="Clusters whose namespaces are backed up: their objects, and the data of volumes whose storage takes snapshots. backdafuckup reaches each cluster's API with a ServiceAccount token from the setup manifest.">
+    <Actions>
+        <MudButton Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Description" OnClick="ToggleSetupAsync">Setup manifest</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add cluster</MudButton>
+    </Actions>
+</PageHeader>
+
+@if (_setup is not null)
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
+        <div class="d-flex align-center gap-2 mb-2">
+            <MudText Typo="Typo.subtitle1" Class="section-title">Setup manifest</MudText>
+            <MudSpacer />
+            <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="CopySetupAsync">Copy</MudButton>
+            <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Download" Href="@SetupUrl(download: true)">Download</MudButton>
+            <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Close" aria-label="Close" OnClick="@(() => _setup = null)" />
+        </div>
+        <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
+            Apply it in the cluster yourself (kubectl apply -f @KubernetesSetupFile, or as a Fleet bundle). It creates the work namespace backdafuckup-system, a ServiceAccount
+            with a token, and the roles. Backup reads every object, Secrets included, takes and removes volume snapshots and runs hooks in pods. Then read the token
+            for <b>Add cluster</b>: <span class="mono">kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.token}' | base64 -d</span>
+        </MudText>
+        <MudSwitch T="bool" Value="_withRestore" ValueChanged="OnRestoreChangedAsync" Color="Color.Primary" Class="mb-2"
+                   Label="With the restore role: create and change objects in any namespace (leave it off for an account that only backs up)" />
+        <pre class="mono" style="max-height: 360px; overflow: auto; background: var(--mud-palette-background-gray); padding: 12px; border-radius: 8px; margin: 0">@_setup</pre>
+    </MudPaper>
+}
+
+@if (_adding)
+{
+    <AddClusterWizard OnDone="OnClusterAddedAsync" OnCancel="@(() => _adding = false)" />
+}
+
+@if (_clusters is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else if (_clusters.Count == 0 && !_adding)
+{
+    <MudAlert Severity="Severity.Info">No Kubernetes cluster has been added yet. Apply the setup manifest in the cluster, then add it with its token.</MudAlert>
+}
+else if (_clusters.Count > 0)
+{
+    <MudPaper Elevation="0" Outlined="true" Class="mb-4 cq">
+        <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+            <thead>
+                <tr><th>Cluster</th><th>Connection</th><th class="c-560">Version</th><th class="c-760">Storage for volumes</th><th class="c-950">Namespaces</th><th>Volumes</th></tr>
+            </thead>
+            <tbody>
+                @foreach (var cluster in _clusters)
+                {
+                    var summary = Summary(cluster.Id);
+                    <tr class="cursor-pointer @(cluster.Id == _selected ? "row-selected" : null)" @onclick="@(() => _selected = cluster.Id)">
+                        <td><b>@cluster.DisplayName</b><span class="cell-sub">@cluster.MasterAddress</span></td>
+                        <td><StateChip State="@cluster.Status" /><span class="cell-sub">direct API</span></td>
+                        <td class="c-560">@cluster.ProductVersion</td>
+                        <td class="c-760">
+                            @foreach (var (driver, snapshot) in summary.Drivers)
+                            {
+                                <span class="@(snapshot ? "mini-chip success" : "mini-chip")" title="@(snapshot ? "Volumes of this driver are backed up through a CSI snapshot." : "Volumes of this driver: objects only.")">@driver · @(snapshot ? "snapshots" : "objects only")</span>
+                            }
+                        </td>
+                        <td class="c-950 num">@summary.Namespaces</td>
+                        <td>@summary.Snapshot snapshot<span class="cell-sub">@summary.ObjectsOnly objects only</span></td>
+                    </tr>
+                }
+            </tbody>
+        </MudSimpleTable>
+    </MudPaper>
+
+    @if (_clusters.FirstOrDefault(c => c.Id == _selected) is { } selected && _inventory.TryGetValue(selected.Id, out var items))
+    {
+        <MudPaper Elevation="0" Outlined="true">
+            <div class="d-flex align-center flex-wrap gap-2 pa-4 pb-0">
+                <MudIcon Icon="@AppIcons.Kubernetes" Color="Color.Primary" />
+                <MudText Typo="Typo.h6">@selected.DisplayName</MudText>
+                <MudSpacer />
+                <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Refresh" OnClick="@(() => RescanAsync(selected))">Rescan</MudButton>
+                <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.Delete" OnClick="@(() => RemoveAsync(selected))">Remove</MudButton>
+            </div>
+            @if (selected.LastError is not null && selected.Status == "Error")
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mx-4 mt-2">@selected.LastError</MudAlert>
+            }
+            <MudTabs Elevation="0" ApplyEffectsToContainer="true" TabPanelsClass="pa-0">
+                <MudTabPanel Text="Volumes">
+                    <div class="cq" style="overflow-x: auto">
+                        <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+                            <thead><tr><th>Namespace</th><th>PVC</th><th class="c-560 num">Size</th><th class="c-760">Storage class</th><th class="c-950">Used by</th><th>Backup of its data</th></tr></thead>
+                            <tbody>
+                                @foreach (var volume in items.Where(i => i.Kind == "VolumeClaim").OrderBy(i => i.ParentNativeId).ThenBy(i => i.Name))
+                                {
+                                    var p = volume.Properties;
+                                    <tr>
+                                        <td>@volume.ParentNativeId</td>
+                                        <td>@volume.Name</td>
+                                        <td class="c-560 num">@Fmt.Bytes(long.TryParse(p.GetValueOrDefault("sizeBytes"), out var size) ? size : null)</td>
+                                        <td class="c-760">@(string.IsNullOrEmpty(p.GetValueOrDefault("storageClass")) ? "–" : p["storageClass"])<span class="cell-sub">@p.GetValueOrDefault("driver")</span></td>
+                                        <td class="c-950">@p.GetValueOrDefault("usedBy")</td>
+                                        <td>
+                                            @if (p.GetValueOrDefault("dataPath") == "snapshot")
+                                            {
+                                                <span class="mini-chip success" title="@($"VolumeSnapshotClass {p.GetValueOrDefault("snapshotClass")}")">snapshot</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="mini-chip" title="@p.GetValueOrDefault("dataPathReason")">objects only</span>
+                                                <span class="cell-sub">@p.GetValueOrDefault("dataPathReason")</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                    </div>
+                </MudTabPanel>
+                <MudTabPanel Text="Namespaces">
+                    <div class="cq" style="overflow-x: auto">
+                        <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+                            <thead><tr><th>Namespace</th><th class="num">Volumes</th><th class="num">Through a snapshot</th><th class="c-560">Phase</th></tr></thead>
+                            <tbody>
+                                @foreach (var ns in items.Where(i => i.Kind == "Namespace").OrderBy(i => i.Name))
+                                {
+                                    <tr>
+                                        <td>@ns.Name</td>
+                                        <td class="num">@ns.Properties.GetValueOrDefault("volumeClaims")</td>
+                                        <td class="num">@ns.Properties.GetValueOrDefault("snapshotVolumes")</td>
+                                        <td class="c-560">@ns.Properties.GetValueOrDefault("phase")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                    </div>
+                </MudTabPanel>
+            </MudTabs>
+        </MudPaper>
+    }
+}
+
+@code {
+    private List<ConnectionDto>? _clusters;
+    private readonly Dictionary<Guid, List<InventoryItemDto>> _inventory = [];
+    private Guid _selected;
+    private bool _adding;
+    private string? _setup;
+    private bool _withRestore = true;
+    private const string KubernetesSetupFile = "backdafuckup-setup.yaml";
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _clusters = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=Kubernetes");
+        _inventory.Clear();
+        foreach (var cluster in _clusters)
+        {
+            _inventory[cluster.Id] = await Api.GetAsync<List<InventoryItemDto>>($"api/connections/{cluster.Id}/inventory");
+        }
+
+        if (_clusters.All(c => c.Id != _selected))
+        {
+            _selected = _clusters.FirstOrDefault()?.Id ?? Guid.Empty;
+        }
+    }
+
+    /// <summary>Per cluster: the CSI drivers (and NFS) of its volumes and whether they go through a snapshot, and the counts.</summary>
+    private (IReadOnlyList<(string Driver, bool Snapshot)> Drivers, int Namespaces, int Snapshot, int ObjectsOnly) Summary(Guid clusterId)
+    {
+        var items = _inventory.GetValueOrDefault(clusterId) ?? [];
+        var volumes = items.Where(i => i.Kind == "VolumeClaim").ToList();
+        var drivers = volumes
+            .GroupBy(v => string.IsNullOrEmpty(v.Properties.GetValueOrDefault("driver")) ? "unbound" : v.Properties["driver"])
+            .Select(g => (g.Key, g.Any(v => v.Properties.GetValueOrDefault("dataPath") == "snapshot")))
+            .OrderByDescending(d => d.Item2).ThenBy(d => d.Key)
+            .ToList();
+        var snapshot = volumes.Count(v => v.Properties.GetValueOrDefault("dataPath") == "snapshot");
+        return (drivers, items.Count(i => i.Kind == "Namespace"), snapshot, volumes.Count - snapshot);
+    }
+
+    private async Task ToggleSetupAsync()
+    {
+        try
+        {
+            _setup = _setup is null ? await Api.GetStringAsync(SetupUrl(download: false)) : null;
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private string SetupUrl(bool download) => $"api/kubernetes/setup.yaml?restore={(_withRestore ? "true" : "false")}{(download ? "&download=true" : string.Empty)}";
+
+    private async Task OnRestoreChangedAsync(bool value)
+    {
+        _withRestore = value;
+        try
+        {
+            _setup = await Api.GetStringAsync(SetupUrl(download: false));
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task CopySetupAsync()
+    {
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", _setup);
+        Snackbar.Add("Setup manifest copied.", Severity.Success);
+    }
+
+    private async Task OnClusterAddedAsync()
+    {
+        _adding = false;
+        await LoadAsync();
+    }
+
+    private async Task RescanAsync(ConnectionDto cluster)
+    {
+        try
+        {
+            await Api.PostAsync($"api/connections/{cluster.Id}/rescan");
+            Snackbar.Add($"{cluster.DisplayName} rescanned.", Severity.Success);
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task RemoveAsync(ConnectionDto cluster)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Remove cluster", $"Remove {cluster.DisplayName}? Restore points are kept; nothing in the cluster is changed.", yesText: "Remove", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await Api.DeleteAsync($"api/connections/{cluster.Id}");
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+}

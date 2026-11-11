@@ -14,17 +14,35 @@ public static class InfrastructureEndpoints
     {
         var connections = app.MapGroup("/api/connections");
 
-        connections.MapGet("/", async (AppDbContext db, CancellationToken ct) =>
-            (await db.Connections.Include(c => c.Credential).Include(c => c.Hosts).OrderBy(c => c.DisplayName).ToListAsync(ct)).Select(c => c.ToDto()));
+        connections.MapGet("/", async (AppDbContext db, string? kind, CancellationToken ct) =>
+        {
+            var query = db.Connections.Include(c => c.Credential).Include(c => c.Hosts).AsQueryable();
+            if (!string.IsNullOrEmpty(kind))
+            {
+                if (!Enum.TryParse<HypervisorKind>(kind, ignoreCase: true, out var parsed))
+                {
+                    return Results.Problem($"Unknown connection kind '{kind}' (XenServer or Kubernetes).", statusCode: StatusCodes.Status400BadRequest);
+                }
+
+                query = query.Where(c => c.Kind == parsed);
+            }
+
+            return Results.Ok((await query.OrderBy(c => c.DisplayName).ToListAsync(ct)).Select(c => c.ToDto()));
+        }).WithDescription("All connections: pools and Kubernetes clusters. kind=XenServer or kind=Kubernetes returns one kind only.");
 
         connections.MapGet("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>
             await db.Connections.Include(c => c.Credential).Include(c => c.Hosts).FirstOrDefaultAsync(c => c.Id == id, ct) is { } c ? Results.Ok(c.ToDto()) : Results.NotFound());
 
         connections.MapPost("/probe", async (ProbeRequestDto request, ConnectionManager manager, CancellationToken ct) =>
         {
+            if (!Enum.TryParse<HypervisorKind>(request.Kind, ignoreCase: true, out var kind))
+            {
+                return Results.Problem($"Unknown connection kind '{request.Kind}' (XenServer or Kubernetes).", statusCode: StatusCodes.Status400BadRequest);
+            }
+
             try
             {
-                return Results.Ok((await manager.Provider(HypervisorKind.XenServer).ProbeCertificateAsync(request.Address.Trim(), request.Port, ct)).ToDto());
+                return Results.Ok((await manager.Provider(kind).ProbeCertificateAsync(request.Address.Trim(), request.Port, ct)).ToDto());
             }
             catch (Exception ex) when (ex is IOException or System.Net.Sockets.SocketException or TimeoutException or OperationCanceledException or System.Security.Authentication.AuthenticationException)
             {
@@ -34,17 +52,23 @@ public static class InfrastructureEndpoints
 
         connections.MapPost("/", async (CreateConnectionDto request, AppDbContext db, ConnectionManager manager, CredentialProtector protector, TimeProvider time, HttpContext http, CancellationToken ct) =>
         {
+            if (!Enum.TryParse<HypervisorKind>(request.Kind, ignoreCase: true, out var kind))
+            {
+                return Results.Problem($"Unknown connection kind '{request.Kind}' (XenServer or Kubernetes).", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            var noun = kind == HypervisorKind.Kubernetes ? "cluster" : "pool";
             if (await db.Connections.AnyAsync(c => c.DisplayName == request.DisplayName, ct))
             {
-                return Results.Problem($"A pool named '{request.DisplayName}' already exists.", statusCode: StatusCodes.Status409Conflict);
+                return Results.Problem($"A connection named '{request.DisplayName}' already exists.", statusCode: StatusCodes.Status409Conflict);
             }
 
             var settings = new ConnectionSettings(
-                Guid.Empty, HypervisorKind.XenServer, request.Address.Trim(), request.Port,
+                Guid.Empty, kind, request.Address.Trim(), request.Port,
                 new System.Net.NetworkCredential(request.UserName, request.Password), TlsTrustMode.Pinned,
                 request.TrustedCertificates.Select(c => new PinnedCertificate(c.HostAddress, c.SpkiSha256, c.Sha256Thumbprint, string.Empty)).ToList(),
                 new Dictionary<string, string>());
-            var result = await manager.Provider(HypervisorKind.XenServer).TestConnectionAsync(settings, ct);
+            var result = await manager.Provider(kind).TestConnectionAsync(settings, ct);
             if (result.UntrustedHosts.Count > 0)
             {
                 return Results.Json(new UntrustedCertificatesDto(result.Error ?? "Untrusted certificate", result.UntrustedHosts.Select(p => p.ToDto()).ToList()), statusCode: StatusCodes.Status409Conflict);
@@ -57,13 +81,14 @@ public static class InfrastructureEndpoints
 
             if (await db.Connections.AnyAsync(c => c.PlatformId == result.Platform.PlatformId, ct))
             {
-                return Results.Problem($"The pool '{result.Platform.PlatformName}' is already registered.", statusCode: StatusCodes.Status409Conflict);
+                return Results.Problem($"The {noun} '{result.Platform.PlatformName}' ({result.Platform.MasterAddress}) is already registered.", statusCode: StatusCodes.Status409Conflict);
             }
 
             var now = time.GetUtcNow();
             var user = http.User.Identity?.Name;
             var connection = new HypervisorConnection
             {
+                Kind = kind,
                 DisplayName = request.DisplayName,
                 Address = request.Address.Trim(),
                 Port = request.Port,
@@ -72,7 +97,7 @@ public static class InfrastructureEndpoints
                 PlatformName = result.Platform.PlatformName,
                 ProductName = result.Platform.ProductName,
                 ProductVersion = result.Platform.ProductVersion,
-                AllowInsecureNbd = request.AllowInsecureNbd,
+                AllowInsecureNbd = kind == HypervisorKind.XenServer && request.AllowInsecureNbd,
                 Status = ConnectionStatus.Connected,
                 LastConnectedUtc = now,
                 Credential = new Credential { Username = request.UserName, ProtectedSecret = protector.Protect(request.Password), CreatedUtc = now, UpdatedUtc = now },
@@ -95,7 +120,7 @@ public static class InfrastructureEndpoints
         {
             if (await db.Jobs.AnyAsync(j => j.ConnectionId == id, ct))
             {
-                return Results.Problem("The pool is still used by backup jobs.", statusCode: StatusCodes.Status409Conflict);
+                return Results.Problem("The connection is still used by backup jobs.", statusCode: StatusCodes.Status409Conflict);
             }
 
             var connection = await db.Connections.FindAsync([id], ct);
@@ -126,6 +151,15 @@ public static class InfrastructureEndpoints
 
         connections.MapGet("/{id:guid}/inventory", async (Guid id, AppDbContext db, CancellationToken ct) =>
             (await db.Inventory.Where(i => i.ConnectionId == id).OrderBy(i => i.Kind).ThenBy(i => i.Name).ToListAsync(ct)).Select(i => i.ToDto()));
+
+        app.MapGet("/api/kubernetes/setup.yaml", (bool? restore, bool? download) =>
+            {
+                var manifest = Backdafuckup.Kubernetes.KubernetesSetup.Manifest(restore != false);
+                return download == true
+                    ? Results.File(System.Text.Encoding.UTF8.GetBytes(manifest), "application/yaml", Backdafuckup.Kubernetes.KubernetesSetup.FileName)
+                    : Results.Text(manifest, "application/yaml");
+            })
+            .WithDescription("The objects a Kubernetes cluster needs for backdafuckup: work namespace, ServiceAccount with a token, backup and (unless restore=false) restore roles. download=true returns it as a file.");
 
         var repositories = app.MapGroup("/api/repositories");
 

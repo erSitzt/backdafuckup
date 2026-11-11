@@ -33,6 +33,14 @@ public sealed class ApiClient(HttpClient http)
         return (await response.Content.ReadFromJsonAsync<T>(Json))!;
     }
 
+    /// <summary>A text resource (e.g. a manifest), as it is.</summary>
+    public async Task<string> GetStringAsync(string url)
+    {
+        using var response = await http.GetAsync(url);
+        await EnsureSuccessAsync(response);
+        return await response.Content.ReadAsStringAsync();
+    }
+
     public async Task<T> PostAsync<T>(string url, object? body = null)
     {
         using var response = await http.PostAsJsonAsync(url, body, Json);

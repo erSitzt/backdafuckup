@@ -7,6 +7,7 @@
     <Project Path="src/Backdafuckup.Core/Backdafuckup.Core.csproj" />
     <Project Path="src/Backdafuckup.DataMover/Backdafuckup.DataMover.csproj" />
     <Project Path="src/Backdafuckup.FileLevel/Backdafuckup.FileLevel.csproj" />
+    <Project Path="src/Backdafuckup.Kubernetes/Backdafuckup.Kubernetes.csproj" />
     <Project Path="src/Backdafuckup.Nbd/Backdafuckup.Nbd.csproj" />
     <Project Path="src/Backdafuckup.Server/Backdafuckup.Server.csproj" />
     <Project Path="src/Backdafuckup.Smb/Backdafuckup.Smb.csproj" />
@@ -23,6 +24,7 @@
     <Project Path="tests/Backdafuckup.Agent.Tests/Backdafuckup.Agent.Tests.csproj" />
     <Project Path="tests/Backdafuckup.DataMover.Tests/Backdafuckup.DataMover.Tests.csproj" />
     <Project Path="tests/Backdafuckup.FileLevel.Tests/Backdafuckup.FileLevel.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.Kubernetes.Tests/Backdafuckup.Kubernetes.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Ssh.Tests/Backdafuckup.Ssh.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Sql.Tests/Backdafuckup.Sql.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Lab.Tests/Backdafuckup.Lab.Tests.csproj" />

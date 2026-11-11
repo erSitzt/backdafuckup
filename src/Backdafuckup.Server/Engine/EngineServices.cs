@@ -488,10 +488,16 @@ public static class EngineServiceCollectionExtensions
         services.Configure<Telemetry.MetricsOptions>(configuration.GetSection("Metrics"));
         services.AddSingleton<Telemetry.StateMetrics>();
         services.AddHostedService<Telemetry.MetricsStateService>();
+        // Tests register their own providers before this; each kind is added only when none of it is there.
         if (services.All(d => d.ServiceType != typeof(IHypervisorProvider)))
         {
             var xen = configuration.GetSection("Xen").Get<XenOptions>() ?? new XenOptions();
             services.AddSingleton<IHypervisorProvider>(new XenProvider(xen));
+        }
+
+        if (!services.Any(d => d.ServiceType == typeof(IHypervisorProvider) && d.ImplementationInstance is IHypervisorProvider { Kind: HypervisorKind.Kubernetes }))
+        {
+            services.AddSingleton<IHypervisorProvider>(new Backdafuckup.Kubernetes.KubernetesProvider());
         }
 
         services.Configure<Agents.AgentOptions>(configuration.GetSection("Agent"));

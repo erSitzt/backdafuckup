@@ -10,7 +10,7 @@ using Backdafuckup.DataMover;
 using Backdafuckup.Nbd;
 using Backdafuckup.Storage;
 using Backdafuckup.Xen;
-using Backdafuckup.Xen.Tls;
+using Backdafuckup.Core.Tls;
 using Backdafuckup.Xen.Xapi;
 
 namespace Backdafuckup.Lab.Tests;

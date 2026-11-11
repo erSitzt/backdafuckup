@@ -5,6 +5,9 @@ namespace Backdafuckup.Core.Hypervisor;
 public enum HypervisorKind
 {
     XenServer,
+
+    /// <summary>A Kubernetes cluster: its namespaces are backed up (objects and the data of their volumes).</summary>
+    Kubernetes,
 }
 
 public enum TlsTrustMode
@@ -62,6 +65,12 @@ public enum InventoryKind
     Vm,
     Storage,
     Network,
+
+    /// <summary>A Kubernetes namespace.</summary>
+    Namespace,
+
+    /// <summary>A Kubernetes PersistentVolumeClaim; its parent is the namespace.</summary>
+    VolumeClaim,
 }
 
 /// <summary>Hypervisor-neutral inventory entry. Provider-specific details go into <see cref="Properties"/>.</summary>
