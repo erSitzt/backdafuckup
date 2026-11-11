@@ -249,6 +249,8 @@ public sealed record RestorePointDiskDto(string Key, string Name, long CapacityB
 
 public sealed record RestorePointNicDto(string Device, string Mac, string NetworkId, string NetworkName);
 
+/// <param name="SqlConsistentCount">Of <c>SqlDatabaseCount</c>, the application-consistent databases; null if not known yet.</param>
+/// <param name="ConsistencyWarning">The consistency is worse than the job promised; not for a SQL Server snapshot's own note.</param>
 /// <param name="DomainControllerEvidence">
 /// Only from <c>GET /api/restore-points/{id}</c>, for a restore point with memory, which has no guest details: why the VM is
 /// known to be a domain controller anyway (its agent, or another restore point of it); null if nothing shows it.
@@ -278,7 +280,9 @@ public sealed record RestorePointDto(
     string? AdDomain = null,
     bool HasVmGenerationId = true,
     long? MemoryImageBytes = null,
-    string? DomainControllerEvidence = null);
+    string? DomainControllerEvidence = null,
+    int? SqlConsistentCount = null,
+    bool ConsistencyWarning = false);
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 
@@ -318,7 +322,9 @@ public sealed record BackupVmPointDto(
     int SqlDatabaseCount,
     bool DomainController,
     string? AdDomain,
-    long? MemoryImageBytes = null);
+    long? MemoryImageBytes = null,
+    int? SqlConsistentCount = null,
+    bool ConsistencyWarning = false);
 
 /// <summary>
 /// A VM in one job: its restore points there and its state. <see cref="JobId"/> is null (and <see cref="JobExists"/>

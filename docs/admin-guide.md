@@ -182,7 +182,7 @@ When the VM snapshot takes longer than VSS allows (see the 10 s limit above), ch
 A job can therefore hold SQL Servers and other VMs. If at least one database was suspended, the VM stays with the SQL Server snapshot; databases of other instances in it (e.g. an older SQL Server next to SQL Server 2022) are then crash-consistent with the reason.
 
 What it means:
-- **Consistency:** the SQL Server databases are application-consistent; files outside SQL Server are crash-consistent. The restore point shows "crash" with this explanation, and the SQL browser shows each database's own state.
+- **Consistency:** the SQL Server databases are application-consistent; files outside SQL Server are crash-consistent. The restore point shows *crash-consistent* (grey, not a warning) and a green *SQL-consistent* when every database was recorded; the SQL browser shows each database's own state.
   - The session ends with a warning if a database of a VM with the SQL Server snapshot could not be suspended (offline, missing rights).
   - System databases (`master`, `model`, `msdb`) cannot be suspended; restore them from a native SQL Server backup.
 - **Writes wait as long as the snapshot takes.** On the shared LVM storage of the lab that was 25–47 s for three or four disks. Applications with the usual 30 s command timeout may see timeouts; a write whose client gave up is still committed afterwards. Keep the snapshot short with `[NOBAK]` and one snapshot per storage.
@@ -190,7 +190,12 @@ What it means:
 - **Edition:** works with SQL Server Express too (tested with SQL Server 2025 Express and 2022 Developer).
 - The SQL Server service account writes the `.bkm` into the instance's backup folder (registry `BackupDirectory`, else `InstanceDefaultBackupPath`).
 
-Restore points show their consistency ("application", or "crash" plus the reason) under *Backups & Restore*.
+Restore points show their consistency under *Backups & Restore*:
+- *application-consistent* (green): the guest held its writes for the snapshot.
+- *crash-consistent* (grey): like after a power failure, what a backup without guest processing, or a SQL Server snapshot for the files outside SQL Server, promises.
+- *crash-consistent* (orange, with the reason as its tooltip): less than the job promised: the guest could not be frozen, or the disks were captured one after another. The filter *Crash-consistent with a warning* finds them.
+- *SQL-consistent* (green) when every SQL Server database in the restore point is application-consistent (VSS or a SQL Server snapshot); *SQL 2/3 consistent* (orange) when some are not; *SQL 3* for restore points whose databases are not checked yet (older ones are checked once after the server starts).
+- *RAM* for a snapshot with memory, and *AD* for a domain controller.
 
 **VMs with two or more disks:** XAPI snapshots the disks of a VM one after another, each paused on its own, so they are captured seconds apart (about 8–12 s per disk on shared LVM storage). Unless the guest held its writes for the whole snapshot (application-consistent), such a restore point is not consistent across its disks, not even like a power failure. Data that spans disks may not match after a restore, for example a database and its log, or a volume over several disks. The restore point then says "The N disks were captured one after another over X s" and counts as crash-consistent with a warning. The session log names the gap, and the metrics count it as `bdfu_snapshot_disk_skew_seconds`. The result of the session does not change.
 

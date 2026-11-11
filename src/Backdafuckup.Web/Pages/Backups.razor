@@ -53,9 +53,9 @@
         <MudSelect T="string" Value="@(Consistency ?? string.Empty)" ValueChanged="@(v => Navigate(("consistency", string.IsNullOrEmpty(v) ? null : v)))"
                    Label="Consistency" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:140px">
             <MudSelectItem T="string" Value="@string.Empty">Any</MudSelectItem>
-            <MudSelectItem T="string" Value="@("application")">Application</MudSelectItem>
-            <MudSelectItem T="string" Value="@("crash")">Crash</MudSelectItem>
-            <MudSelectItem T="string" Value="@("warning")">Crash with a warning</MudSelectItem>
+            <MudSelectItem T="string" Value="@("application")">Application-consistent</MudSelectItem>
+            <MudSelectItem T="string" Value="@("crash")">Crash-consistent</MudSelectItem>
+            <MudSelectItem T="string" Value="@("warning")">Crash-consistent with a warning</MudSelectItem>
         </MudSelect>
         <MudSelect T="string" SelectedValues="@(States ?? [])" SelectedValuesChanged="@(v => Navigate(("state", Values(v))))" MultiSelection="true"
                    Label="State" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:140px"
@@ -244,7 +244,7 @@ else
 
         public int NoPoint { get; } = rows.Count(r => r.State == BackupVmStates.NoPoint);
 
-        public int Warnings { get; } = rows.Count(r => r.Latest is { Consistency: not "application", ConsistencyReason: not null });
+        public int Warnings { get; } = rows.Count(r => r.Latest is { Consistency: not "application", ConsistencyWarning: true });
     }
 
     // The groups are built once per data, grouping and sort: the rows keep their objects between renders, so a row

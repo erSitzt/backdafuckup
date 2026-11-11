@@ -15,7 +15,8 @@ public sealed record FileMountDto(
     IReadOnlyList<GuestVolumeDto> Volumes,
     IReadOnlyList<string> Warnings,
     int IdleTimeoutMinutes,
-    string VmNativeId);
+    string VmNativeId,
+    bool ConsistencyWarning = false);
 
 /// <param name="Title">Display name: drive letter or mount point, label, otherwise the id.</param>
 /// <param name="Family">"windows" or "unix" for readable volumes.</param>

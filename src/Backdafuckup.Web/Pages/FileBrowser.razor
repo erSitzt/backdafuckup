@@ -24,16 +24,7 @@ else
     <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3" Wrap="Wrap.Wrap">
         <MudText Typo="Typo.h5">Restore files: @_mount.VmName</MudText>
         <MudChip T="string" Size="Size.Small" Color="Color.Default">@_mount.RestorePointCreatedUtc.ToLocalTime().ToString("g")</MudChip>
-        @if (_mount.Consistency == "application")
-        {
-            <MudChip T="string" Size="Size.Small" Color="Color.Success" Icon="@AppIcons.ApplicationConsistent">application-consistent</MudChip>
-        }
-        else
-        {
-            <MudTooltip Text="@($"The newest changes before the snapshot may be missing in some files. {_mount.ConsistencyReason}")">
-                <MudChip T="string" Size="Size.Small" Color="Color.Warning" Icon="@Icons.Material.Filled.Warning">crash-consistent</MudChip>
-            </MudTooltip>
-        }
+        <ConsistencyChip Consistency="@_mount.Consistency" Reason="@_mount.ConsistencyReason" Warning="@_mount.ConsistencyWarning" />
         <MudSpacer />
         <MudText Typo="Typo.caption">Closes after @_mount.IdleTimeoutMinutes minutes without use.</MudText>
         <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="CloseAsync" StartIcon="@Icons.Material.Filled.Close">Close</MudButton>

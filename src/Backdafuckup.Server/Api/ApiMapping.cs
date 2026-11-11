@@ -90,5 +90,7 @@ internal static class ApiMapping
         r.DomainController == true,
         r.AdDomain,
         VmGenerationIds.IsSet(r.Vm?.GenerationId),
-        r.MemoryImageBytes);
+        r.MemoryImageBytes,
+        SqlConsistentCount: r.SqlConsistentCount,
+        ConsistencyWarning: r.ConsistencyWarning);
 }
