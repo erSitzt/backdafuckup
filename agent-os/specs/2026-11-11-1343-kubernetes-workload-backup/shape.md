@@ -133,8 +133,21 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
     - **The mover** follows the SSH restore script: each file under a hidden temporary name, flushed, owner, mode and times set, then renamed over the old one (or to a free RESTORED- name); links after the files, folder times last; nothing written through a symbolic link or outside the volume. It reports what failed, was renamed or lacks owner, mode or times, per item.
     - **Privileges:** root with CHOWN, DAC_OVERRIDE, FOWNER and FSETID (Pod Security "baseline"). A namespace that enforces "restricted" is refused before anything is created; the ZIP download remains.
     - The token secret, a copy of the image pull secret and the pod are in the ledger.
-- **Docs as built (task 9, 2026-11-11):** the administrator guide's chapter *Kubernetes namespaces* (requirements and ports, the setup manifest and its roles, the mover image, jobs and hooks, consistency, Secrets, the three ways to restore, cleaning up, limits, troubleshooting); the lab runbook's checks K1–K11 with the results of the test cluster; the mover image's base layers in `THIRD-PARTY-NOTICES.md`. Open: lab runs through the agent path (K11), once the agent exists.
-- **Agent path as a TCP tunnel:** exec (hooks) runs over the client's own WebSocket, which bypasses HTTP message handlers, so relaying HTTP requests is not enough.
+- **Docs as built (task 9, 2026-11-11):** the administrator guide's chapter *Kubernetes namespaces* (requirements and ports, the setup manifest and its roles, the mover image, jobs and hooks, consistency, Secrets, the three ways to restore, cleaning up, limits, troubleshooting); the lab runbook's checks K1–K11 with the results of the test cluster; the mover image's base layers in `THIRD-PARTY-NOTICES.md`. Open: the lab run through the agent path (K11).
+- **Agent path as built (2026-11-11):**
+  - **The agent is the mover image in agent mode** (`BDFU_MOVER_MODE=agent`), a Deployment `backdafuckup-agent` in `backdafuckup-system`. It reuses the image, its registry push and pull secret, and runs as a non-root user without capabilities.
+  - **One WebSocket per TCP connection** instead of multiplexed streams:
+    - The agent keeps a control WebSocket open (`/api/agent/clusters/<id>/control`). For each connection the server asks for (`open`), it opens a WebSocket of its own (`…/tunnel/<stream>`) and joins it to a TCP connection to `KUBERNETES_SERVICE_HOST`.
+    - Flow control is TCP's; a slow watch cannot stall the others.
+  - **Credentials:**
+    - The agent sends its ServiceAccount token (again when the kubelet renews it) and the cluster CA. The server keeps both in memory.
+    - The agent authenticates with a per-cluster connect token from the setup manifest, stored like a credential.
+  - **The server's side:**
+    - A loopback port per cluster: the unchanged Kubernetes client (HTTP, watch, exec) connects there.
+    - TLS is checked by our own callback for HTTP and for the WebSockets of exec (`CreateWebSocketBuilder`): the chain to the cluster CA and the name `kubernetes.default.svc`, since the URL's host is the loopback address.
+  - **Connections:** `access` = `Direct` or `Agent`. An agent cluster learns its platform at the agent's first contact (a cluster already connected is refused). A direct cluster can change to its agent, keeping jobs and restore points.
+  - Not yet: updating the agent's image from the server (apply the manifest again after a server update).
+- **Agent path as a TCP tunnel (as planned):** exec (hooks) runs over the client's own WebSocket, which bypasses HTTP message handlers, so relaying HTTP requests is not enough.
   - The agent keeps a WebSocket to the server and carries TCP connections to the API server, as Rancher's remotedialer does.
   - The server gives each agent cluster a local port, so the same client code (HTTP, watch, exec, TLS and pinning) works unchanged on both paths.
 

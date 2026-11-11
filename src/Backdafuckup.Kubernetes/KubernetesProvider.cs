@@ -18,7 +18,7 @@ namespace Backdafuckup.Kubernetes;
 /// <param name="timings">Tests only: shorter waits.</param>
 /// <param name="executor">Tests only: runs hooks instead of the cluster's exec.</param>
 public sealed class KubernetesProvider(
-    Func<DelegatingHandler>? transport = null, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
+    Func<DelegatingHandler?>? transport = null, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
     : IHypervisorProvider
 {
     public HypervisorKind Kind => HypervisorKind.Kubernetes;

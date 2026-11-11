@@ -11,17 +11,6 @@ internal static class Program
         var version = typeof(MoverRunner).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?";
         Console.WriteLine($"backdafuckup mover {version}");
 
-        MoverOptions options;
-        try
-        {
-            options = MoverOptions.FromEnvironment(Environment.GetEnvironmentVariable);
-        }
-        catch (ArgumentException ex)
-        {
-            Console.Error.WriteLine(ex.Message);
-            return 2;
-        }
-
         // Kubernetes stops a pod with SIGTERM: end the transfer instead of being killed in the middle of a write.
         using var stop = new CancellationTokenSource();
         using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
@@ -35,6 +24,23 @@ internal static class Program
             stop.Cancel();
         };
 
-        return await MoverRunner.RunAsync(options, handler: null, Console.Out, stop.Token).ConfigureAwait(false);
+        try
+        {
+            // The cluster agent: the same image, as a Deployment that keeps the tunnel to the server open.
+            if (string.Equals(Environment.GetEnvironmentVariable("BDFU_MOVER_MODE"), "agent", StringComparison.OrdinalIgnoreCase))
+            {
+                var agent = ClusterAgentOptions.FromEnvironment(Environment.GetEnvironmentVariable);
+                await ClusterAgent.Create(agent, Console.Out).RunAsync(stop.Token).ConfigureAwait(false);
+                return 0;
+            }
+
+            var options = MoverOptions.FromEnvironment(Environment.GetEnvironmentVariable);
+            return await MoverRunner.RunAsync(options, handler: null, Console.Out, stop.Token).ConfigureAwait(false);
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 2;
+        }
     }
 }

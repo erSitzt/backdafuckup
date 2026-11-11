@@ -38,6 +38,9 @@ public sealed class FakeKubernetesApi
     /// <summary>Called after an object was deleted, with its plural and the object.</summary>
     public Action<string, JsonObject>? Deleted { get; set; }
 
+    /// <summary>When set, requests without <c>Authorization: Bearer</c> this token are answered with 401.</summary>
+    public string? RequiredToken { get; set; }
+
     /// <summary>The log of each pod by "namespace/name".</summary>
     public Dictionary<string, string> PodLogs { get; } = [];
 
@@ -346,7 +349,9 @@ public sealed class FakeKubernetesApi
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            var response = api.Answer(request);
+            var response = api.RequiredToken is { } token && request.Headers.Authorization?.ToString() != "Bearer " + token
+                ? Json(HttpStatusCode.Unauthorized, new JsonObject { ["kind"] = "Status", ["apiVersion"] = "v1", ["status"] = "Failure", ["message"] = "Unauthorized", ["code"] = 401 })
+                : api.Answer(request);
             response.RequestMessage = request; // The client reads the request back from the response.
             return Task.FromResult(response);
         }

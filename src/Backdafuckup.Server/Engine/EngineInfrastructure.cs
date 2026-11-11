@@ -70,7 +70,7 @@ public static class DtoMapping
 }
 
 /// <summary>Opens hypervisor sessions for stored connections (decrypts credentials, applies certificate pins).</summary>
-public sealed class ConnectionManager(IEnumerable<IHypervisorProvider> providers, IDbContextFactory<AppDbContext> dbFactory, CredentialProtector protector)
+public sealed class ConnectionManager(IEnumerable<IHypervisorProvider> providers, IDbContextFactory<AppDbContext> dbFactory, CredentialProtector protector, Clusters.ClusterAgents agents)
 {
     public IHypervisorProvider Provider(HypervisorKind kind) =>
         providers.FirstOrDefault(p => p.Kind == kind) ?? throw new NotSupportedException($"No provider for {kind}.");
@@ -98,7 +98,9 @@ public sealed class ConnectionManager(IEnumerable<IHypervisorProvider> providers
         IHypervisorSession session;
         try
         {
-            session = await Provider(connection.Kind).OpenAsync(BuildSettings(connection), cancellationToken).ConfigureAwait(false);
+            // A cluster behind its agent: the tunnel's local port, with the token and CA the agent sent.
+            var settings = connection.Access == ConnectionAccess.Agent ? agents.Settings(connection) : BuildSettings(connection);
+            session = await Provider(connection.Kind).OpenAsync(settings, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -118,7 +120,8 @@ public sealed class ConnectionManager(IEnumerable<IHypervisorProvider> providers
 
         try
         {
-            var master = session.Platform.MasterAddress;
+            // Through an agent the client talks to a local port; the cluster's API server is the agent's business.
+            var master = connection.Access == ConnectionAccess.Agent ? connection.Address : session.Platform.MasterAddress;
             var now = DateTimeOffset.UtcNow;
             await db.Connections.Where(c => c.Id == connectionId).ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.Status, ConnectionStatus.Connected)

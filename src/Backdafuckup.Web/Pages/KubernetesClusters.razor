@@ -6,7 +6,7 @@
 
 <PageTitle>Kubernetes clusters – backdafuckup</PageTitle>
 <PageHeader Title="Kubernetes Clusters"
-            Description="Clusters whose namespaces are backed up: their objects, and the data of volumes whose storage takes snapshots. backdafuckup reaches each cluster's API with a ServiceAccount token from the setup manifest.">
+            Description="Clusters whose namespaces are backed up: their objects, and the data of volumes whose storage takes snapshots. backdafuckup reaches each cluster's API with a ServiceAccount token from the setup manifest, directly or through an agent in the cluster that dials out.">
     <Actions>
         <MudButton Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Description" OnClick="ToggleSetupAsync">Setup manifest</MudButton>
         <MudButton Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Inventory2" OnClick="@(() => _showMover = !_showMover)">Mover image</MudButton>
@@ -18,16 +18,23 @@
 {
     <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
         <div class="d-flex align-center gap-2 mb-2">
-            <MudText Typo="Typo.subtitle1" Class="section-title">Setup manifest</MudText>
+            <MudText Typo="Typo.subtitle1" Class="section-title">Setup manifest@(_setupFor is { } forCluster ? $" of {forCluster.DisplayName}, with its agent" : string.Empty)</MudText>
             <MudSpacer />
             <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="CopySetupAsync">Copy</MudButton>
             <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Download" Href="@SetupUrl(download: true)">Download</MudButton>
-            <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Close" aria-label="Close" OnClick="@(() => _setup = null)" />
+            <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Close" aria-label="Close" OnClick="@(() => { _setup = null; _setupFor = null; })" />
         </div>
         <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
             Apply it in the cluster yourself (kubectl apply -f @KubernetesSetupFile, or as a Fleet bundle). It creates the work namespace backdafuckup-system, a ServiceAccount
-            with a token, and the roles. Backup reads every object, Secrets included, takes and removes volume snapshots and runs hooks in pods. Then <b>Add cluster</b>
-            with the token and the cluster CA from its token secret.
+            with a token, and the roles. Backup reads every object, Secrets included, takes and removes volume snapshots and runs hooks in pods.
+            @if (_setupFor is null)
+            {
+                <span>Then <b>Add cluster</b> with the token and the cluster CA from its token secret, or add it through an agent.</span>
+            }
+            else
+            {
+                <span>With the agent: a Deployment that dials out to this server, and its connect token. Keep the manifest like a password.</span>
+            }
         </MudText>
         <MudSwitch T="bool" Value="_withRestore" ValueChanged="OnRestoreChangedAsync" Color="Color.Primary" Class="mb-2"
                    Label="With the restore role: create and change objects in any namespace (leave it off for an account that only backs up)" />
@@ -51,7 +58,7 @@ else if (_mover is { UpToDate: false } && _clusters is { Count: > 0 })
 
 @if (_adding)
 {
-    <AddClusterWizard OnDone="OnClusterAddedAsync" OnCancel="@(() => _adding = false)" />
+    <AddClusterWizard OnDone="OnClusterAddedAsync" OnCancel="OnClusterAddedAsync" />
 }
 
 @if (_clusters is null)
@@ -74,8 +81,19 @@ else if (_clusters.Count > 0)
                 {
                     var summary = Summary(cluster.Id);
                     <tr class="cursor-pointer @(cluster.Id == _selected ? "row-selected" : null)" @onclick="@(() => _selected = cluster.Id)">
-                        <td><b>@cluster.DisplayName</b><span class="cell-sub">@cluster.Address:@cluster.Port</span></td>
-                        <td><StateChip State="@cluster.Status" /><span class="cell-sub">direct API</span></td>
+                        <td><b>@cluster.DisplayName</b><span class="cell-sub">@(cluster.Agent is null ? $"{cluster.Address}:{cluster.Port}" : cluster.Agent.ApiServer is { } api ? $"through its agent, API {api}" : "through its agent")</span></td>
+                        <td>
+                            <StateChip State="@cluster.Status" />
+                            @if (cluster.Agent is { } agent)
+                            {
+                                <span class="@(agent.Online ? "mini-chip success" : "mini-chip warning")" title="@AgentTitle(agent)">agent @(agent.Online ? "online" : "offline")</span>
+                                <span class="cell-sub">@(agent.Online ? $"{agent.Pod} on {agent.Node}" : agent.LastContactUtc is { } last ? $"last contact {Fmt.Time(last)}" : "not connected yet")</span>
+                            }
+                            else
+                            {
+                                <span class="cell-sub">direct API</span>
+                            }
+                        </td>
                         <td class="c-560">@cluster.ProductVersion</td>
                         <td class="c-760">
                             @foreach (var (driver, snapshot) in summary.Drivers)
@@ -98,6 +116,14 @@ else if (_clusters.Count > 0)
                 <MudIcon Icon="@AppIcons.Kubernetes" Color="Color.Primary" />
                 <MudText Typo="Typo.h6">@selected.DisplayName</MudText>
                 <MudSpacer />
+                @if (selected.Agent is not null)
+                {
+                    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Description" OnClick="@(() => ShowAgentSetupAsync(selected))">Setup manifest with the agent</MudButton>
+                }
+                else
+                {
+                    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.SettingsEthernet" OnClick="@(() => SwitchToAgentAsync(selected))">Reach it through an agent</MudButton>
+                }
                 <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Refresh" OnClick="@(() => RescanAsync(selected))">Rescan</MudButton>
                 <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.Delete" OnClick="@(() => RemoveAsync(selected))">Remove</MudButton>
             </div>
@@ -166,6 +192,7 @@ else if (_clusters.Count > 0)
     private Guid _selected;
     private bool _adding;
     private string? _setup;
+    private ConnectionDto? _setupFor;
     private bool _withRestore = true;
     private bool _showMover;
     private MoverImageDto? _mover;
@@ -217,6 +244,7 @@ else if (_clusters.Count > 0)
     {
         try
         {
+            _setupFor = null;
             _setup = _setup is null ? await Api.GetStringAsync(SetupUrl(download: false)) : null;
         }
         catch (ApiException ex)
@@ -225,7 +253,50 @@ else if (_clusters.Count > 0)
         }
     }
 
-    private string SetupUrl(bool download) => $"api/kubernetes/setup.yaml?restore={(_withRestore ? "true" : "false")}{(download ? "&download=true" : string.Empty)}";
+    private string SetupUrl(bool download) =>
+        $"api/kubernetes/setup.yaml?restore={(_withRestore ? "true" : "false")}{(_setupFor is { } cluster ? $"&connectionId={cluster.Id}" : string.Empty)}{(download ? "&download=true" : string.Empty)}";
+
+    /// <summary>The manifest of a cluster behind its agent, with the agent and its connect token (to apply it again).</summary>
+    private async Task ShowAgentSetupAsync(ConnectionDto cluster)
+    {
+        try
+        {
+            _setupFor = cluster;
+            _setup = await Api.GetStringAsync(SetupUrl(download: false));
+        }
+        catch (ApiException ex)
+        {
+            _setupFor = null;
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    /// <summary>Changes a direct cluster to its agent (jobs and restore points stay) and shows the manifest with the agent.</summary>
+    private async Task SwitchToAgentAsync(ConnectionDto cluster)
+    {
+        if (await Dialogs.ShowMessageBoxAsync(
+                "Reach it through an agent",
+                $"From now on the server reaches {cluster.DisplayName} only through an agent in the cluster, which dials out to this server. The stored ServiceAccount token is removed; " +
+                "apply the setup manifest with the agent next. Jobs and restore points stay.",
+                yesText: "Change", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            var changed = await Api.PostAsync<ConnectionDto>($"api/connections/{cluster.Id}/agent");
+            await LoadAsync();
+            await ShowAgentSetupAsync(changed);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private static string AgentTitle(ConnectionAgentDto agent) =>
+        $"Version {agent.Version ?? "?"}{(agent.ConnectedUtc is { } at ? $", connected since {Fmt.Time(at)}" : string.Empty)}{(agent.ApiServer is { } api ? $", API server {api} in the cluster" : string.Empty)}";
 
     private async Task OnRestoreChangedAsync(bool value)
     {

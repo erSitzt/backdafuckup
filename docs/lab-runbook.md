@@ -216,7 +216,7 @@ kubectl -n backdafuckup-system get pvc,pods,secrets
 | K8 | *Files and folders of a PVC*: download `dump.rdb`; *Back into the PVC* with *Keep existing files*; `appendonlydir` into the folder `/bdfu-filetest` with *Replace existing files*. | The download equals the backup. `RESTORED-dump.rdb` next to `dump.rdb`, its SHA-256 equal to the download, `redis:redis`, mode and modification time as in the backup. The folder with its files, owners and times. The mover pod ran on the node of `redis-test-0` and is gone, with its secrets. |
 | K9 | *Back into the PVC* for a namespace with `pod-security.kubernetes.io/enforce: restricted`. | Refused before a pod is created, with the ZIP download as the alternative. |
 | K10 | Delete a backup's mover pod while it copies. | The session fails with the pod's state ("was deleted"); snapshots, PVC and secret of the run are removed. |
-| K11 | K3, K5 and K8 through the in-cluster agent. | As there. (The agent is planned.) |
+| K11 | *Reach it through an agent* for the test cluster (or add a cluster through an agent), apply the setup manifest with the agent. Then K3, K5 and K8. | The agent shows *online* with its pod and node; the inventory is read; K3, K5 and K8 as there, the hooks run (exec through the tunnel). Deleting the agent pod: *offline*, backups fail with "The agent of cluster … is not connected"; the new pod reconnects within seconds. |
 
 ## Results
 

@@ -15,6 +15,12 @@ public static class KubernetesConnectionOptions
     /// empty for the API server itself.
     /// </summary>
     public const string BasePath = "kubernetes.basePath";
+
+    /// <summary>
+    /// The name the API server's certificate must carry when it is reached through a tunnel (the cluster's agent): the
+    /// client connects to a local port, so the URL's host is not that name. Empty for a direct connection.
+    /// </summary>
+    public const string TlsName = "kubernetes.tlsName";
 }
 
 /// <summary>The certificates a client accepted and refused, keyed by address: refused ones are offered for trust, accepted ones pinned.</summary>
@@ -35,6 +41,11 @@ public static class KubernetesClients
         ArgumentNullException.ThrowIfNull(settings);
         var pins = new HashSet<string>(settings.Pins.Select(p => p.SpkiSha256), StringComparer.OrdinalIgnoreCase);
         var authorities = CertificateAuthorities(settings);
+        if (settings.Options.TryGetValue(KubernetesConnectionOptions.TlsName, out var tlsName) && !string.IsNullOrWhiteSpace(tlsName))
+        {
+            return CreateTunneled(settings, authorities, tlsName.Trim(), observer, transport);
+        }
+
         var config = new KubernetesClientConfiguration
         {
             Host = BaseUrl(settings),
@@ -69,6 +80,76 @@ public static class KubernetesClients
         // Retries outside the transport: what the API server asks to retry, also from the fake API of tests.
         return transport is null ? new k8s.Kubernetes(config, new RetryHandler()) : new k8s.Kubernetes(config, new RetryHandler(), transport);
     }
+
+    /// <summary>
+    /// A client through the tunnel of the cluster's agent: the API server answers at a local port, so its certificate is
+    /// checked against the cluster CA and <paramref name="tlsName"/> (the name it has inside the cluster) by a callback of
+    /// our own, for the HTTP requests and for the WebSockets of exec alike.
+    /// </summary>
+    private static IKubernetes CreateTunneled(ConnectionSettings settings, X509Certificate2Collection authorities, string tlsName, TlsObserver? observer, DelegatingHandler? transport)
+    {
+        if (authorities.Count == 0)
+        {
+            throw new InvalidOperationException($"The agent of cluster {settings.Address} has not sent the cluster CA yet.");
+        }
+
+        var validate = TunnelValidator(authorities, tlsName, observer, settings.Address);
+        var config = new KubernetesClientConfiguration
+        {
+            Host = BaseUrl(settings),
+            AccessToken = settings.Credential.Password,
+            UserAgent = "backdafuckup",
+            HttpClientTimeout = TimeSpan.FromSeconds(60),
+            FirstMessageHandlerSetup = handler =>
+            {
+                if (handler is SocketsHttpHandler sockets)
+                {
+                    sockets.SslOptions.TargetHost = tlsName;
+                    sockets.SslOptions.RemoteCertificateValidationCallback = validate;
+                }
+            },
+        };
+        var client = transport is null ? new k8s.Kubernetes(config, new RetryHandler()) : new k8s.Kubernetes(config, new RetryHandler(), transport);
+        client.CreateWebSocketBuilder = () =>
+        {
+            var builder = new WebSocketBuilder();
+            builder.Options.RemoteCertificateValidationCallback = validate;
+            return builder;
+        };
+        return client;
+    }
+
+    /// <summary>Accepts a certificate that chains to one of <paramref name="authorities"/> (only them) and carries <paramref name="name"/>.</summary>
+    internal static RemoteCertificateValidationCallback TunnelValidator(X509Certificate2Collection authorities, string name, TlsObserver? observer, string address) =>
+        (_, certificate, presented, _) =>
+        {
+            if (certificate is null)
+            {
+                return false;
+            }
+
+            var leaf = new X509Certificate2(certificate);
+            using var chain = new X509Chain();
+            chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+            chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+            chain.ChainPolicy.CustomTrustStore.AddRange(authorities);
+            if (presented is not null)
+            {
+                foreach (var element in presented.ChainElements)
+                {
+                    chain.ChainPolicy.ExtraStore.Add(element.Certificate);
+                }
+            }
+
+            var trusted = chain.Build(leaf) && leaf.MatchesHostname(name, allowWildcards: true, allowCommonName: false);
+            var seen = (trusted ? observer?.Accepted : observer?.Rejected)?.TryAdd(address, leaf) == true;
+            if (!seen)
+            {
+                leaf.Dispose();
+            }
+
+            return trusted;
+        };
 
     /// <summary>The CA certificates among the pins: a cluster is trusted through the CA that signs its API servers.</summary>
     public static X509Certificate2Collection CertificateAuthorities(ConnectionSettings settings)

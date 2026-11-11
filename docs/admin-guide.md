@@ -27,6 +27,7 @@
 | Backup server → PostgreSQL | TCP 5432 | Catalog (usually on the same machine) |
 | Backup server → Kubernetes API servers | TCP 6443 (HTTPS) | Inventory, objects, snapshots, mover pods, hooks (exec) |
 | Mover pods in a cluster → backup server | TCP 9555 (HTTPS) | Volume data of backups and restores, files of a file restore into a PVC. Outbound from the pods only. |
+| Cluster agent → backup server | TCP 9555 (HTTPS, WebSockets) | For clusters reached through their agent: the control connection and one WebSocket per API connection. Outbound from the cluster only; then the server needs no route to the API server. |
 | Backup server → container registry | HTTPS (the registry's port) | Pushing the mover image |
 | Cluster nodes → container registry | HTTPS (the registry's port) | Pulling the mover image |
 
@@ -588,7 +589,7 @@ It was built for RKE2 on vSphere with the vSphere CSI driver. Any CSI driver wit
 
 | Item | Notes |
 |---|---|
-| Cluster | Tested with RKE2 1.32 and vSphere CSI 3.6.3. The API server must be reachable from the backup server. |
+| Cluster | Tested with RKE2 1.32 and vSphere CSI 3.6.3. Either the backup server reaches the API server, or the cluster's pods reach the backup server (an agent, see below). |
 | Volume snapshots | The snapshot CRDs and the snapshot controller (RKE2 ships both), the CSI driver's snapshotter, and a VolumeSnapshotClass for the driver (`deletionPolicy: Delete`). PVCs on storage without a snapshot class (NFS, for example) are backed up as objects only. |
 | vSphere CSI | 3.5 or later. 3.3.1 is end of life and not supported on Kubernetes 1.32. vSphere allows 3 snapshots per volume by default and costs I/O for each; backdafuckup keeps a snapshot only while its volume is read. |
 | Container registry | For the mover image: reachable by the backup server (push) and the cluster's nodes (pull). |
@@ -626,7 +627,42 @@ It was built for RKE2 on vSphere with the vSphere CSI driver. Any CSI driver wit
 
    *Rescan* reads the inventory again.
 
-The server connects to the API server itself. For clusters it cannot reach, an agent in the cluster that dials out is planned.
+### Through an agent (clusters the server cannot reach)
+
+When the backup server cannot reach a cluster's API server (a firewall or NAT in between), an agent in the cluster connects out to the server instead.
+
+**How it works:**
+- The agent is the mover image in agent mode: a Deployment `backdafuckup-agent` in `backdafuckup-system`.
+- It keeps a WebSocket to the server open (`/api/agent/clusters/<id>/control`, TCP 9555).
+- For every connection the server's Kubernetes client opens to the API server, the agent opens a WebSocket of its own and joins it to a TCP connection to the API server in the cluster (`kubernetes.default.svc`).
+- TLS runs from the server through the agent to the API server, so the agent sees no request. Exec for hooks goes through the tunnel too.
+- On this server the cluster gets a port on the loopback address that the client connects to. The server checks the API server's certificate against the cluster CA and the name `kubernetes.default.svc`.
+- The agent sends its ServiceAccount token and the cluster CA. It sends the token again whenever the kubelet renews it. The server keeps both in memory only.
+- The agent authenticates with the cluster's **connect token**, which only the setup manifest holds.
+
+**To add a cluster this way:**
+1. Set the server address under *Guest agents → Settings* and the mover image's registry (below).
+2. *Add cluster → Through an agent in the cluster*, with a display name.
+3. The console shows the setup manifest with the agent. It contains:
+   - the roles as above;
+   - a Secret `backdafuckup-agent` with the connect token;
+   - the pull secret in *Create* mode;
+   - the Deployment, with the image by digest.
+
+   The mover image is pushed first if needed. Keep the manifest like a password.
+4. Apply it. Once the agent connects, the server reads the cluster and fills its inventory; the wizard waits for that.
+
+**An existing cluster** changes to agent access with *Reach it through an agent* on its page. Jobs and restore points stay. The stored ServiceAccount token and pins are replaced by the connect token, and *Setup manifest with the agent* shows the manifest to apply. Going back to direct access means adding the cluster's token again.
+
+**The agent pod:**
+- It runs as user 1654, not as root, without capabilities, with a read-only root file system.
+- Resources: 50m CPU and 64 MiB requested, 256 MiB limit.
+- It needs no permissions of its own; the server's calls use the ServiceAccount's roles.
+- The mover pods of backups and restores still connect to the server directly (TCP 9555), as with direct access.
+
+**Status:** the cluster list shows *agent online* with its pod and node, or *agent offline* since its last contact. While the agent is offline, backups and restores of the cluster fail with "The agent of cluster … is not connected to this server".
+
+**Updating the agent:** it runs the mover image of the version whose manifest was applied. After a server update, apply the manifest again (*Setup manifest with the agent*) to run the new image.
 
 ### The mover image
 
@@ -784,6 +820,9 @@ Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-r
 | "The snapshot … was not ready to use after 10 minutes" | The CSI snapshotter cannot create the snapshot (limit reached, storage, class). | Check the VolumeSnapshot's events and the `csi-snapshotter` log. On vSphere, check the volume's snapshot count. |
 | "The namespace … enforces the Pod Security level "restricted"" | File restore into a PVC of such a namespace. | Download the files as ZIP, or allow "baseline" for the namespace during the restore. |
 | "The PVC … is ReadWriteOncePod and used by …" | No second pod may mount the PVC. | Scale the workload to 0 for the restore, or download the files. |
+| "The agent of cluster … is not connected to this server" | The agent pod is not running, or cannot reach the server. | Check `kubectl -n backdafuckup-system logs deploy/backdafuckup-agent`: it names the server address and the error (certificate, connection). |
+| "Cannot connect to the backup server … 401" (in the agent's log) | The connect token is not the cluster's current one (the cluster was added again or switched). | Apply the current setup manifest with the agent. |
+| "the agent cannot reach the API server …" (server log) | The agent cannot open a TCP connection to `KUBERNETES_SERVICE_HOST`. | Check network policies in `backdafuckup-system`. |
 
 ## API and API tokens
 

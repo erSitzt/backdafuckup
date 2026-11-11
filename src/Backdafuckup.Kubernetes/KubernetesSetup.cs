@@ -16,7 +16,134 @@ public static class KubernetesSetup
     /// volume snapshots, runs hooks in pods and works with PVCs, PVs and pods in the work namespace. Restore creates and
     /// changes objects in any namespace; without it the account only backs up.
     /// </summary>
-    public static string Manifest(bool includeRestore = true) => includeRestore ? Backup + Restore : Backup;
+    public static string Manifest(bool includeRestore = true, ClusterAgentManifest? agent = null) =>
+        (includeRestore ? Backup + Restore : Backup) + (agent is null ? string.Empty : Agent(agent));
+
+    public const string AgentName = "backdafuckup-agent";
+
+    /// <summary>
+    /// The agent of a cluster the server reaches through it: a Secret with the connect token, the pull secret when the
+    /// server creates it, and a Deployment of the mover image in agent mode, as a non-root user without capabilities. It
+    /// uses the ServiceAccount of the manifest, whose token it sends to the server.
+    /// </summary>
+    private static string Agent(ClusterAgentManifest agent)
+    {
+        var pull = agent.PullSecretName is { } name
+            ? $$"""
+                    imagePullSecrets:
+                      - name: {{Quote(name)}}
+
+              """
+            : string.Empty;
+        var pullSecret = agent.PullSecretName is { } secretName && agent.DockerConfigJson is { } json
+            ? $$"""
+              ---
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: {{Quote(secretName)}}
+                namespace: {{WorkNamespace}}
+                labels:
+                  app.kubernetes.io/managed-by: backdafuckup
+              type: kubernetes.io/dockerconfigjson
+              data:
+                .dockerconfigjson: {{Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json))}}
+
+              """
+            : string.Empty;
+        return $$"""
+            ---
+            # The agent: for a cluster the backup server cannot reach. It dials out to {{agent.ServerUrl}} and carries the server's
+            # connections to the API server; TLS runs from the server to the API server through it. The connect token below
+            # lets it in: keep this manifest like a password.
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: {{AgentName}}
+              namespace: {{WorkNamespace}}
+              labels:
+                app.kubernetes.io/managed-by: backdafuckup
+            type: Opaque
+            stringData:
+              token: {{Quote(agent.Token)}}
+
+            """ + pullSecret + $$"""
+            ---
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: {{AgentName}}
+              namespace: {{WorkNamespace}}
+              labels:
+                app.kubernetes.io/name: {{AgentName}}
+                app.kubernetes.io/managed-by: backdafuckup
+            spec:
+              replicas: 1
+              strategy:
+                type: Recreate
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: {{AgentName}}
+              template:
+                metadata:
+                  labels:
+                    app.kubernetes.io/name: {{AgentName}}
+                spec:
+                  serviceAccountName: {{ServiceAccount}}
+
+            """ + pull + $$"""
+                  securityContext:
+                    runAsNonRoot: true
+                    runAsUser: 1654
+                    runAsGroup: 1654
+                    seccompProfile:
+                      type: RuntimeDefault
+                  containers:
+                    - name: agent
+                      image: {{Quote(agent.Image)}}
+                      imagePullPolicy: IfNotPresent
+                      env:
+                        - name: BDFU_MOVER_MODE
+                          value: agent
+                        - name: BDFU_AGENT_SERVER_URL
+                          value: {{Quote(agent.ServerUrl)}}
+                        - name: BDFU_AGENT_CONNECTION
+                          value: {{Quote(agent.ConnectionId.ToString("D"))}}
+                        - name: BDFU_MOVER_SERVER_PINS
+                          value: {{Quote(string.Join(',', agent.ServerPins))}}
+                        - name: BDFU_AGENT_TOKEN
+                          valueFrom:
+                            secretKeyRef:
+                              name: {{AgentName}}
+                              key: token
+                        - name: POD_NAME
+                          valueFrom:
+                            fieldRef:
+                              fieldPath: metadata.name
+                        - name: NODE_NAME
+                          valueFrom:
+                            fieldRef:
+                              fieldPath: spec.nodeName
+                        # The root file system is read-only: no diagnostics socket in /tmp.
+                        - name: DOTNET_EnableDiagnostics
+                          value: "0"
+                      resources:
+                        requests:
+                          cpu: 50m
+                          memory: 64Mi
+                        limits:
+                          memory: 256Mi
+                      securityContext:
+                        allowPrivilegeEscalation: false
+                        readOnlyRootFilesystem: true
+                        capabilities:
+                          drop: [ALL]
+
+            """;
+    }
+
+    /// <summary>A YAML double-quoted scalar (JSON's string syntax is valid YAML).</summary>
+    private static string Quote(string value) => System.Text.Json.JsonSerializer.Serialize(value);
 
     private static readonly string Backup = $$"""
         # backdafuckup: access to this cluster for backing up and restoring namespaces.
@@ -135,3 +262,11 @@ public static class KubernetesSetup
 
         """;
 }
+
+/// <summary>What the agent part of a cluster's setup manifest needs.</summary>
+/// <param name="ServerUrl">Where the agent reaches the backup server (Guest agents → Settings).</param>
+/// <param name="ServerPins">SHA-256 SPKI pins of the server certificate; empty: the system's CA store.</param>
+/// <param name="Token">The cluster's connect token.</param>
+/// <param name="Image">The mover image by digest.</param>
+public sealed record ClusterAgentManifest(
+    Guid ConnectionId, string ServerUrl, IReadOnlyList<string> ServerPins, string Token, string Image, string? PullSecretName, string? DockerConfigJson);
