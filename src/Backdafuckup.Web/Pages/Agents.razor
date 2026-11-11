@@ -151,7 +151,7 @@ else
                 @if (context.Agent is { Online: true })
                 {
                     <MudTooltip Text="Test VSS: prepare, freeze for a moment and thaw (no snapshot)">
-                        <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.FactCheck" Disabled="_testing" OnClick="@(() => TestAsync(context.Agent))" />
+                        <MudIconButton Size="Size.Small" Icon="@AppIcons.Verify" Disabled="_testing" OnClick="@(() => TestAsync(context.Agent))" />
                     </MudTooltip>
                 }
                 @if (context.Agent is not null)

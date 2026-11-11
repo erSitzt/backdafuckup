@@ -67,6 +67,8 @@ html, body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helveti
 .mini-chip.info { background: var(--mud-palette-info-hover); color: var(--mud-palette-info); }
 .mini-chip.warning { background: var(--mud-palette-warning-hover); color: var(--mud-palette-warning-darken); }
 .mini-chip.error { background: var(--mud-palette-error-hover); color: var(--mud-palette-error); }
+/* An icon in a mini chip: the same icon as the thing everywhere else (AppIcons), at the chip's text size. */
+.mini-chip .mini-chip-icon { font-size: 14px; margin: 0 3px 0 -2px; vertical-align: -2px; }
 
 /* Wizards (new job, restore): the step bar, the step's head, the form, and actions that stay in view while scrolling. */
 .wizard-steps { display: flex; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--mud-palette-lines-default); overflow-x: auto; scrollbar-width: none; }

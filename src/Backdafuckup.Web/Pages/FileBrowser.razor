@@ -10,7 +10,7 @@
 @if (_error is not null)
 {
     <MudAlert Severity="Severity.Error" Class="mb-3">@_error</MudAlert>
-    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="OpenAsync" StartIcon="@Icons.Material.Filled.FolderOpen">Open again</MudButton>
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="OpenAsync" StartIcon="@AppIcons.Files">Open again</MudButton>
     <MudButton Variant="Variant.Text" Href="/backups" Class="ml-2">Back to backups</MudButton>
 }
 else if (_mount is null)
@@ -26,7 +26,7 @@ else
         <MudChip T="string" Size="Size.Small" Color="Color.Default">@_mount.RestorePointCreatedUtc.ToLocalTime().ToString("g")</MudChip>
         @if (_mount.Consistency == "application")
         {
-            <MudChip T="string" Size="Size.Small" Color="Color.Success" Icon="@Icons.Material.Filled.VerifiedUser">application-consistent</MudChip>
+            <MudChip T="string" Size="Size.Small" Color="Color.Success" Icon="@AppIcons.ApplicationConsistent">application-consistent</MudChip>
         }
         else
         {
@@ -89,7 +89,7 @@ else
                                            Disabled="@(_selected.Count == 0 || _preparing)" OnClick="DownloadZipAsync">@(_selected.Count > 0 ? $"Download ZIP ({_selected.Count})" : "Download")</MudButton>
                             }
                         </MudTooltip>
-                        <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Restore"
+                        <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@AppIcons.Restore"
                                    Disabled="@(_selected.Count == 0)" OnClick="OpenRestoreAsync">Restore…</MudButton>
                     </MudStack>
                     @if (_loading)
@@ -292,7 +292,7 @@ else
             {
                 Value = Node(v.Id, []),
                 Text = $"{v.Title}  ·  {v.FileSystem}, {Fmt.Bytes(v.Length)}",
-                Icon = Icons.Material.Filled.Storage,
+                Icon = AppIcons.Disk,
                 Expandable = true,
             })];
             var first = _mount.Volumes.FirstOrDefault(v => v.Readable && v.MountPoint is "C:" or "/") ?? _mount.Volumes.FirstOrDefault(v => v.Readable);

@@ -11,7 +11,7 @@
 @if (_error is not null)
 {
     <MudAlert Severity="Severity.Error" Class="mb-3">@_error</MudAlert>
-    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="OpenAsync" StartIcon="@Icons.Material.Filled.Storage">Open again</MudButton>
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="OpenAsync" StartIcon="@AppIcons.Database">Open again</MudButton>
     <MudButton Variant="Variant.Text" Href="/backups" Class="ml-2">Back to backups</MudButton>
 }
 else if (_mount is null || _sql is null)
@@ -63,7 +63,7 @@ else
                     {
                         var instance = InstanceOf(db.Instance);
                         <MudStack Row="true" AlignItems="AlignItems.Center" Wrap="Wrap.Wrap" Class="mb-2">
-                            <MudIcon Icon="@Icons.Material.Filled.Storage" />
+                            <MudIcon Icon="@AppIcons.Database" />
                             <MudText Typo="Typo.h6">@db.Name</MudText>
                             <MudText Typo="Typo.body2" Class="mud-text-secondary">@db.Instance@(instance?.Product is { } product ? $" · {product}" : "")</MudText>
                             <ConsistencyChip Consistency="@db.Consistency" Reason="@db.ConsistencyReason" />
@@ -73,13 +73,13 @@ else
                                            Disabled="@(!db.Restorable || !CanExport(db))" OnClick="@(() => OpenPublishAsync(db, restore: false))">Publish</MudButton>
                             </MudTooltip>
                             <MudTooltip Text="Copy the database files into a VM under new names and attach them as a new database, on the original or another instance.">
-                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore"
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@AppIcons.Restore"
                                            Disabled="@(!db.Restorable || !CanExport(db))" OnClick="@(() => OpenPublishAsync(db, restore: true))">Restore</MudButton>
                             </MudTooltip>
                             <MudTooltip Text="The database files as they are in the backup, plus a script that attaches them to an instance.">
                                 <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.FolderZip"
                                            Disabled="@(!CanExport(db) || _preparing)" OnClick="@(() => ExportFilesAsync(db))">Export files</MudButton>
-                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Inventory2"
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Download"
                                            Disabled="@(!db.Restorable || !CanExport(db))" OnClick="@(() => OpenPublishAsync(db, restore: false, export: true))">Export .bak</MudButton>
                             </MudTooltip>
                         </MudStack>
@@ -133,7 +133,7 @@ else
                     else if (SelectedInstance is { } inst)
                     {
                         <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-2">
-                            <MudIcon Icon="@Icons.Material.Filled.Dns" />
+                            <MudIcon Icon="@AppIcons.SqlInstance" />
                             <MudText Typo="Typo.h6">@inst.Name</MudText>
                             <MudText Typo="Typo.body2" Class="mud-text-secondary">@(inst.Product ?? "SQL Server")</MudText>
                         </MudStack>
@@ -349,7 +349,7 @@ else
     </DialogContent>
     <DialogActions>
         <MudButton OnClick="@(() => _publishOpen = false)">Cancel</MudButton>
-        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@(_restoreMode ? Icons.Material.Filled.SettingsBackupRestore : Icons.Material.Filled.Link)"
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@(_restoreMode ? AppIcons.Restore : Icons.Material.Filled.Link)"
                    Disabled="@(!CanPublish || _starting)" OnClick="PublishAsync">@(_exportMode ? "Export" : _restoreMode ? (_overwrite ? "Overwrite" : "Restore") : "Publish")</MudButton>
     </DialogActions>
 </MudDialog>
@@ -733,7 +733,7 @@ else
             {
                 Value = "i:" + i.Name,
                 Text = i.Product is null ? i.Name : $"{i.Name}  ·  {i.Product}",
-                Icon = Icons.Material.Filled.Dns,
+                Icon = AppIcons.SqlInstance,
                 Expanded = true,
                 Children = [.. _sql.Databases
                     .Where(d => string.Equals(d.Instance, i.Name, StringComparison.OrdinalIgnoreCase))
@@ -742,7 +742,7 @@ else
                     {
                         Value = Key(d),
                         Text = d.Name,
-                        Icon = d.Restorable ? Icons.Material.Filled.Storage : Icons.Material.Filled.Block,
+                        Icon = d.Restorable ? AppIcons.Database : Icons.Material.Filled.Block,
                         Expandable = false,
                     })],
             })];

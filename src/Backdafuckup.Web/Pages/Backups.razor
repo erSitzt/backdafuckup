@@ -99,15 +99,15 @@
     <ChildContent>
         @if (_menuPoint is { } point)
         {
-            <MudMenuItem Icon="@Icons.Material.Filled.Computer" Href="@($"/restore/{point.Id}")">Entire VM</MudMenuItem>
-            <MudMenuItem Icon="@Icons.Material.Filled.FolderOpen" Href="@($"/files/{point.Id}")">Files and folders</MudMenuItem>
+            <MudMenuItem Icon="@AppIcons.Vm" Href="@($"/restore/{point.Id}")">Entire VM</MudMenuItem>
+            <MudMenuItem Icon="@AppIcons.Files" Href="@($"/files/{point.Id}")">Files and folders</MudMenuItem>
             @if (point.SqlDatabaseCount > 0)
             {
-                <MudMenuItem Icon="@Icons.Material.Filled.TableChart" Href="@($"/sql/{point.Id}")">SQL Server databases</MudMenuItem>
+                <MudMenuItem Icon="@AppIcons.Database" Href="@($"/sql/{point.Id}")">SQL Server databases</MudMenuItem>
             }
             @if (point.DomainController)
             {
-                <MudMenuItem Icon="@Icons.Material.Filled.Domain" Href="@($"/ad/{point.Id}")">Active Directory objects</MudMenuItem>
+                <MudMenuItem Icon="@AppIcons.ActiveDirectory" Href="@($"/ad/{point.Id}")">Active Directory objects</MudMenuItem>
             }
         }
     </ChildContent>

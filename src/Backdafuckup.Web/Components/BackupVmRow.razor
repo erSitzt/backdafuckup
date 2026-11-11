@@ -40,15 +40,15 @@
         {
             @if (Latest.DomainController)
             {
-                <span class="mini-chip info" title="@($"Domain controller{(string.IsNullOrEmpty(Latest.AdDomain) ? string.Empty : $" of {Latest.AdDomain}")}: its Active Directory database is in the newest restore point")">AD</span>
+                <span class="mini-chip info" title="@($"Domain controller{(string.IsNullOrEmpty(Latest.AdDomain) ? string.Empty : $" of {Latest.AdDomain}")}: its Active Directory database is in the newest restore point")"><MudIcon Icon="@AppIcons.ActiveDirectory" Class="mini-chip-icon" />AD</span>
             }
             @if (Latest.SqlDatabaseCount > 0)
             {
-                <span class="mini-chip info" title="@($"{Latest.SqlDatabaseCount} SQL Server database(s) in the newest restore point")">SQL @Latest.SqlDatabaseCount</span>
+                <span class="mini-chip info" title="@($"{Latest.SqlDatabaseCount} SQL Server database(s) in the newest restore point")"><MudIcon Icon="@AppIcons.Database" Class="mini-chip-icon" />SQL @Latest.SqlDatabaseCount</span>
             }
             @if (Latest.MemoryImageBytes is { } ram && Latest.Consistency != "application")
             {
-                <span class="mini-chip info" title="@($"Snapshot with memory ({Fmt.Bytes(ram)} RAM): the disks match each other; a restore can resume the VM.")">RAM</span>
+                <span class="mini-chip info" title="@($"Snapshot with memory ({Fmt.Bytes(ram)} RAM): the disks match each other; a restore can resume the VM.")"><MudIcon Icon="@AppIcons.Memory" Class="mini-chip-icon" />RAM</span>
             }
             else if (Latest.Consistency != "application")
             {

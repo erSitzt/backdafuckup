@@ -102,8 +102,8 @@ else
                     @(plan.StopAtLocal is { } stop ? $"up to {plan.ReachedUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss} (STOPAT {stop.Replace('T', ' ')[..19]} in SQL Server's time)" : plan.Logs == 0 ? string.Empty : "to the end of the last one") — the state of @plan.ReachedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture).
                 </MudText>
                 <div class="d-flex gap-2 flex-wrap">
-                    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(false))">Restore as a new database</MudButton>
-                    <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(() => OpenAsync(true))">Overwrite the original</MudButton>
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@AppIcons.Restore" OnClick="@(() => OpenAsync(false))">Restore as a new database</MudButton>
+                    <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@AppIcons.Restore" OnClick="@(() => OpenAsync(true))">Overwrite the original</MudButton>
                     <MudTooltip Text="@(plan.RestorePointId is null ? $"Publishing needs a restore point as the base; this time starts from a full backup. {PublishableText()}" : "Attach it in a VM from the backup without copying the files; the log backups are applied in a temporary overlay.")">
                         <MudButton Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Publish" Disabled="@(plan.RestorePointId is null)" OnClick="@(() => OpenAsync(false, true))">Publish</MudButton>
                     </MudTooltip>

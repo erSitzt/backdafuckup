@@ -14,14 +14,14 @@
             <MudChip T="string" Size="Size.Small" Color="Color.Default">@Fmt.Time(_point.CreatedUtc)</MudChip>
             @if (!string.IsNullOrEmpty(_point.AdDomain))
             {
-                <MudChip T="string" Size="Size.Small" Color="Color.Info" Icon="@Icons.Material.Filled.Domain">@_point.AdDomain</MudChip>
+                <MudChip T="string" Size="Size.Small" Color="Color.Info" Icon="@AppIcons.ActiveDirectory">@_point.AdDomain</MudChip>
             }
         }
     </TitleContent>
     <Actions>
         @if (_explore is { State: "Ready" } ready && ready.Mount is { } mount)
         {
-            <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Icon="@Icons.Material.Filled.Dns">@mount.LiveHost</MudChip>
+            <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Icon="@AppIcons.Vm">@mount.LiveHost</MudChip>
             <MudTooltip Text="@(mount.RecycleBin ? "Deleted objects come back with all attributes, links and the password." : "Deleted objects are tombstones: the restore writes their attributes and memberships back; accounts need a new password.")">
                 <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@(mount.RecycleBin ? Color.Success : Color.Default)" Icon="@Icons.Material.Filled.Recycling">
                     Recycle Bin @(mount.RecycleBin ? "on" : "off")
@@ -85,7 +85,7 @@ else if (_explore is null)
                 }
             </MudItem>
         </MudGrid>
-        <MudButton Class="mt-3" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.FolderOpen"
+        <MudButton Class="mt-3" Variant="Variant.Filled" Color="Color.Primary" StartIcon="@AppIcons.ActiveDirectory"
                    Disabled="@(_agentId is null || _credentialId is null || _busy)" OnClick="OpenAsync">Open</MudButton>
     </MudPaper>
 }
@@ -113,7 +113,7 @@ else if (_explore.State != "Ready")
 else
 {
     <MudTabs Elevation="0" Rounded="true" TabPanelsClass="pt-3" @bind-ActivePanelIndex="_tab">
-        <MudTabPanel Text="Objects" Icon="@Icons.Material.Filled.AccountTree">
+        <MudTabPanel Text="Objects" Icon="@AppIcons.ActiveDirectory">
             <MudGrid Spacing="2">
                 <MudItem xs="12" md="3">
                     <MudPaper Class="pa-2" Elevation="1" Style="max-height:70vh;overflow:auto">
@@ -144,7 +144,7 @@ else
                             </MudSelect>
                             <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Search" OnClick="SearchAsync" Disabled="_searching">Search</MudButton>
                             <MudSpacer />
-                            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore"
+                            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@AppIcons.Restore"
                                        Disabled="@(_selected.Count == 0)" OnClick="RestoreSelectedAsync">Restore… @(_selected.Count > 0 ? $"({_selected.Count})" : string.Empty)</MudButton>
                         </MudStack>
                         <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1" Wrap="Wrap.Wrap" Class="mb-1">
@@ -207,7 +207,7 @@ else
                     <MudText Typo="Typo.body2">A restore brings back a policy's files in SYSVOL and its container, raises its version so that clients apply it again, and adds its links back if chosen.</MudText>
                     <MudSpacer />
                     <MudSwitch T="bool" @bind-Value="_gpoLinks" Color="Color.Primary" Label="Add the links back" />
-                    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore"
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@AppIcons.Restore"
                                Disabled="@(_selectedGpos.Count == 0)" OnClick="RestoreGposAsync">Restore… @(_selectedGpos.Count > 0 ? $"({_selectedGpos.Count})" : string.Empty)</MudButton>
                 </MudStack>
                 <MudTable T="AdEntryDto" Items="_gpos" Dense="true" Hover="true" Elevation="0" MultiSelection="true" @bind-SelectedItems="_selectedGpos" Loading="_gposLoading" Breakpoint="Breakpoint.Sm">
@@ -321,7 +321,7 @@ else
     </DialogContent>
     <DialogActions>
         <MudButton OnClick="@(() => _objectOpen = false)">Close</MudButton>
-        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore"
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@AppIcons.Restore"
                    Disabled="@(_object is null || (_object.State is "changed" && _attributes.Count == 0) || _object.State == "unchanged")" OnClick="RestoreObjectAsync">Restore…</MudButton>
     </DialogActions>
 </MudDialog>
@@ -403,7 +403,7 @@ else
     </DialogContent>
     <DialogActions>
         <MudButton OnClick="@(() => _restoreOpen = false)">Cancel</MudButton>
-        <MudButton Variant="Variant.Filled" Color="Color.Error" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="StartRestoreAsync"
+        <MudButton Variant="Variant.Filled" Color="Color.Error" StartIcon="@AppIcons.Restore" OnClick="StartRestoreAsync"
                    Disabled="@(_plan is null || _starting || !string.Equals(_confirm?.Trim(), _plan.LiveDomain, StringComparison.OrdinalIgnoreCase) || _plan.Items.All(i => i.Outcome != "planned"))">Restore</MudButton>
     </DialogActions>
 </MudDialog>
@@ -535,7 +535,7 @@ else
         if (_explore.State == "Ready")
         {
             var domain = _explore.Mount?.DomainDn ?? string.Empty;
-            _tree = [new TreeItemData<string> { Value = domain, Text = _point?.AdDomain ?? domain, Icon = Icons.Material.Filled.Domain, Expandable = true, Expanded = false }];
+            _tree = [new TreeItemData<string> { Value = domain, Text = _point?.AdDomain ?? domain, Icon = AppIcons.ActiveDirectory, Expandable = true, Expanded = false }];
             await SearchAsync();
             await LoadGposAsync();
         }
@@ -873,11 +873,11 @@ else
     {
         "user" => Icons.Material.Filled.Person,
         "group" => Icons.Material.Filled.Group,
-        "computer" => Icons.Material.Filled.Computer,
+        "computer" => AppIcons.Vm,
         "contact" => Icons.Material.Filled.ContactMail,
         "organizationalUnit" => Icons.Material.Filled.FolderShared,
         "groupPolicyContainer" => Icons.Material.Filled.Policy,
-        "domainDNS" => Icons.Material.Filled.Domain,
+        "domainDNS" => AppIcons.ActiveDirectory,
         _ => Icons.Material.Filled.Folder,
     };
 
