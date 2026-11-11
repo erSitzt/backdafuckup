@@ -29,6 +29,8 @@ public sealed class MoverFilesTests : IDisposable
     [Fact]
     public async Task Files_folders_and_links_get_their_content_mode_and_times_and_folder_times_come_last()
     {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The mover puts files into volumes on Linux only (statx, lchown).");
+
         var report = await ApplyAsync(keep: false, owners: false, w =>
         {
             w.Directory(0, "folder");
@@ -53,6 +55,8 @@ public sealed class MoverFilesTests : IDisposable
     [Fact]
     public async Task Replace_replaces_existing_files_and_keep_writes_restored_copies_with_free_names()
     {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The mover puts files into volumes on Linux only (statx, lchown).");
+
         await File.WriteAllTextAsync(Path.Combine(_volume, "a.txt"), "old", Ct);
         await File.WriteAllTextAsync(Path.Combine(_volume, "RESTORED-a.txt"), "older copy", Ct);
 
@@ -70,6 +74,8 @@ public sealed class MoverFilesTests : IDisposable
     [Fact]
     public async Task Nothing_is_written_through_a_link_or_outside_the_volume_and_conflicts_with_folders_fail()
     {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The mover puts files into volumes on Linux only (statx, lchown).");
+
         File.CreateSymbolicLink(Path.Combine(_volume, "evil"), _outside);
         Directory.CreateDirectory(Path.Combine(_volume, "dir"));
 
@@ -98,6 +104,8 @@ public sealed class MoverFilesTests : IDisposable
     [Fact]
     public async Task A_file_the_server_cannot_read_leaves_nothing_behind_and_a_stream_that_breaks_off_fails()
     {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The mover puts files into volumes on Linux only (statx, lchown).");
+
         using var stream = new MemoryStream();
         var writer = new MoverFileWriter(stream);
         writer.WriteHeader();
@@ -124,6 +132,7 @@ public sealed class MoverFilesTests : IDisposable
     [Fact]
     public async Task Owners_from_the_backup_that_cannot_be_set_are_reported_and_the_file_is_still_restored()
     {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The mover puts files into volumes on Linux only (statx, lchown).");
         if (Environment.IsPrivilegedProcess)
         {
             return; // root may give files to anyone
