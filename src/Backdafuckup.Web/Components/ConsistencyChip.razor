@@ -2,7 +2,9 @@
    what a backup without guest processing promises: it shows as a warning only when it is less than the job promised. *@
 @if (Consistency == "application")
 {
-    <MudChip T="string" Size="Size.Small" Color="Color.Success" Icon="@AppIcons.ApplicationConsistent">application-consistent</MudChip>
+    <MudTooltip Text="@(Hooks ? "The backup hooks of the pods ran before the snapshots: their volumes are application-consistent." : "The guest held its writes for the snapshot (VSS).")">
+        <MudChip T="string" Size="Size.Small" Color="Color.Success" Icon="@AppIcons.ApplicationConsistent">@(Hooks ? "app-consistent (hooks)" : "application-consistent")</MudChip>
+    </MudTooltip>
 }
 else
 {
@@ -21,4 +23,8 @@ else
     /// <summary>Less consistent than promised (default): a database that is only crash-consistent always is.</summary>
     [Parameter]
     public bool Warning { get; set; } = true;
+
+    /// <summary>A Kubernetes namespace: its consistency comes from the backup hooks of its pods.</summary>
+    [Parameter]
+    public bool Hooks { get; set; }
 }

@@ -5,7 +5,7 @@
 @inject ISnackbar Snackbar
 
 <PageTitle>Backups – backdafuckup</PageTitle>
-<PageHeader Title="Backups &amp; Restore" Description="Every backed-up VM with its newest restore point, by job or by VM. Expand a VM for all its restore points; restore the whole VM, files, SQL Server databases or Active Directory objects from any of them.">
+<PageHeader Title="Backups &amp; Restore" Description="Every backed-up VM and Kubernetes namespace with its newest restore point, by job or by VM. Expand one for all its restore points; restore a whole VM, files, SQL Server databases or Active Directory objects, or a namespace, its apps and PVCs, from any of them.">
     <Actions>
         <MudToggleGroup T="string" Value="@Grouping" ValueChanged="@(v => Navigate(("group", v == "vm" ? "vm" : null)))" Size="Size.Small" Outlined="true" Color="Color.Primary">
             <MudToggleItem Value="@("job")" Text="By job" />
@@ -17,7 +17,7 @@
 <MudPaper Elevation="1" Class="pa-2 mb-3">
     <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Wrap="Wrap.Wrap">
         <MudTextField T="string" @bind-Value="_text" DebounceInterval="300" OnDebounceIntervalElapsed="@(v => Navigate(("q", string.IsNullOrWhiteSpace(v) ? null : v.Trim())))"
-                      Placeholder="VM or job" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Clearable="true"
+                      Placeholder="VM, namespace or job" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Clearable="true"
                       Variant="Variant.Outlined" Margin="Margin.Dense" Class="backup-search" Style="min-width:180px;max-width:260px" />
         @* On a phone the filters fill the first screen: there they fold away behind this button. *@
         <MudButton Class="backup-filters-toggle" Variant="Variant.Text" Size="Size.Small" StartIcon="@Icons.Material.Filled.FilterList"
@@ -140,7 +140,7 @@ else
                 <div class="backup-group-head cursor-pointer" @onclick="@(() => ToggleGroup(group.Key))">
                     <MudIcon Icon="@(collapsed ? Icons.Material.Filled.ChevronRight : Icons.Material.Filled.ExpandMore)" Size="Size.Small" />
                     <MudText Typo="Typo.subtitle1" Class="section-title">@group.Title</MudText>
-                    <MudText Typo="Typo.body2" Color="Color.Secondary">@group.Detail · @group.Rows.Count VM@(group.Rows.Count == 1 ? string.Empty : "s")</MudText>
+                    <MudText Typo="Typo.body2" Color="Color.Secondary">@group.Detail · @BackupRow.Count(group.Rows)</MudText>
                     @if (group.Stale > 0)
                     {
                         <MudChip T="string" Size="Size.Small" Color="Color.Warning" Icon="@Icons.Material.Filled.Schedule">@group.Stale missed a run</MudChip>
@@ -163,7 +163,7 @@ else
                     <MudSimpleTable Dense="true" Hover="true" Elevation="0" Class="backup-vms">
                         <thead>
                             <tr>
-                                <th style="width:28px"></th><th>VM</th><th class="c-560">State</th><th class="c-560">Newest restore point</th><th class="c-760 num">Points</th>
+                                <th style="width:28px"></th><th>@BackupRow.Noun(group.Rows)</th><th class="c-560">State</th><th class="c-560">Newest restore point</th><th class="c-760 num">Points</th>
                                 <th class="c-950 num">Stored</th><th class="c-420">Contains</th>@if (Grouping == "vm") {<th class="c-760">Jobs</th>}<th></th>
                             </tr>
                         </thead>
@@ -179,7 +179,7 @@ else
                 @if (!all && group.Rows.Count > RowLimit)
                 {
                     <div class="pa-2">
-                        <MudButton Variant="Variant.Text" OnClick="@(() => _showAll.Add(group.Key))">Show all @group.Rows.Count VMs</MudButton>
+                        <MudButton Variant="Variant.Text" OnClick="@(() => _showAll.Add(group.Key))">Show all @BackupRow.Count(group.Rows)</MudButton>
                     </div>
                 }
             }
@@ -425,7 +425,8 @@ else
     private string Summary()
     {
         var vms = _vms!;
-        var text = $"{vms.Count} VM{(vms.Count == 1 ? string.Empty : "s")}";
+        var namespaces = vms.Count(v => v.Latest?.ObjectKind == RestorePointObjectKinds.KubernetesNamespace);
+        var text = $"{vms.Count - namespaces} VM{(vms.Count - namespaces == 1 ? string.Empty : "s")}" + (namespaces > 0 ? $" · {namespaces} namespace{(namespaces == 1 ? string.Empty : "s")}" : string.Empty);
         var stale = vms.Count(v => v.State == BackupVmStates.Stale);
         var none = vms.Count(v => v.State == BackupVmStates.NoPoint);
         return text + (stale > 0 ? $" · {stale} missed a run" : string.Empty) + (none > 0 ? $" · {none} without restore point" : string.Empty);

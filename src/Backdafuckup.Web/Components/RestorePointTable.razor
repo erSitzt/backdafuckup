@@ -41,7 +41,7 @@
 
 <div class="cq">
     <MudSimpleTable Dense="true" Hover="true" Elevation="0" Class="points-table">
-        <thead><tr><th>Created</th><th class="c-560">Type</th><th class="c-420">Consistency</th><th class="c-760 num">Disks</th><th class="c-560 num">New data</th>@if (ShowJob) {<th class="c-950">Job</th>}<th></th></tr></thead>
+        <thead><tr><th>Created</th><th class="c-560">Type</th><th class="c-420">Consistency</th><th class="c-760 num">@(Points.FirstOrDefault()?.ObjectKind == RestorePointObjectKinds.KubernetesNamespace ? "Volumes" : "Disks")</th><th class="c-560 num">New data</th>@if (ShowJob) {<th class="c-950">Job</th>}<th></th></tr></thead>
         <tbody>
             @foreach (var p in Points)
             {
@@ -49,7 +49,7 @@
                     <td class="nowrap-wide">@Fmt.Time(p.CreatedUtc)</td>
                     <td class="c-560">@p.Kind</td>
                     <td class="c-420">
-                        @foreach (var pill in RestorePointPills.For(p.Consistency, p.ConsistencyReason, p.ConsistencyWarning, p.MemoryImageBytes, p.SqlDatabaseCount ?? 0, p.SqlUserDatabaseCount, p.SqlConsistentCount, p.DomainController, p.AdDomain, "this restore point"))
+                        @foreach (var pill in RestorePointPills.For(p.Consistency, p.ConsistencyReason, p.ConsistencyWarning, p.MemoryImageBytes, p.SqlDatabaseCount ?? 0, p.SqlUserDatabaseCount, p.SqlConsistentCount, p.DomainController, p.AdDomain, "this restore point", p.ObjectKind))
                         {
                             <span class="@pill.Css" title="@pill.Title">@if (pill.Icon is not null) { @AppIcons.Svg(pill.Icon, "mini-chip-icon") }@pill.Text</span>
                         }

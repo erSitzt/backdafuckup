@@ -1,3 +1,4 @@
+using Backdafuckup.Contracts;
 using Backdafuckup.Web.Services;
 using MudBlazor;
 
@@ -17,9 +18,20 @@ public static class RestorePointPills
     /// <param name="scope">"this restore point" or "the newest restore point", for the tooltips.</param>
     public static List<Pill> For(
         string consistency, string? reason, bool warning, long? memoryImageBytes, int sqlDatabases, int? sqlUserDatabases, int? sqlConsistent,
-        bool domainController, string? adDomain, string scope)
+        bool domainController, string? adDomain, string scope, string objectKind = RestorePointObjectKinds.Vm)
     {
         var pills = new List<Pill>(3);
+        if (objectKind == RestorePointObjectKinds.KubernetesNamespace)
+        {
+            // A namespace is application-consistent through the backup hooks of its pods, not through a guest's VSS.
+            pills.Add(consistency == "application"
+                ? new("mini-chip success", AppIcons.ApplicationConsistent, "app-consistent (hooks)",
+                    "The backup hooks of its pods ran before the snapshots (e.g. a database wrote its data to disk): their volumes are application-consistent.")
+                : new(warning ? "mini-chip warning" : "mini-chip", warning ? Icons.Material.Filled.Warning : null, "crash-consistent",
+                    reason ?? "Each volume as after a power failure: no backup hooks ran in its pods (annotation pre.hook.backup.velero.io/command)."));
+            return pills;
+        }
+
         if (consistency == "application")
         {
             pills.Add(new("mini-chip success", AppIcons.ApplicationConsistent, "application-consistent",
