@@ -9,6 +9,7 @@
             Description="Clusters whose namespaces are backed up: their objects, and the data of volumes whose storage takes snapshots. backdafuckup reaches each cluster's API with a ServiceAccount token from the setup manifest.">
     <Actions>
         <MudButton Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Description" OnClick="ToggleSetupAsync">Setup manifest</MudButton>
+        <MudButton Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Inventory2" OnClick="@(() => _showMover = !_showMover)">Mover image</MudButton>
         <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add cluster</MudButton>
     </Actions>
 </PageHeader>
@@ -32,6 +33,20 @@
                    Label="With the restore role: create and change objects in any namespace (leave it off for an account that only backs up)" />
         <pre class="mono" style="max-height: 360px; overflow: auto; background: var(--mud-palette-background-gray); padding: 12px; border-radius: 8px; margin: 0">@_setup</pre>
     </MudPaper>
+}
+
+@if (_showMover)
+{
+    <MoverImagePanel OnClose="@(() => _showMover = false)" OnChanged="@(image => _mover = image)" />
+}
+else if (_mover is { UpToDate: false } && _clusters is { Count: > 0 })
+{
+    <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-4">
+        @(_mover.Registry.Length == 0
+            ? "No registry is set for the mover image yet: backups of volume data need it in a registry the cluster can pull from."
+            : $"The mover image {_mover.Shipped?.Version} is not in {_mover.Registry} yet; the next backup with volume data pushes it.")
+        <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Primary" OnClick="@(() => _showMover = true)">Mover image</MudButton>
+    </MudAlert>
 }
 
 @if (_adding)
@@ -152,9 +167,22 @@ else if (_clusters.Count > 0)
     private bool _adding;
     private string? _setup;
     private bool _withRestore = true;
+    private bool _showMover;
+    private MoverImageDto? _mover;
     private const string KubernetesSetupFile = "backdafuckup-setup.yaml";
 
-    protected override Task OnInitializedAsync() => LoadAsync();
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        try
+        {
+            _mover = await Api.GetAsync<MoverImageDto>("api/kubernetes/mover");
+        }
+        catch (ApiException)
+        {
+            // Only for the notice; the panel shows the error.
+        }
+    }
 
     private async Task LoadAsync()
     {

@@ -6,8 +6,9 @@ namespace Backdafuckup.Testing.Kubernetes;
 
 /// <summary>
 /// An in-memory Kubernetes API for tests, plugged into the client as its outermost handler so no request reaches the
-/// network. It serves <c>/version</c> and lists and reads of the objects added to it, core and grouped, cluster-scoped and
-/// namespaced, by the API's URL layout.
+/// network. It serves <c>/version</c>, lists (with equality label selectors), reads, creates, replaces, merge-patches
+/// and deletes of objects, core and grouped, cluster-scoped and namespaced, by the API's URL layout, and pod logs.
+/// <see cref="Created"/> stands in for the cluster's controllers (a snapshot becomes ready, a pod runs).
 /// </summary>
 public sealed class FakeKubernetesApi
 {
@@ -25,6 +26,15 @@ public sealed class FakeKubernetesApi
     /// <summary>The paths requested, for asserting what the client asked.</summary>
     public List<string> Requests { get; } = [];
 
+    /// <summary>Called after an object was created, with its plural and the stored object (change it inside <see cref="Mutate"/>).</summary>
+    public Action<string, JsonObject>? Created { get; set; }
+
+    /// <summary>Called after an object was deleted, with its plural and the object.</summary>
+    public Action<string, JsonObject>? Deleted { get; set; }
+
+    /// <summary>The log of each pod by "namespace/name".</summary>
+    public Dictionary<string, string> PodLogs { get; } = [];
+
     public FakeKubernetesApi()
     {
         Add("api/v1", "namespaces", Namespace("kube-system", "uid-kube-system"));
@@ -41,6 +51,42 @@ public sealed class FakeKubernetesApi
         }
 
         return item;
+    }
+
+    /// <summary>Changes stored objects consistently with requests running at the same time.</summary>
+    public void Mutate(Action change)
+    {
+        lock (_lock)
+        {
+            change();
+        }
+    }
+
+    /// <summary>The stored object (change it inside <see cref="Mutate"/>), or null.</summary>
+    public JsonObject? Find(string plural, string? ns, string name)
+    {
+        lock (_lock)
+        {
+            return _objects.FirstOrDefault(o => o.Plural == plural && Matches(o.Item, ns, name)).Item;
+        }
+    }
+
+    /// <summary>Removes an object as a controller would (no request); false when there is none.</summary>
+    public bool Remove(string plural, string? ns, string name)
+    {
+        lock (_lock)
+        {
+            return _objects.RemoveAll(o => o.Plural == plural && Matches(o.Item, ns, name)) > 0;
+        }
+    }
+
+    /// <summary>Copies of the stored objects of a kind.</summary>
+    public IReadOnlyList<JsonObject> All(string plural)
+    {
+        lock (_lock)
+        {
+            return [.. _objects.Where(o => o.Plural == plural).Select(o => (JsonObject)o.Item.DeepClone())];
+        }
     }
 
     public static JsonObject Namespace(string name, string? uid = null) => new()
@@ -64,11 +110,6 @@ public sealed class FakeKubernetesApi
             return Json(status, new JsonObject { ["kind"] = "Status", ["apiVersion"] = "v1", ["status"] = "Failure", ["message"] = $"fake: {(int)status}", ["code"] = (int)status });
         }
 
-        if (request.Method != HttpMethod.Get)
-        {
-            return Json(HttpStatusCode.MethodNotAllowed, new JsonObject { ["kind"] = "Status", ["message"] = $"fake: {request.Method} not supported" });
-        }
-
         if (path == "version")
         {
             return Json(HttpStatusCode.OK, new JsonObject { ["major"] = "1", ["minor"] = "32", ["gitVersion"] = GitVersion });
@@ -90,14 +131,85 @@ public sealed class FakeKubernetesApi
             rest = rest[2..];
         }
 
-        // rest: [plural] or [plural, name] (namespaces/<name> alone is a read of a namespace).
+        // rest: [plural], [plural, name] or [plural, name, subresource] (namespaces/<name> alone is the namespace itself).
         var plural = ns is not null && rest.Length == 0 ? "namespaces" : rest[0];
         var name = ns is not null && rest.Length == 0 ? ns : rest.Length > 1 ? rest[1] : null;
+        var subresource = rest.Length > 2 ? rest[2] : null;
         if (ns is not null && rest.Length == 0)
         {
             ns = null;
         }
 
+        if (subresource == "log" && request.Method == HttpMethod.Get)
+        {
+            lock (_lock)
+            {
+                return PodLogs.TryGetValue($"{ns}/{name}", out var text)
+                    ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(text, Encoding.UTF8, "text/plain") }
+                    : NotFound(path);
+            }
+        }
+
+        if (request.Method == HttpMethod.Post && name is null)
+        {
+            return Create(apiPath, plural, ns, request);
+        }
+
+        if (request.Method == HttpMethod.Delete && name is not null)
+        {
+            JsonObject removed;
+            lock (_lock)
+            {
+                var index = _objects.FindIndex(o => o.ApiPath == apiPath && o.Plural == plural && Matches(o.Item, ns, name));
+                if (index < 0)
+                {
+                    return NotFound(path);
+                }
+
+                removed = _objects[index].Item;
+                _objects.RemoveAt(index);
+            }
+
+            Deleted?.Invoke(plural, removed);
+            return Json(HttpStatusCode.OK, (JsonObject)removed.DeepClone());
+        }
+
+        if ((request.Method == HttpMethod.Put || request.Method == HttpMethod.Patch) && name is not null)
+        {
+            var body = JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!.AsObject();
+            lock (_lock)
+            {
+                var index = _objects.FindIndex(o => o.ApiPath == apiPath && o.Plural == plural && Matches(o.Item, ns, name));
+                if (index < 0)
+                {
+                    return NotFound(path);
+                }
+
+                var stored = _objects[index].Item;
+                if (request.Method == HttpMethod.Put)
+                {
+                    body["metadata"]!["uid"] = stored["metadata"]?["uid"]?.DeepClone();
+                    _objects[index] = (apiPath, plural, body);
+                    stored = body;
+                }
+                else
+                {
+                    MergePatch(stored, body);
+                }
+
+                return Json(HttpStatusCode.OK, (JsonObject)stored.DeepClone());
+            }
+        }
+
+        if (request.Method != HttpMethod.Get)
+        {
+            return Json(HttpStatusCode.MethodNotAllowed, new JsonObject { ["kind"] = "Status", ["message"] = $"fake: {request.Method} /{path} not supported" });
+        }
+
+        var selector = System.Web.HttpUtility.ParseQueryString(request.RequestUri.Query)["labelSelector"]?
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(term => term.Split('=', 2))
+            .ToList() ?? [];
         List<JsonObject> matches;
         bool served;
         lock (_lock)
@@ -107,6 +219,7 @@ public sealed class FakeKubernetesApi
                 .Where(o => o.ApiPath == apiPath && o.Plural == plural)
                 .Where(o => ns is null || (string?)o.Item["metadata"]?["namespace"] == ns)
                 .Where(o => name is null || (string?)o.Item["metadata"]?["name"] == name)
+                .Where(o => selector.All(term => (string?)o.Item["metadata"]?["labels"]?[term[0]] == term[^1]))
                 .Select(o => (JsonObject)o.Item.DeepClone())
                 .ToList();
         }
@@ -128,6 +241,62 @@ public sealed class FakeKubernetesApi
         }
 
         return Json(HttpStatusCode.OK, new JsonObject { ["kind"] = "List", ["apiVersion"] = "v1", ["metadata"] = new JsonObject(), ["items"] = list });
+    }
+
+    private HttpResponseMessage Create(string apiPath, string plural, string? ns, HttpRequestMessage request)
+    {
+        var item = JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!.AsObject();
+        var metadata = item["metadata"]?.AsObject() ?? throw new InvalidOperationException("fake: an object without metadata");
+        var name = (string?)metadata["name"];
+        if (ns is not null)
+        {
+            metadata["namespace"] = ns;
+        }
+
+        lock (_lock)
+        {
+            if (_objects.Any(o => o.ApiPath == apiPath && o.Plural == plural && Matches(o.Item, ns, name!)))
+            {
+                return Json(HttpStatusCode.Conflict, new JsonObject
+                {
+                    ["kind"] = "Status", ["apiVersion"] = "v1", ["status"] = "Failure", ["reason"] = "AlreadyExists", ["code"] = 409,
+                    ["message"] = $"fake: {plural} \"{name}\" already exists",
+                });
+            }
+
+            metadata["uid"] = $"uid-{plural}-{name}";
+            metadata["creationTimestamp"] = "2026-11-11T12:00:00Z";
+            _objects.Add((apiPath, plural, item));
+        }
+
+        Created?.Invoke(plural, item);
+        lock (_lock)
+        {
+            return Json(HttpStatusCode.Created, (JsonObject)item.DeepClone());
+        }
+    }
+
+    private static bool Matches(JsonObject item, string? ns, string name) =>
+        (string?)item["metadata"]?["name"] == name && (ns is null || (string?)item["metadata"]?["namespace"] == ns);
+
+    /// <summary>JSON merge patch (RFC 7386): objects merge, null removes, anything else replaces.</summary>
+    private static void MergePatch(JsonObject target, JsonObject patch)
+    {
+        foreach (var (key, value) in patch.ToList())
+        {
+            if (value is null)
+            {
+                target.Remove(key);
+            }
+            else if (value is JsonObject child && target[key] is JsonObject existing)
+            {
+                MergePatch(existing, child);
+            }
+            else
+            {
+                target[key] = value.DeepClone();
+            }
+        }
     }
 
     private static HttpResponseMessage NotFound(string path) =>

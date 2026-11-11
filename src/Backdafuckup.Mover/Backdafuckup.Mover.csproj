@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The mover: runs in a pod next to a volume and streams it to the backup server (backup) or from it (restore).
+       Built as a container image by the SDK (dotnet publish -r linux-x64 -t:PublishContainer), no Docker needed. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>backdafuckup-mover</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ContainerRepository>backdafuckup/mover</ContainerRepository>
+    <ContainerBaseImage>mcr.microsoft.com/dotnet/runtime-deps:10.0-noble-chiseled</ContainerBaseImage>
+    <!-- Reads and writes block devices, which belong to root. -->
+    <ContainerUser>root</ContainerUser>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <PublishTrimmed>true</PublishTrimmed>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Backdafuckup.Server.Tests" />
+  </ItemGroup>
+</Project>

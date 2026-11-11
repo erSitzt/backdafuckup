@@ -503,6 +503,11 @@ public static class EngineServiceCollectionExtensions
         services.Configure<Agents.AgentOptions>(configuration.GetSection("Agent"));
         services.AddSingleton<Agents.AgentRegistry>();
         services.AddSingleton<Agents.AgentSettingsStore>();
+        services.AddSingleton<Movers.MoverChannels>();
+        services.AddSingleton<Backdafuckup.Core.DataMover.IMoverChannels>(sp => sp.GetRequiredService<Movers.MoverChannels>());
+        services.AddSingleton<Movers.MoverImage>();
+        services.TryAddSingleton(new Movers.RegistryTransport());
+        services.AddSingleton<Movers.MoverRegistry>();
         services.AddSingleton<Agents.AgentService>();
         services.AddSingleton<Agents.AgentPackages>();
         services.AddSingleton<Agents.GuestProcessingService>();

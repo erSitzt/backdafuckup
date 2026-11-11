@@ -29,6 +29,8 @@ public static class KubernetesSetup
           name: {{WorkNamespace}}
           labels:
             app.kubernetes.io/managed-by: backdafuckup
+            # The mover pods run as root (block devices belong to root), without privileges or capabilities: "baseline".
+            pod-security.kubernetes.io/enforce: baseline
         ---
         apiVersion: v1
         kind: ServiceAccount
@@ -78,7 +80,8 @@ public static class KubernetesSetup
             name: {{ServiceAccount}}
             namespace: {{WorkNamespace}}
         ---
-        # The work namespace: the temporary PVCs from snapshots and the mover pods that read and write them.
+        # The work namespace: the temporary PVCs from snapshots, the mover pods that read and write them, and the pull secret
+        # for the mover image when the registry needs a login.
         apiVersion: rbac.authorization.k8s.io/v1
         kind: Role
         metadata:
@@ -86,7 +89,7 @@ public static class KubernetesSetup
           namespace: {{WorkNamespace}}
         rules:
           - apiGroups: [""]
-            resources: [persistentvolumeclaims, pods]
+            resources: [persistentvolumeclaims, pods, secrets]
             verbs: [create, delete, patch, update]
         ---
         apiVersion: rbac.authorization.k8s.io/v1

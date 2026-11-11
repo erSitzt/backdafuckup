@@ -31,6 +31,7 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17").Build();
     private readonly string _root = Path.Combine(Path.GetTempPath(), "bdfu-api-tests", Guid.NewGuid().ToString("N"));
     private readonly FakeXenPool _pool = new();
+    private readonly FakeRegistry _registry = new("bdfu-push", "secret-1");
     private WebApplicationFactory<Program>? _factory;
     private FakeShareConnector? _shares;
 
@@ -40,6 +41,8 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     {
         await _postgres.StartAsync(Ct);
         _shares = new FakeShareConnector(Path.Combine(_root, "shares"));
+        Directory.CreateDirectory(_root);
+        await File.WriteAllBytesAsync(Path.Combine(_root, "backdafuckup-mover.tar"), FakeRegistry.ImageArchive("0.3.0", "backdafuckup-mover", "Backdafuckup.Core.dll"), Ct);
         _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseEnvironment("Testing");
@@ -54,10 +57,13 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
             builder.UseSetting("SqlBackup:TickInterval", "01:00:00");
             // Runs do not wait for agents to reconnect after the start (one test turns the wait on).
             builder.UseSetting("SqlBackup:AgentReconnectGrace", "00:00:00");
+            builder.UseSetting("Mover:ImageArchive", Path.Combine(_root, "backdafuckup-mover.tar"));
             builder.ConfigureTestServices(services =>
             {
                 services.RemoveAll<Backdafuckup.Smb.ISmbShareConnector>();
                 services.AddSingleton<Backdafuckup.Smb.ISmbShareConnector>(_shares);
+                services.RemoveAll<Backdafuckup.Server.Movers.RegistryTransport>();
+                services.AddSingleton(new Backdafuckup.Server.Movers.RegistryTransport(() => _registry));
                 services.RemoveAll<IHypervisorProvider>();
                 services.AddSingleton<IHypervisorProvider>(new XenProvider(
                     new XenOptions { XapiRetryAttempts = 1, XapiRetryDelay = TimeSpan.FromMilliseconds(10) },

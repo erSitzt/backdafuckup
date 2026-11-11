@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the server for Windows (self-contained, with the agent package) and installs or updates it on a Windows host
+# Builds the server for Windows (self-contained, with the agent package and the mover image) and installs or updates it on a Windows host
 # over SMB and WinRM. Refuses to restart while sessions run (pass --force to bdfu_deploy.py to override).
 #
 # Usage: scripts/deploy/update-windows.sh [host]        (default: $BDFU_DEPLOY_HOST, e.g. backup01.corp.example)
@@ -30,6 +30,17 @@ if [[ -d "$root/artifacts/agent" ]]; then
   cp -r "$root/artifacts/agent" "$out/publish/agent"
 else
   echo "warning: artifacts/agent is missing (scripts/build-agent.sh); the server will offer no agent package." >&2
+fi
+
+# The mover image the server pushes to the cluster registry; SKIP_MOVER_BUILD=1 reuses artifacts/mover.
+if [[ "${SKIP_MOVER_BUILD:-0}" != "1" ]]; then
+  echo "== build mover image"
+  "$root/scripts/build-mover.sh" "$root/artifacts/mover"
+fi
+if [[ -d "$root/artifacts/mover" ]]; then
+  cp -r "$root/artifacts/mover" "$out/publish/mover"
+else
+  echo "warning: artifacts/mover is missing (scripts/build-mover.sh); the server cannot push the mover image." >&2
 fi
 
 echo "== install on $host"

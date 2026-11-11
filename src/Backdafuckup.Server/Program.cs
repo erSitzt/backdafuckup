@@ -3,6 +3,7 @@ using Backdafuckup.Server.Api;
 using Backdafuckup.Server.Data;
 using Backdafuckup.Server.Engine;
 using Backdafuckup.Server.Hosting;
+using Backdafuckup.Server.Movers;
 using Backdafuckup.Server.Telemetry;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
@@ -187,6 +188,8 @@ try
     app.MapInfrastructureEndpoints();
     app.MapOperationEndpoints();
     app.MapAgentEndpoints();
+    app.MapMoverEndpoints();
+    app.MapMoverImageEndpoints();
     app.MapFileRestoreEndpoints();
     app.MapLinuxCredentialEndpoints();
     app.MapSqlEndpoints();
