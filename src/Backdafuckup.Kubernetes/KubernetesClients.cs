@@ -21,6 +21,19 @@ public static class KubernetesConnectionOptions
     /// client connects to a local port, so the URL's host is not that name. Empty for a direct connection.
     /// </summary>
     public const string TlsName = "kubernetes.tlsName";
+
+    /// <summary>The cluster's name in messages and restore points when its address says nothing (a cluster behind its agent).</summary>
+    public const string ClusterName = "kubernetes.clusterName";
+}
+
+public static class KubernetesSettings
+{
+    /// <summary>The cluster in messages: its address, or the name given for a cluster reached through its agent.</summary>
+    public static string ClusterName(this ConnectionSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return settings.Options.TryGetValue(KubernetesConnectionOptions.ClusterName, out var name) && !string.IsNullOrWhiteSpace(name) ? name : settings.Address;
+    }
 }
 
 /// <summary>The certificates a client accepted and refused, keyed by address: refused ones are offered for trust, accepted ones pinned.</summary>

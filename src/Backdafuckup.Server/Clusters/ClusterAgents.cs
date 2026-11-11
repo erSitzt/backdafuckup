@@ -64,7 +64,7 @@ public sealed class ClusterAgents(IDbContextFactory<AppDbContext> dbFactory, Cre
             new NetworkCredential("agent", session.ApiToken),
             TlsTrustMode.Pinned,
             session.Authorities,
-            new Dictionary<string, string> { [KubernetesConnectionOptions.TlsName] = session.TlsName });
+            new Dictionary<string, string> { [KubernetesConnectionOptions.TlsName] = session.TlsName, [KubernetesConnectionOptions.ClusterName] = connection.DisplayName });
     }
 
     /// <summary>The connection whose connect token the request carries, or null.</summary>

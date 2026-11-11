@@ -106,6 +106,7 @@ public sealed partial class ApiIntegrationTests
         var session = await WaitForSessionAsync(client, backup.SessionId);
         var sessionLog = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{backup.SessionId}/log", Ct))!.Select(l => l.Message));
         Assert.True(session.Session.State == "Succeeded", session.Session.Summary + "\n" + sessionLog + "\n" + log);
+        Assert.DoesNotContain("127.0.0.1", sessionLog, StringComparison.Ordinal); // the tunnel's address is no name for the cluster
         Assert.Single(movers);
         AssertClusterClean();
 

@@ -22,7 +22,7 @@ internal sealed class KubernetesSession(
 {
     private PlatformInfo? _platform;
 
-    public PlatformInfo Platform => _platform ?? new PlatformInfo(string.Empty, settings.Address, settings.Address, "Kubernetes", string.Empty);
+    public PlatformInfo Platform => _platform ?? new PlatformInfo(string.Empty, settings.ClusterName(), settings.Address, "Kubernetes", string.Empty);
 
     public async Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken)
     {
@@ -48,7 +48,7 @@ internal sealed class KubernetesSession(
             }
             catch (k8s.Autorest.HttpOperationException ex)
             {
-                throw new KubernetesOperationException($"Reading the version of cluster {settings.Address} failed: {VolumeSnapshotFlow.Problem(ex)}", ex);
+                throw new KubernetesOperationException($"Reading the version of cluster {settings.ClusterName()} failed: {VolumeSnapshotFlow.Problem(ex)}", ex);
             }
         }
 
@@ -59,9 +59,9 @@ internal sealed class KubernetesSession(
 
     public async Task<IReadOnlyList<System.Text.Json.Nodes.JsonObject>> ReadObjectsAsync(string ns, CancellationToken cancellationToken)
     {
-        var flow = new VolumeSnapshotFlow(client, settings.Address, NullOperationLog.Instance, new InMemoryArtifactLedger(), new KubernetesTimings());
+        var flow = new VolumeSnapshotFlow(client, settings.ClusterName(), NullOperationLog.Instance, new InMemoryArtifactLedger(), new KubernetesTimings());
         var volumes = await flow.CallAsync($"listing the PVCs of {ns}", () => KubernetesInventory.VolumesAsync(client, ns, cancellationToken)).ConfigureAwait(false);
-        var collected = await KubernetesResources.CollectAsync(client, settings.Address, ns, volumes, NullOperationLog.Instance, cancellationToken).ConfigureAwait(false);
+        var collected = await KubernetesResources.CollectAsync(client, settings.ClusterName(), ns, volumes, NullOperationLog.Instance, cancellationToken).ConfigureAwait(false);
         return [.. KubernetesResources.Read(collected.Content)];
     }
 
@@ -71,7 +71,7 @@ internal sealed class KubernetesSession(
         ArgumentNullException.ThrowIfNull(plan);
         if (plan.Manifest.Kubernetes is null || plan.Kubernetes is null)
         {
-            throw new NotSupportedException($"Only restore points of Kubernetes namespaces can be restored into cluster {settings.Address}.");
+            throw new NotSupportedException($"Only restore points of Kubernetes namespaces can be restored into cluster {settings.ClusterName()}.");
         }
 
         IVmRestoreSession restore = new KubernetesNamespaceRestore(client, settings, plan, log, ledger, channels, images, timings ?? new KubernetesTimings());
@@ -82,7 +82,7 @@ internal sealed class KubernetesSession(
     public async Task<IPvcFileRestore> BeginFileRestoreAsync(PvcFileRestoreRequest request, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var flow = new VolumeSnapshotFlow(client, settings.Address, log, ledger, timings ?? new KubernetesTimings()) { Channels = channels };
+        var flow = new VolumeSnapshotFlow(client, settings.ClusterName(), log, ledger, timings ?? new KubernetesTimings()) { Channels = channels };
         return await PvcFileImport.StartAsync(flow, channels, images, request, cancellationToken).ConfigureAwait(false);
     }
 
@@ -92,20 +92,20 @@ internal sealed class KubernetesSession(
         ArgumentNullException.ThrowIfNull(artifact);
         var slash = artifact.NativeId.IndexOf('/', StringComparison.Ordinal);
         var (ns, name) = slash < 0 ? ((string?)null, artifact.NativeId) : (artifact.NativeId[..slash], artifact.NativeId[(slash + 1)..]);
-        var flow = new VolumeSnapshotFlow(client, settings.Address, log, new InMemoryArtifactLedger(), new KubernetesTimings());
+        var flow = new VolumeSnapshotFlow(client, settings.ClusterName(), log, new InMemoryArtifactLedger(), new KubernetesTimings());
         if (artifact.Kind == KubernetesArtifactKinds.ScaledWorkload)
         {
             await WorkloadPause.ResumeAsync(flow, artifact.NativeId, artifact.Data, cancellationToken).ConfigureAwait(false);
-            log.Info($"Workload {artifact.NativeId} scaled back in cluster {settings.Address} (a PVC swap did not finish).");
+            log.Info($"Workload {artifact.NativeId} scaled back in cluster {settings.ClusterName()} (a PVC swap did not finish).");
             return;
         }
 
         await flow.DeleteAsync(artifact.Kind, ns, name, cancellationToken).ConfigureAwait(false);
-        log.Info($"Leftover {artifact.Kind} {artifact.NativeId} deleted in cluster {settings.Address}.");
+        log.Info($"Leftover {artifact.Kind} {artifact.NativeId} deleted in cluster {settings.ClusterName()}.");
     }
 
     public Task CommitArtifactAsync(ProviderArtifact artifact, IOperationLog log, CancellationToken cancellationToken) =>
-        throw new NotSupportedException($"The cluster {settings.Address} has no artifacts of backdafuckup yet ({artifact.Kind} {artifact.NativeId}).");
+        throw new NotSupportedException($"The cluster {settings.ClusterName()} has no artifacts of backdafuckup yet ({artifact.Kind} {artifact.NativeId}).");
 
     public Task ReleaseChangeTokensAsync(IEnumerable<ChangeToken> tokens, IOperationLog log, CancellationToken cancellationToken) => Task.CompletedTask;
 
