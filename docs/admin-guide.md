@@ -665,7 +665,7 @@ When the backup server cannot reach a cluster's API server (a firewall or NAT in
 **Updating the agent:** the server keeps the agent's image at its own mover image.
 - When the agent connects (after a server update, the server restarts and the agent reconnects), the server compares the image of the Deployment with its own. If they differ, it pushes its image when needed and patches the `agent` container's image; the agent restarts with it and connects again.
 - It waits while sessions of clusters run, because the tunnel is down for the restart.
-- A cluster whose manifest predates this needs it applied once more, for the role's permission to patch the Deployment. Until then the server log says so.
+- The permission to patch the Deployment comes from the restore role, or, in a manifest without it, from the work role of manifests since this version. A backup-only cluster with an older manifest needs it applied once more; until then the server log says so.
 
 ### The mover image
 
