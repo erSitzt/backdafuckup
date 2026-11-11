@@ -1,28 +1,79 @@
+@implements IDisposable
 @inject ApiClient Api
 @inject ISnackbar Snackbar
+@inject IJSRuntime JS
 
-@* Adds a Kubernetes cluster: the address of its API (load balancer or a server), and the ServiceAccount token and the
-   cluster CA from the token secret of the setup manifest. The CA is the trust anchor: every API server behind a load
-   balancer has its own certificate, and the cluster renews them. *@
+@* Adds a Kubernetes cluster, reached one of two ways:
+   - directly: the address of its API (load balancer or a server), and the ServiceAccount token and the cluster CA from the
+     token secret of the setup manifest. The CA is the trust anchor: every API server behind a load balancer has its own
+     certificate, and the cluster renews them.
+   - through an agent: the cluster is added by name, and its setup manifest brings the agent, which dials out to this server
+     and sends the token and CA itself. The wizard waits until it is there. *@
 <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
-    <MudText Typo="Typo.h6" Class="mb-1">Add Kubernetes cluster</MudText>
-    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
-        Apply the setup manifest in the cluster first. Its token secret holds both values below:
-        <span class="mono d-block mt-1">kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.token}' | base64 -d</span>
-        <span class="mono d-block">kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.ca\.crt}' | base64 -d</span>
-    </MudText>
-    <div class="form-wide">
-        <div class="field-grid" style="grid-template-columns: minmax(0, 2fr) 140px minmax(0, 1fr)">
-            <MudTextField @bind-Value="_address" Label="API server: host name or IP address" Variant="Variant.Outlined" AutoFocus="true"
-                          HelperText="As in the kubeconfig's server URL, without https:// and port." />
-            <MudNumericField @bind-Value="_port" Label="Port" Variant="Variant.Outlined" />
-            <MudTextField @bind-Value="_displayName" Label="Display name" Variant="Variant.Outlined" />
+    <MudText Typo="Typo.h6" Class="mb-3">Add Kubernetes cluster</MudText>
+
+    @if (_created is null)
+    {
+        <MudRadioGroup T="bool" @bind-Value="_throughAgent" Class="radio-stack mb-3">
+            <MudRadio T="bool" Value="false" Color="Color.Primary">Directly: this server reaches the cluster's API server</MudRadio>
+            <MudRadio T="bool" Value="true" Color="Color.Primary">Through an agent in the cluster: the agent dials out to this server (a cluster behind a firewall or NAT)</MudRadio>
+        </MudRadioGroup>
+
+        @if (_throughAgent)
+        {
+            <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-3">
+                The cluster gets a setup manifest with the agent: a Deployment in backdafuckup-system that runs the mover image and keeps a connection to this server open.
+                Through it the server reaches the API server; the agent sends the ServiceAccount's token and the cluster CA itself. The cluster's pods need to reach this
+                server's address (Guest agents → Settings) on port 9555, and the mover image has to be in a registry the cluster can pull from.
+            </MudText>
+            <div class="form-wide">
+                <MudTextField @bind-Value="_displayName" Label="Display name" Variant="Variant.Outlined" AutoFocus="true" HelperText="E.g. the cluster's name in Rancher." />
+            </div>
+        }
+        else
+        {
+            <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
+                Apply the setup manifest in the cluster first. Its token secret holds both values below:
+                <span class="mono d-block mt-1">kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.token}' | base64 -d</span>
+                <span class="mono d-block">kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.ca\.crt}' | base64 -d</span>
+            </MudText>
+            <div class="form-wide">
+                <div class="field-grid" style="grid-template-columns: minmax(0, 2fr) 140px minmax(0, 1fr)">
+                    <MudTextField @bind-Value="_address" Label="API server: host name or IP address" Variant="Variant.Outlined" AutoFocus="true"
+                                  HelperText="As in the kubeconfig's server URL, without https:// and port." />
+                    <MudNumericField @bind-Value="_port" Label="Port" Variant="Variant.Outlined" />
+                    <MudTextField @bind-Value="_displayName" Label="Display name" Variant="Variant.Outlined" />
+                </div>
+                <MudTextField @bind-Value="_token" Label="ServiceAccount token" InputType="InputType.Password" Variant="Variant.Outlined" Class="mt-3" />
+                <MudTextField @bind-Value="_ca" Label="Cluster CA certificate (PEM)" Variant="Variant.Outlined" Lines="5" Class="mt-3"
+                              Placeholder="-----BEGIN CERTIFICATE-----" Style="font-family: ui-monospace, Consolas, monospace; font-size: .8rem"
+                              HelperText="The API servers are trusted when their certificate is signed by this CA (for the address above)." />
+            </div>
+        }
+    }
+    else
+    {
+        <div class="d-flex align-center gap-2 mb-2">
+            <MudText Typo="Typo.subtitle1" Class="section-title">Setup manifest of @_created.DisplayName, with its agent</MudText>
+            <MudSpacer />
+            @if (_manifest is not null)
+            {
+                <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="CopyAsync">Copy</MudButton>
+                <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Download" Href="@($"api/kubernetes/setup.yaml?connectionId={_created.Id}&download=true")">Download</MudButton>
+            }
         </div>
-        <MudTextField @bind-Value="_token" Label="ServiceAccount token" InputType="InputType.Password" Variant="Variant.Outlined" Class="mt-3" />
-        <MudTextField @bind-Value="_ca" Label="Cluster CA certificate (PEM)" Variant="Variant.Outlined" Lines="5" Class="mt-3"
-                      Placeholder="-----BEGIN CERTIFICATE-----" Style="font-family: ui-monospace, Consolas, monospace; font-size: .8rem"
-                      HelperText="The API servers are trusted when their certificate is signed by this CA (for the address above)." />
-    </div>
+        <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
+            Apply it in the cluster (kubectl apply -f backdafuckup-setup.yaml, or as a Fleet bundle). It holds the agent's connect token: keep it like a password.
+        </MudText>
+        @if (_manifest is not null)
+        {
+            <pre class="mono" style="max-height: 300px; overflow: auto; background: var(--mud-palette-background-gray); padding: 12px; border-radius: 8px; margin: 0">@_manifest</pre>
+        }
+        <div class="d-flex align-center gap-2 mt-3">
+            <MudProgressCircular Indeterminate="true" Size="Size.Small" />
+            <MudText Typo="Typo.body2">Waiting for the agent to connect…</MudText>
+        </div>
+    }
 
     @if (_error is not null)
     {
@@ -30,9 +81,12 @@
     }
 
     <div class="d-flex gap-2 mt-4">
-        <MudButton Variant="Variant.Text" OnClick="OnCancel">Cancel</MudButton>
+        <MudButton Variant="Variant.Text" OnClick="CancelAsync">@(_created is null ? "Cancel" : "Close")</MudButton>
         <MudSpacer />
-        <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || !Complete)" OnClick="CreateAsync">Connect and add</MudButton>
+        @if (_created is null)
+        {
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || !Complete)" OnClick="CreateAsync">@(_throughAgent ? "Add and show the manifest" : "Connect and add")</MudButton>
+        }
     </div>
     @if (_busy)
     {
@@ -44,6 +98,7 @@
     [Parameter] public EventCallback OnDone { get; set; }
     [Parameter] public EventCallback OnCancel { get; set; }
 
+    private bool _throughAgent;
     private string _address = string.Empty;
     private int _port = 6443;
     private string _displayName = string.Empty;
@@ -51,8 +106,13 @@
     private string _ca = string.Empty;
     private bool _busy;
     private string? _error;
+    private ConnectionDto? _created;
+    private string? _manifest;
+    private readonly CancellationTokenSource _closed = new();
 
-    private bool Complete => !string.IsNullOrWhiteSpace(_address) && !string.IsNullOrWhiteSpace(_token) && _ca.Contains("BEGIN CERTIFICATE", StringComparison.Ordinal);
+    private bool Complete => _throughAgent
+        ? !string.IsNullOrWhiteSpace(_displayName)
+        : !string.IsNullOrWhiteSpace(_address) && !string.IsNullOrWhiteSpace(_token) && _ca.Contains("BEGIN CERTIFICATE", StringComparison.Ordinal);
 
     private async Task CreateAsync()
     {
@@ -60,19 +120,39 @@
         _error = null;
         try
         {
+            if (_throughAgent)
+            {
+                var name = _displayName.Trim();
+                _created = await Api.PostAsync<ConnectionDto>("api/connections", new CreateConnectionDto
+                {
+                    Kind = "Kubernetes", Access = "Agent", DisplayName = name, Address = string.Empty, UserName = string.Empty, Password = string.Empty,
+                });
+                try
+                {
+                    _manifest = await Api.GetStringAsync($"api/kubernetes/setup.yaml?connectionId={_created.Id}");
+                }
+                catch (ApiException ex)
+                {
+                    _error = ex.Message;
+                }
+
+                _ = WaitForAgentAsync(_created.Id, name);
+                return;
+            }
+
             var address = _address.Trim();
-            var name = string.IsNullOrWhiteSpace(_displayName) ? address : _displayName.Trim();
+            var display = string.IsNullOrWhiteSpace(_displayName) ? address : _displayName.Trim();
             await Api.PostAsync("api/connections", new CreateConnectionDto
             {
                 Kind = "Kubernetes",
-                DisplayName = name,
+                DisplayName = display,
                 Address = address,
                 Port = _port,
                 UserName = "backdafuckup",
                 Password = _token.Trim(),
                 CaCertificatePem = _ca.Trim(),
             });
-            Snackbar.Add($"Cluster {name} added.", Severity.Success);
+            Snackbar.Add($"Cluster {display} added.", Severity.Success);
             await OnDone.InvokeAsync();
         }
         catch (ApiException ex)
@@ -83,5 +163,51 @@
         {
             _busy = false;
         }
+    }
+
+    /// <summary>Polls the connection until its agent is there (or the wizard is closed).</summary>
+    private async Task WaitForAgentAsync(Guid id, string name)
+    {
+        try
+        {
+            while (!_closed.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(3), _closed.Token);
+                var connection = await Api.GetAsync<ConnectionDto>($"api/connections/{id}");
+                if (connection.Agent is { Online: true } agent)
+                {
+                    Snackbar.Add($"The agent of {name} connected (pod {agent.Pod} on {agent.Node}).", Severity.Success);
+                    await OnDone.InvokeAsync();
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Closed.
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task CopyAsync()
+    {
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", _manifest);
+        Snackbar.Add("Setup manifest copied.", Severity.Success);
+    }
+
+    private async Task CancelAsync()
+    {
+        await _closed.CancelAsync();
+        await OnCancel.InvokeAsync();
+    }
+
+    public void Dispose()
+    {
+        _closed.Cancel();
+        _closed.Dispose();
     }
 }

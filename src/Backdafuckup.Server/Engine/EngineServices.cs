@@ -516,6 +516,7 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Agents.AgentDeployer>();
         services.AddSingleton<Agents.IAgentInstaller>(sp => sp.GetRequiredService<Agents.AgentDeployer>());
         services.AddSingleton<Agents.AgentDeploymentRunner>();
+        services.AddSingleton<Clusters.ClusterAgents>();
         services.AddSingleton<ConnectionManager>();
         services.AddSingleton<RepositoryManager>();
         services.AddSingleton<RunningSessions>();

@@ -51,6 +51,16 @@ public enum ConnectionStatus
     Error,
 }
 
+/// <summary>How the server reaches a connection's API.</summary>
+public enum ConnectionAccess
+{
+    /// <summary>The server connects to the address itself.</summary>
+    Direct,
+
+    /// <summary>Kubernetes: through the tunnel of the cluster's agent, which dials out to the server.</summary>
+    Agent,
+}
+
 public sealed class HypervisorConnection
 {
     public Guid Id { get; set; } = Guid.CreateVersion7();
@@ -81,6 +91,12 @@ public sealed class HypervisorConnection
     public TlsTrustMode TrustMode { get; set; } = TlsTrustMode.Pinned;
 
     public bool AllowInsecureNbd { get; set; }
+
+    /// <summary>
+    /// <see cref="ConnectionAccess.Agent"/>: the address and token come from the cluster's agent, and the credential's
+    /// secret is the cluster's connect token (in the setup manifest), which the agent authenticates with.
+    /// </summary>
+    public ConnectionAccess Access { get; set; }
 
     public ConnectionStatus Status { get; set; }
 

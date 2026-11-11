@@ -76,6 +76,13 @@ public sealed record CreateConnectionDto
     public string? CaCertificatePem { get; init; }
 
     public bool AllowInsecureNbd { get; init; }
+
+    /// <summary>
+    /// Kubernetes: "Direct" (default): the server reaches the API server at the address with the token. "Agent": an agent
+    /// in the cluster dials out to the server and carries the server's connections to the API server; address, token
+    /// and CA are not needed, and the setup manifest of the connection holds the agent and its connect token.
+    /// </summary>
+    public string Access { get; init; } = "Direct";
 }
 
 /// <summary>Returned with HTTP 409 when hosts present certificates the user has not trusted yet.</summary>
@@ -96,7 +103,13 @@ public sealed record ConnectionDto(
     string? LastError,
     string UserName,
     bool AllowInsecureNbd,
-    IReadOnlyList<ConnectionHostDto> Hosts);
+    IReadOnlyList<ConnectionHostDto> Hosts,
+    ConnectionAgentDto? Agent = null);
+
+/// <summary>The agent of a Kubernetes cluster reached through it (<see cref="CreateConnectionDto.Access"/> "Agent").</summary>
+/// <param name="Online">Its control connection to the server is open.</param>
+/// <param name="ApiServer">Where it reaches the API server (host:port in the cluster).</param>
+public sealed record ConnectionAgentDto(bool Online, string? Version, DateTimeOffset? ConnectedUtc, DateTimeOffset? LastContactUtc, string? Pod, string? Node, string? ApiServer);
 
 public sealed record ConnectionHostDto(string Address, string SpkiSha256, DateTimeOffset TrustedUtc);
 

@@ -622,6 +622,12 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<string>("Access")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("access");
+
                     b.Property<string>("Address")
                         .IsRequired()
                         .HasMaxLength(255)

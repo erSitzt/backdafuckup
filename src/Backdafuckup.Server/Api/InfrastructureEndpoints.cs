@@ -14,7 +14,7 @@ public static class InfrastructureEndpoints
     {
         var connections = app.MapGroup("/api/connections");
 
-        connections.MapGet("/", async (AppDbContext db, string? kind, CancellationToken ct) =>
+        connections.MapGet("/", async (AppDbContext db, Clusters.ClusterAgents agents, string? kind, CancellationToken ct) =>
         {
             var query = db.Connections.Include(c => c.Credential).Include(c => c.Hosts).AsQueryable();
             if (!string.IsNullOrEmpty(kind))
@@ -27,11 +27,11 @@ public static class InfrastructureEndpoints
                 query = query.Where(c => c.Kind == parsed);
             }
 
-            return Results.Ok((await query.OrderBy(c => c.DisplayName).ToListAsync(ct)).Select(c => c.ToDto()));
+            return Results.Ok((await query.OrderBy(c => c.DisplayName).ToListAsync(ct)).Select(c => WithAgent(c, agents)));
         }).WithDescription("All connections: pools and Kubernetes clusters. kind=XenServer or kind=Kubernetes returns one kind only.");
 
-        connections.MapGet("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>
-            await db.Connections.Include(c => c.Credential).Include(c => c.Hosts).FirstOrDefaultAsync(c => c.Id == id, ct) is { } c ? Results.Ok(c.ToDto()) : Results.NotFound());
+        connections.MapGet("/{id:guid}", async (Guid id, AppDbContext db, Clusters.ClusterAgents agents, CancellationToken ct) =>
+            await db.Connections.Include(c => c.Credential).Include(c => c.Hosts).FirstOrDefaultAsync(c => c.Id == id, ct) is { } c ? Results.Ok(WithAgent(c, agents)) : Results.NotFound());
 
         connections.MapPost("/probe", async (ProbeRequestDto request, ConnectionManager manager, CancellationToken ct) =>
         {
@@ -61,6 +61,32 @@ public static class InfrastructureEndpoints
             if (await db.Connections.AnyAsync(c => c.DisplayName == request.DisplayName, ct))
             {
                 return Results.Problem($"A connection named '{request.DisplayName}' already exists.", statusCode: StatusCodes.Status409Conflict);
+            }
+
+            // A cluster behind its agent: nothing to test yet; the setup manifest brings the agent, which then connects.
+            if (kind == HypervisorKind.Kubernetes && string.Equals(request.Access, nameof(ConnectionAccess.Agent), StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(request.DisplayName))
+                {
+                    return Results.Problem("Give the cluster a name.", statusCode: StatusCodes.Status400BadRequest);
+                }
+
+                var created = time.GetUtcNow();
+                var token = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+                var behindAgent = new HypervisorConnection
+                {
+                    Kind = kind,
+                    DisplayName = request.DisplayName.Trim(),
+                    Address = Backdafuckup.Core.DataMover.ClusterTunnel.ApiServerName,
+                    Port = 443,
+                    Access = ConnectionAccess.Agent,
+                    Status = ConnectionStatus.Unknown,
+                    LastError = "Waiting for the agent: apply the cluster's setup manifest.",
+                    Credential = new Credential { Username = "agent", ProtectedSecret = protector.Protect(token), CreatedUtc = created, UpdatedUtc = created },
+                };
+                db.Connections.Add(behindAgent);
+                await db.SaveChangesAsync(ct);
+                return Results.Created($"/api/connections/{behindAgent.Id}", behindAgent.ToDto() with { Agent = new ConnectionAgentDto(false, null, null, null, null, null, null) });
             }
 
             var pins = request.TrustedCertificates.Select(c => new PinnedCertificate(c.HostAddress, c.SpkiSha256, c.Sha256Thumbprint, string.Empty)).ToList();
@@ -150,6 +176,42 @@ public static class InfrastructureEndpoints
             return Results.NoContent();
         });
 
+        connections.MapPost("/{id:guid}/agent", async (Guid id, AppDbContext db, CredentialProtector protector, Clusters.ClusterAgents agents, TimeProvider time, CancellationToken ct) =>
+        {
+            var connection = await db.Connections.Include(c => c.Credential).Include(c => c.Hosts).FirstOrDefaultAsync(c => c.Id == id, ct);
+            if (connection is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (connection.Kind != HypervisorKind.Kubernetes)
+            {
+                return Results.Problem("Only Kubernetes clusters are reached through an agent.", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            if (connection.Access == ConnectionAccess.Agent)
+            {
+                return Results.Ok(WithAgent(connection, agents));
+            }
+
+            // From now on through the agent: its connect token replaces the stored ServiceAccount token and the pins.
+            var now = time.GetUtcNow();
+            var token = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            connection.Access = ConnectionAccess.Agent;
+            connection.Address = Backdafuckup.Core.DataMover.ClusterTunnel.ApiServerName;
+            connection.Port = 443;
+            connection.Credential.Username = "agent";
+            connection.Credential.ProtectedSecret = protector.Protect(token);
+            connection.Credential.UpdatedUtc = now;
+            connection.Hosts.Clear();
+            connection.Status = ConnectionStatus.Unknown;
+            connection.LastError = "Waiting for the agent: apply the cluster's setup manifest with the agent.";
+            await db.SaveChangesAsync(ct);
+            return Results.Ok(WithAgent(connection, agents));
+        }).WithDescription(
+            "Reaches a Kubernetes cluster through its agent from now on (jobs and restore points stay): the stored token and pins are replaced by a connect token, " +
+            "which the cluster's setup manifest with the agent (GET /api/kubernetes/setup.yaml?connectionId=…) holds. Going back to direct access means adding the token again.");
+
         connections.MapPost("/{id:guid}/rescan", async (Guid id, AppDbContext db, ConnectionManager manager, TimeProvider time, CancellationToken ct) =>
         {
             return await TryRefreshInventoryAsync(id, db, manager, time, ct) is { } error
@@ -160,14 +222,51 @@ public static class InfrastructureEndpoints
         connections.MapGet("/{id:guid}/inventory", async (Guid id, AppDbContext db, CancellationToken ct) =>
             (await db.Inventory.Where(i => i.ConnectionId == id).OrderBy(i => i.Kind).ThenBy(i => i.Name).ToListAsync(ct)).Select(i => i.ToDto()));
 
-        app.MapGet("/api/kubernetes/setup.yaml", (bool? restore, bool? download) =>
+        app.MapGet("/api/kubernetes/setup.yaml", async (
+                bool? restore, bool? download, Guid? connectionId, AppDbContext db, CredentialProtector protector, Agents.AgentSettingsStore settings,
+                [Microsoft.AspNetCore.Mvc.FromServices] Movers.MoverRegistry images, CancellationToken ct) =>
             {
-                var manifest = Backdafuckup.Kubernetes.KubernetesSetup.Manifest(restore != false);
+                Backdafuckup.Kubernetes.ClusterAgentManifest? agent = null;
+                if (connectionId is { } id)
+                {
+                    var connection = await db.Connections.AsNoTracking().Include(c => c.Credential).FirstOrDefaultAsync(c => c.Id == id && c.Kind == HypervisorKind.Kubernetes, ct);
+                    if (connection is null)
+                    {
+                        return Results.NotFound();
+                    }
+
+                    if (connection.Access == ConnectionAccess.Agent)
+                    {
+                        var url = await settings.GetServerUrlAsync(ct);
+                        if (string.IsNullOrWhiteSpace(url))
+                        {
+                            return Results.Problem("Set the address under which the cluster reaches this server first (Guest agents → Settings → server address).", statusCode: StatusCodes.Status409Conflict);
+                        }
+
+                        Backdafuckup.Core.DataMover.MoverDeployment mover;
+                        try
+                        {
+                            mover = await images.EnsurePushedAsync(null, ct);
+                        }
+                        catch (Exception ex) when (ex is InvalidOperationException or Movers.RegistryException or HttpRequestException)
+                        {
+                            return Results.Problem($"The agent runs the mover image, which is not in a registry the cluster can pull from yet (Kubernetes Clusters → Mover image): {ex.Message}",
+                                statusCode: StatusCodes.Status409Conflict);
+                        }
+
+                        agent = new Backdafuckup.Kubernetes.ClusterAgentManifest(
+                            connection.Id, url.TrimEnd('/') + "/", settings.ServerPins(), protector.Unprotect(connection.Credential.ProtectedSecret), mover.Image, mover.PullSecretName, mover.DockerConfigJson);
+                    }
+                }
+
+                var manifest = Backdafuckup.Kubernetes.KubernetesSetup.Manifest(restore != false, agent);
                 return download == true
                     ? Results.File(System.Text.Encoding.UTF8.GetBytes(manifest), "application/yaml", Backdafuckup.Kubernetes.KubernetesSetup.FileName)
                     : Results.Text(manifest, "application/yaml");
             })
-            .WithDescription("The objects a Kubernetes cluster needs for backdafuckup: work namespace, ServiceAccount with a token, backup and (unless restore=false) restore roles. download=true returns it as a file.");
+            .WithDescription(
+                "The objects a Kubernetes cluster needs for backdafuckup: work namespace, ServiceAccount with a token, backup and (unless restore=false) restore roles. " +
+                "With connectionId of a cluster reached through its agent also the agent (Deployment, connect token, pull secret); the mover image is pushed first if needed. download=true returns it as a file.");
 
         var repositories = app.MapGroup("/api/repositories");
 
@@ -357,7 +456,13 @@ public static class InfrastructureEndpoints
     /// Reads the inventory; a failure marks the connection as failed with the message (also right after it was added: it
     /// stays, shows the error and can be rescanned or removed). Returns the error, or null.
     /// </summary>
-    private static async Task<string?> TryRefreshInventoryAsync(Guid connectionId, AppDbContext db, ConnectionManager manager, TimeProvider time, CancellationToken ct)
+    /// <summary>A connection for the console; a cluster behind its agent with the agent's state.</summary>
+    private static ConnectionDto WithAgent(HypervisorConnection connection, Clusters.ClusterAgents agents) =>
+        connection.Access == ConnectionAccess.Agent
+            ? connection.ToDto() with { Agent = agents.Describe(connection.Id) ?? new ConnectionAgentDto(false, null, null, null, null, null, null) }
+            : connection.ToDto();
+
+    internal static async Task<string?> TryRefreshInventoryAsync(Guid connectionId, AppDbContext db, ConnectionManager manager, TimeProvider time, CancellationToken ct)
     {
         try
         {
@@ -399,6 +504,22 @@ public static class InfrastructureEndpoints
         await using var session = await manager.OpenAsync(connectionId, ct);
         var inventory = await session.GetInventoryAsync(ct);
         var now = time.GetUtcNow();
+
+        // A cluster added through its agent learns which cluster it is at its first contact.
+        var platform = inventory.Platform;
+        if (await db.Connections.AnyAsync(c => c.Id == connectionId && c.PlatformId == null, ct) && !string.IsNullOrEmpty(platform.PlatformId))
+        {
+            var other = await db.Connections.Where(c => c.Id != connectionId && c.PlatformId == platform.PlatformId).Select(c => c.DisplayName).FirstOrDefaultAsync(ct);
+            if (other is not null)
+            {
+                throw new InvalidOperationException($"This cluster ({platform.PlatformName}) is connected already, as '{other}'. Remove one of the two connections.");
+            }
+
+            await db.Connections.Where(c => c.Id == connectionId).ExecuteUpdateAsync(u => u
+                .SetProperty(c => c.PlatformId, platform.PlatformId)
+                .SetProperty(c => c.ProductName, platform.ProductName), ct);
+        }
+
         var existing = await db.Inventory.Where(i => i.ConnectionId == connectionId).ToListAsync(ct);
         db.Inventory.RemoveRange(existing.Where(e => !inventory.Items.Any(i => i.Kind == e.Kind && i.NativeId == e.NativeId)));
         foreach (var item in inventory.Items)

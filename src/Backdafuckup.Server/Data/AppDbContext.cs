@@ -79,6 +79,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(32);
             e.Property(x => x.TrustMode).HasConversion<string>().HasMaxLength(32);
             e.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
+            e.Property(x => x.Access).HasConversion<string>().HasMaxLength(16);
             e.Property(x => x.DisplayName).HasMaxLength(200);
             e.Property(x => x.Address).HasMaxLength(255);
             e.HasIndex(x => x.DisplayName).IsUnique();

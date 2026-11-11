@@ -1,5 +1,6 @@
 using Backdafuckup.Server.Agents;
 using Backdafuckup.Server.Api;
+using Backdafuckup.Server.Clusters;
 using Backdafuckup.Server.Data;
 using Backdafuckup.Server.Engine;
 using Backdafuckup.Server.Hosting;
@@ -187,8 +188,10 @@ try
     app.MapApiTokenEndpoints();
     app.MapInfrastructureEndpoints();
     app.MapOperationEndpoints();
+    app.UseWebSockets();
     app.MapAgentEndpoints();
     app.MapMoverEndpoints();
+    app.MapClusterAgentEndpoints();
     app.MapMoverImageEndpoints();
     app.MapFileRestoreEndpoints();
     app.MapLinuxCredentialEndpoints();
