@@ -134,7 +134,7 @@ internal static class KubernetesHooks
     }
 
     /// <summary>Runs the hooks one after another; returns what happened to each. Failures are in the records, not thrown.</summary>
-    public static async Task<IReadOnlyList<KubernetesHookRecord>> RunAsync(IPodExecutor executor, string ns, IReadOnlyList<PodHook> hooks, IOperationLog log, CancellationToken cancellationToken)
+    public static async Task<IReadOnlyList<KubernetesHookRecord>> RunAsync(IPodExecutor executor, string cluster, string ns, IReadOnlyList<PodHook> hooks, IOperationLog log, CancellationToken cancellationToken)
     {
         var records = new List<KubernetesHookRecord>();
         foreach (var hook in hooks)
@@ -142,6 +142,7 @@ internal static class KubernetesHooks
             var started = Stopwatch.GetTimestamp();
             int? exitCode = null;
             string? error;
+            var timedOut = false;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(hook.Timeout);
             try
@@ -153,6 +154,7 @@ internal static class KubernetesHooks
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 error = $"no answer within {hook.Timeout.TotalSeconds:0} s";
+                timedOut = true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -160,6 +162,7 @@ internal static class KubernetesHooks
             }
 
             var seconds = Stopwatch.GetElapsedTime(started).TotalSeconds;
+            KubernetesMetrics.RecordHook(cluster, hook.Phase, error is null ? "ok" : timedOut ? "timeout" : "failed");
             records.Add(new KubernetesHookRecord(hook.Phase, hook.Pod, hook.Container, hook.CommandText, exitCode, error, Math.Round(seconds, 1)));
             var text = $"{(hook.Phase == Pre ? "Pre" : "Post")}-hook in {ns}/{hook.Pod} ({hook.Container}): {hook.CommandText}";
             if (error is null)

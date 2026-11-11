@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
@@ -23,9 +24,28 @@ namespace Backdafuckup.Server.Clusters;
 /// the API server, and every TCP connection it opens is carried by a WebSocket of the agent to the API server. The
 /// ServiceAccount token and CA the agent sends are kept in memory only.
 /// </summary>
-public sealed class ClusterAgents(IDbContextFactory<AppDbContext> dbFactory, CredentialProtector protector, IServiceProvider services, TimeProvider time, ILogger<ClusterAgents> logger)
-    : IAsyncDisposable
+public sealed class ClusterAgents : IAsyncDisposable
 {
+    private readonly IDbContextFactory<AppDbContext> dbFactory;
+    private readonly CredentialProtector protector;
+    private readonly IServiceProvider services;
+    private readonly TimeProvider time;
+    private readonly ILogger<ClusterAgents> logger;
+
+    public ClusterAgents(
+        IDbContextFactory<AppDbContext> dbFactory, CredentialProtector protector, IServiceProvider services, TimeProvider time, ILogger<ClusterAgents> logger, System.Diagnostics.Metrics.IMeterFactory meters)
+    {
+        this.dbFactory = dbFactory;
+        this.protector = protector;
+        this.services = services;
+        this.time = time;
+        this.logger = logger;
+        meters.Create(Telemetry.BackupMetrics.MeterName).CreateObservableGauge(
+            "bdfu_k8s_agent_connected",
+            () => _endpoints.Values.Select(e => new System.Diagnostics.Metrics.Measurement<int>(e.Session is null ? 0 : 1, new KeyValuePair<string, object?>("cluster", e.Name))),
+            description: "1 while the agent of a cluster reached through it is connected to this server, 0 once it is gone (clusters whose agent connected since the server started).");
+    }
+
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(20);
 
@@ -140,6 +160,7 @@ public sealed class ClusterAgents(IDbContextFactory<AppDbContext> dbFactory, Cre
         }
 
         var endpoint = _endpoints.GetOrAdd(connection.Id, id => new Endpoint(this, id, _stopping.Token));
+        endpoint.Name = connection.DisplayName;
         if (endpoint.Attach(session) is { } previous)
         {
             await CloseAsync(previous.Socket, WebSocketCloseStatus.NormalClosure, "replaced by a new connection of the agent").ConfigureAwait(false);
@@ -391,6 +412,9 @@ public sealed class ClusterAgents(IDbContextFactory<AppDbContext> dbFactory, Cre
         }
 
         public int Port { get; }
+
+        /// <summary>The cluster's name (for metrics).</summary>
+        public string Name { get; set; } = string.Empty;
 
         public AgentSession? Session => Volatile.Read(ref _session);
 

@@ -98,7 +98,7 @@ A scrape interval of 60 s matches how often the server refreshes its catalog gau
 - **Prometheus Operator:** `kubectl apply -f prometheusrule.yaml`. Its label `release` must match the Prometheus' `ruleSelector`.
 - **Plain Prometheus:** add `backdafuckup.rules.yml` under `rule_files:`.
 
-Both contain the same 13 alerts:
+Both contain the same 15 alerts:
 
 | Alert | When |
 |---|---|
@@ -115,6 +115,8 @@ Both contain the same 13 alerts:
 | BackdafuckupRepositoryLow | a repository has less than 10 % free |
 | BackdafuckupSqlLogBackupLate | a SQL log backup is late |
 | BackdafuckupAgentOffline | guest agents are offline |
+| BackdafuckupClusterAgentDisconnected | the agent of a Kubernetes cluster reached through it is gone for 15 minutes |
+| BackdafuckupClusterSnapshotLongLived | a volume snapshot of a Kubernetes cluster lived over 2 hours (in the last day) |
 
 After changing `backdafuckup.rules.yml`, check it and regenerate the `PrometheusRule`:
 

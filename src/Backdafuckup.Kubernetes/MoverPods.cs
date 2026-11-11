@@ -136,7 +136,7 @@ internal static class MoverPods
     /// <param name="ns">The pod's namespace (default: the work namespace).</param>
     /// <param name="pending">What a pending pod waits for, for the log (default: the copy of a snapshot).</param>
     public static async Task WatchAsync(
-        VolumeSnapshotFlow flow, string podName, string source, Action<Exception> abort, CancellationToken cancellationToken, string? ns = null, string? pending = null)
+        VolumeSnapshotFlow flow, string podName, string source, Action<Exception> abort, CancellationToken cancellationToken, string? ns = null, string? pending = null, string mode = "backup")
     {
         var space = ns ?? KubernetesSetup.WorkNamespace;
         var client = flow.Client;
@@ -180,6 +180,7 @@ internal static class MoverPods
                     return;
                 case "Running" when !running:
                     running = true;
+                    KubernetesMetrics.RecordMoverStart(flow.Cluster, mode, DateTimeOffset.UtcNow - started);
                     flow.Log.Info($"Mover pod {space}/{podName} running{(pod.Spec?.NodeName is { Length: > 0 } node ? $" on node {node}" : string.Empty)} after {(DateTimeOffset.UtcNow - started).TotalSeconds:0} s.");
                     break;
                 case "Pending" when DateTimeOffset.UtcNow - reported >= flow.Timings.Progress:

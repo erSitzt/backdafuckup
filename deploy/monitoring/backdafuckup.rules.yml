@@ -119,3 +119,21 @@ groups:
         annotations:
           summary: "{{ $value }} guest agent(s) without contact"
           description: "Guest agents have not reported for over 10 minutes (VM off, agent stopped, or the VM cannot reach the server on 9555). See Infrastructure → Guest Agents."
+
+      - alert: BackdafuckupClusterAgentDisconnected
+        expr: bdfu_k8s_agent_connected == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The agent of cluster {{ $labels.cluster }} is not connected"
+          description: "Backups and restores of the cluster fail while its agent is gone. Check the Deployment backdafuckup-agent in backdafuckup-system and its log (it names the server address and the error)."
+
+      - alert: BackdafuckupClusterSnapshotLongLived
+        expr: histogram_quantile(1, sum by (cluster, le) (rate(bdfu_k8s_snapshot_lifetime_seconds_bucket[1d]))) > 7200
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "Volume snapshots in cluster {{ $labels.cluster }} lived over 2 hours"
+          description: "A VolumeSnapshot existed for hours while its volume was read (vSphere: the copy of the snapshot is slow). A volume with a snapshot cannot be expanded or deleted, and vSphere allows 3 per volume."

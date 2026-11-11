@@ -140,6 +140,15 @@ public sealed partial class ApiIntegrationTests
         Assert.Single(movers);
         AssertClusterClean();
 
+        // Metrics of the namespace's backup and of the agent.
+        var metrics = (await client.GetStringAsync("/metrics", Ct)).Split('\n');
+        bool Has(string name, params string[] labels) =>
+            metrics.Any(l => l.StartsWith(name + "{", StringComparison.Ordinal) && labels.All(label => l.Contains(label, StringComparison.Ordinal)));
+        Assert.True(Has("bdfu_k8s_snapshot_ready_seconds_count", "cluster=\"rke2-edge\"", "driver=\"csi.vsphere.vmware.com\""), "snapshot ready");
+        Assert.True(Has("bdfu_k8s_snapshot_lifetime_seconds_count", "cluster=\"rke2-edge\""), "snapshot lifetime");
+        Assert.True(Has("bdfu_k8s_hooks_total", "cluster=\"rke2-edge\"", "phase=\"pre\"", "result=\"ok\""), "hooks");
+        Assert.Contains(metrics, l => l.StartsWith("bdfu_k8s_agent_connected{", StringComparison.Ordinal) && l.Contains("cluster=\"rke2-edge\"", StringComparison.Ordinal) && l.TrimEnd().EndsWith(" 1", StringComparison.Ordinal));
+
         // A renewed ServiceAccount token reaches the server; the old one no longer works in the cluster.
         await File.WriteAllTextAsync(Path.Combine(account, "token"), "sa-token-2", Ct);
         _cluster.RequiredToken = "sa-token-2";

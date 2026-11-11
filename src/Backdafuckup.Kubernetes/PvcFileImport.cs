@@ -219,7 +219,7 @@ internal sealed class PvcFileImport : IPvcFileRestore
         }
 
         _flow.Log.Info($"Mover pod {Ns}/{PodName} started for the files{(node is null ? string.Empty : $" on node {node}")}, image {mover.Image}.");
-        _watching = MoverPods.WatchAsync(_flow, PodName, Description, _channel.Abort, _stopWatching.Token, Ns, $"waiting for {_request.Claim} to be mounted");
+        _watching = MoverPods.WatchAsync(_flow, PodName, Description, _channel.Abort, _stopWatching.Token, Ns, $"waiting for {_request.Claim} to be mounted", mode: "files");
     }
 
     private async Task<T?> ReadAsync<T>(string what, Func<Task<T>> read)
