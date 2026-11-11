@@ -50,7 +50,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         _descriptor = plan.Manifest.Kubernetes ?? throw new InvalidDataException("The restore point is not one of a Kubernetes namespace.");
         _images = images;
         _run = (plan.SessionId == Guid.Empty ? Guid.NewGuid() : plan.SessionId).ToString("N")[..8];
-        _flow = new VolumeSnapshotFlow(client, settings.Address, log, ledger, timings) { Channels = channels };
+        _flow = new VolumeSnapshotFlow(client, settings.ClusterName(), log, ledger, timings) { Channels = channels };
         _objects = [.. KubernetesResources.Read(plan.Metadata.Content)];
 
         var plurals = KubernetesApplier.BuiltInPlurals();
@@ -118,7 +118,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
             if (!_options.ReplaceClaims)
             {
-                errors.Add($"The PVC {Target}/{name} exists in cluster {_settings.Address}: delete it first, restore into another namespace, restore the PVC under a new name, or replace it.");
+                errors.Add($"The PVC {Target}/{name} exists in cluster {_settings.ClusterName()}: delete it first, restore into another namespace, restore the PVC under a new name, or replace it.");
                 continue;
             }
 
@@ -143,7 +143,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         {
             if (_flow.Channels is null || _images is null)
             {
-                errors.Add($"Volume data cannot be restored to cluster {_settings.Address}: this server has no mover channel.");
+                errors.Add($"Volume data cannot be restored to cluster {_settings.ClusterName()}: this server has no mover channel.");
             }
             else
             {
@@ -156,7 +156,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             var what = _options.OnlyClaims is { } claims
                 ? $"PVC(s) {string.Join(", ", claims.Select(c => _options.ClaimName(c) == c ? c : $"{c} as {_options.ClaimName(c)}"))}"
                 : _options.Objects is not null ? $"{_selected.Count} object(s) of the selection and what they need" : "the namespace";
-            Log.Info($"Restoring {what} of {Source} into namespace {Target} of cluster {_settings.Address} ({DataVolumes.Count()} volume(s) with data; existing objects: {(_options.ReplaceExisting ? "replaced" : "left as they are")}).");
+            Log.Info($"Restoring {what} of {Source} into namespace {Target} of cluster {_settings.ClusterName()} ({DataVolumes.Count()} volume(s) with data; existing objects: {(_options.ReplaceExisting ? "replaced" : "left as they are")}).");
         }
 
         return new RestoreValidation(errors, warnings);
@@ -419,7 +419,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         {
             if (DateTimeOffset.UtcNow - started > _flow.Timings.Deleted)
             {
-                throw new KubernetesOperationException($"The PVC {Target}/{claim} is still there {_flow.Timings.Deleted.TotalMinutes:0} minutes after its deletion (cluster {_settings.Address}).");
+                throw new KubernetesOperationException($"The PVC {Target}/{claim} is still there {_flow.Timings.Deleted.TotalMinutes:0} minutes after its deletion (cluster {_settings.ClusterName()}).");
             }
 
             await Task.Delay(_flow.Timings.Poll, cancellationToken).ConfigureAwait(false);

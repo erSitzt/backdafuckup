@@ -58,7 +58,7 @@ internal static class KubernetesInventory
     {
         var version = await client.Version.GetCodeAsync(cancellationToken).ConfigureAwait(false);
         var kubeSystem = await client.CoreV1.ReadNamespaceAsync("kube-system", cancellationToken: cancellationToken).ConfigureAwait(false);
-        return new PlatformInfo(kubeSystem.Metadata.Uid, settings.Address, settings.Address, "Kubernetes", version.GitVersion);
+        return new PlatformInfo(kubeSystem.Metadata.Uid, settings.ClusterName(), settings.Address, "Kubernetes", version.GitVersion);
     }
 
     public static async Task<Inventory> GetAsync(IKubernetes client, ConnectionSettings settings, CancellationToken cancellationToken)

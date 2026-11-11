@@ -58,7 +58,7 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         IKubernetes client, ConnectionSettings settings, string kubernetesVersion, VmBackupRequest request, IOperationLog log, IArtifactLedger ledger,
         IMoverChannels? channels, IMoverImageSource? images, IPodExecutor executor, KubernetesTimings timings, CancellationToken cancellationToken)
     {
-        var cluster = settings.Address;
+        var cluster = settings.ClusterName();
         var ns = request.VmId;
         var run = request.RestorePointId.ToString("N")[..8];
         var flow = new VolumeSnapshotFlow(client, cluster, log, ledger, timings);
