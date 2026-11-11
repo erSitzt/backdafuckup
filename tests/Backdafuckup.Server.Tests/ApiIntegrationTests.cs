@@ -306,6 +306,24 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_removed_connection_takes_its_inventory_and_credential_with_it()
+    {
+        var client = await SignedInClientAsync();
+        _pool.AddVm("app01", 1024 * 1024);
+        var connection = await Read<ConnectionDto>(client.PostAsJsonAsync("/api/connections", new CreateConnectionDto
+        {
+            DisplayName = "Lab pool", Address = "xcp1", UserName = "root", Password = "secret",
+        }, Ct));
+        Assert.NotEmpty((await client.GetFromJsonAsync<List<InventoryItemDto>>($"/api/connections/{connection.Id}/inventory", Ct))!);
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync($"/api/connections/{connection.Id}", Ct)).StatusCode);
+
+        Assert.Empty((await client.GetFromJsonAsync<List<ConnectionDto>>("/api/connections", Ct))!);
+        await using var db = await _factory!.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>().CreateDbContextAsync(Ct);
+        Assert.Equal((0, 0), (await db.Inventory.CountAsync(Ct), await db.Credentials.CountAsync(c => c.Kind == Backdafuckup.Server.Data.CredentialKind.Hypervisor, Ct)));
+    }
+
+    [Fact]
     public async Task The_agent_runner_freezes_and_thaws_through_the_real_server_over_http()
     {
         // The real agent loop (enroll, long poll, commands in the background, results) against the real endpoints;
