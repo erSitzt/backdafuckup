@@ -200,6 +200,14 @@ public static class Fmt
         _ => kind,
     };
 
+    /// <summary>A session kind with what it works on: a namespace's backup or restore is not a VM's.</summary>
+    public static string Kind(string? kind, string? objectKind) => (kind, objectKind) switch
+    {
+        ("Backup", Contracts.RestorePointObjectKinds.KubernetesNamespace) => "Namespace backup",
+        ("Restore", Contracts.RestorePointObjectKinds.KubernetesNamespace) => "Namespace restore",
+        _ => Kind(kind),
+    };
+
     public static MudBlazor.Color StateColor(string? state) => state switch
     {
         "Succeeded" or "Success" or "Available" or "Online" or "Connected" => MudBlazor.Color.Success,

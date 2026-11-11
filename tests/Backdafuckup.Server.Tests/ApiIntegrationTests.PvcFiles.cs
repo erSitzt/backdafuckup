@@ -51,7 +51,8 @@ public sealed partial class ApiIntegrationTests
             Objects = [new JobObjectDto("bdfu-spike", "bdfu-spike")], RetryCount = 0,
         }, Ct));
         var backup = await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{job.Id}/run", new RunJobDto(), Ct));
-        Assert.Equal("Succeeded", (await WaitForSessionAsync(client, backup.SessionId)).Session.State);
+        var backupSession = (await WaitForSessionAsync(client, backup.SessionId)).Session;
+        Assert.Equal(("Succeeded", RestorePointObjectKinds.KubernetesNamespace), (backupSession.State, backupSession.ObjectKind)); // the console marks it as a namespace's
         var point = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>("/api/restore-points?vmId=bdfu-spike", Ct))!);
 
         // The browser sees the PVC's file system; a namespace has no VM to restore into, and folders are absolute.
@@ -74,6 +75,7 @@ public sealed partial class ApiIntegrationTests
         var first = await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync("/api/file-restore/restores", Request(FileRestoreModeDto.Overwrite), Ct))).SessionId);
         var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{first.Session.Id}/log", Ct))!.Select(l => l.Message));
         Assert.True(first.Session.State == "Succeeded", first.Session.Summary + "\n" + log);
+        Assert.Equal(RestorePointObjectKinds.KubernetesNamespace, first.Session.ObjectKind);
         Assert.Contains("is used by redis-test-0 on node node-1; the mover pod mounts it there too", log, StringComparison.Ordinal);
         Assert.Contains("to PVC bdfu-spike/data-redis-test-0, original location", first.Session.Summary, StringComparison.Ordinal);
         var manifest = FsFixtures.Manifest("ext4-gpt.p1").ToDictionary(l => l[7], l => l[1]);

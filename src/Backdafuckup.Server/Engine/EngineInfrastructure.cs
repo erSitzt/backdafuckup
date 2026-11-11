@@ -60,7 +60,7 @@ public static class DtoMapping
 {
     public static SessionSummaryDto ToDto(this SessionEntity s) => new(
         s.Id, s.Kind.ToString(), s.Name, s.State.ToString(), s.TriggeredBy, s.RunMode.ToString(), s.JobId,
-        s.CreatedUtc, s.StartedUtc, s.EndedUtc, s.Progress, s.ReadBytes, s.TransferredBytes, s.Summary, s.Metrics);
+        s.CreatedUtc, s.StartedUtc, s.EndedUtc, s.Progress, s.ReadBytes, s.TransferredBytes, s.Summary, s.Metrics, s.ObjectKind);
 
     public static SessionTaskDto ToDto(this SessionTaskEntity t) => new(
         t.Id, t.SessionId, t.ObjectNativeId, t.ObjectName, t.State.ToString(), t.Attempt, t.Progress, t.ReadBytes,

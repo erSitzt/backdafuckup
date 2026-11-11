@@ -9,12 +9,25 @@
     <Actions>
         <MudToggleGroup T="string" Value="@Grouping" ValueChanged="@(v => Navigate(("group", v == "vm" ? "vm" : null)))" Size="Size.Small" Outlined="true" Color="Color.Primary">
             <MudToggleItem Value="@("job")" Text="By job" />
-            <MudToggleItem Value="@("vm")" Text="By VM" />
+            <MudToggleItem Value="@("vm")" Text="@(KindCount(RestorePointObjectKinds.KubernetesNamespace) > 0 ? "By VM or namespace" : "By VM")" />
         </MudToggleGroup>
     </Actions>
 </PageHeader>
 
 <MudPaper Elevation="1" Class="pa-2 mb-3">
+    @if (ShowKinds)
+    {
+        @* What kind of object: VMs and Kubernetes namespaces (later more) side by side, each with its icon and color. *@
+        <div class="kind-filter" role="group" aria-label="Kind of object">
+            <button type="button" class="@(Kind is null ? "kind-chip active" : "kind-chip")" @onclick="@(() => Navigate(("kind", null)))">All <span class="kind-count">@_vms!.Count</span></button>
+            <button type="button" class="@(Kind == "vm" ? "kind-chip active" : "kind-chip")" @onclick="@(() => Navigate(("kind", "vm")))">
+                @AppIcons.Svg(AppIcons.Vm, "kind-icon kind-vm")Virtual machines <span class="kind-count">@KindCount(RestorePointObjectKinds.Vm)</span>
+            </button>
+            <button type="button" class="@(Kind == "k8s" ? "kind-chip active" : "kind-chip")" @onclick="@(() => Navigate(("kind", "k8s")))">
+                @AppIcons.Svg(AppIcons.Kubernetes, "kind-icon kind-k8s")Kubernetes namespaces <span class="kind-count">@KindCount(RestorePointObjectKinds.KubernetesNamespace)</span>
+            </button>
+        </div>
+    }
     <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Wrap="Wrap.Wrap">
         <MudTextField T="string" @bind-Value="_text" DebounceInterval="300" OnDebounceIntervalElapsed="@(v => Navigate(("q", string.IsNullOrWhiteSpace(v) ? null : v.Trim())))"
                       Placeholder="VM, namespace or job" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Clearable="true"
@@ -126,22 +139,26 @@
         <MudAlert Severity="Severity.Error">@_error</MudAlert>
     }
 }
-else if (_vms.Count == 0)
+else if (_vms.Count == 0 || Groups().Count == 0)
 {
-    <MudAlert Severity="Severity.Info">@(Filtered ? "No VM matches the filters." : "No restore points yet: run a backup job.")</MudAlert>
+    <MudAlert Severity="Severity.Info">@(Filtered ? "Nothing matches the filters." : "No restore points yet: run a backup job.")</MudAlert>
 }
 else
 {
     @foreach (var group in Groups())
     {
         var collapsed = _collapsed.Contains(group.Key);
-        <MudPaper Elevation="1" Class="mb-3">
+        <MudPaper Elevation="1" Class="@($"mb-3 backup-group {group.Css}")">
             @if (group.Title is not null)
             {
                 <div class="backup-group-head cursor-pointer" @onclick="@(() => ToggleGroup(group.Key))">
                     <MudIcon Icon="@(collapsed ? Icons.Material.Filled.ChevronRight : Icons.Material.Filled.ExpandMore)" Size="Size.Small" />
+                    @if (group.Icon is not null)
+                    {
+                        @AppIcons.Svg(group.Icon, $"kind-icon {group.Css}")
+                    }
                     <MudText Typo="Typo.subtitle1" Class="section-title">@group.Title</MudText>
-                    <MudText Typo="Typo.body2" Color="Color.Secondary">@group.Detail · @BackupRow.Count(group.Rows)</MudText>
+                    <MudText Typo="Typo.body2" Color="Color.Secondary">@(group.Source is null ? string.Empty : group.Source + " · ")@group.Detail · @BackupRow.Count(group.Rows)</MudText>
                     @if (group.Stale > 0)
                     {
                         <MudChip T="string" Size="Size.Small" Color="Color.Warning" Icon="@Icons.Material.Filled.Schedule">@group.Stale missed a run</MudChip>
@@ -210,9 +227,14 @@ else
 
     [SupplyParameterFromQuery(Name = "sort")] public string? SortParameter { get; set; }
 
+    /// <summary><c>vm</c> or <c>k8s</c>: only that kind of object; null: all.</summary>
+    [SupplyParameterFromQuery(Name = "kind")] public string? KindParameter { get; set; }
+
     private List<BackupVmDto>? _vms;
     private List<JobDto> _jobs = [];
     private List<RepositoryDto> _repositories = [];
+    private Dictionary<Guid, ConnectionDto> _connections = [];
+    private int _listsVersion;
     private string? _error;
     private bool _loading;
     private string? _text;
@@ -228,7 +250,22 @@ else
 
     private string Sorting => SortParameter is "oldest" or "size" ? SortParameter : "name";
 
-    private bool Filtered => !string.IsNullOrEmpty(Q) || JobIds is { Length: > 0 } || Repository is not null || Content is { Length: > 0 }
+    private string? Kind => KindParameter is "vm" or "k8s" ? KindParameter : null;
+
+    /// <summary>The kind filter appears once there is more than one kind of object (or it is set).</summary>
+    private bool ShowKinds => _vms is not null && (Kind is not null || _vms.Select(KindOf).Distinct().Count() > 1);
+
+    private int KindCount(string objectKind) => _vms?.Count(v => KindOf(v) == objectKind) ?? 0;
+
+    /// <summary>What a VM row stands for: its restore points say so; without one, the connection of its job.</summary>
+    private string KindOf(BackupVmDto vm) =>
+        vm.Latest?.ObjectKind
+        ?? (vm.Jobs.Any(j => j.JobId is { } id && ClusterOf(id)) ? RestorePointObjectKinds.KubernetesNamespace : RestorePointObjectKinds.Vm);
+
+    private bool ClusterOf(Guid jobId) =>
+        _jobs.FirstOrDefault(j => j.Id == jobId) is { } job && _connections.TryGetValue(job.ConnectionId, out var connection) && connection.Kind == "Kubernetes";
+
+    private bool Filtered => Kind is not null || !string.IsNullOrEmpty(Q) || JobIds is { Length: > 0 } || Repository is not null || Content is { Length: > 0 }
         || !string.IsNullOrEmpty(Consistency) || States is { Length: > 0 } || OlderThan is not null;
 
     private bool _filtersOpen;
@@ -236,7 +273,7 @@ else
     private int ActiveFilters => (JobIds is { Length: > 0 } ? 1 : 0) + (Repository is null ? 0 : 1) + (Content is { Length: > 0 } ? 1 : 0)
         + (string.IsNullOrEmpty(Consistency) ? 0 : 1) + (States is { Length: > 0 } ? 1 : 0) + (OlderThan is null ? 0 : 1);
 
-    private sealed class Group(string key, string? title, string detail, List<BackupRow> rows)
+    private sealed class Group(string key, string? title, string detail, List<BackupRow> rows, string? source = null, bool? cluster = null)
     {
         public string Key => key;
 
@@ -245,6 +282,16 @@ else
         public string Detail => detail;
 
         public List<BackupRow> Rows => rows;
+
+        /// <summary>Where the objects come from: "pool …", "cluster …".</summary>
+        public string? Source => source;
+
+        /// <summary>True: Kubernetes namespaces, false: VMs, null: both (or nothing known).</summary>
+        public bool? Cluster { get; } = cluster ?? (rows.Count == 0 ? null : rows.All(r => r.IsNamespace) ? true : rows.Any(r => r.IsNamespace) ? null : false);
+
+        public string? Icon => Cluster switch { true => AppIcons.Kubernetes, false => AppIcons.Vm, null => null };
+
+        public string? Css => Cluster switch { true => ObjectKindUi.KubernetesCss, false => ObjectKindUi.VmCss, null => null };
 
         public int Stale { get; } = rows.Count(r => r.State == BackupVmStates.Stale);
 
@@ -256,7 +303,7 @@ else
     // The groups are built once per data, grouping and sort: the rows keep their objects between renders, so a row
     // component renders again only when its own data changed.
     private List<Group> _groups = [];
-    private (List<BackupVmDto>? Vms, string Grouping, string Sorting) _groupedFor;
+    private (List<BackupVmDto>? Vms, string Grouping, string Sorting, string? Kind, int Lists) _groupedFor;
 
     // The job and repository lists only fill the filters: they load next to the VMs, not before them.
     protected override void OnInitialized() => _ = LoadListsAsync();
@@ -267,8 +314,11 @@ else
         {
             var jobs = Api.GetAsync<List<JobDto>>("api/jobs");
             var repositories = Api.GetAsync<List<RepositoryDto>>("api/repositories");
+            var connections = Api.GetAsync<List<ConnectionDto>>("api/connections");
             _jobs = (await jobs).OrderBy(j => j.Name, StringComparer.OrdinalIgnoreCase).ToList();
             _repositories = await repositories;
+            _connections = (await connections).ToDictionary(c => c.Id);
+            _listsVersion++;
             StateHasChanged();
         }
         catch (ApiException ex)
@@ -366,7 +416,7 @@ else
     private Task ResetAsync()
     {
         _text = null;
-        Navigate(("q", null), ("job", null), ("repo", null), ("content", null), ("consistency", null), ("state", null), ("older", null));
+        Navigate(("kind", null), ("q", null), ("job", null), ("repo", null), ("content", null), ("consistency", null), ("state", null), ("older", null));
         return Task.CompletedTask;
     }
 
@@ -381,8 +431,9 @@ else
 
     private List<Group> Groups()
     {
-        var key = (_vms, Grouping, Sorting);
-        if (ReferenceEquals(key._vms, _groupedFor.Vms) && key.Grouping == _groupedFor.Grouping && key.Sorting == _groupedFor.Sorting)
+        var key = (_vms, Grouping, Sorting, Kind, _listsVersion);
+        if (ReferenceEquals(key._vms, _groupedFor.Vms) && key.Grouping == _groupedFor.Grouping && key.Sorting == _groupedFor.Sorting
+            && key.Kind == _groupedFor.Kind && key._listsVersion == _groupedFor.Lists)
         {
             return _groups;
         }
@@ -394,22 +445,32 @@ else
 
     private IEnumerable<Group> BuildGroups()
     {
-        if (Grouping == "vm")
+        var wanted = Kind switch { "vm" => RestorePointObjectKinds.Vm, "k8s" => RestorePointObjectKinds.KubernetesNamespace, _ => null };
+        var vms = _vms!.Where(v => wanted is null || KindOf(v) == wanted).ToList();
+        if (vms.Count == 0)
         {
-            yield return new Group("all", null, string.Empty, Sort(_vms!.Select(v => new BackupRow("all|" + v.VmNativeId, v, null))));
             yield break;
         }
 
-        var rows = _vms!.SelectMany(v => v.Jobs.Select(j => (Vm: v, Job: j))).ToList();
+        if (Grouping == "vm")
+        {
+            yield return new Group("all", null, string.Empty, Sort(vms.Select(v => new BackupRow("all|" + v.VmNativeId, v, null, KindOf(v)))));
+            yield break;
+        }
+
+        var rows = vms.SelectMany(v => v.Jobs.Select(j => (Vm: v, Job: j))).ToList();
         foreach (var job in rows.Where(r => r.Job.JobExists).GroupBy(r => r.Job.JobId!.Value).OrderBy(g => g.First().Job.JobName, StringComparer.OrdinalIgnoreCase))
         {
             var first = job.First().Job;
             var detail = !first.Enabled ? "disabled" : first.Schedule is { } schedule ? Pages.Jobs.Describe(schedule) : "not scheduled";
             var key = job.Key.ToString();
-            yield return new Group(key, first.JobName, detail, Sort(job.Select(r => new BackupRow(key + "|" + r.Vm.VmNativeId, r.Vm, r.Job))));
+            var connection = _jobs.FirstOrDefault(j => j.Id == job.Key) is { } dto && _connections.TryGetValue(dto.ConnectionId, out var found) ? found : null;
+            var cluster = connection is null ? (bool?)null : connection.Kind == "Kubernetes";
+            var source = connection is null ? null : $"{(cluster == true ? "cluster" : "pool")} {connection.DisplayName}";
+            yield return new Group(key, first.JobName, detail, Sort(job.Select(r => new BackupRow(key + "|" + r.Vm.VmNativeId, r.Vm, r.Job, KindOf(r.Vm)))), source, cluster);
         }
 
-        var orphans = rows.Where(r => !r.Job.JobExists).Select(r => new BackupRow("none|" + r.Vm.VmNativeId, r.Vm, r.Job)).ToList();
+        var orphans = rows.Where(r => !r.Job.JobExists).Select(r => new BackupRow("none|" + r.Vm.VmNativeId, r.Vm, r.Job, KindOf(r.Vm))).ToList();
         if (orphans.Count > 0)
         {
             yield return new Group("none", "Without job", "restore points of deleted jobs, kept until they are deleted", Sort(orphans));

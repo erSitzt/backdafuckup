@@ -17,7 +17,8 @@ public sealed record SessionSummaryDto(
     long ReadBytes,
     long TransferredBytes,
     string? Summary,
-    TransferMetricsDto? Metrics = null);
+    TransferMetricsDto? Metrics = null,
+    string? ObjectKind = null);
 
 public sealed record SessionTaskDto(
     Guid Id,

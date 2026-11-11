@@ -423,6 +423,7 @@ public sealed class FileRestoreMounts(
         var session = new SessionEntity
         {
             Kind = SessionKind.FileBrowse,
+            ObjectKind = point.ObjectKind,
             RepositoryId = point.RepositoryId,
             Name = $"Browse files {point.VmName} ({point.CreatedUtc.ToLocalTime():g})",
             TriggeredBy = user,

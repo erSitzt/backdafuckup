@@ -149,3 +149,18 @@ html, body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helveti
 .summary-list { display: grid; grid-template-columns: minmax(110px, max-content) minmax(0, 1fr); gap: 8px 20px; margin: 0; font-size: .875rem; line-height: 1.45; }
 .summary-list dt { color: var(--mud-palette-text-secondary); }
 .summary-list dd { margin: 0; overflow-wrap: anywhere; }
+/* Kinds of backed-up objects (VMs, Kubernetes namespaces, later more): an icon and a color each, a stripe on their groups. */
+:root { --kind-vm: #3b74d6; --kind-k8s: #0f9488; }
+.kind-icon { width: 18px; height: 18px; flex: none; vertical-align: -4px; margin-right: 6px; color: var(--mud-palette-text-secondary); }
+.kind-icon.kind-vm { color: var(--kind-vm); }
+.kind-icon.kind-k8s { color: var(--kind-k8s); }
+.kind-name { white-space: nowrap; }
+.kind-indent { padding-left: 24px; }
+.backup-group { border-left: 4px solid transparent; }
+.backup-group.kind-vm { border-left-color: var(--kind-vm); }
+.backup-group.kind-k8s { border-left-color: var(--kind-k8s); }
+.kind-filter { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 2px 8px; }
+.kind-chip { display: inline-flex; align-items: center; gap: 2px; padding: 3px 12px; border-radius: 16px; border: 1px solid var(--mud-palette-lines-inputs); background: transparent; color: var(--mud-palette-text-primary); font: inherit; font-size: .875rem; cursor: pointer; }
+.kind-chip:hover { background: var(--mud-palette-action-default-hover); }
+.kind-chip.active { border-color: var(--mud-palette-primary); background: var(--mud-palette-primary-hover); font-weight: 600; }
+.kind-count { margin-left: 4px; color: var(--mud-palette-text-secondary); font-weight: 400; }

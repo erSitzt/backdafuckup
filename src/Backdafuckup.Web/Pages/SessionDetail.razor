@@ -17,7 +17,7 @@ else
         <TitleContent><StateChip State="@_session.State" /></TitleContent>
         <DescriptionContent>
             <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mt-1">
-                @Fmt.Kind(_session.Kind) · started by @_session.TriggeredBy · @Fmt.Time(_session.StartedUtc ?? _session.CreatedUtc)@(_session.Kind == "SqlBackup" ? "" : $" · duration {Fmt.Duration(_session.StartedUtc, _session.EndedUtc)}")
+                @AppIcons.Svg(ObjectKindUi.Session(_session).Icon, $"kind-icon {ObjectKindUi.Session(_session).Css}")@Fmt.Kind(_session.Kind, _session.ObjectKind) · started by @_session.TriggeredBy · @Fmt.Time(_session.StartedUtc ?? _session.CreatedUtc)@(_session.Kind == "SqlBackup" ? "" : $" · duration {Fmt.Duration(_session.StartedUtc, _session.EndedUtc)}")
                 @if (_session.Summary is not null) { <span> · @_session.Summary</span> }
             </MudText>
         </DescriptionContent>

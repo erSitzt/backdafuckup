@@ -28,9 +28,11 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
             throw new InvalidOperationException($"Job '{job.Name}' is already queued or running.");
         }
 
+        var cluster = await db.Connections.AnyAsync(c => c.Id == job.ConnectionId && c.Kind == Core.Hypervisor.HypervisorKind.Kubernetes, cancellationToken).ConfigureAwait(false);
         var session = new SessionEntity
         {
             Kind = SessionKind.Backup,
+            ObjectKind = cluster ? RestorePointObjectKinds.KubernetesNamespace : RestorePointObjectKinds.Vm,
             JobId = jobId,
             RepositoryId = job.RepositoryId,
             Name = job.Name,
@@ -48,6 +50,7 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         var session = new SessionEntity
         {
             Kind = SessionKind.Restore,
+            ObjectKind = await ObjectKindAsync(db, request.RestorePointId, cancellationToken).ConfigureAwait(false),
             Name = $"Restore {vmName}",
             TriggeredBy = triggeredBy,
             State = SessionState.Queued,
@@ -115,6 +118,7 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         var session = new SessionEntity
         {
             Kind = SessionKind.FileRestore,
+            ObjectKind = await ObjectKindAsync(db, request.RestorePointId, cancellationToken).ConfigureAwait(false),
             Name = $"Restore files {vmName}",
             TriggeredBy = triggeredBy,
             State = SessionState.Queued,
@@ -163,6 +167,9 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         };
         return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
     }
+
+    private static async Task<string?> ObjectKindAsync(AppDbContext db, Guid restorePointId, CancellationToken cancellationToken) =>
+        await db.RestorePoints.Where(r => r.Id == restorePointId).Select(r => r.ObjectKind).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     public async Task<bool> RequestStopAsync(Guid sessionId, CancellationToken cancellationToken)
     {
