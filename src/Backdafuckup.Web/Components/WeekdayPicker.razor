@@ -1,0 +1,26 @@
+@* Weekdays as one row of toggles (Mon … Sun) instead of seven checkboxes below each other. *@
+<MudToggleGroup T="DayOfWeek" SelectionMode="SelectionMode.MultiSelection" Values="@Days" ValuesChanged="OnChangedAsync"
+                Color="Color.Primary" Outlined="true" Size="Size.Small" CheckMark="false" Disabled="@Disabled" Class="weekday-picker">
+    @foreach (var day in WeekDays)
+    {
+        <MudToggleItem T="DayOfWeek" Value="@day" Text="@day.ToString()[..3]" />
+    }
+</MudToggleGroup>
+
+@code {
+    private static readonly DayOfWeek[] WeekDays = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday];
+
+    /// <summary>The chosen days; changed in place.</summary>
+    [Parameter, EditorRequired] public ISet<DayOfWeek> Days { get; set; } = new HashSet<DayOfWeek>();
+
+    [Parameter] public bool Disabled { get; set; }
+
+    [Parameter] public EventCallback Changed { get; set; }
+
+    private async Task OnChangedAsync(IEnumerable<DayOfWeek>? days)
+    {
+        Days.Clear();
+        Days.UnionWith(days ?? []);
+        await Changed.InvokeAsync();
+    }
+}

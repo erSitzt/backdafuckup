@@ -1,0 +1,27 @@
+@* The head of a form section (e.g. in an expansion panel's title): an icon, the title, a line that sums up its settings,
+   and on the right whether it is switched on. *@
+<div class="section-head">
+    <span class="section-icon @(On == false ? "off" : null)"><MudIcon Icon="@Icon" Size="Size.Small" /></span>
+    <span class="section-head-text">
+        <span class="section-head-title">@Title</span>
+        @if (!string.IsNullOrEmpty(Summary))
+        {
+            <span class="section-head-summary" title="@Summary">@Summary</span>
+        }
+    </span>
+    @if (On is { } on)
+    {
+        <span class="mini-chip @(on ? "success" : null) section-state">@(on ? "On" : "Off")</span>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public string Icon { get; set; } = string.Empty;
+
+    [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
+
+    [Parameter] public string? Summary { get; set; }
+
+    /// <summary>Shows "On" or "Off" on the right; null for a section that cannot be switched off.</summary>
+    [Parameter] public bool? On { get; set; }
+}

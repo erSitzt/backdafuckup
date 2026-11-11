@@ -11,15 +11,10 @@
 }
 else
 {
-    <div class="step-header">
-        @for (var i = 0; i < Steps.Length; i++)
-        {
-            var index = i;
-            <MudChip T="string" Color="@(index == _step ? Color.Primary : index < _step ? Color.Success : Color.Default)" OnClick="@(() => _step = Math.Min(index, _step))">@($"{index + 1}. {Steps[index]}")</MudChip>
-        }
-    </div>
+    <MudPaper Class="wizard" Elevation="0" Outlined="true">
+        <WizardSteps Steps="Steps" Current="_step" CanSelect="@(index => index <= _step)" OnSelect="@(index => _step = index)" />
 
-    <MudPaper Class="pa-4" Elevation="1">
+        <div class="wizard-body">
         @switch (_step)
         {
             case 0:
@@ -164,18 +159,19 @@ else
         {
             <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">@_error</MudAlert>
         }
+        </div>
 
-        <div class="d-flex gap-2 mt-4">
+        <div class="wizard-actions">
             <MudButton Href="/backups">Cancel</MudButton>
             <MudSpacer />
-            <MudButton Variant="Variant.Outlined" Disabled="@(_step == 0)" OnClick="@(() => _step--)">Back</MudButton>
+            <MudButton Variant="Variant.Outlined" Disabled="@(_step == 0)" StartIcon="@Icons.Material.Filled.ChevronLeft" OnClick="@(() => _step--)">Back</MudButton>
             @if (_step < Steps.Length - 1)
             {
-                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="@(() => _step++)">Next</MudButton>
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" EndIcon="@Icons.Material.Filled.ChevronRight" OnClick="@(() => _step++)">Next</MudButton>
             }
             else
             {
-                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="StartAsync">Restore</MudButton>
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="StartAsync">Restore</MudButton>
             }
         </div>
     </MudPaper>

@@ -1,0 +1,48 @@
+@* The steps of a wizard: numbered dots joined by lines, done steps with a check, the current one highlighted, and under
+   each label an optional hint (what was chosen there). On narrow screens only the current step keeps its label. *@
+<nav class="wizard-steps" aria-label="Steps">
+    @for (var i = 0; i < Steps.Count; i++)
+    {
+        var index = i;
+        var state = index < Current ? "done" : index == Current ? "current" : "todo";
+        var hint = Hints is not null && index < Hints.Count ? Hints[index] : null;
+        <button type="button" class="wizard-step @state" disabled="@(!(CanSelect?.Invoke(index) ?? true))"
+                aria-current="@(index == Current ? "step" : null)" @onclick="@(() => OnSelect.InvokeAsync(index))">
+            <span class="wizard-step-dot">
+                @if (state == "done")
+                {
+                    <MudIcon Icon="@Icons.Material.Filled.Check" Style="font-size:1.05rem" />
+                }
+                else
+                {
+                    @(index + 1)
+                }
+            </span>
+            <span class="wizard-step-text">
+                <span class="wizard-step-label">@Steps[index]</span>
+                @if (!string.IsNullOrEmpty(hint))
+                {
+                    <span class="wizard-step-hint" title="@hint">@hint</span>
+                }
+            </span>
+        </button>
+        @if (index < Steps.Count - 1)
+        {
+            <span class="wizard-step-line @(index < Current ? "done" : null)" aria-hidden="true"></span>
+        }
+    }
+</nav>
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<string> Steps { get; set; } = [];
+
+    [Parameter] public int Current { get; set; }
+
+    /// <summary>A short line under a step's label, e.g. what was chosen there; null or empty for none.</summary>
+    [Parameter] public IReadOnlyList<string?>? Hints { get; set; }
+
+    /// <summary>Whether a step can be clicked (default: all).</summary>
+    [Parameter] public Func<int, bool>? CanSelect { get; set; }
+
+    [Parameter] public EventCallback<int> OnSelect { get; set; }
+}

@@ -13,326 +13,421 @@
 }
 else
 {
-    <div class="step-header">
-        @for (var i = 0; i < Steps.Length; i++)
-        {
-            var index = i;
-            <MudChip T="string" Color="@(index == _step ? Color.Primary : index < _step ? Color.Success : Color.Default)" OnClick="@(() => GoTo(index))">@($"{index + 1}. {Steps[index]}")</MudChip>
-        }
-    </div>
+    <MudPaper Class="wizard" Elevation="0" Outlined="true">
+        <WizardSteps Steps="Steps" Current="_step" Hints="Hints()" OnSelect="GoTo" />
 
-    <MudPaper Class="pa-4" Elevation="1">
-        @switch (_step)
-        {
-            case 0:
-                <MudTextField @bind-Value="_name" Label="Name" Variant="Variant.Outlined" Class="mb-3" />
-                <MudTextField @bind-Value="_description" Label="Description" Variant="Variant.Outlined" Lines="2" />
-                break;
+        <div class="wizard-body">
+            <div class="wizard-step-head">
+                <MudText Typo="Typo.h6" Class="section-title">@StepTitles[_step]</MudText>
+                <MudText Typo="Typo.body2" Color="Color.Secondary">@StepIntros[_step]</MudText>
+            </div>
 
-            case 1:
-                @if (_pools.Count == 0)
-                {
-                    <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">
-                        No virtualization pool yet. Add one under <MudLink Href="/infrastructure/pools">Virtualization Pools</MudLink>; its VMs are listed here then.
+            @switch (_step)
+            {
+                case 0:
+                    <div class="form-narrow">
+                        <MudTextField @bind-Value="_name" Label="Name" Variant="Variant.Outlined" Class="mb-4" AutoFocus="true" />
+                        <MudTextField @bind-Value="_description" Label="Description" Variant="Variant.Outlined" Lines="3"
+                                      HelperText="Optional: what the job is for, or whom to ask about it." />
+                    </div>
+                    break;
+
+                case 1:
+                    @if (_pools.Count == 0)
+                    {
+                        <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">
+                            No virtualization pool yet. Add one under <MudLink Href="/infrastructure/pools">Virtualization Pools</MudLink>; its VMs are listed here then.
+                        </MudAlert>
+                    }
+                    <div class="field-toolbar">
+                        <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="Pool" Variant="Variant.Outlined" Margin="Margin.Dense"
+                                   ToStringFunc="@(id => _pools.FirstOrDefault(p => p.Id == id)?.DisplayName ?? string.Empty)">
+                            @foreach (var pool in _pools)
+                            {
+                                <MudSelectItem T="Guid" Value="pool.Id">@pool.DisplayName</MudSelectItem>
+                            }
+                        </MudSelect>
+                        <MudTextField @bind-Value="_vmFilter" Placeholder="Filter VMs" Variant="Variant.Outlined" Margin="Margin.Dense" Adornment="Adornment.Start"
+                                      AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Clearable="true" />
+                        <div class="field-toolbar-end">
+                            <span class="mini-chip @(_selected.Count > 0 ? "success" : null)">@_selected.Count selected</span>
+                            @if (_withMemory.Count > 0)
+                            {
+                                <span class="mini-chip info">@_withMemory.Count with memory</span>
+                            }
+                        </div>
+                    </div>
+                    <div class="table-box">
+                        <MudSimpleTable Dense="true" Hover="true" Elevation="0" FixedHeader="true">
+                            <thead><tr><th style="width:48px"></th><th>VM</th><th>Power</th><th>Disks</th><th title="Snapshot with memory: the VM can be resumed on restore">With memory</th></tr></thead>
+                            <tbody>
+                                @foreach (var vm in _vms.Where(v => string.IsNullOrWhiteSpace(_vmFilter) || v.Name.Contains(_vmFilter, StringComparison.OrdinalIgnoreCase)))
+                                {
+                                    <tr class="@(_selected.ContainsKey(vm.NativeId) ? "row-selected" : null)">
+                                        <td><MudCheckBox T="bool" Value="@_selected.ContainsKey(vm.NativeId)" ValueChanged="@(on => Toggle(vm, on))" Dense="true" Color="Color.Primary" /></td>
+                                        <td>@vm.Name</td>
+                                        <td>@vm.Properties.GetValueOrDefault("powerState")</td>
+                                        <td class="nowrap">@vm.Properties.GetValueOrDefault("diskCount") (@Fmt.Bytes(long.TryParse(vm.Properties.GetValueOrDefault("diskBytes"), out var b) ? b : null))</td>
+                                        <td>
+                                            <MudSwitch T="bool" Value="@_withMemory.Contains(vm.NativeId)" ValueChanged="@(on => ToggleMemory(vm.NativeId, on))" Size="Size.Small" Color="Color.Primary"
+                                                       Disabled="@(!_selected.ContainsKey(vm.NativeId))"
+                                                       title="@($"RAM {Fmt.Bytes(long.TryParse(vm.Properties.GetValueOrDefault("memoryBytes"), out var m) ? m : null)}: written at every backup")" />
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                    </div>
+                    <div class="form-note mt-3">
+                        <MudIcon Icon="@Icons.Material.Outlined.Memory" Size="Size.Small" />
+                        <span>
+                            <b>With memory</b> (snapshot with RAM): the VM is paused while its RAM is written and all its disks are captured, so the disks match each other and a
+                            restore can resume the VM where it was. It costs a pause of the RAM write plus every disk (about a minute for 16 GB and four disks on shared LVM),
+                            RAM-sized space on the VM's storage during the backup and in every restore point, and disks marked [NOBAK] are captured too (not backed up).
+                            These VMs get no guest processing (VSS). A VM that is not running gets a normal snapshot.
+                        </span>
+                    </div>
+                    break;
+
+                case 2:
+                    <div class="field-grid repo-row">
+                        <MudSelect T="Guid" @bind-Value="_repositoryId" Label="Backup repository" Variant="Variant.Outlined">
+                            @foreach (var repository in _repositories)
+                            {
+                                <MudSelectItem T="Guid" Value="repository.Id">@repository.Name (@Fmt.Bytes(repository.FreeBytes) free)</MudSelectItem>
+                            }
+                        </MudSelect>
+                        <MudNumericField @bind-Value="_retention" Label="Restore points to keep" Min="1" Max="10000" Variant="Variant.Outlined"
+                                         HelperText="Older ones are deleted after each run." />
+                    </div>
+
+                    <MudExpansionPanels MultiExpansion="true" Elevation="0" Class="form-sections">
+                        <MudExpansionPanel>
+                            <TitleContent>
+                                <SectionTitle Icon="@Icons.Material.Outlined.Tune" Title="Transport and performance" Summary="@TransportSummary()" />
+                            </TitleContent>
+                            <ChildContent>
+                                <div class="form-wide">
+                                    <MudSelect T="string" @bind-Value="_transport" Label="Disk transport" Variant="Variant.Outlined" Class="form-narrow">
+                                        <MudSelectItem T="string" Value="@TransportModes.Automatic">Automatic (NBD, otherwise HTTP export)</MudSelectItem>
+                                        <MudSelectItem T="string" Value="@TransportModes.NbdOnly">NBD only</MudSelectItem>
+                                        <MudSelectItem T="string" Value="@TransportModes.HttpExportOnly">HTTP export only</MudSelectItem>
+                                    </MudSelect>
+                                    <MudText Typo="Typo.caption" Class="help-text">
+                                        NBD reads disks in parallel and, with change tracking, only the changed blocks. The HTTP export needs no network setup,
+                                        but uses one stream per disk and transfers the whole allocated disk on every backup.
+                                    </MudText>
+                                    <div class="field-grid cols-4">
+                                        <MudNumericField @bind-Value="_parallelVms" Label="VMs in parallel" Min="1" Max="16" Variant="Variant.Outlined" />
+                                        <MudNumericField @bind-Value="_parallelDisks" Label="Disks per VM in parallel" Min="1" Max="8" Variant="Variant.Outlined" />
+                                        <MudNumericField @bind-Value="_nbdConnections" Label="NBD connections per disk" Min="1" Max="12" Variant="Variant.Outlined" />
+                                        <MudNumericField @bind-Value="_retries" Label="Retries for failed VMs" Min="0" Max="10" Variant="Variant.Outlined" />
+                                    </div>
+                                    <MudText Typo="Typo.caption" Class="help-text">
+                                        Each disk is read as its own stream. Parallel streams speed up the HTTP export, which is limited per stream,
+                                        until the network is full: on a 1 Gbit/s link about two streams already reach the line rate.
+                                    </MudText>
+                                </div>
+                            </ChildContent>
+                        </MudExpansionPanel>
+
+                        <MudExpansionPanel>
+                            <TitleContent>
+                                <SectionTitle Icon="@Icons.Material.Outlined.VerifiedUser" Title="Guest processing" Summary="@GuestSummary()" On="_guest" />
+                            </TitleContent>
+                            <ChildContent>
+                                <div class="form-wide">
+                                    <MudSwitch T="bool" @bind-Value="_guest" Color="Color.Primary" Label="Application-consistent backups through the backdafuckup agent" />
+                                    <MudText Typo="Typo.caption" Class="help-text">
+                                        The agent freezes SQL Server, Active Directory, Exchange and other VSS-aware applications in Windows VMs while
+                                        the snapshot is taken (VSS backups are copy-only: other backup products are not disturbed). Without it,
+                                        backups are crash-consistent, like after a power failure.
+                                    </MudText>
+                                    @if (_guest)
+                                    {
+                                        <MudSelect T="string" @bind-Value="_guestMode" Label="Method" Variant="Variant.Outlined">
+                                            <MudSelectItem T="string" Value="@GuestProcessingModes.Vss">VSS for every VM</MudSelectItem>
+                                            <MudSelectItem T="string" Value="@GuestProcessingModes.SqlSnapshot">SQL Server snapshot where SQL Server 2022+ runs, VSS for all other VMs</MudSelectItem>
+                                        </MudSelect>
+                                        <MudText Typo="Typo.caption" Class="help-text">
+                                            @if (_guestMode == GuestProcessingModes.SqlSnapshot)
+                                            {
+                                                <text>
+                                                    VMs with SQL Server 2022 or later: the agent suspends the writes of the SQL Server databases (reads go
+                                                    on) until the VM snapshot is taken, however long it takes, and records it in msdb as a backup of the
+                                                    chosen type. The databases are application-consistent, other files crash-consistent. Writes wait during
+                                                    the snapshot; applications with short timeouts may see errors meanwhile.
+                                                    All other VMs (no SQL Server, an older one, or no database could be suspended) use VSS, as with the
+                                                    first method.
+                                                </text>
+                                            }
+                                            else
+                                            {
+                                                <text>
+                                                    All VSS-aware applications (SQL Server, Active Directory, Exchange, files). Windows holds the writes for
+                                                    at most 10 s: on slow storage or with many disks the snapshot takes longer, and the backup is then
+                                                    crash-consistent; the session log shows the snapshot time.
+                                                </text>
+                                            }
+                                        </MudText>
+                                        @if (_guestMode == GuestProcessingModes.SqlSnapshot)
+                                        {
+                                            <div class="field-grid cols-2">
+                                                <MudSelect T="Guid?" @bind-Value="_sqlCredentialId" Label="SQL Server account" Variant="Variant.Outlined" Clearable="true"
+                                                           HelperText="A Windows account or SQL Server login that is sysadmin on the SQL Server instances (Credentials).">
+                                                    @foreach (var (id, label) in _sqlAccounts)
+                                                    {
+                                                        <MudSelectItem T="Guid?" Value="id">@label</MudSelectItem>
+                                                    }
+                                                </MudSelect>
+                                                <MudSelect T="bool" @bind-Value="_sqlCopyOnly" Label="SQL Server backup type" Variant="Variant.Outlined">
+                                                    <MudSelectItem T="bool" Value="false">Full backup (in the backup chain)</MudSelectItem>
+                                                    <MudSelectItem T="bool" Value="true">Copy-only backup (outside the backup chain)</MudSelectItem>
+                                                </MudSelect>
+                                            </div>
+                                            <MudText Typo="Typo.caption" Class="help-text">
+                                                @if (_sqlCopyOnly)
+                                                {
+                                                    <text>
+                                                        Changes nothing in the databases' backup chains: for VMs whose SQL Server backups another tool takes
+                                                        (e.g. with differential backups), or for backups kept apart. Log backups cannot build on it while a
+                                                        database has no regular full backup.
+                                                    </text>
+                                                }
+                                                else
+                                                {
+                                                    <text>
+                                                        A regular full backup: log backups and differential backups (also those of other tools) build on it.
+                                                        For a database in FULL recovery without a full backup it starts the log chain: from then on only log
+                                                        backups free its transaction log, otherwise it grows. The session log warns about such databases and
+                                                        about log chains without a log backup for a day. VMs that fall back to VSS get copy-only backups.
+                                                    </text>
+                                                }
+                                            </MudText>
+                                        }
+                                        <div class="field-grid cols-2">
+                                            <MudSelect T="string" @bind-Value="_guestPolicy" Label="If the guest cannot be frozen" Variant="Variant.Outlined">
+                                                <MudSelectItem T="string" Value="@GuestFailurePolicies.CrashConsistentWithWarning">Back up crash-consistently and warn</MudSelectItem>
+                                                <MudSelectItem T="string" Value="@GuestFailurePolicies.FailVm">Fail the VM</MudSelectItem>
+                                            </MudSelect>
+                                            <MudSelect T="Guid?" @bind-Value="_guestCredentialId" Label="Install the agent where it is missing, with" Variant="Variant.Outlined" Clearable="true"
+                                                       HelperText="Windows administrator credentials (SMB 445); leave empty to install agents yourself.">
+                                                @foreach (var credential in _credentials)
+                                                {
+                                                    <MudSelectItem T="Guid?" Value="credential.Id">@credential.UserName</MudSelectItem>
+                                                }
+                                            </MudSelect>
+                                        </div>
+                                    }
+                                </div>
+                            </ChildContent>
+                        </MudExpansionPanel>
+
+                        <MudExpansionPanel>
+                            <TitleContent>
+                                <SectionTitle Icon="@Icons.Material.Outlined.Storage" Title="SQL Server backups (log chain)" Summary="@SqlSummary()" On="_sqlBackup" />
+                            </TitleContent>
+                            <ChildContent>
+                                <div class="form-wide">
+                                    <MudSwitch T="bool" @bind-Value="_sqlBackup" Color="Color.Primary" Label="Log, full and system database backups through the agent in the VMs" />
+                                    <MudText Typo="Typo.caption" Class="help-text">
+                                        The agent backs up the transaction logs of every database in FULL or BULK_LOGGED recovery, sends the files to
+                                        the repository and deletes them in the VM afterwards; databases can then be restored to any second.
+                                        backdafuckup owns the log chain: switch off log backups of other tools (maintenance plans, Ola Hallengren,
+                                        other backup products), the session warns about them. If the backup server is unreachable, the log backups
+                                        pause; files whose upload failed wait in the VM.
+                                    </MudText>
+                                    @if (_sqlBackup)
+                                    {
+                                        @if (!(_guest && _guestMode == GuestProcessingModes.SqlSnapshot))
+                                        {
+                                            <MudSelect T="Guid?" @bind-Value="_sqlCredentialId" Label="SQL Server account" Variant="Variant.Outlined" Clearable="true" Class="form-narrow mb-2"
+                                                       HelperText="A Windows account or SQL Server login that is sysadmin on the SQL Server instances (Credentials).">
+                                                @foreach (var (id, label) in _sqlAccounts)
+                                                {
+                                                    <MudSelectItem T="Guid?" Value="id">@label</MudSelectItem>
+                                                }
+                                            </MudSelect>
+                                        }
+
+                                        <div class="form-subhead">Log backups</div>
+                                        <div class="field-grid cols-fixed">
+                                            <MudSelect T="string" @bind-Value="_logPreset" Label="Every" Variant="Variant.Outlined">
+                                                @foreach (var minutes in SqlBackupSettingsDto.PresetIntervals)
+                                                {
+                                                    <MudSelectItem T="string" Value="@minutes.ToString(System.Globalization.CultureInfo.InvariantCulture)">@minutes minutes</MudSelectItem>
+                                                }
+                                                <MudSelectItem T="string" Value="@("custom")">Longer (minutes)</MudSelectItem>
+                                            </MudSelect>
+                                            @if (_logPreset == "custom")
+                                            {
+                                                <MudNumericField T="int" @bind-Value="_logCustom" Label="Minutes (60–1440)" Min="60" Max="1440" Variant="Variant.Outlined" />
+                                            }
+                                        </div>
+                                        <MudText Typo="Typo.caption" Class="help-text">
+                                            The interval is the most data a restore can lose (RPO). The runs start at fixed times from midnight in the
+                                            job's time zone (e.g. :00, :15, :30, :45).
+                                        </MudText>
+
+                                        <div class="form-subhead">Full backups of the databases</div>
+                                        <div class="field-grid cols-fixed">
+                                            <MudSelect T="string" @bind-Value="_fullKind" Label="Schedule" Variant="Variant.Outlined">
+                                                <MudSelectItem T="string" Value="@("None")">Never</MudSelectItem>
+                                                <MudSelectItem T="string" Value="@("Daily")">Daily</MudSelectItem>
+                                                <MudSelectItem T="string" Value="@("Weekly")">On selected weekdays</MudSelectItem>
+                                            </MudSelect>
+                                            @if (_fullKind != "None")
+                                            {
+                                                <MudTextField @bind-Value="_fullTime" Label="Time (HH:mm)" Variant="Variant.Outlined" />
+                                            }
+                                        </div>
+                                        @if (_fullKind == "Weekly")
+                                        {
+                                            <WeekdayPicker Days="_fullDays" />
+                                        }
+                                        <div class="check-stack">
+                                            <MudCheckBox T="bool" @bind-Value="_fullForAll" Color="Color.Primary" Label="Also for databases whose base is the SQL Server snapshot of the image backup" />
+                                            <MudText Typo="Typo.caption" Class="help-text">
+                                                A native full backup (BACKUP DATABASE, verified) is the base of the log chain where there is no SQL Server
+                                                snapshot: SQL Server before 2022, or VSS as method. Restores need the newest full before the point in time
+                                                and every log backup after it.
+                                            </MudText>
+                                            <MudCheckBox T="bool" @bind-Value="_fullOnBreak" Color="Color.Primary" Label="Start a missing or broken log chain with a full backup at once" />
+                                            <MudText Typo="Typo.caption" Class="help-text">
+                                                For new databases, after a switch to SIMPLE and back, or after another tool's log backup. Without it the chain
+                                                restarts only with the next scheduled full or image backup.
+                                            </MudText>
+                                        </div>
+
+                                        <div class="form-subhead">System databases (master, msdb, model)</div>
+                                        <div class="field-grid cols-fixed">
+                                            <MudSelect T="string" @bind-Value="_systemKind" Label="Full backups" Variant="Variant.Outlined">
+                                                <MudSelectItem T="string" Value="@("None")">Never</MudSelectItem>
+                                                <MudSelectItem T="string" Value="@("Daily")">Daily</MudSelectItem>
+                                                <MudSelectItem T="string" Value="@("Weekly")">On selected weekdays</MudSelectItem>
+                                            </MudSelect>
+                                            @if (_systemKind != "None")
+                                            {
+                                                <MudTextField @bind-Value="_systemTime" Label="Time (HH:mm)" Variant="Variant.Outlined" />
+                                            }
+                                        </div>
+                                        @if (_systemKind == "Weekly")
+                                        {
+                                            <WeekdayPicker Days="_systemDays" />
+                                        }
+
+                                        <div class="form-subhead">Databases and files</div>
+                                        <div class="field-grid cols-2">
+                                            <MudTextField @bind-Value="_sqlExcluded" Label="Leave out databases (comma-separated)" Variant="Variant.Outlined" />
+                                            <MudTextField @bind-Value="_sqlStaging" Label="Folder in the VM for the backup files until they are sent" Variant="Variant.Outlined"
+                                                          HelperText="Empty: the instance's backup folder (a subfolder backdafuckup). SQL Server's service must be able to write there." />
+                                        </div>
+                                    }
+                                </div>
+                            </ChildContent>
+                        </MudExpansionPanel>
+                    </MudExpansionPanels>
+                    break;
+
+                case 3:
+                    <div class="form-narrow">
+                        <MudToggleGroup T="string" @bind-Value="_scheduleKind" SelectionMode="SelectionMode.SingleSelection" Color="Color.Primary" Outlined="true" CheckMark="false" Class="mb-4">
+                            <MudToggleItem T="string" Value="@("None")" Text="Run manually" />
+                            <MudToggleItem T="string" Value="@("Daily")" Text="Daily" />
+                            <MudToggleItem T="string" Value="@("Weekly")" Text="On selected weekdays" />
+                        </MudToggleGroup>
+                        @if (_scheduleKind == "None")
+                        {
+                            <div class="form-note">
+                                <MudIcon Icon="@Icons.Material.Outlined.TouchApp" Size="Size.Small" />
+                                <span>The job runs only when it is started under Backup Jobs or through the API.</span>
+                            </div>
+                        }
+                        else
+                        {
+                            @if (_scheduleKind == "Weekly")
+                            {
+                                <div class="field-label">Weekdays</div>
+                                <WeekdayPicker Days="_days" />
+                            }
+                            <div class="field-grid schedule-row mt-2">
+                                <MudTextField @bind-Value="_time" Label="Time (HH:mm)" Variant="Variant.Outlined" />
+                                <MudTextField @bind-Value="_timeZone" Label="Time zone (IANA, e.g. Europe/Berlin)" Variant="Variant.Outlined" />
+                            </div>
+                        }
+                    </div>
+                    break;
+
+                default:
+                    <div class="summary-grid">
+                        <section class="summary-card">
+                            <div class="summary-card-head"><MudIcon Icon="@Icons.Material.Outlined.Badge" Size="Size.Small" /> Job</div>
+                            <dl class="summary-list">
+                                <dt>Name</dt><dd>@_name</dd>
+                                @if (!string.IsNullOrWhiteSpace(_description))
+                                {
+                                    <dt>Description</dt><dd>@_description</dd>
+                                }
+                                <dt>Schedule</dt><dd>@Jobs.Describe(Schedule())@(_scheduleKind == "None" ? null : $" ({_timeZone})")</dd>
+                            </dl>
+                        </section>
+                        <section class="summary-card">
+                            <div class="summary-card-head"><MudIcon Icon="@Icons.Material.Outlined.Dns" Size="Size.Small" /> Virtual machines</div>
+                            <dl class="summary-list">
+                                <dt>Pool</dt><dd>@_pools.FirstOrDefault(p => p.Id == _connectionId)?.DisplayName</dd>
+                                <dt>VMs (@_selected.Count)</dt>
+                                <dd>
+                                    @foreach (var (nativeId, vmName) in _selected.OrderBy(kv => kv.Value, StringComparer.OrdinalIgnoreCase))
+                                    {
+                                        <span class="mini-chip">@vmName@(_withMemory.Contains(nativeId) ? " · RAM" : null)</span>
+                                    }
+                                </dd>
+                            </dl>
+                        </section>
+                        <section class="summary-card">
+                            <div class="summary-card-head"><MudIcon Icon="@Icons.Material.Outlined.Inventory2" Size="Size.Small" /> Storage</div>
+                            <dl class="summary-list">
+                                <dt>Repository</dt><dd>@_repositories.FirstOrDefault(r => r.Id == _repositoryId)?.Name</dd>
+                                <dt>Retention</dt><dd>@_retention restore points</dd>
+                                <dt>Disk transport</dt><dd>@TransportText(_transport)</dd>
+                                <dt>In parallel</dt><dd>@_parallelVms VM(s), @_parallelDisks disk(s) per VM, @_nbdConnections NBD connection(s) per disk</dd>
+                                <dt>Retries</dt><dd>@_retries</dd>
+                            </dl>
+                        </section>
+                        <section class="summary-card">
+                            <div class="summary-card-head"><MudIcon Icon="@Icons.Material.Outlined.VerifiedUser" Size="Size.Small" /> Consistency and SQL Server</div>
+                            <dl class="summary-list">
+                                <dt>Guest processing</dt>
+                                <dd>@(_guest ? $"application-consistent ({(_guestMode == GuestProcessingModes.SqlSnapshot ? $"SQL Server snapshot ({(_sqlCopyOnly ? "copy-only" : "full backups")}), otherwise VSS" : "VSS")}); on failure: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with warning")}" + (_guestCredentialId is null ? "" : "; installs missing agents") : "off (crash-consistent)")</dd>
+                                <dt>SQL Server backups</dt>
+                                <dd>@(_sqlBackup ? $"log backups every {LogInterval()} min; full backups: {Jobs.Describe(SqlSchedule(_fullKind, _fullTime, _fullDays))}; system databases: {Jobs.Describe(SqlSchedule(_systemKind, _systemTime, _systemDays))}" : "off")</dd>
+                            </dl>
+                        </section>
+                    </div>
+                    <MudSwitch T="bool" @bind-Value="_enabled" Color="Color.Primary" Label="Job enabled" Class="mt-4" />
+                    <MudAlert Severity="Severity.Info" Dense="true" Variant="Variant.Text" Class="mt-2">
+                        Changed block tracking is enabled on the VMs' disks with the first backup. While it is enabled, storage live migration of those disks is not possible.
                     </MudAlert>
-                }
-                <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="Pool" Variant="Variant.Outlined" Class="mb-3"
-                           ToStringFunc="@(id => _pools.FirstOrDefault(p => p.Id == id)?.DisplayName ?? string.Empty)">
-                    @foreach (var pool in _pools)
-                    {
-                        <MudSelectItem T="Guid" Value="pool.Id">@pool.DisplayName</MudSelectItem>
-                    }
-                </MudSelect>
-                <MudTextField @bind-Value="_vmFilter" Placeholder="Filter VMs" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Class="mb-2" />
-                <MudSimpleTable Dense="true" Hover="true" Elevation="0" Style="max-height:420px;overflow-y:auto">
-                    <thead><tr><th></th><th>VM</th><th>Power</th><th>Disks</th><th title="Snapshot with memory: the VM can be resumed on restore">With memory</th></tr></thead>
-                    <tbody>
-                        @foreach (var vm in _vms.Where(v => string.IsNullOrWhiteSpace(_vmFilter) || v.Name.Contains(_vmFilter, StringComparison.OrdinalIgnoreCase)))
-                        {
-                            <tr>
-                                <td><MudCheckBox T="bool" Value="@_selected.ContainsKey(vm.NativeId)" ValueChanged="@(on => Toggle(vm, on))" Dense="true" /></td>
-                                <td>@vm.Name</td>
-                                <td>@vm.Properties.GetValueOrDefault("powerState")</td>
-                                <td>@vm.Properties.GetValueOrDefault("diskCount") (@Fmt.Bytes(long.TryParse(vm.Properties.GetValueOrDefault("diskBytes"), out var b) ? b : null))</td>
-                                <td>
-                                    <MudSwitch T="bool" Value="@_withMemory.Contains(vm.NativeId)" ValueChanged="@(on => ToggleMemory(vm.NativeId, on))" Size="Size.Small" Color="Color.Primary"
-                                               Disabled="@(!_selected.ContainsKey(vm.NativeId))"
-                                               title="@($"RAM {Fmt.Bytes(long.TryParse(vm.Properties.GetValueOrDefault("memoryBytes"), out var m) ? m : null)}: written at every backup")" />
-                                </td>
-                            </tr>
-                        }
-                    </tbody>
-                </MudSimpleTable>
-                <MudText Typo="Typo.body2" Class="mt-2">@_selected.Count VM(s) selected@(_withMemory.Count > 0 ? $", {_withMemory.Count} with memory" : string.Empty)</MudText>
-                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block mt-1" Style="max-width:80ch">
-                    <b>With memory</b> (snapshot with RAM): the VM is paused while its RAM is written and all its disks are captured, so the disks match each other and a
-                    restore can resume the VM where it was. It costs a pause of the RAM write plus every disk (about a minute for 16 GB and four disks on shared LVM),
-                    RAM-sized space on the VM's storage during the backup and in every restore point, and disks marked [NOBAK] are captured too (not backed up).
-                    These VMs get no guest processing (VSS). A VM that is not running gets a normal snapshot.
-                </MudText>
-                break;
+                    break;
+            }
 
-            case 2:
-                <MudSelect T="Guid" @bind-Value="_repositoryId" Label="Backup repository" Variant="Variant.Outlined" Class="mb-3">
-                    @foreach (var repository in _repositories)
-                    {
-                        <MudSelectItem T="Guid" Value="repository.Id">@repository.Name (@Fmt.Bytes(repository.FreeBytes) free)</MudSelectItem>
-                    }
-                </MudSelect>
-                <MudNumericField @bind-Value="_retention" Label="Restore points to keep" Min="1" Max="10000" Variant="Variant.Outlined" Class="mb-3" />
-                <MudExpansionPanels>
-                    <MudExpansionPanel Text="Advanced">
-                        <MudSelect T="string" @bind-Value="_transport" Label="Disk transport" Variant="Variant.Outlined" Class="mb-1">
-                            <MudSelectItem T="string" Value="@TransportModes.Automatic">Automatic (NBD, otherwise HTTP export)</MudSelectItem>
-                            <MudSelectItem T="string" Value="@TransportModes.NbdOnly">NBD only</MudSelectItem>
-                            <MudSelectItem T="string" Value="@TransportModes.HttpExportOnly">HTTP export only</MudSelectItem>
-                        </MudSelect>
-                        <MudText Typo="Typo.caption" Class="d-block mb-3">
-                            NBD reads disks in parallel and, with change tracking, only the changed blocks. The HTTP export needs no network setup,
-                            but uses one stream per disk and transfers the whole allocated disk on every backup.
-                        </MudText>
-                        <MudNumericField @bind-Value="_parallelVms" Label="VMs processed in parallel" Min="1" Max="16" Variant="Variant.Outlined" Class="mb-3" />
-                        <MudNumericField @bind-Value="_parallelDisks" Label="Disks per VM processed in parallel" Min="1" Max="8" Variant="Variant.Outlined" Class="mb-1" />
-                        <MudText Typo="Typo.caption" Class="d-block mb-3">
-                            Each disk is read as its own stream. Parallel streams speed up the HTTP export, which is limited per stream,
-                            until the network is full: on a 1 Gbit/s link about two streams already reach the line rate.
-                        </MudText>
-                        <MudNumericField @bind-Value="_nbdConnections" Label="NBD connections per disk" Min="1" Max="12" Variant="Variant.Outlined" Class="mb-3" />
-                        <MudNumericField @bind-Value="_retries" Label="Retries for failed VMs" Min="0" Max="10" Variant="Variant.Outlined" />
-                    </MudExpansionPanel>
-                    <MudExpansionPanel Text="@(_guest ? "Guest processing (application-consistent)" : "Guest processing")">
-                        <MudSwitch T="bool" @bind-Value="_guest" Color="Color.Primary" Label="Application-consistent backups through the backdafuckup agent" />
-                        <MudText Typo="Typo.caption" Class="d-block mb-3">
-                            The agent freezes SQL Server, Active Directory, Exchange and other VSS-aware applications in Windows VMs while
-                            the snapshot is taken (VSS backups are copy-only: other backup products are not disturbed). Without it,
-                            backups are crash-consistent, like after a power failure.
-                        </MudText>
-                        <MudSelect T="string" @bind-Value="_guestMode" Label="Method" Variant="Variant.Outlined" Disabled="!_guest" Class="mb-1">
-                            <MudSelectItem T="string" Value="@GuestProcessingModes.Vss">VSS for every VM</MudSelectItem>
-                            <MudSelectItem T="string" Value="@GuestProcessingModes.SqlSnapshot">SQL Server snapshot where SQL Server 2022+ runs, VSS for all other VMs</MudSelectItem>
-                        </MudSelect>
-                        <MudText Typo="Typo.caption" Class="d-block mb-3">
-                            @if (_guestMode == GuestProcessingModes.SqlSnapshot)
-                            {
-                                <text>
-                                    VMs with SQL Server 2022 or later: the agent suspends the writes of the SQL Server databases (reads go
-                                    on) until the VM snapshot is taken, however long it takes, and records it in msdb as a backup of the
-                                    chosen type. The databases are application-consistent, other files crash-consistent. Writes wait during
-                                    the snapshot; applications with short timeouts may see errors meanwhile.
-                                    All other VMs (no SQL Server, an older one, or no database could be suspended) use VSS, as with the
-                                    first method.
-                                </text>
-                            }
-                            else
-                            {
-                                <text>
-                                    All VSS-aware applications (SQL Server, Active Directory, Exchange, files). Windows holds the writes for
-                                    at most 10 s: on slow storage or with many disks the snapshot takes longer, and the backup is then
-                                    crash-consistent; the session log shows the snapshot time.
-                                </text>
-                            }
-                        </MudText>
-                        @if (_guestMode == GuestProcessingModes.SqlSnapshot)
-                        {
-                            <MudSelect T="Guid?" @bind-Value="_sqlCredentialId" Label="SQL Server account" Variant="Variant.Outlined" Disabled="!_guest" Clearable="true" Class="mb-3"
-                                       HelperText="A Windows account or SQL Server login that is sysadmin on the SQL Server instances (Credentials).">
-                                @foreach (var (id, label) in _sqlAccounts)
-                                {
-                                    <MudSelectItem T="Guid?" Value="id">@label</MudSelectItem>
-                                }
-                            </MudSelect>
-                            <MudSelect T="bool" @bind-Value="_sqlCopyOnly" Label="SQL Server backup type" Variant="Variant.Outlined" Disabled="!_guest" Class="mb-1">
-                                <MudSelectItem T="bool" Value="false">Full backup (in the backup chain)</MudSelectItem>
-                                <MudSelectItem T="bool" Value="true">Copy-only backup (outside the backup chain)</MudSelectItem>
-                            </MudSelect>
-                            <MudText Typo="Typo.caption" Class="d-block mb-3">
-                                @if (_sqlCopyOnly)
-                                {
-                                    <text>
-                                        Changes nothing in the databases' backup chains: for VMs whose SQL Server backups another tool takes
-                                        (e.g. with differential backups), or for backups kept apart. Log backups cannot build on it while a
-                                        database has no regular full backup.
-                                    </text>
-                                }
-                                else
-                                {
-                                    <text>
-                                        A regular full backup: log backups and differential backups (also those of other tools) build on it.
-                                        For a database in FULL recovery without a full backup it starts the log chain: from then on only log
-                                        backups free its transaction log, otherwise it grows. The session log warns about such databases and
-                                        about log chains without a log backup for a day. VMs that fall back to VSS get copy-only backups.
-                                    </text>
-                                }
-                            </MudText>
-                        }
-                        <MudSelect T="string" @bind-Value="_guestPolicy" Label="If the guest cannot be frozen" Variant="Variant.Outlined" Disabled="!_guest" Class="mb-3">
-                            <MudSelectItem T="string" Value="@GuestFailurePolicies.CrashConsistentWithWarning">Back up crash-consistently and warn</MudSelectItem>
-                            <MudSelectItem T="string" Value="@GuestFailurePolicies.FailVm">Fail the VM</MudSelectItem>
-                        </MudSelect>
-                        <MudSelect T="Guid?" @bind-Value="_guestCredentialId" Label="Install the agent where it is missing, with" Variant="Variant.Outlined" Disabled="!_guest" Clearable="true"
-                                   HelperText="Windows administrator credentials (SMB 445); leave empty to install agents yourself.">
-                            @foreach (var credential in _credentials)
-                            {
-                                <MudSelectItem T="Guid?" Value="credential.Id">@credential.UserName</MudSelectItem>
-                            }
-                        </MudSelect>
-                    </MudExpansionPanel>
-                    <MudExpansionPanel Text="@(_sqlBackup ? $"SQL Server backups (log backups every {LogInterval()} min)" : "SQL Server backups (log chain)")">
-                        <MudSwitch T="bool" @bind-Value="_sqlBackup" Color="Color.Primary" Label="Log, full and system database backups through the agent in the VMs" />
-                        <MudText Typo="Typo.caption" Class="d-block mb-3">
-                            The agent backs up the transaction logs of every database in FULL or BULK_LOGGED recovery, sends the files to
-                            the repository and deletes them in the VM afterwards; databases can then be restored to any second.
-                            backdafuckup owns the log chain: switch off log backups of other tools (maintenance plans, Ola Hallengren,
-                            other backup products), the session warns about them. If the backup server is unreachable, the log backups
-                            pause; files whose upload failed wait in the VM.
-                        </MudText>
-                        @if (_sqlBackup && !(_guest && _guestMode == GuestProcessingModes.SqlSnapshot))
-                        {
-                            <MudSelect T="Guid?" @bind-Value="_sqlCredentialId" Label="SQL Server account" Variant="Variant.Outlined" Clearable="true" Class="mb-3"
-                                       HelperText="A Windows account or SQL Server login that is sysadmin on the SQL Server instances (Credentials).">
-                                @foreach (var (id, label) in _sqlAccounts)
-                                {
-                                    <MudSelectItem T="Guid?" Value="id">@label</MudSelectItem>
-                                }
-                            </MudSelect>
-                        }
-                        <div class="d-flex gap-3 mb-1" style="flex-wrap:wrap">
-                            <MudSelect T="string" @bind-Value="_logPreset" Label="Log backups every" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:220px">
-                                @foreach (var minutes in SqlBackupSettingsDto.PresetIntervals)
-                                {
-                                    <MudSelectItem T="string" Value="@minutes.ToString(System.Globalization.CultureInfo.InvariantCulture)">@minutes minutes</MudSelectItem>
-                                }
-                                <MudSelectItem T="string" Value="@("custom")">Longer (minutes)</MudSelectItem>
-                            </MudSelect>
-                            @if (_logPreset == "custom")
-                            {
-                                <MudNumericField T="int" @bind-Value="_logCustom" Label="Minutes (60–1440)" Min="60" Max="1440" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:200px" />
-                            }
-                        </div>
-                        <MudText Typo="Typo.caption" Class="d-block mb-3">
-                            The interval is the most data a restore can lose (RPO). The runs start at fixed times from midnight in the
-                            job's time zone (e.g. :00, :15, :30, :45).
-                        </MudText>
-                        <MudText Typo="Typo.subtitle2">Full backups of the databases</MudText>
-                        <div class="d-flex gap-3 mb-1" style="flex-wrap:wrap">
-                            <MudSelect T="string" @bind-Value="_fullKind" Label="Schedule" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:220px">
-                                <MudSelectItem T="string" Value="@("None")">Never</MudSelectItem>
-                                <MudSelectItem T="string" Value="@("Daily")">Daily</MudSelectItem>
-                                <MudSelectItem T="string" Value="@("Weekly")">On selected weekdays</MudSelectItem>
-                            </MudSelect>
-                            @if (_fullKind != "None")
-                            {
-                                <MudTextField @bind-Value="_fullTime" Label="Time (HH:mm)" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:160px" />
-                            }
-                        </div>
-                        @if (_fullKind == "Weekly")
-                        {
-                            <div class="mb-1">
-                                @foreach (var day in WeekDays)
-                                {
-                                    <MudCheckBox T="bool" Value="@_fullDays.Contains(day)" ValueChanged="@(on => Toggle(_fullDays, day, on))" Label="@day.ToString()" Disabled="!_sqlBackup" />
-                                }
-                            </div>
-                        }
-                        <MudCheckBox T="bool" @bind-Value="_fullForAll" Label="Also for databases whose base is the SQL Server snapshot of the image backup" Disabled="!_sqlBackup" />
-                        <MudText Typo="Typo.caption" Class="d-block mb-3">
-                            A native full backup (BACKUP DATABASE, verified) is the base of the log chain where there is no SQL Server
-                            snapshot: SQL Server before 2022, or VSS as method. Restores need the newest full before the point in time
-                            and every log backup after it.
-                        </MudText>
-                        <MudCheckBox T="bool" @bind-Value="_fullOnBreak" Label="Start a missing or broken log chain with a full backup at once" Disabled="!_sqlBackup" />
-                        <MudText Typo="Typo.caption" Class="d-block mb-3">
-                            For new databases, after a switch to SIMPLE and back, or after another tool's log backup. Without it the chain
-                            restarts only with the next scheduled full or image backup.
-                        </MudText>
-                        <MudText Typo="Typo.subtitle2">System databases (master, msdb, model)</MudText>
-                        <div class="d-flex gap-3 mb-1" style="flex-wrap:wrap">
-                            <MudSelect T="string" @bind-Value="_systemKind" Label="Full backups" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:220px">
-                                <MudSelectItem T="string" Value="@("None")">Never</MudSelectItem>
-                                <MudSelectItem T="string" Value="@("Daily")">Daily</MudSelectItem>
-                                <MudSelectItem T="string" Value="@("Weekly")">On selected weekdays</MudSelectItem>
-                            </MudSelect>
-                            @if (_systemKind != "None")
-                            {
-                                <MudTextField @bind-Value="_systemTime" Label="Time (HH:mm)" Variant="Variant.Outlined" Disabled="!_sqlBackup" Style="max-width:160px" />
-                            }
-                        </div>
-                        @if (_systemKind == "Weekly")
-                        {
-                            <div class="mb-1">
-                                @foreach (var day in WeekDays)
-                                {
-                                    <MudCheckBox T="bool" Value="@_systemDays.Contains(day)" ValueChanged="@(on => Toggle(_systemDays, day, on))" Label="@day.ToString()" Disabled="!_sqlBackup" />
-                                }
-                            </div>
-                        }
-                        <MudTextField @bind-Value="_sqlExcluded" Label="Leave out databases (comma-separated)" Variant="Variant.Outlined" Disabled="!_sqlBackup" Class="mt-3 mb-3" />
-                        <MudTextField @bind-Value="_sqlStaging" Label="Folder in the VM for the backup files until they are sent" Variant="Variant.Outlined" Disabled="!_sqlBackup"
-                                      HelperText="Empty: the instance's backup folder (a subfolder backdafuckup). SQL Server's service must be able to write there." />
-                    </MudExpansionPanel>
-                </MudExpansionPanels>
-                break;
+            @if (_error is not null)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mt-4">@_error</MudAlert>
+            }
+        </div>
 
-            case 3:
-                <MudRadioGroup T="string" @bind-Value="_scheduleKind" Class="mb-3">
-                    <MudRadio T="string" Value="@("None")">Run manually</MudRadio>
-                    <MudRadio T="string" Value="@("Daily")">Daily</MudRadio>
-                    <MudRadio T="string" Value="@("Weekly")">On selected weekdays</MudRadio>
-                </MudRadioGroup>
-                @if (_scheduleKind != "None")
-                {
-                    <MudTextField @bind-Value="_time" Label="Time (HH:mm)" Variant="Variant.Outlined" Class="mb-3" Style="max-width:200px" />
-                    @if (_scheduleKind == "Weekly")
-                    {
-                        <div class="mb-3">
-                            @foreach (var day in WeekDays)
-                            {
-                                <MudCheckBox T="bool" Value="@_days.Contains(day)" ValueChanged="@(on => ToggleDay(day, on))" Label="@day.ToString()" />
-                            }
-                        </div>
-                    }
-                    <MudTextField @bind-Value="_timeZone" Label="Time zone (IANA, e.g. Europe/Berlin)" Variant="Variant.Outlined" Style="max-width:400px" />
-                }
-                break;
-
-            default:
-                <MudSimpleTable Dense="true" Elevation="0">
-                    <tbody>
-                        <tr><td style="width:220px">Name</td><td>@_name</td></tr>
-                        <tr><td>Pool</td><td>@_pools.FirstOrDefault(p => p.Id == _connectionId)?.DisplayName</td></tr>
-                        <tr><td>VMs</td><td>@string.Join(", ", _selected.Select(kv => _withMemory.Contains(kv.Key) ? $"{kv.Value} (with memory)" : kv.Value))</td></tr>
-                        <tr><td>Repository</td><td>@_repositories.FirstOrDefault(r => r.Id == _repositoryId)?.Name</td></tr>
-                        <tr><td>Retention</td><td>@_retention restore points</td></tr>
-                        <tr><td>Schedule</td><td>@Jobs.Describe(Schedule())</td></tr>
-                        <tr><td>Disk transport</td><td>@TransportText(_transport)</td></tr>
-                        <tr><td>Parallel processing</td><td>@_parallelVms VM(s), @_parallelDisks disk(s) per VM</td></tr>
-                        <tr><td>SQL Server backups</td><td>@(_sqlBackup ? $"log backups every {LogInterval()} min; full backups: {Jobs.Describe(SqlSchedule(_fullKind, _fullTime, _fullDays))}; system databases: {Jobs.Describe(SqlSchedule(_systemKind, _systemTime, _systemDays))}" : "off")</td></tr>
-                        <tr><td>Guest processing</td><td>@(_guest ? $"application-consistent ({(_guestMode == GuestProcessingModes.SqlSnapshot ? $"SQL Server snapshot ({(_sqlCopyOnly ? "copy-only" : "full backups")}), otherwise VSS" : "VSS")}); on failure: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with warning")}" + (_guestCredentialId is null ? "" : "; installs missing agents") : "off (crash-consistent)")</td></tr>
-                    </tbody>
-                </MudSimpleTable>
-                <MudCheckBox @bind-Value="_enabled" Label="Job enabled" Class="mt-2" />
-                <MudAlert Severity="Severity.Info" Dense="true" Class="mt-2">
-                    Changed block tracking is enabled on the VMs' disks with the first backup. While it is enabled, storage live migration of those disks is not possible.
-                </MudAlert>
-                break;
-        }
-
-        @if (_error is not null)
-        {
-            <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">@_error</MudAlert>
-        }
-
-        <div class="d-flex gap-2 mt-4">
+        <div class="wizard-actions">
             <MudButton Href="/jobs">Cancel</MudButton>
             <MudSpacer />
-            <MudButton Variant="Variant.Outlined" Disabled="@(_step == 0)" OnClick="@(() => GoTo(_step - 1))">Back</MudButton>
+            <MudButton Variant="Variant.Outlined" Disabled="@(_step == 0)" StartIcon="@Icons.Material.Filled.ChevronLeft" OnClick="@(() => GoTo(_step - 1))">Back</MudButton>
             @if (_step < Steps.Length - 1)
             {
-                <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="@(() => GoTo(_step + 1))">Next</MudButton>
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" EndIcon="@Icons.Material.Filled.ChevronRight" OnClick="@(() => GoTo(_step + 1))">Next</MudButton>
             }
             else
             {
-                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="SaveAsync">Finish</MudButton>
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" StartIcon="@Icons.Material.Filled.Check" OnClick="SaveAsync">@(Id is null ? "Create job" : "Save job")</MudButton>
             }
         </div>
     </MudPaper>
@@ -341,13 +436,47 @@ else
 @code {
     private static readonly string[] Steps = ["Name", "Virtual machines", "Storage", "Schedule", "Summary"];
 
+    private static readonly string[] StepTitles = ["Name", "Virtual machines", "Storage and processing", "Schedule", "Summary"];
+
+    private static readonly string[] StepIntros =
+    [
+        "How the job appears in lists, sessions and notifications.",
+        "The VMs this job backs up, all from one pool. With memory takes a snapshot with RAM of a VM.",
+        "Where the restore points go and how many are kept; how the disks are read, and how the guests and their SQL Server databases are handled.",
+        "When the job runs. SQL Server log backups have their own interval (Storage and processing).",
+        "Check the settings, then save the job.",
+    ];
+
+    /// <summary>What was chosen in each step, under its label in the step bar.</summary>
+    private IReadOnlyList<string?> Hints() =>
+    [
+        string.IsNullOrWhiteSpace(_name) ? null : _name.Trim(),
+        _selected.Count == 0 ? null : _withMemory.Count > 0 ? $"{_selected.Count} VM(s), {_withMemory.Count} with memory" : $"{_selected.Count} VM(s)",
+        _repositories?.FirstOrDefault(r => r.Id == _repositoryId) is { } repository ? $"{repository.Name} · {_retention} points" : null,
+        Jobs.Describe(Schedule()),
+        null,
+    ];
+
+    private string TransportSummary() =>
+        $"{_transport switch { TransportModes.NbdOnly => "NBD only", TransportModes.HttpExportOnly => "HTTP export only", _ => "Automatic transport" }} · " +
+        $"{_parallelVms} VM(s) and {_parallelDisks} disk(s) per VM in parallel · {_retries} retries";
+
+    private string GuestSummary() => !_guest
+        ? "Off: backups are crash-consistent, like after a power failure"
+        : $"{(_guestMode == GuestProcessingModes.SqlSnapshot ? "SQL Server snapshot, VSS for the other VMs" : "VSS for every VM")} · " +
+          $"if the guest cannot be frozen: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with a warning")}";
+
+    private string SqlSummary() => !_sqlBackup
+        ? "Off: SQL Server databases restore only to the times of the image backups"
+        : $"Log backups every {LogInterval()} min · full: {Jobs.Describe(SqlSchedule(_fullKind, _fullTime, _fullDays))} · " +
+          $"system databases: {Jobs.Describe(SqlSchedule(_systemKind, _systemTime, _systemDays))}";
+
     private static string TransportText(string mode) => mode switch
     {
         TransportModes.NbdOnly => "NBD only",
         TransportModes.HttpExportOnly => "HTTP export only",
         _ => "Automatic (NBD, otherwise HTTP export)",
     };
-    private static readonly DayOfWeek[] WeekDays = [DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday];
 
     [Parameter] public Guid? Id { get; set; }
 
@@ -501,18 +630,6 @@ else
         }
     }
 
-    private void ToggleDay(DayOfWeek day, bool on)
-    {
-        if (on)
-        {
-            _days.Add(day);
-        }
-        else
-        {
-            _days.Remove(day);
-        }
-    }
-
     private void GoTo(int step)
     {
         if (step < 0 || step >= Steps.Length)
@@ -550,18 +667,6 @@ else
     private ScheduleDto SqlSchedule(string kind, string time, HashSet<DayOfWeek> days) => new(kind, time, kind == "Weekly" ? days.ToList() : [], _timeZone);
 
     private int LogInterval() => _logPreset == "custom" ? _logCustom : int.Parse(_logPreset, System.Globalization.CultureInfo.InvariantCulture);
-
-    private static void Toggle(HashSet<DayOfWeek> days, DayOfWeek day, bool on)
-    {
-        if (on)
-        {
-            days.Add(day);
-        }
-        else
-        {
-            days.Remove(day);
-        }
-    }
 
     private async Task SaveAsync()
     {
