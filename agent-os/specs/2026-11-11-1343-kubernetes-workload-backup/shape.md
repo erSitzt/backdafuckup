@@ -146,7 +146,7 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
     - A loopback port per cluster: the unchanged Kubernetes client (HTTP, watch, exec) connects there.
     - TLS is checked by our own callback for HTTP and for the WebSockets of exec (`CreateWebSocketBuilder`): the chain to the cluster CA and the name `kubernetes.default.svc`, since the URL's host is the loopback address.
   - **Connections:** `access` = `Direct` or `Agent`. An agent cluster learns its platform at the agent's first contact (a cluster already connected is refused). A direct cluster can change to its agent, keeping jobs and restore points.
-  - Not yet: updating the agent's image from the server (apply the manifest again after a server update).
+  - **Updates:** when the agent connects, the server compares its Deployment's image with its own mover image and, when no session of a cluster runs, patches the `agent` container's image (JSON patch with a test). The work role may patch only the Deployment `backdafuckup-agent`.
 - **Agent path as a TCP tunnel (as planned):** exec (hooks) runs over the client's own WebSocket, which bypasses HTTP message handlers, so relaying HTTP requests is not enough.
   - The agent keeps a WebSocket to the server and carries TCP connections to the API server, as Rancher's remotedialer does.
   - The server gives each agent cluster a local port, so the same client code (HTTP, watch, exec, TLS and pinning) works unchanged on both paths.

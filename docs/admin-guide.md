@@ -606,7 +606,7 @@ It was built for RKE2 on vSphere with the vSphere CSI driver. Any CSI driver wit
    | Namespace `backdafuckup-system` with `pod-security.kubernetes.io/enforce: baseline` | The work namespace: temporary PVCs and the mover pods |
    | ServiceAccount `backdafuckup` and its token Secret `backdafuckup-token` | The account the server uses |
    | ClusterRole `backdafuckup-backup` | Read every object, Secrets included. Create and delete VolumeSnapshots and VolumeSnapshotContents. `pods/exec` for hooks. PersistentVolumes |
-   | Role `backdafuckup-work` in `backdafuckup-system` | PVCs, pods and Secrets of the work namespace |
+   | Role `backdafuckup-work` in `backdafuckup-system` | PVCs, pods and Secrets of the work namespace; patch the agent's Deployment `backdafuckup-agent` (its image) |
    | ClusterRole `backdafuckup-restore` (optional) | Create, change and delete objects in every namespace: restores, and the mover pod of a file restore in the PVC's namespace |
 
 3. Read the token and the cluster CA. The commands are in the manifest's header:
@@ -662,7 +662,10 @@ When the backup server cannot reach a cluster's API server (a firewall or NAT in
 
 **Status:** the cluster list shows *agent online* with its pod and node, or *agent offline* since its last contact. While the agent is offline, backups and restores of the cluster fail with "The agent of cluster … is not connected to this server".
 
-**Updating the agent:** it runs the mover image of the version whose manifest was applied. After a server update, apply the manifest again (*Setup manifest with the agent*) to run the new image.
+**Updating the agent:** the server keeps the agent's image at its own mover image.
+- When the agent connects (after a server update, the server restarts and the agent reconnects), the server compares the image of the Deployment with its own. If they differ, it pushes its image when needed and patches the `agent` container's image; the agent restarts with it and connects again.
+- It waits while sessions of clusters run, because the tunnel is down for the restart.
+- A cluster whose manifest predates this needs it applied once more, for the role's permission to patch the Deployment. Until then the server log says so.
 
 ### The mover image
 
