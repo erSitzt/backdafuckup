@@ -88,6 +88,7 @@ public static class BackupVms
                     r.LogicalBytes,
                     r.SqlDatabaseCount,
                     r.SqlConsistentCount,
+                    r.SqlUserDatabaseCount,
                     r.DomainController,
                     r.AdDomain,
                     r.MemoryImageBytes,
@@ -102,7 +103,7 @@ public static class BackupVms
             var newest = vmJob.MaxBy(g => g.Latest.CreatedUtc)!;
             var l = newest.Latest;
             var latest = new BackupVmPointDto(l.Id, vmJob.Key.JobId, l.CreatedUtc, l.Kind.ToString(), l.Consistency, l.ConsistencyReason, l.LogicalBytes,
-                l.SqlDatabaseCount ?? 0, l.DomainController == true, l.AdDomain, l.MemoryImageBytes, l.SqlConsistentCount, l.ConsistencyWarning);
+                l.SqlDatabaseCount ?? 0, l.DomainController == true, l.AdDomain, l.MemoryImageBytes, l.SqlConsistentCount, l.ConsistencyWarning, l.SqlUserDatabaseCount);
             var job = vmJob.Key.JobId is { } id ? jobs.GetValueOrDefault(id) : null;
             entries.Add(new Entry(vmJob.Key.VmNativeId, l.VmName, l.ConnectionId ?? job?.ConnectionId, Describe(job, vmJob.Key.JobId, job?.Name ?? l.JobName,
                 vmJob.Sum(g => g.Count), vmJob.Sum(g => g.Stored), [.. vmJob.Select(g => g.RepositoryId).Distinct()], latest, now)));

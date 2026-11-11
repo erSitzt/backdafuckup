@@ -304,13 +304,13 @@ internal sealed class VmBackupTask(
             ManifestBlob? vssBlob = null;
             ManifestBlob? sqlSnapshotBlob = null;
             int? sqlDatabases = null;
-            var sqlConsistent = 0;
+            var (sqlUser, sqlConsistent) = (0, 0);
             StoredAdDatabase? directory = null;
             if (guest?.Quiescer is { Prepared: { } prepared } quiescer)
             {
                 var stored = StoredGuestMetadata.Build(prepared, quiescer.Thawed, consistency, consistencyReason, quiescer.SqlSnapshot);
                 sqlDatabases = stored.SqlDatabases.Count;
-                sqlConsistent = stored.SqlDatabases.Count(d => d.Consistency == "application");
+                (sqlUser, sqlConsistent) = stored.UserDatabaseConsistency();
                 directory = stored.ActiveDirectory;
                 if (directory is { Consistency: not "application" } && consistency == "application")
                 {
@@ -380,6 +380,7 @@ internal sealed class VmBackupTask(
                 ConsistencyWarning = pointWarning,
                 Guest = guestBlob,
                 SqlDatabaseCount = guest?.Quiescer is { Prepared: not null } ? sqlDatabases : 0,
+                SqlUserDatabaseCount = sqlUser,
                 SqlConsistentCount = sqlConsistent,
                 DomainController = guest?.Quiescer is { Prepared: not null } ? directory is not null : null,
                 AdDomain = directory is null ? null : directory.DomainDns ?? string.Empty,
@@ -752,7 +753,8 @@ internal sealed class VmBackupTask(
         entity.ConsistencyReason = manifest.ConsistencyReason;
         entity.ConsistencyWarning = manifest.ConsistencyWarning ?? RestorePointConsistency.IsWarning(manifest.ConsistencyReason);
         entity.SqlDatabaseCount = manifest.SqlDatabaseCount ?? (manifest.Guest is null ? 0 : null);
-        entity.SqlConsistentCount = manifest.SqlConsistentCount ?? (manifest.Guest is null ? 0 : null);
+        entity.SqlUserDatabaseCount = manifest.SqlUserDatabaseCount ?? (manifest.Guest is null ? 0 : null);
+        entity.SqlConsistentCount = manifest.SqlUserDatabaseCount is null ? entity.SqlUserDatabaseCount : manifest.SqlConsistentCount;
         entity.DomainController = manifest.DomainController ?? (manifest.Guest is null ? false : null);
         entity.AdDomain = manifest.AdDomain;
         entity.SqlBackupSetsRecorded = manifest.SqlSnapshot is null ? true : null;

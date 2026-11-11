@@ -22,6 +22,16 @@ public sealed class StoredGuestMetadata
 
     public List<StoredSqlDatabase> SqlDatabases { get; set; } = [];
 
+    /// <summary>
+    /// The user databases (not master, model, msdb, tempdb) and how many of them are application-consistent. A SQL Server
+    /// snapshot cannot suspend the system databases, so they are crash-consistent there by design: they do not count.
+    /// </summary>
+    public (int Databases, int Consistent) UserDatabaseConsistency()
+    {
+        var user = SqlDatabases.Where(d => !SqlSystemDatabases.Contains(d.Database)).ToList();
+        return (user.Count, user.Count(d => d.Consistency == "application"));
+    }
+
     public List<GuestWriter> Writers { get; set; } = [];
 
     /// <summary>On a domain controller: its directory database and facts at backup time, with their consistency.</summary>
