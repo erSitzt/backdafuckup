@@ -90,6 +90,7 @@ public sealed class RestoreSessionRunner(
                         TargetNamespace = string.IsNullOrWhiteSpace(request.Kubernetes?.TargetNamespace) ? space.Namespace : request.Kubernetes.TargetNamespace.Trim(),
                         ReplaceExisting = request.Kubernetes?.ReplaceExisting == true,
                         OnlyClaims = request.Kubernetes?.OnlyClaims,
+                        ReplaceClaims = request.Kubernetes?.ReplaceClaims == true,
                         Objects = request.Kubernetes?.Objects,
                         ClaimNames = request.Kubernetes?.ClaimNames ?? [],
                     }

@@ -91,7 +91,11 @@ else
                                     <td class="num">@Fmt.Bytes(volume.SizeBytes)</td>
                                     <td>@volume.StorageClass</td>
                                     <td>
-                                        @if (_claims.ContainsKey(volume.Claim))
+                                        @if (_claims.ContainsKey(volume.Claim) && _replaceClaims)
+                                        {
+                                            <span class="mini-chip warning">replaces @volume.Claim</span>
+                                        }
+                                        else if (_claims.ContainsKey(volume.Claim))
                                         {
                                             <MudTextField T="string" Value="@_claims[volume.Claim]" ValueChanged="@(v => _claims[volume.Claim] = v)" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width: 320px" />
                                         }
@@ -101,7 +105,22 @@ else
                         </tbody>
                     </MudSimpleTable>
                 </div>
-                <MudText Typo="Typo.caption" Class="help-text">A PVC is restored next to the original under a new name, or under its own name into another namespace. Its workload is not changed.</MudText>
+                <MudSwitch T="bool" Value="_replaceClaims" ValueChanged="OnReplaceChanged" Color="Color.Warning" Class="mt-3"
+                           Label="Replace the PVCs in place: their workloads are stopped for the swap and started again" />
+                @if (_replaceClaims)
+                {
+                    <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">
+                        The current data of the selected PVCs is deleted and replaced by the restore point's. Their volumes are written first, while the workloads still run;
+                        then the Deployments or StatefulSets using them are scaled to 0, the PVCs swapped and the workloads scaled back. If Fleet or Argo CD manages their
+                        replicas, they may scale them up during the swap. Pods without such a controller (DaemonSets, bare pods) stop the restore before anything is written.
+                    </MudAlert>
+                    <MudTextField @bind-Value="_confirm" Label="@($"Type {_details.Namespace} to confirm")" Variant="Variant.Outlined" Class="mt-3" Style="max-width: 420px" Immediate="true" />
+                }
+                else
+                {
+                    <MudText Typo="Typo.caption" Class="help-text">A PVC is restored next to the original under a new name, or under its own name into another namespace. Its workload is not changed.</MudText>
+                }
+
                 break;
         }
     </MudPaper>
@@ -109,7 +128,7 @@ else
     <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
         <MudText Typo="Typo.subtitle1" Class="section-title mb-2">Where</MudText>
         <div class="form-narrow">
-            <MudTextField @bind-Value="_target" Label="Target namespace" Variant="Variant.Outlined"
+            <MudTextField @bind-Value="_target" Label="Target namespace" Variant="Variant.Outlined" Disabled="@(_what == WhatClaims && _replaceClaims)"
                           HelperText="@(_target.Trim() == _details.Namespace ? "The original namespace." : "Created when it does not exist; RoleBindings to its ServiceAccounts follow the new name.")" />
             @if (_what != WhatClaims)
             {
@@ -149,6 +168,8 @@ else
     private string _what = WhatNamespace;
     private string _target = string.Empty;
     private bool _replace;
+    private bool _replaceClaims;
+    private string _confirm = string.Empty;
     private readonly HashSet<string> _objects = [];
     private readonly Dictionary<string, string> _claims = [];
     private bool _busy;
@@ -171,6 +192,7 @@ else
     private bool Ready => !string.IsNullOrWhiteSpace(_target) && _what switch
     {
         WhatApps => _objects.Count > 0,
+        WhatClaims when _replaceClaims => _claims.Count > 0 && _confirm.Trim() == _details?.Namespace,
         WhatClaims => _claims.Count > 0 && _claims.Values.All(v => !string.IsNullOrWhiteSpace(v)),
         _ => true,
     };
@@ -217,11 +239,25 @@ else
         }
     }
 
+    private void OnReplaceChanged(bool on)
+    {
+        _replaceClaims = on;
+        _confirm = string.Empty;
+        if (on)
+        {
+            _target = _details!.Namespace;
+            foreach (var claim in _claims.Keys.ToList())
+            {
+                _claims[claim] = claim;
+            }
+        }
+    }
+
     private void ToggleClaim(string claim, bool on)
     {
         if (on)
         {
-            _claims[claim] = _target.Trim() == _details!.Namespace ? $"{claim}-restored" : claim;
+            _claims[claim] = _replaceClaims || _target.Trim() != _details!.Namespace ? claim : $"{claim}-restored";
         }
         else
         {
@@ -241,7 +277,8 @@ else
                 ReplaceExisting = _replace && _what != WhatClaims,
                 Objects = _what == WhatApps ? [.. _objects] : null,
                 OnlyClaims = _what == WhatClaims ? [.. _claims.Keys] : null,
-                ClaimNames = _what == WhatClaims ? _claims.ToDictionary(kv => kv.Key, kv => kv.Value.Trim()) : [],
+                ReplaceClaims = _what == WhatClaims && _replaceClaims,
+                ClaimNames = _what == WhatClaims && !_replaceClaims ? _claims.ToDictionary(kv => kv.Key, kv => kv.Value.Trim()) : [],
             };
             var started = await Api.PostAsync<StartedDto>("api/restores", new RestoreRequestDto
             {

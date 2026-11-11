@@ -32,6 +32,9 @@ public sealed class FakeKubernetesApi
     /// <summary>Called after an object was created, with its plural and the stored object (change it inside <see cref="Mutate"/>).</summary>
     public Action<string, JsonObject>? Created { get; set; }
 
+    /// <summary>Called after an object was replaced or patched, with its plural and the stored object.</summary>
+    public Action<string, JsonObject>? Patched { get; set; }
+
     /// <summary>Called after an object was deleted, with its plural and the object.</summary>
     public Action<string, JsonObject>? Deleted { get; set; }
 
@@ -194,6 +197,7 @@ public sealed class FakeKubernetesApi
         if ((request.Method == HttpMethod.Put || request.Method == HttpMethod.Patch) && name is not null)
         {
             var body = JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!.AsObject();
+            JsonObject changed;
             lock (_lock)
             {
                 var index = _objects.FindIndex(o => o.ApiPath == apiPath && o.Plural == plural && Matches(o.Item, ns, name));
@@ -214,7 +218,13 @@ public sealed class FakeKubernetesApi
                     MergePatch(stored, body);
                 }
 
-                return Json(HttpStatusCode.OK, (JsonObject)stored.DeepClone());
+                changed = stored;
+            }
+
+            Patched?.Invoke(plural, changed);
+            lock (_lock)
+            {
+                return Json(HttpStatusCode.OK, (JsonObject)changed.DeepClone());
             }
         }
 

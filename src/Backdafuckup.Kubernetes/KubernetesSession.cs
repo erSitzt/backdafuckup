@@ -71,6 +71,13 @@ internal sealed class KubernetesSession(
         var slash = artifact.NativeId.IndexOf('/', StringComparison.Ordinal);
         var (ns, name) = slash < 0 ? ((string?)null, artifact.NativeId) : (artifact.NativeId[..slash], artifact.NativeId[(slash + 1)..]);
         var flow = new VolumeSnapshotFlow(client, settings.Address, log, new InMemoryArtifactLedger(), new KubernetesTimings());
+        if (artifact.Kind == KubernetesArtifactKinds.ScaledWorkload)
+        {
+            await WorkloadPause.ResumeAsync(flow, artifact.NativeId, artifact.Data, cancellationToken).ConfigureAwait(false);
+            log.Info($"Workload {artifact.NativeId} scaled back in cluster {settings.Address} (a PVC swap did not finish).");
+            return;
+        }
+
         await flow.DeleteAsync(artifact.Kind, ns, name, cancellationToken).ConfigureAwait(false);
         log.Info($"Leftover {artifact.Kind} {artifact.NativeId} deleted in cluster {settings.Address}.");
     }

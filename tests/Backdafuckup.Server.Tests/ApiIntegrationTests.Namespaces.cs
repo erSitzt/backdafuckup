@@ -215,6 +215,57 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal(2, restoredDevices.Count);
         Assert.Equal(volume, (await File.ReadAllBytesAsync(restoredDevices[1], Ct))[..volume.Length]);
         AssertClusterClean();
+
+        // Replacing the PVC in place: a pod no controller owns cannot be stopped, so the swap is refused before anything is written.
+        var replace = new KubernetesRestoreDto { OnlyClaims = ["data-redis-test-0"], ReplaceClaims = true };
+        var (blocked, blockedLog) = await RestoreAsync(replace);
+        Assert.Equal("Failed", blocked.Session.State);
+        Assert.Contains("The pod bdfu-spike/redis-test-0 uses the PVC data-redis-test-0 and no controller owns it: stop it first.", blockedLog, StringComparison.Ordinal);
+        Assert.Equal(2, restoredDevices.Count);
+
+        // Owned by a StatefulSet: scaled to 0, the PVC swapped for the restored one, scaled back.
+        var statefulSet = new JsonObject
+        {
+            ["apiVersion"] = "apps/v1",
+            ["kind"] = "StatefulSet",
+            ["metadata"] = new JsonObject { ["name"] = "redis-test", ["namespace"] = "bdfu-spike" },
+            ["spec"] = new JsonObject { ["replicas"] = 1 },
+        };
+        _cluster.Add("apis/apps/v1", "statefulsets", statefulSet);
+        var redisPod = _cluster.Find("pods", "bdfu-spike", "redis-test-0")!;
+        _cluster.Mutate(() => redisPod["metadata"]!["ownerReferences"] = new JsonArray(new JsonObject { ["kind"] = "StatefulSet", ["name"] = "redis-test", ["controller"] = true }));
+        var podCopy = (JsonObject)redisPod.DeepClone();
+        var scaledTo = new List<int>();
+        _cluster.Patched = (plural, item) =>
+        {
+            if (plural != "statefulsets")
+            {
+                return;
+            }
+
+            // The StatefulSet controller: no pod at 0, the pod again at 1.
+            var replicas = (int)item["spec"]!["replicas"]!;
+            scaledTo.Add(replicas);
+            if (replicas == 0)
+            {
+                _cluster.Remove("pods", "bdfu-spike", "redis-test-0");
+            }
+            else
+            {
+                _cluster.Add("api/v1", "pods", (JsonObject)podCopy.DeepClone());
+            }
+        };
+        var (swapped, swappedLog) = await RestoreAsync(replace);
+        Assert.True(swapped.Session.State == "Succeeded", swappedLog);
+        Assert.Equal([0, 1], scaledTo);
+        Assert.Contains("StatefulSet bdfu-spike/redis-test scaled from 1 to 0 for the swap of PVC data-redis-test-0", swappedLog, StringComparison.Ordinal);
+        Assert.Contains("PVC bdfu-spike/data-redis-test-0 with its former data deleted", swappedLog, StringComparison.Ordinal);
+        var swappedClaim = _cluster.Find("persistentvolumeclaims", "bdfu-spike", "data-redis-test-0")!;
+        Assert.Equal("VolumeSnapshot", (string?)swappedClaim["spec"]!["dataSource"]!["kind"]);
+        Assert.Equal(1, (int)_cluster.Find("statefulsets", "bdfu-spike", "redis-test")!["spec"]!["replicas"]!);
+        Assert.NotNull(_cluster.Find("pods", "bdfu-spike", "redis-test-0"));
+        Assert.Equal(3, restoredDevices.Count);
+        AssertClusterClean();
         await using var db = await _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>().CreateDbContextAsync(Ct);
         Assert.All(await db.Artifacts.ToListAsync(Ct), a => Assert.Equal(ArtifactState.Done, a.State));
     }

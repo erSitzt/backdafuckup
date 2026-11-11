@@ -178,6 +178,12 @@ public sealed record KubernetesRestoreOptions
     /// </summary>
     public IReadOnlyList<string>? Objects { get; init; }
 
+    /// <summary>
+    /// With <see cref="OnlyClaims"/>: each PVC replaces the one of its name in the target namespace. The workloads using it are
+    /// scaled to 0 for the swap and back afterwards; the PVC's current data is deleted.
+    /// </summary>
+    public bool ReplaceClaims { get; init; }
+
     /// <summary>New names for restored PVCs (claim → name), e.g. to restore one next to the original.</summary>
     public IReadOnlyDictionary<string, string> ClaimNames { get; init; } = new Dictionary<string, string>();
 
