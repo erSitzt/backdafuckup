@@ -4,6 +4,7 @@
 
 - **Web UI:** easy-to-use web console on par with Veeam, so admins can switch easily. It covers the dashboard, backup job setup, browsing restore points, guided restore wizards, and job status/history. Backups & Restore stays usable with hundreds of VMs: one row per VM grouped by job, filters in the address, VMs that missed a scheduled run or have no restore point marked
 - **VM backup (XCP-ng / XenServer):** VM snapshot via XAPI, disks read over NBD into our own chunk repository (compressed, deduplicated). Full backups plus **CBT-based incrementals** (forever-incremental: every restore point is complete on its own). Built on a hypervisor-agnostic core so other platforms can be added later
+  - Snapshot with memory, per VM in the job (spec `2026-11-10-1654-snapshot-with-memory`): `VM.checkpoint` pauses the VM, writes its RAM to a memory image and captures all its disks at one moment, so they match without VSS. The memory image goes into the restore point; a restore boots the VM cold, or resumes it where it was (only in the pool it was backed up in, a copy without network connections, never a domain controller). The pause is the price: about 2 minutes for 8 GiB RAM on shared storage in the lab, and VSS cannot hold writes that long, so such VMs get no guest processing
 - **Backup from storage snapshots (XCP-ng + HPE Alletra Storage MP B10000):** keeps the live cluster almost unstressed during backup:
   1. A short VM snapshot, held only seconds, gives application consistency
   2. An array snapshot is taken, and the VM snapshot is removed immediately

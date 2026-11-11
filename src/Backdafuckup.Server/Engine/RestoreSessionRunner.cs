@@ -246,15 +246,16 @@ public sealed class RestoreSessionRunner(
                 : $"The restore point of {at} does not name the disk(s) {string.Join(", ", missing)} in its snapshot with memory, so it cannot resume. Restore it without memory.");
         }
 
-        if (manifest.DomainController == true)
+        // A restore point with memory has no guest details, so its agent and the VM's other restore points tell whether it is a DC.
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        if (await DomainControllerEvidence.FindAsync(db, point, cancellationToken).ConfigureAwait(false) is { } evidence)
         {
-            throw new InvalidOperationException($"{point.VmName} was a domain controller: resumed, it would continue its directory from the backup without Windows noticing a restore " +
-                "(USN rollback). Restore it without memory: Windows then restores Active Directory non-authoritatively at its first start.");
+            throw new InvalidOperationException($"{point.VmName} is a domain controller ({evidence}): resumed, it would continue its directory from the backup without Windows " +
+                "noticing a restore (USN rollback). Restore it without memory: Windows then restores Active Directory non-authoritatively at its first start.");
         }
 
         if (point.ConnectionId != targetConnection)
         {
-            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             var names = await db.Connections.Where(c => c.Id == targetConnection || c.Id == point.ConnectionId)
                 .ToDictionaryAsync(c => c.Id, c => c.DisplayName, cancellationToken).ConfigureAwait(false);
             var source = point.ConnectionId is { } id ? $"'{names.GetValueOrDefault(id, id.ToString())}'" : "(unknown)";

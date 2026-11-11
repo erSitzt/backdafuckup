@@ -249,6 +249,10 @@ public sealed record RestorePointDiskDto(string Key, string Name, long CapacityB
 
 public sealed record RestorePointNicDto(string Device, string Mac, string NetworkId, string NetworkName);
 
+/// <param name="DomainControllerEvidence">
+/// Only from <c>GET /api/restore-points/{id}</c>, for a restore point with memory, which has no guest details: why the VM is
+/// known to be a domain controller anyway (its agent, or another restore point of it); null if nothing shows it.
+/// </param>
 public sealed record RestorePointDto(
     Guid Id,
     Guid RepositoryId,
@@ -273,7 +277,8 @@ public sealed record RestorePointDto(
     bool DomainController = false,
     string? AdDomain = null,
     bool HasVmGenerationId = true,
-    long? MemoryImageBytes = null);
+    long? MemoryImageBytes = null,
+    string? DomainControllerEvidence = null);
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 

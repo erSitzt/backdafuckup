@@ -56,6 +56,7 @@ Multi-disk VMs therefore end up not even crash-consistent across their disks; si
 - **Two metadata blobs:** `vm-metadata` (the live VM, for cold restores, as before) and `vm-metadata-memory` (the checkpoint, for resume).
 - **Consistency:** `"crash"` without a warning reason, and the chip RAM. A cold boot is a power failure of the whole VM at one moment; a resume continues the running state.
 - **Spike switch:** `Engine:CheckpointWithVss` (default false) is only for S3.
+- **No resume for a domain controller:** XAPI keeps the checkpoint's VM generation id (it is a template), so a resumed DC would not notice the restore (USN rollback). A restore point with memory has no guest details, so the VM's agent (domain role 4 or 5) and its restore points with guest processing tell (`DomainControllerEvidence`). A cold restore imports the live VM's metadata and gets a new generation id, as before.
 
 ### Risks
 - **Pause length:** RAM write plus every disk, e.g. 16 GB and 4 disks ≈ a minute or more (not measured yet). Users and network peers notice it.

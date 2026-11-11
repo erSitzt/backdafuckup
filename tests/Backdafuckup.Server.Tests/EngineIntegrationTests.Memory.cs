@@ -178,6 +178,55 @@ public sealed partial class EngineIntegrationTests
     }
 
     [Fact]
+    public async Task A_domain_controller_does_not_resume_although_its_restore_point_with_memory_has_no_guest_details()
+    {
+        var (vmUuid, _) = _pool.AddVm("dc-vm", DiskSize);
+        var point = await BackUpWithMemoryAsync(vmUuid);
+        Assert.NotEqual(true, point.DomainController);
+        var vms = _pool.Records("VM").Count;
+        var vdis = _pool.Records("VDI").Count;
+
+        // Its agent reports a domain controller.
+        await using (var db = await DbAsync())
+        {
+            db.Agents.Add(new AgentEntity { KeyHash = "dc-key", HostName = "DC9", VmNativeId = point.VmNativeId, DomainRole = 5, Domain = "corp.example" });
+            await db.SaveChangesAsync(Ct);
+            Assert.Equal("its agent on DC9 reports a domain controller of corp.example", await DomainControllerEvidence.FindAsync(db, point, Ct));
+        }
+
+        var byAgent = await RestoreAsync(point, new RestoreRequestDto { RestorePointId = point.Id, VmName = "dc-copy", ResumeWithMemory = true });
+        Assert.Equal(SessionState.Failed, byAgent.State);
+        Assert.Contains(await LogAsync(byAgent.Id), m => m.Contains("dc-vm is a domain controller (its agent on DC9 reports a domain controller of corp.example)", StringComparison.Ordinal)
+                                                         && m.Contains("USN rollback", StringComparison.Ordinal));
+        Assert.Equal((vms, vdis), (_pool.Records("VM").Count, _pool.Records("VDI").Count));
+
+        // Without the agent, a restore point with guest processing shows it.
+        await using (var db = await DbAsync())
+        {
+            await db.Agents.Where(a => a.VmNativeId == point.VmNativeId).ExecuteDeleteAsync(Ct);
+            Assert.Null(await DomainControllerEvidence.FindAsync(db, point, Ct));
+            await db.JobObjects.Where(o => o.JobId == point.JobId).ExecuteUpdateAsync(s => s.SetProperty(o => o.WithMemory, false), Ct);
+        }
+
+        Assert.Equal(SessionState.Succeeded, (await RunAsync(Services.GetRequiredService<SessionQueue>().EnqueueBackupAsync(point.JobId!.Value, SessionRunMode.Incremental, "test", Ct))).State);
+        var plain = await LatestRestorePointAsync();
+        Assert.Null(plain.MemoryImageBytes);
+        await using (var db = await DbAsync())
+        {
+            await db.RestorePoints.Where(r => r.Id == plain.Id).ExecuteUpdateAsync(s => s.SetProperty(r => r.DomainController, true).SetProperty(r => r.AdDomain, "corp.example"), Ct);
+        }
+
+        vms = _pool.Records("VM").Count;
+        vdis = _pool.Records("VDI").Count;
+
+        var byPoint = await RestoreAsync(point, new RestoreRequestDto { RestorePointId = point.Id, VmName = "dc-copy", ResumeWithMemory = true });
+        Assert.Equal(SessionState.Failed, byPoint.State);
+        Assert.Contains(await LogAsync(byPoint.Id), m => m.Contains("dc-vm is a domain controller (its restore point of ", StringComparison.Ordinal)
+                                                         && m.Contains("shows it as a domain controller of corp.example)", StringComparison.Ordinal));
+        Assert.Equal((vms, vdis), (_pool.Records("VM").Count, _pool.Records("VDI").Count));
+    }
+
+    [Fact]
     public async Task A_restore_point_with_memory_still_boots_cold_from_its_disks()
     {
         var (vmUuid, _) = _pool.AddVm("cold-vm", DiskSize);

@@ -193,7 +193,7 @@ A Windows lab VM (e.g. `sql2`) in a job of its own, with *With memory* in the jo
 | I2 | Guest processing on, `BDFU_Engine__CheckpointWithVss=true` in the service's environment, the agent connected. Back up. | The VSS freeze and the pause in the log; the result of the freeze (held or timed out) in the log and in the VM's VSS events. |
 | I3 | *Restore* the restore point of I1 to another location with *Resume with memory* and *Resume the VM*. | The VM is created suspended and resumes; it has no NIC (log: "removed: the copy resumes without network connections"). On its console the uptime goes back to before the backup, and programs open at the backup are still open. |
 | I4 | Restore the same restore point without memory, *Power on*. | Boots from its disks like any crash-consistent restore point; no memory image is uploaded. |
-| I5 | *Resume with memory* for a restore point of a domain controller, and one from before resume existed. | The wizard offers only the cold start for the DC; the old restore point fails at once: "… by a version that could not resume yet …". Nothing is created in the pool. |
+| I5 | *Resume with memory* for a restore point with memory of a domain controller whose agent is connected (or that has a restore point with guest processing), and for one from before resume existed. | The wizard offers only the cold start for the DC and names why ("its agent on … reports a domain controller …"); a resume through the API fails at once: "… is a domain controller (…) … USN rollback". The old restore point fails at once: "… by a version that could not resume yet …". Nothing is created in the pool. |
 
 ## Results
 
