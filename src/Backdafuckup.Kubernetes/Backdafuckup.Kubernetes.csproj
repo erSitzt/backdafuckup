@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="KubernetesClient" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Backdafuckup.Kubernetes.Tests" />
+  </ItemGroup>
+</Project>

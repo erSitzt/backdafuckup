@@ -118,7 +118,7 @@ html, body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helveti
 .table-box { border: 1px solid var(--mud-palette-lines-default); border-radius: var(--mud-default-borderradius); overflow: hidden; }
 .table-box .mud-table-container { max-height: 460px; overflow: auto; }
 .table-box .mud-simple-table table thead th { background: var(--mud-palette-background-gray); font-weight: 600; }
-.table-box tr.row-selected > td { background: rgba(var(--mud-palette-primary-rgb), .05); }
+.table-box tr.row-selected > td, .mud-simple-table tr.row-selected > td { background: rgba(var(--mud-palette-primary-rgb), .05); }
 
 /* Form sections: expansion panels as separate cards with an icon, a summary of their settings and their state. */
 .form-sections { display: flex; flex-direction: column; gap: 12px; }

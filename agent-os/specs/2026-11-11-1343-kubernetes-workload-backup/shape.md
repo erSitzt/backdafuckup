@@ -12,6 +12,7 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
 - **Phase 2:**
   - Restore into another cluster, with namespace and StorageClass mapping.
   - Whole-cluster DR.
+- **Later step: Kubernetes clusters on XCP-ng** (user request 2026-11-11). Their PVs may be backed up through XAPI (VDI snapshots with CBT) instead of the CSI driver. The CSI drivers for XCP-ng are to be researched first.
 - **Phase 3:**
   - NFS volumes at file level.
   - Changed block tracking through CSI SnapshotMetadata.
@@ -64,7 +65,12 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
   - Job objects get a kind (VM or namespace) and options.
   - Restore points get an object kind and a namespace descriptor; `Vm` becomes optional.
   - PVCs are the restore point's disks, keyed by PVC name.
-- **Library:** the official C# client `KubernetesClient`, after checking its licence and dependencies.
+- **Library:** the official C# client `KubernetesClient` 18.0.13 (Kubernetes 1.34 models, within the client's supported skew to our 1.32 clusters).
+  - Apache-2.0; its dependencies Fractions and YamlDotNet are MIT.
+  - The API server certificate is pinned through `FirstMessageHandlerSetup`.
+- **Agent path as a TCP tunnel:** exec (hooks) runs over the client's own WebSocket, which bypasses HTTP message handlers, so relaying HTTP requests is not enough.
+  - The agent keeps a WebSocket to the server and carries TCP connections to the API server, as Rancher's remotedialer does.
+  - The server gives each agent cluster a local port, so the same client code (HTTP, watch, exec, TLS and pinning) works unchanged on both paths.
 
 ### Facts from the QA cluster (`rke2-qa`, read-only, 2026-11-11)
 - **Cluster:** RKE2 1.32.13, 3 servers, 8 agents.

@@ -1,0 +1,79 @@
+using System.Net;
+using System.Net.Http;
+using System.Security.Authentication;
+using Backdafuckup.Core.Hypervisor;
+using Backdafuckup.Core.Tls;
+using k8s.Autorest;
+
+namespace Backdafuckup.Kubernetes;
+
+/// <summary>
+/// A Kubernetes cluster as a connection: its namespaces and volumes are the inventory. The server reaches the API with a
+/// ServiceAccount token; the API server's certificate is pinned on first use, as for pools.
+/// </summary>
+/// <param name="transport">Tests only: answers every API request instead of the network.</param>
+public sealed class KubernetesProvider(Func<DelegatingHandler>? transport = null) : IHypervisorProvider
+{
+    public HypervisorKind Kind => HypervisorKind.Kubernetes;
+
+    public async Task<CertificateProbe> ProbeCertificateAsync(string address, int port, CancellationToken cancellationToken)
+    {
+        var (certificate, valid) = await CertificatePinning.ProbeAsync(address, port, cancellationToken).ConfigureAwait(false);
+        using (certificate)
+        {
+            return CertificatePinning.ToProbe(address, certificate, valid);
+        }
+    }
+
+    public async Task<ConnectResult> TestConnectionAsync(ConnectionSettings settings, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        var tls = new TlsObserver();
+        var url = KubernetesClients.BaseUrl(settings);
+        using var client = KubernetesClients.Create(settings, tls, transport?.Invoke());
+        PlatformInfo platform;
+        try
+        {
+            platform = await KubernetesInventory.GetPlatformAsync(client, settings, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or AuthenticationException or IOException)
+        {
+            if (!tls.Rejected.IsEmpty)
+            {
+                return new ConnectResult(false, $"The TLS certificate of the API server {url} is not trusted yet.", null,
+                    tls.Rejected.Select(kv => CertificatePinning.ToProbe(kv.Key, kv.Value, false)).ToList(), []);
+            }
+
+            return new ConnectResult(false, $"Cannot reach the Kubernetes API {url}: {ex.Message}", null, [], []);
+        }
+        catch (HttpOperationException ex)
+        {
+            return new ConnectResult(false, Describe(ex, url), null, [], []);
+        }
+
+        // Pin the certificate the validated requests were answered with (with its PEM); without TLS (tests) keep what was given.
+        var pins = tls.Accepted.Select(kv => CertificatePinning.ToPin(kv.Key, kv.Value)).ToList();
+        foreach (var certificate in tls.Accepted.Values)
+        {
+            certificate.Dispose();
+        }
+
+        return new ConnectResult(true, null, platform, [], pins.Count > 0 ? pins : settings.Pins);
+    }
+
+    public Task<IHypervisorSession> OpenAsync(ConnectionSettings settings, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        IHypervisorSession session = new KubernetesSession(KubernetesClients.Create(settings, null, transport?.Invoke()), settings);
+        return Task.FromResult(session);
+    }
+
+    /// <summary>An API error with the cluster and what the token may lack.</summary>
+    internal static string Describe(HttpOperationException ex, string url) => ex.Response?.StatusCode switch
+    {
+        HttpStatusCode.Unauthorized => $"The Kubernetes API {url} refused the token (401 Unauthorized): it is wrong, expired, or its ServiceAccount was deleted.",
+        HttpStatusCode.Forbidden => $"The Kubernetes API {url} refused a request (403 Forbidden): the ServiceAccount lacks a permission. {ex.Response.Content}",
+        { } code => $"The Kubernetes API {url} answered {(int)code} {code}: {ex.Response?.Content}",
+        null => $"The Kubernetes API {url} failed: {ex.Message}",
+    };
+}

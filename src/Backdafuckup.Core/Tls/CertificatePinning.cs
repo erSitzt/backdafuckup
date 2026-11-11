@@ -4,9 +4,9 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Backdafuckup.Core.Hypervisor;
 
-namespace Backdafuckup.Xen.Tls;
+namespace Backdafuckup.Core.Tls;
 
-/// <summary>Public-key pinning (SHA-256 of the SubjectPublicKeyInfo) for XAPI and NBD TLS connections.</summary>
+/// <summary>Public-key pinning (SHA-256 of the SubjectPublicKeyInfo) for TLS connections to XAPI, NBD and Kubernetes API servers.</summary>
 public static class CertificatePinning
 {
     public static string SpkiSha256(X509Certificate2 certificate)

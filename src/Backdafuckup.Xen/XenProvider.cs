@@ -4,7 +4,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json.Nodes;
 using Backdafuckup.Core.Hypervisor;
-using Backdafuckup.Xen.Tls;
+using Backdafuckup.Core.Tls;
 using Backdafuckup.Xen.Xapi;
 
 namespace Backdafuckup.Xen;

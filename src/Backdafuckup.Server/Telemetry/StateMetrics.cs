@@ -336,7 +336,8 @@ public sealed class MetricsStateService(
         List<(Guid Id, string Name)> pools;
         await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
         {
-            pools = (await db.Connections.AsNoTracking().Select(c => new { c.Id, c.DisplayName }).ToListAsync(cancellationToken).ConfigureAwait(false))
+            // Pools only: a Kubernetes cluster has no storages of its own to report.
+            pools = (await db.Connections.AsNoTracking().Where(c => c.Kind == HypervisorKind.XenServer).Select(c => new { c.Id, c.DisplayName }).ToListAsync(cancellationToken).ConfigureAwait(false))
                 .Select(c => (c.Id, c.DisplayName)).ToList();
         }
 

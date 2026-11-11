@@ -44,7 +44,7 @@
   - restore of a namespace (all or selected objects), a single PVC and files in the same cluster;
   - the server talks to the cluster API directly, or through an in-cluster agent that dials out.
 
-  Later: another cluster and whole-cluster DR, then NFS volumes at file level, changed block tracking (CSI SnapshotMetadata) and group snapshots.
+  Later: another cluster and whole-cluster DR, then NFS volumes at file level, changed block tracking (CSI SnapshotMetadata) and group snapshots; then Kubernetes clusters on XCP-ng, whose PVs could be read through XAPI with CBT.
 
 ## Phase 2: Post-Launch
 

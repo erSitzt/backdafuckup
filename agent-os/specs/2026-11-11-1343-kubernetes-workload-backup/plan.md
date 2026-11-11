@@ -124,6 +124,9 @@ Spec folder: `agent-os/specs/2026-11-11-1343-kubernetes-workload-backup/`
   - CBT through CSI SnapshotMetadata (gRPC; CSI hostpath already offers it).
   - VolumeGroupSnapshots where the driver has them.
   - Hook presets for Redis, MongoDB, RabbitMQ and Prometheus.
+- **Later step: Kubernetes clusters on XCP-ng** (user request 2026-11-11).
+  - Nodes on XCP-ng, with a CSI driver for XCP-ng storage; which drivers exist and whether they take snapshots is to be researched.
+  - Because backdafuckup speaks XAPI already, a PV's data could come straight from its VDI: a XAPI snapshot with CBT, so true incrementals instead of a full read per run.
 
 ## Tasks
 1. **Save spec documentation:**
