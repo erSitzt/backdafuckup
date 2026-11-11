@@ -341,3 +341,103 @@ public static class KubernetesRestorePoints
                 KubernetesObjects.IsWorkload(o) && !KubernetesObjects.IsControlled(o) ? KubernetesObjects.Needs(o, all) : null))];
     }
 }
+
+/// <summary>How an object of a restore point stands against the live cluster.</summary>
+public static class KubernetesObjectStates
+{
+    /// <summary>In the cluster as in the restore point.</summary>
+    public const string Same = "same";
+
+    /// <summary>In the cluster, but different.</summary>
+    public const string Changed = "changed";
+
+    /// <summary>In the restore point, not in the cluster (deleted since).</summary>
+    public const string Missing = "missing";
+
+    /// <summary>In the cluster, not in the restore point (made since).</summary>
+    public const string New = "new";
+}
+
+/// <summary>An object in the comparison of a restore point with its live namespace.</summary>
+public sealed record KubernetesComparison(string ApiVersion, string Kind, string Name, string? App, bool Controlled, string State);
+
+/// <summary>Compares the objects of a restore point with the live namespace, and shows objects without revealing secrets.</summary>
+public static class KubernetesCompare
+{
+    /// <summary>
+    /// Each namespaced object of the restore point against the live one (both cleaned as for a restore, without what changes
+    /// on its own: Deployment revisions, a PVC's volume), plus the live objects the restore point does not have.
+    /// </summary>
+    public static IReadOnlyList<KubernetesComparison> Compare(byte[] backup, IReadOnlyList<JsonObject> live)
+    {
+        var stored = KubernetesResources.Read(backup).Where(Comparable).ToList();
+        var current = live.Where(Comparable).GroupBy(KubernetesObjects.Key, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+        var result = new List<KubernetesComparison>();
+        foreach (var o in stored)
+        {
+            var key = KubernetesObjects.Key(o);
+            var state = !current.TryGetValue(key, out var now)
+                ? KubernetesObjectStates.Missing
+                : JsonNode.DeepEquals(Normalize(o), Normalize(now)) ? KubernetesObjectStates.Same : KubernetesObjectStates.Changed;
+            result.Add(new KubernetesComparison((string?)o["apiVersion"] ?? string.Empty, KubernetesObjects.Kind(o), KubernetesObjects.Name(o), KubernetesObjects.App(o), KubernetesObjects.IsControlled(o), state));
+        }
+
+        var keys = stored.Select(KubernetesObjects.Key).ToHashSet(StringComparer.Ordinal);
+        foreach (var (key, o) in current.Where(kv => !keys.Contains(kv.Key)))
+        {
+            result.Add(new KubernetesComparison((string?)o["apiVersion"] ?? string.Empty, KubernetesObjects.Kind(o), KubernetesObjects.Name(o), KubernetesObjects.App(o), KubernetesObjects.IsControlled(o), KubernetesObjectStates.New));
+        }
+
+        return [.. result.OrderBy(c => KubernetesObjects.Rank(c.Kind)).ThenBy(c => c.Kind, StringComparer.Ordinal).ThenBy(c => c.Name, StringComparer.Ordinal)];
+    }
+
+    /// <summary>The object of the restore point with <paramref name="kind"/> and <paramref name="name"/>, shown safely; null when it has none.</summary>
+    public static string? Show(byte[] backup, string kind, string name) =>
+        KubernetesResources.Read(backup).FirstOrDefault(o => KubernetesObjects.Kind(o) == kind && KubernetesObjects.Name(o) == name) is { } o ? Show(o) : null;
+
+    /// <summary>Indented JSON; a Secret's values replaced by their sizes (the keys stay).</summary>
+    public static string Show(JsonObject o)
+    {
+        var copy = (JsonObject)o.DeepClone();
+        (copy["metadata"] as JsonObject)?.Remove("managedFields");
+        if (KubernetesObjects.Kind(copy) == "Secret")
+        {
+            foreach (var field in new[] { "data", "stringData" })
+            {
+                if (copy[field] is JsonObject values)
+                {
+                    foreach (var key in values.Select(kv => kv.Key).ToList())
+                    {
+                        var length = (string?)values[key] is { } text ? (field == "data" ? text.Length * 3 / 4 : text.Length) : 0;
+                        values[key] = $"<hidden, about {length} bytes>";
+                    }
+                }
+            }
+
+            (copy["metadata"]?["annotations"] as JsonObject)?.Remove("kubectl.kubernetes.io/last-applied-configuration");
+        }
+
+        // Shown as text (the console escapes it): readable, without \u003C for "<".
+        return copy.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+    }
+
+    private static bool Comparable(JsonObject o) => KubernetesObjects.Namespace(o) is not null && !KubernetesObjects.IsClusterMade(o);
+
+    private static JsonObject Normalize(JsonObject o)
+    {
+        var ns = KubernetesObjects.Namespace(o) ?? string.Empty;
+        var n = KubernetesObjects.Prepare(o, ns, ns);
+        (n["metadata"]?["annotations"] as JsonObject)?.Remove("deployment.kubernetes.io/revision");
+        if (n["metadata"]?["annotations"] is JsonObject { Count: 0 } emptyAnnotations)
+        {
+            ((JsonObject)n["metadata"]!).Remove("annotations");
+        }
+
+        if (KubernetesObjects.Kind(n) == "PersistentVolumeClaim")
+        {
+            (n["spec"] as JsonObject)?.Remove("volumeName");
+        }
+
+        return n;
+    }
+}

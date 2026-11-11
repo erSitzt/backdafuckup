@@ -11,6 +11,7 @@
         {
             <MudMenuItem Icon="@AppIcons.Kubernetes" Href="@($"/restore-namespace/{_point.Id}")">Namespace, apps or PVCs</MudMenuItem>
             <MudMenuItem Icon="@AppIcons.Files" Href="@($"/files/{_point.Id}")">Files and folders of a PVC</MudMenuItem>
+            <MudMenuItem Icon="@Icons.Material.Filled.CompareArrows" Href="@($"/k8s-objects/{_point.Id}")">Objects: compare and pick</MudMenuItem>
         }
         else if (_point is { } point)
         {

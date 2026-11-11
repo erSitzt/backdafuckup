@@ -178,6 +178,9 @@ public sealed record KubernetesRestoreOptions
     /// </summary>
     public IReadOnlyList<string>? Objects { get; init; }
 
+    /// <summary>Restore <see cref="Objects"/> as they are, without what their workloads need (a selection in the object explorer).</summary>
+    public bool ExactObjects { get; init; }
+
     /// <summary>
     /// With <see cref="OnlyClaims"/>: each PVC replaces the one of its name in the target namespace. The workloads using it are
     /// scaled to 0 for the swap and back afterwards; the PVC's current data is deleted.

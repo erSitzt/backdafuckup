@@ -1,0 +1,253 @@
+@page "/k8s-objects/{Id:guid}"
+@inject ApiClient Api
+@inject NavigationManager Navigation
+
+@* The objects of a namespace's restore point: compared with the live namespace (same, changed, deleted since, made
+   since), each shown as stored and as it is now, and the chosen ones restored exactly as they are. *@
+<PageTitle>Kubernetes objects – backdafuckup</PageTitle>
+<PageHeader Title="@($"Objects of {_details?.Namespace}")" Back="/backups"
+            Description="Compare the restore point with the namespace as it is now, look at single objects, and restore the ones you pick, exactly as they were. Secrets show their keys, never their values.">
+    <Actions>
+        <MudButton Variant="Variant.Outlined" Color="Color.Primary" StartIcon="@Icons.Material.Filled.CompareArrows" Disabled="@(_comparing || _details is null)" OnClick="CompareAsync">
+            Compare with the cluster
+        </MudButton>
+    </Actions>
+</PageHeader>
+
+@if (_error is not null && _details is null)
+{
+    <MudAlert Severity="Severity.Error">@_error</MudAlert>
+}
+else if (_details is null || _point is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <MudPaper Class="pa-2 mb-3" Elevation="0" Outlined="true">
+        <div class="field-toolbar">
+            <MudTextField T="string" @bind-Value="_filter" Placeholder="Filter by name" Variant="Variant.Outlined" Margin="Margin.Dense" Adornment="Adornment.Start"
+                          AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Clearable="true" />
+            <MudSelect T="string" @bind-Value="_kind" Label="Kind" Variant="Variant.Outlined" Margin="Margin.Dense" Clearable="true">
+                @foreach (var kind in Rows().Select(r => r.Kind).Distinct().Order(StringComparer.Ordinal))
+                {
+                    <MudSelectItem T="string" Value="@kind">@kind</MudSelectItem>
+                }
+            </MudSelect>
+            <div class="field-toolbar-end">
+                @if (_comparison is not null)
+                {
+                    <span class="cell-sub">compared @Fmt.Time(_comparison.ComparedUtc)</span>
+                }
+                <span class="mini-chip @(_selected.Count > 0 ? "success" : null)">@_selected.Count selected</span>
+            </div>
+        </div>
+        @if (_comparison is not null)
+        {
+            <div class="mt-2">
+                <MudToggleGroup T="string" @bind-Value="_state" SelectionMode="SelectionMode.SingleSelection" Size="Size.Small" Outlined="true" Color="Color.Primary" CheckMark="false" Style="width: fit-content">
+                    <MudToggleItem T="string" Value="@("")" Text="@($"All {Rows().Count}")" />
+                    <MudToggleItem T="string" Value="@("changed")" Text="@($"Changed {Count("changed")}")" />
+                    <MudToggleItem T="string" Value="@("missing")" Text="@($"Deleted since {Count("missing")}")" />
+                    <MudToggleItem T="string" Value="@("new")" Text="@($"New since {Count("new")}")" />
+                    <MudToggleItem T="string" Value="@("same")" Text="@($"Same {Count("same")}")" />
+                </MudToggleGroup>
+            </div>
+        }
+        @if (_comparing)
+        {
+            <MudProgressLinear Indeterminate="true" Class="mt-2" />
+        }
+    </MudPaper>
+
+    @if (_error is not null)
+    {
+        <MudAlert Severity="Severity.Error" Dense="true" Class="mb-3">@_error</MudAlert>
+    }
+
+    <MudPaper Elevation="0" Outlined="true" Class="mb-3">
+        <div class="table-box" style="max-height: 60vh">
+            <MudSimpleTable Dense="true" Hover="true" Elevation="0" FixedHeader="true">
+                <thead><tr><th style="width:48px"></th><th>Kind</th><th>Name</th><th class="c-760">App</th><th>State</th></tr></thead>
+                <tbody>
+                    @foreach (var row in Visible())
+                    {
+                        var key = $"{row.Kind}/{row.Name}";
+                        var selectable = row.State != "new" && !row.Controlled;
+                        <tr class="@(_selected.Contains(key) ? "row-selected" : null)">
+                            <td><MudCheckBox T="bool" Value="@_selected.Contains(key)" ValueChanged="@(on => Toggle(key, on))" Dense="true" Color="Color.Primary" Disabled="@(!selectable)" /></td>
+                            <td class="nowrap">@row.Kind</td>
+                            <td>
+                                <a class="cursor-pointer" @onclick="@(() => ShowAsync(row.Kind, row.Name, row.State))"><b>@row.Name</b></a>
+                                @if (row.Controlled)
+                                {
+                                    <span class="cell-sub">made by its controller</span>
+                                }
+                            </td>
+                            <td class="c-760">@row.App</td>
+                            <td>
+                                @switch (row.State)
+                                {
+                                    case "same": <span class="mini-chip">same</span> break;
+                                    case "changed": <span class="mini-chip warning">changed</span> break;
+                                    case "missing": <span class="mini-chip info">deleted since</span> break;
+                                    case "new": <span class="mini-chip" title="Only in the cluster: made after the backup">new since</span> break;
+                                    default: <span class="cell-sub">not compared</span> break;
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </MudSimpleTable>
+        </div>
+    </MudPaper>
+
+    @if (_shown is not null)
+    {
+        <MudPaper Class="pa-3 mb-3" Elevation="0" Outlined="true">
+            <div class="d-flex align-center gap-2 mb-2">
+                <MudText Typo="Typo.subtitle1" Class="section-title">@_shown.Kind @_shown.Name</MudText>
+                <MudSpacer />
+                <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Close" aria-label="Close" OnClick="@(() => _shown = null)" />
+            </div>
+            <div class="field-grid" style="grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)">
+                <div>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">In the restore point (@Fmt.Time(_point.CreatedUtc))</MudText>
+                    <pre class="mono" style="max-height: 420px; overflow: auto; background: var(--mud-palette-background-gray); padding: 10px; border-radius: 8px; margin: 0">@(_shown.Backup ?? "– not in the restore point –")</pre>
+                </div>
+                <div>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">In the cluster now</MudText>
+                    <pre class="mono" style="max-height: 420px; overflow: auto; background: var(--mud-palette-background-gray); padding: 10px; border-radius: 8px; margin: 0">@(_shown.Live ?? "– not in the cluster –")</pre>
+                </div>
+            </div>
+        </MudPaper>
+    }
+
+    <MudPaper Class="pa-3" Elevation="0" Outlined="true">
+        <div class="d-flex align-center flex-wrap gap-3">
+            <MudSwitch T="bool" @bind-Value="_replace" Color="Color.Primary" Label="Replace objects that exist with their state in the restore point" />
+            <MudSpacer />
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" Disabled="@(_busy || _selected.Count == 0)" OnClick="RestoreAsync">
+                Restore @_selected.Count object(s)
+            </MudButton>
+        </div>
+        <MudText Typo="Typo.caption" Class="help-text">
+            The selected objects come back exactly as chosen, into @_details.Namespace; PVCs with data only when they do not exist (otherwise use the restore of single PVCs).
+            To bring a workload with everything it needs, use the namespace restore and its apps and workloads.
+        </MudText>
+    </MudPaper>
+}
+
+@code {
+    [Parameter] public Guid Id { get; set; }
+
+    private RestorePointDto? _point;
+    private KubernetesRestorePointDto? _details;
+    private KubernetesComparisonDto? _comparison;
+    private KubernetesObjectDetailDto? _shown;
+    private readonly HashSet<string> _selected = [];
+    private string _filter = string.Empty;
+    private string? _kind;
+    private string _state = string.Empty;
+    private bool _replace;
+    private bool _comparing;
+    private bool _busy;
+    private string? _error;
+
+    private sealed record Row(string Kind, string Name, string? App, bool Controlled, string? State);
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _details = await Api.GetAsync<KubernetesRestorePointDto>($"api/restore-points/{Id}/kubernetes");
+            _point = await Api.GetAsync<RestorePointDto>($"api/restore-points/{Id}");
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    /// <summary>The objects: from the comparison once there is one (with those made since), else from the restore point.</summary>
+    private List<Row> Rows() => _comparison is not null
+        ? [.. _comparison.Objects.Select(o => new Row(o.Kind, o.Name, o.App, o.Controlled, o.State))]
+        : [.. _details!.Objects.Where(o => o.Namespace is not null).Select(o => new Row(o.Kind, o.Name, o.App, o.Controlled, null))];
+
+    private IEnumerable<Row> Visible() => Rows()
+        .Where(r => string.IsNullOrEmpty(_kind) || r.Kind == _kind)
+        .Where(r => string.IsNullOrEmpty(_state) || r.State == _state)
+        .Where(r => string.IsNullOrWhiteSpace(_filter) || r.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase));
+
+    private int Count(string state) => Rows().Count(r => r.State == state);
+
+    private void Toggle(string key, bool on)
+    {
+        if (on)
+        {
+            _selected.Add(key);
+        }
+        else
+        {
+            _selected.Remove(key);
+        }
+    }
+
+    private async Task CompareAsync()
+    {
+        _comparing = true;
+        _error = null;
+        try
+        {
+            _comparison = await Api.GetAsync<KubernetesComparisonDto>($"api/restore-points/{Id}/kubernetes/compare");
+            _state = Count("changed") + Count("missing") > 0 ? string.Empty : _state;
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _comparing = false;
+        }
+    }
+
+    private async Task ShowAsync(string kind, string name, string? state)
+    {
+        _error = null;
+        try
+        {
+            _shown = await Api.GetAsync<KubernetesObjectDetailDto>(
+                $"api/restore-points/{Id}/kubernetes/object?kind={Uri.EscapeDataString(kind)}&name={Uri.EscapeDataString(name)}&live={(state != "missing" ? "true" : "false")}");
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task RestoreAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>("api/restores", new RestoreRequestDto
+            {
+                RestorePointId = Id,
+                TargetConnectionId = _point!.ConnectionId,
+                Mode = RestoreModeDto.OriginalLocation,
+                Kubernetes = new KubernetesRestoreDto { Objects = [.. _selected], ExactObjects = true, ReplaceExisting = _replace },
+            });
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

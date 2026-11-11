@@ -10,9 +10,15 @@ namespace Backdafuckup.Kubernetes;
 /// An open connection to a cluster: inventory, backups of namespaces, and the cleanup of leftover objects. Restores follow
 /// (spec 2026-11-11-1343-kubernetes-workload-backup, task 8).
 /// </summary>
+/// <summary>Reads a namespace of the live cluster the way a backup stores it (for comparing it with a restore point).</summary>
+public interface IKubernetesNamespaceReader
+{
+    Task<IReadOnlyList<System.Text.Json.Nodes.JsonObject>> ReadObjectsAsync(string ns, CancellationToken cancellationToken);
+}
+
 internal sealed class KubernetesSession(
     IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
-    : IHypervisorSession
+    : IHypervisorSession, IKubernetesNamespaceReader
 {
     private PlatformInfo? _platform;
 
@@ -49,6 +55,14 @@ internal sealed class KubernetesSession(
         return await KubernetesNamespaceBackup.StartAsync(
             client, settings, _platform.ProductVersion, request, log, ledger, channels, images, executor ?? new ClientPodExecutor(client), timings ?? new KubernetesTimings(), cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<System.Text.Json.Nodes.JsonObject>> ReadObjectsAsync(string ns, CancellationToken cancellationToken)
+    {
+        var flow = new VolumeSnapshotFlow(client, settings.Address, NullOperationLog.Instance, new InMemoryArtifactLedger(), new KubernetesTimings());
+        var volumes = await flow.CallAsync($"listing the PVCs of {ns}", () => KubernetesInventory.VolumesAsync(client, ns, cancellationToken)).ConfigureAwait(false);
+        var collected = await KubernetesResources.CollectAsync(client, settings.Address, ns, volumes, NullOperationLog.Instance, cancellationToken).ConfigureAwait(false);
+        return [.. KubernetesResources.Read(collected.Content)];
     }
 
     /// <summary>Restores a namespace's restore point (its objects and volumes) into this cluster.</summary>

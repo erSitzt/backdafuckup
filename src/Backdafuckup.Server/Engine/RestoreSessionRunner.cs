@@ -92,6 +92,7 @@ public sealed class RestoreSessionRunner(
                         OnlyClaims = request.Kubernetes?.OnlyClaims,
                         ReplaceClaims = request.Kubernetes?.ReplaceClaims == true,
                         Objects = request.Kubernetes?.Objects,
+                        ExactObjects = request.Kubernetes?.ExactObjects == true,
                         ClaimNames = request.Kubernetes?.ClaimNames ?? [],
                     }
                     : null,

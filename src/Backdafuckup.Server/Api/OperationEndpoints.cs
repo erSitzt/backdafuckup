@@ -186,6 +186,29 @@ public static class OperationEndpoints
             await queue.RequestStopAsync(id, ct) ? Results.NoContent() : Results.Problem("The session is not running.", statusCode: StatusCodes.Status409Conflict));
     }
 
+    /// <summary>A namespace's restore point: the entity, its Kubernetes descriptor and its objects; or the problem why not.</summary>
+    private static async Task<(RestorePointEntity? Point, KubernetesNamespaceDescriptor? Space, byte[]? Content, IResult? Problem)> NamespaceAsync(
+        Guid id, AppDbContext db, RepositoryManager repositories, CancellationToken ct)
+    {
+        var point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == id && r.State == RestorePointState.Available, ct);
+        if (point is null)
+        {
+            return (null, null, null, Results.Problem("The restore point does not exist or is not available.", statusCode: StatusCodes.Status404NotFound));
+        }
+
+        var repository = await repositories.GetAsync(point.RepositoryId, ct);
+        await using var reader = await repository.OpenRestorePointAsync(id, ct);
+        if (reader.Manifest is not { Kubernetes: { } space, Metadata: { } metadata })
+        {
+            return (point, null, null, Results.Problem("The restore point is not one of a Kubernetes namespace.", statusCode: StatusCodes.Status400BadRequest));
+        }
+
+        await using var blob = await reader.OpenBlobAsync(metadata, ct);
+        using var memory = new MemoryStream();
+        await blob.CopyToAsync(memory, ct);
+        return (point, space, memory.ToArray(), null);
+    }
+
     private static void MapRestorePoints(RouteGroupBuilder points)
     {
         points.MapGet("/{id:guid}/kubernetes", async (Guid id, AppDbContext db, RepositoryManager repositories, CancellationToken ct) =>
@@ -219,6 +242,60 @@ public static class OperationEndpoints
                 [.. Backdafuckup.Kubernetes.KubernetesRestorePoints.Objects(content).Select(o => new KubernetesObjectDto(o.ApiVersion, o.Kind, o.Name, o.Namespace, o.Controlled, o.App, o.Needs))],
                 [.. space.Hooks.Select(h => new KubernetesHookDto(h.Phase, h.Pod, h.Container, h.Command, h.ExitCode, h.Error, h.Seconds))]));
         }).WithDescription("A restore point of a Kubernetes namespace: its volumes (with or without data), its objects (with their app and, for workloads, what a restore of them brings along) and its hooks.");
+
+        points.MapGet("/{id:guid}/kubernetes/compare", async (Guid id, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, TimeProvider time, CancellationToken ct) =>
+        {
+            var (point, space, content, problem) = await NamespaceAsync(id, db, repositories, ct);
+            if (problem is not null)
+            {
+                return problem;
+            }
+
+            if (point!.ConnectionId is not { } cluster)
+            {
+                return Results.Problem("The cluster of this restore point is no longer connected.", statusCode: StatusCodes.Status409Conflict);
+            }
+
+            try
+            {
+                await using var session = await connections.OpenAsync(cluster, ct);
+                var live = await ((Backdafuckup.Kubernetes.IKubernetesNamespaceReader)session).ReadObjectsAsync(space!.Namespace, ct);
+                return Results.Ok(new KubernetesComparisonDto(space.Namespace, time.GetUtcNow(),
+                    [.. Backdafuckup.Kubernetes.KubernetesCompare.Compare(content!, live).Select(c => new KubernetesObjectStateDto(c.ApiVersion, c.Kind, c.Name, c.App, c.Controlled, c.State))]));
+            }
+            catch (Exception ex) when (ex is Backdafuckup.Kubernetes.KubernetesOperationException or HttpRequestException or k8s.Autorest.HttpOperationException)
+            {
+                return Results.Problem($"The namespace {space!.Namespace} could not be read in its cluster: {ex.Message}", statusCode: StatusCodes.Status502BadGateway);
+            }
+        }).WithDescription("Compares the objects of a namespace's restore point with the live namespace: same, changed, missing (deleted since) or new (made since).");
+
+        points.MapGet("/{id:guid}/kubernetes/object", async (Guid id, string kind, string name, bool? live, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, CancellationToken ct) =>
+        {
+            var (point, space, content, problem) = await NamespaceAsync(id, db, repositories, ct);
+            if (problem is not null)
+            {
+                return problem;
+            }
+
+            string? current = null;
+            if (live == true && point!.ConnectionId is { } cluster)
+            {
+                try
+                {
+                    await using var session = await connections.OpenAsync(cluster, ct);
+                    var objects = await ((Backdafuckup.Kubernetes.IKubernetesNamespaceReader)session).ReadObjectsAsync(space!.Namespace, ct);
+                    current = objects.FirstOrDefault(o => (string?)o["kind"] == kind && (string?)o["metadata"]?["name"] == name) is { } found
+                        ? Backdafuckup.Kubernetes.KubernetesCompare.Show(found)
+                        : null;
+                }
+                catch (Exception ex) when (ex is Backdafuckup.Kubernetes.KubernetesOperationException or HttpRequestException or k8s.Autorest.HttpOperationException)
+                {
+                    current = $"(the cluster could not be read: {ex.Message})";
+                }
+            }
+
+            return Results.Ok(new KubernetesObjectDetailDto(kind, name, Backdafuckup.Kubernetes.KubernetesCompare.Show(content!, kind, name), current));
+        }).WithDescription("An object of a namespace's restore point as stored and (live=true) as the cluster has it now; Secrets show their keys, never their values.");
 
         points.MapGet("/", async (AppDbContext db, Guid? jobId, string? vmId, CancellationToken ct) =>
         {

@@ -64,6 +64,9 @@ public sealed record KubernetesRestoreDto
     /// <summary>Only these objects (<c>Kind/name</c>) and what they need (ConfigMaps, Secrets, PVCs, Services …). Null: the whole namespace.</summary>
     public List<string>? Objects { get; init; }
 
+    /// <summary>Restore <see cref="Objects"/> exactly, without what their workloads need.</summary>
+    public bool ExactObjects { get; init; }
+
     public Dictionary<string, string> ClaimNames { get; init; } = [];
 }
 
@@ -85,3 +88,12 @@ public sealed record KubernetesVolumeDto(string Claim, string DataPath, string? 
 public sealed record KubernetesObjectDto(string ApiVersion, string Kind, string Name, string? Namespace, bool Controlled, string? App = null, IReadOnlyList<string>? Needs = null);
 
 public sealed record KubernetesHookDto(string Phase, string Pod, string Container, string Command, int? ExitCode, string? Error, double Seconds);
+
+/// <summary>A restore point of a namespace compared with its live namespace.</summary>
+public sealed record KubernetesComparisonDto(string Namespace, DateTimeOffset ComparedUtc, IReadOnlyList<KubernetesObjectStateDto> Objects);
+
+/// <param name="State"><c>same</c>, <c>changed</c>, <c>missing</c> (only in the restore point) or <c>new</c> (only in the cluster).</param>
+public sealed record KubernetesObjectStateDto(string ApiVersion, string Kind, string Name, string? App, bool Controlled, string State);
+
+/// <summary>An object as the restore point has it and as the cluster has it now (Secrets without their values).</summary>
+public sealed record KubernetesObjectDetailDto(string Kind, string Name, string? Backup, string? Live);
