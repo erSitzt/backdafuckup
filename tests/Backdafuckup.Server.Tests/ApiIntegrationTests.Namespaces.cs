@@ -190,18 +190,14 @@ public sealed partial class ApiIntegrationTests
         var (copy, copyLog) = await RestoreAsync(new KubernetesRestoreDto { TargetNamespace = "bdfu-spike-copy" });
         Assert.True(copy.Session.State == "Succeeded", copyLog);
         Assert.NotNull(_cluster.Find("namespaces", null, "bdfu-spike-copy"));
+        // The PVC is made from a snapshot of the restored volume (an ordinary volume of the driver); the snapshots are gone.
         var restoredClaim = _cluster.Find("persistentvolumeclaims", "bdfu-spike-copy", "data-redis-test-0")!;
-        var pvName = (string)restoredClaim["spec"]!["volumeName"]!;
-        var pv = _cluster.Find("persistentvolumes", null, pvName)!;
+        Assert.Equal(("VolumeSnapshot", "snapshot.storage.k8s.io"), ((string?)restoredClaim["spec"]!["dataSource"]!["kind"], (string?)restoredClaim["spec"]!["dataSource"]!["apiGroup"]));
+        Assert.Null(restoredClaim["spec"]!["volumeName"]);
         var device1 = Assert.Single(restoredDevices);
-        Assert.Equal(
-            ("csi.vsphere.vmware.com", $"fcd-{Path.GetFileNameWithoutExtension(device1)}", "Filesystem", "bdfu-spike-copy", "data-redis-test-0", "csi.vsphere.vmware.com"),
-            ((string?)pv["spec"]!["csi"]!["driver"], (string?)pv["spec"]!["csi"]!["volumeHandle"], (string?)pv["spec"]!["volumeMode"],
-             (string?)pv["spec"]!["claimRef"]!["namespace"], (string?)pv["spec"]!["claimRef"]!["name"], (string?)pv["metadata"]!["annotations"]!["pv.kubernetes.io/provisioned-by"]));
-        Assert.Null(restoredClaim["spec"]!["dataSource"]);
+        Assert.Contains($"PVC bdfu-spike-copy/data-redis-test-0: created from the snapshot of its restored volume", copyLog, StringComparison.Ordinal);
         Assert.NotNull(_cluster.Find("configmaps", "bdfu-spike-copy", "redis-config"));
         Assert.NotNull(_cluster.Find("pods", "bdfu-spike-copy", "redis-test-0"));
-        Assert.Null(_cluster.Find("persistentvolumes", null, $"pv-{Path.GetFileNameWithoutExtension(device1)}")); // the work PV object is gone, its volume kept
         var written = await File.ReadAllBytesAsync(device1, Ct);
         Assert.Equal(volume, written[..volume.Length]);
         Assert.Contains("Volume data-redis-test-0: restored", copyLog, StringComparison.Ordinal);
