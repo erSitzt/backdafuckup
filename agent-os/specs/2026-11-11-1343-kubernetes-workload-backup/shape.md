@@ -68,6 +68,24 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
 - **Library:** the official C# client `KubernetesClient` 18.0.13 (Kubernetes 1.34 models, within the client's supported skew to our 1.32 clusters).
   - Apache-2.0; its dependencies Fractions and YamlDotNet are MIT.
   - The API server certificate is pinned through `FirstMessageHandlerSetup`.
+- **Mover image pushed from the console** (user decision 2026-11-11):
+  - The build makes the mover image with the .NET SDK's container support (`PublishContainer` to an archive, no Docker) and ships it with the server, as the agent package.
+  - The console pushes it to the user's registry over the OCI distribution API, with registry credentials stored like the others.
+  - Pods use it by digest, so the mover always matches the server. Where the registry needs a login to pull, the product creates a pull secret in `backdafuckup-system`.
+  - The agent image (agent path) goes the same way.
+  - **Pull secret:** our clusters pull from the internal registry with credentials. In QA, 123 of 124 pods with its images carry the pull secrets the platform team distributes, so the mover needs one too:
+    - by default the product creates its own pull secret in `backdafuckup-system` from the stored registry credentials (the work namespace's role may create secrets there);
+    - alternatively the user names an existing secret there, e.g. one a reflector copies in.
+- **Mover and data channel as built (task 6, 2026-11-11):**
+  - **Wire format** (`MoverStream`): a header with the size, records of non-zero regions (offset, length, data; at most 16 MiB) in increasing order, heartbeats while the mover reads zeros, and an end with the total, so a cut stream is detected.
+  - **Endpoints:** `/api/agent/movers/{id}/data` (PUT backup, GET restore) and `/result`, with a one-time bearer token per volume and run. The URL and the SPKI pins are those of the guest agents (Guest agents → Settings). With a certificate of the user's own CA, `Agent:ServerPins` gives the pins, because the chiseled image does not trust internal CAs.
+  - **Waiting:** a channel waits up to 4 hours for its mover, because the mover's volume is a full copy of the snapshot. A watcher fails it at once when the pod cannot pull its image or fails, with the reason and the end of the pod's log.
+  - **The mover:**
+    - It reads exactly the snapshot's size (`BDFU_MOVER_BYTES`), because the new volume may be rounded up.
+    - It skips zero blocks at 64 KiB.
+    - It runs as root (block devices belong to root), but without capabilities and privilege escalation, with a read-only root file system. So the work namespace carries `pod-security.kubernetes.io/enforce: baseline`.
+  - **Pull secret:** created as `backdafuckup-registry` from an optional read-only pull user (else the push user), or an existing secret, or none. The push is skipped when the registry already has the image (by digest); a backup pushes a newer image itself after a server update.
+  - **Tags:** the image tag is `<version>-<digest prefix>`, so registries that forbid redeploying a tag (Nexus "Disable redeploy") accept every build.
 - **Agent path as a TCP tunnel:** exec (hooks) runs over the client's own WebSocket, which bypasses HTTP message handlers, so relaying HTTP requests is not enough.
   - The agent keeps a WebSocket to the server and carries TCP connections to the API server, as Rancher's remotedialer does.
   - The server gives each agent cluster a local port, so the same client code (HTTP, watch, exec, TLS and pinning) works unchanged on both paths.

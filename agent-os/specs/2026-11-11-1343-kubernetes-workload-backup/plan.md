@@ -156,7 +156,8 @@ Spec folder: `agent-os/specs/2026-11-11-1343-kubernetes-workload-backup/`
    - Direct path (token, pin) and agent path (Linux agent image, enrollment, tunnel).
    - RBAC/Fleet generator, inventory, connection health and metrics, connection pages in the chosen UI variant.
 6. **Mover and data channel:**
-   - Mover image (Linux, minimal .NET).
+   - Mover image (Linux, minimal .NET), built as an image archive by the .NET SDK (`PublishContainer`) and shipped with the server.
+   - The console pushes it to the user's registry (OCI distribution API, stored registry credentials); pods use it by digest, with a pull secret in `backdafuckup-system` where needed.
    - Push (backup) and pull (restore) with one-time tokens; server receiver into the pipeline and `IDiskWriter`.
    - Ledger records for VS, VSC, PVC and pod; cleanup at startup and after failures.
 7. **Backup of namespaces:**

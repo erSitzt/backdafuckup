@@ -1,0 +1,215 @@
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+
+@* The registry of the mover image: the server pushes the image it ships there, and the pods of each cluster pull it by
+   digest. A backup pushes a newer image itself (after a server update); this panel sets the registry and pushes now. *@
+<MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
+    <div class="d-flex align-center gap-2 mb-1">
+        <MudText Typo="Typo.subtitle1" Class="section-title">Mover image</MudText>
+        @if (_image is not null)
+        {
+            @if (_image.UpToDate)
+            {
+                <span class="mini-chip success">in the registry</span>
+            }
+            else if (_image.Pushed is not null)
+            {
+                <span class="mini-chip warning">newer image to push</span>
+            }
+            else
+            {
+                <span class="mini-chip warning">not pushed yet</span>
+            }
+        }
+        <MudSpacer />
+        <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Close" aria-label="Close" OnClick="OnClose" />
+    </div>
+    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-3">
+        A small Linux container that runs next to each volume during a backup or restore and moves its data to or from this server. The server pushes the image it
+        ships to your registry and the pods pull it from there, referenced by its digest. A backup pushes a newer image itself after a server update.
+    </MudText>
+
+    @if (_image is null)
+    {
+        <MudProgressLinear Indeterminate="true" />
+    }
+    else
+    {
+        <div class="d-flex flex-wrap gap-6 mb-3">
+            <div>
+                <MudText Typo="Typo.caption" Color="Color.Secondary">Shipped with this server</MudText>
+                @if (_image.Shipped is { } shipped)
+                {
+                    <MudText Typo="Typo.body2">@shipped.Version · @Fmt.Bytes(shipped.SizeBytes)</MudText>
+                    <MudText Typo="Typo.caption" Class="mono" title="@shipped.Digest">@Short(shipped.Digest)</MudText>
+                }
+                else
+                {
+                    <MudText Typo="Typo.body2" Color="Color.Error">@_image.ShippedProblem</MudText>
+                }
+            </div>
+            <div>
+                <MudText Typo="Typo.caption" Color="Color.Secondary">Last pushed</MudText>
+                @if (_image.Pushed is { } pushed)
+                {
+                    <MudText Typo="Typo.body2">@pushed.Version · @Fmt.Time(pushed.PushedUtc)</MudText>
+                    <MudText Typo="Typo.caption" Class="mono" title="@pushed.Reference">@pushed.Reference.Split('@')[0]:@pushed.Tag</MudText>
+                }
+                else
+                {
+                    <MudText Typo="Typo.body2">–</MudText>
+                }
+            </div>
+        </div>
+
+        <div class="form-wide">
+            <div class="field-grid" style="grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)">
+                <MudTextField @bind-Value="_registry" Label="Registry" Variant="Variant.Outlined" Placeholder="registry.corp.example:8443"
+                              HelperText="Host name and port of the registry's API, without https:// (Nexus: the Docker connector of a hosted repository)." />
+                <MudTextField @bind-Value="_repository" Label="Repository" Variant="Variant.Outlined" HelperText="Path of the image in the registry." />
+                <MudTextField @bind-Value="_userName" Label="Push user" Variant="Variant.Outlined" HelperText="May push to the repository." />
+                <MudTextField @bind-Value="_password" Label="Password" InputType="InputType.Password" Variant="Variant.Outlined"
+                              Placeholder="@(_image.HasPassword ? "stored – leave empty to keep it" : null)" />
+                <MudTextField @bind-Value="_userAgent" Label="User-Agent" Variant="Variant.Outlined" Placeholder="@_image.DefaultUserAgent" Style="grid-column: 1 / -1"
+                              HelperText="Sent to the registry. Empty: the default, which starts like the Docker client's, as proxies in front of registries often let only Docker clients through." />
+            </div>
+
+            <MudText Typo="Typo.body2" Class="mt-4 mb-1"><b>Pull secret</b> of the mover pods in backdafuckup-system</MudText>
+            <div class="radio-stack">
+                <MudRadioGroup T="string" @bind-Value="_pullSecret">
+                    <MudRadio T="string" Value="@MoverPullSecretModes.Create" Color="Color.Primary">backdafuckup creates it (backdafuckup-registry)</MudRadio>
+                    <MudRadio T="string" Value="@MoverPullSecretModes.Existing" Color="Color.Primary">An existing secret</MudRadio>
+                    <MudRadio T="string" Value="@MoverPullSecretModes.None" Color="Color.Primary">None (anonymous pulls, or the nodes have credentials)</MudRadio>
+                </MudRadioGroup>
+            </div>
+            @if (_pullSecret == MoverPullSecretModes.Create)
+            {
+                <div class="field-grid mt-2" style="grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)">
+                    <MudTextField @bind-Value="_pullUserName" Label="Pull user (optional)" Variant="Variant.Outlined"
+                                  HelperText="A read-only user for the cluster. Empty: the push user's credentials go into the secret." />
+                    <MudTextField @bind-Value="_pullPassword" Label="Pull password" InputType="InputType.Password" Variant="Variant.Outlined"
+                                  Placeholder="@(_image.HasPullPassword ? "stored – leave empty to keep it" : null)" Disabled="@string.IsNullOrWhiteSpace(_pullUserName)" />
+                </div>
+            }
+            else if (_pullSecret == MoverPullSecretModes.Existing)
+            {
+                <MudTextField @bind-Value="_existingSecret" Label="Secret name" Variant="Variant.Outlined" Class="mt-2" Style="max-width: 420px"
+                              HelperText="A docker-registry secret in backdafuckup-system that may pull from this registry." />
+            }
+        </div>
+
+        @if (_error is not null)
+        {
+            <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">@_error</MudAlert>
+        }
+
+        @if (_log is { Count: > 0 })
+        {
+            <pre class="mono mt-3" style="background: var(--mud-palette-background-gray); padding: 8px 12px; border-radius: 8px; margin: 0; white-space: pre-wrap">@string.Join("\n", _log)</pre>
+        }
+
+        <div class="d-flex gap-2 mt-4">
+            <MudSpacer />
+            <MudButton Variant="Variant.Outlined" Disabled="@(_busy || string.IsNullOrWhiteSpace(_registry))" OnClick="@(() => SaveAsync(push: false))">Save</MudButton>
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.CloudUpload"
+                       Disabled="@(_busy || string.IsNullOrWhiteSpace(_registry) || _image.Shipped is null)" OnClick="@(() => SaveAsync(push: true))">Save and push</MudButton>
+        </div>
+        @if (_busy)
+        {
+            <MudProgressLinear Indeterminate="true" Class="mt-2" />
+        }
+    }
+</MudPaper>
+
+@code {
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    /// <summary>After a save or push, with the image's state (for the page's notice).</summary>
+    [Parameter] public EventCallback<MoverImageDto> OnChanged { get; set; }
+
+    private MoverImageDto? _image;
+    private string _registry = string.Empty;
+    private string _repository = string.Empty;
+    private string? _userName;
+    private string? _password;
+    private string _pullSecret = MoverPullSecretModes.Create;
+    private string? _pullUserName;
+    private string? _pullPassword;
+    private string? _existingSecret;
+    private string? _userAgent;
+    private bool _busy;
+    private string? _error;
+    private IReadOnlyList<string>? _log;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            Show(await Api.GetAsync<MoverImageDto>("api/kubernetes/mover"));
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private void Show(MoverImageDto image)
+    {
+        _image = image;
+        _registry = image.Registry;
+        _repository = image.Repository;
+        _userName = image.UserName;
+        _pullSecret = image.PullSecret;
+        _pullUserName = image.PullUserName;
+        _existingSecret = image.ExistingSecret;
+        _userAgent = image.UserAgent;
+        _password = null;
+        _pullPassword = null;
+    }
+
+    private async Task SaveAsync(bool push)
+    {
+        _busy = true;
+        _error = null;
+        _log = null;
+        try
+        {
+            // An empty password field keeps the stored password (null); there is no way to clear it here but a new value.
+            await Api.PutAsync("api/kubernetes/mover", new SaveMoverImageDto(
+                _registry, _repository, _userName, string.IsNullOrEmpty(_password) ? null : _password,
+                _pullSecret, _pullUserName, string.IsNullOrEmpty(_pullPassword) ? null : _pullPassword, _existingSecret, _userAgent ?? string.Empty));
+            if (push)
+            {
+                var result = await Api.PostAsync<MoverPushResultDto>("api/kubernetes/mover/push");
+                _log = result.Log;
+                Show(result.Image);
+                Snackbar.Add("Mover image pushed.", Severity.Success);
+            }
+            else
+            {
+                Show(await Api.GetAsync<MoverImageDto>("api/kubernetes/mover"));
+                Snackbar.Add("Mover image settings saved.", Severity.Success);
+            }
+
+            await OnChanged.InvokeAsync(_image!);
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+            try
+            {
+                _image = await Api.GetAsync<MoverImageDto>("api/kubernetes/mover");
+            }
+            catch (ApiException)
+            {
+                // The error above says enough.
+            }
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private static string Short(string digest) => digest.Length > 19 ? digest[..19] + "…" : digest;
+}

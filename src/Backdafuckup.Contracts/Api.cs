@@ -493,3 +493,78 @@ public static class GuestFailurePolicies
 
 /// <summary>Result of "Test VSS": prepare, freeze and thaw in the guest without a VM snapshot.</summary>
 public sealed record AgentTestResultDto(bool Ok, string Message, IReadOnlyList<string> Log);
+
+/// <summary>How the mover pods get their pull secret in the cluster's work namespace.</summary>
+public static class MoverPullSecretModes
+{
+    /// <summary>The server creates <c>backdafuckup-registry</c> from the pull credentials (or the push credentials).</summary>
+    public const string Create = "Create";
+
+    /// <summary>A secret the cluster already has, named in <see cref="MoverImageDto.ExistingSecret"/>.</summary>
+    public const string Existing = "Existing";
+
+    /// <summary>No pull secret: the registry allows anonymous pulls, or the nodes have credentials.</summary>
+    public const string None = "None";
+}
+
+/// <summary>
+/// The mover image: the registry the server pushes it to (secrets are never returned), the image the server ships and
+/// the one last pushed. Pods reference the pushed image by digest.
+/// </summary>
+public sealed record MoverImageDto
+{
+    /// <summary>Host name and port of the registry's API, e.g. <c>registry.corp.example:8443</c>; empty until set.</summary>
+    public string Registry { get; init; } = string.Empty;
+
+    public string Repository { get; init; } = "backdafuckup/mover";
+
+    public string? UserName { get; init; }
+
+    public bool HasPassword { get; init; }
+
+    public string PullSecret { get; init; } = MoverPullSecretModes.Create;
+
+    /// <summary>A read-only user for the pull secret; empty: the push user.</summary>
+    public string? PullUserName { get; init; }
+
+    public bool HasPullPassword { get; init; }
+
+    public string? ExistingSecret { get; init; }
+
+    /// <summary>The User-Agent the server sends to the registry; null: <see cref="DefaultUserAgent"/>.</summary>
+    public string? UserAgent { get; init; }
+
+    /// <summary>
+    /// Starts like the Docker client's (<c>docker/…</c>), because proxies in front of registries often pass Docker clients only.
+    /// </summary>
+    public string DefaultUserAgent { get; init; } = string.Empty;
+
+    /// <summary>The image this server version ships; null when it has none (see <see cref="ShippedProblem"/>).</summary>
+    public MoverImageBuildDto? Shipped { get; init; }
+
+    public string? ShippedProblem { get; init; }
+
+    public MoverImagePushDto? Pushed { get; init; }
+
+    /// <summary>The pushed image is the shipped one, in the registry and repository set now.</summary>
+    public bool UpToDate { get; init; }
+}
+
+public sealed record MoverImageBuildDto(string Version, string Digest, string Tag, long SizeBytes);
+
+public sealed record MoverImagePushDto(string Reference, string Tag, string Digest, string Version, DateTimeOffset PushedUtc);
+
+/// <summary>Saves the registry settings; a null password keeps the stored one, an empty one removes it. An empty User-Agent uses the default.</summary>
+public sealed record SaveMoverImageDto(
+    string Registry,
+    string Repository,
+    string? UserName,
+    string? Password,
+    string PullSecret,
+    string? PullUserName,
+    string? PullPassword,
+    string? ExistingSecret,
+    string? UserAgent = null);
+
+/// <summary>The result of a push: the image as it is now, and a line per step.</summary>
+public sealed record MoverPushResultDto(MoverImageDto Image, IReadOnlyList<string> Log);

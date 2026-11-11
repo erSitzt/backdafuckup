@@ -33,8 +33,16 @@ internal sealed class KubernetesSession(IKubernetes client, ConnectionSettings s
     public Task<IVmRestoreSession> BeginRestoreAsync(VmRestorePlan plan, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken) =>
         throw new NotSupportedException($"Restoring into a Kubernetes cluster is not available yet (cluster {settings.Address}).");
 
-    public Task CleanupArtifactAsync(ProviderArtifact artifact, IOperationLog log, CancellationToken cancellationToken) =>
-        throw new NotSupportedException($"The cluster {settings.Address} has no artifacts of backdafuckup yet ({artifact.Kind} {artifact.NativeId}).");
+    /// <summary>Deletes a leftover object of a backup or restore (the ledger's id: <c>namespace/name</c>, or <c>name</c> when cluster-scoped).</summary>
+    public async Task CleanupArtifactAsync(ProviderArtifact artifact, IOperationLog log, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(artifact);
+        var slash = artifact.NativeId.IndexOf('/', StringComparison.Ordinal);
+        var (ns, name) = slash < 0 ? ((string?)null, artifact.NativeId) : (artifact.NativeId[..slash], artifact.NativeId[(slash + 1)..]);
+        var flow = new VolumeSnapshotFlow(client, settings.Address, log, new InMemoryArtifactLedger(), new KubernetesTimings());
+        await flow.DeleteAsync(artifact.Kind, ns, name, cancellationToken).ConfigureAwait(false);
+        log.Info($"Leftover {artifact.Kind} {artifact.NativeId} deleted in cluster {settings.Address}.");
+    }
 
     public Task CommitArtifactAsync(ProviderArtifact artifact, IOperationLog log, CancellationToken cancellationToken) =>
         throw new NotSupportedException($"The cluster {settings.Address} has no artifacts of backdafuckup yet ({artifact.Kind} {artifact.NativeId}).");

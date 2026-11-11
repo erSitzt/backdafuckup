@@ -8,6 +8,7 @@
     <Project Path="src/Backdafuckup.DataMover/Backdafuckup.DataMover.csproj" />
     <Project Path="src/Backdafuckup.FileLevel/Backdafuckup.FileLevel.csproj" />
     <Project Path="src/Backdafuckup.Kubernetes/Backdafuckup.Kubernetes.csproj" />
+    <Project Path="src/Backdafuckup.Mover/Backdafuckup.Mover.csproj" />
     <Project Path="src/Backdafuckup.Nbd/Backdafuckup.Nbd.csproj" />
     <Project Path="src/Backdafuckup.Server/Backdafuckup.Server.csproj" />
     <Project Path="src/Backdafuckup.Smb/Backdafuckup.Smb.csproj" />
