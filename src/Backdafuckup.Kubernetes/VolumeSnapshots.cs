@@ -34,6 +34,9 @@ public sealed record KubernetesTimings
 
     public TimeSpan Deleted { get; init; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>How long a restore waits for a target PVC to be bound: the storage copies the restored volume from its snapshot.</summary>
+    public TimeSpan RestoreCopy { get; init; } = TimeSpan.FromHours(6);
+
     /// <summary>How often a wait writes a line to the session log.</summary>
     public TimeSpan Progress { get; init; } = TimeSpan.FromMinutes(1);
 }
@@ -174,11 +177,6 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
                     break;
                 case KubernetesArtifactKinds.Secret:
                     await client.CoreV1.DeleteNamespacedSecretAsync(name, ns, cancellationToken: cancellationToken).ConfigureAwait(false);
-                    break;
-                case VolumeImport.RetainedVolumeKind:
-                    // A restored volume that was never bound to its PVC: the cluster deletes it once its PV says Delete.
-                    await client.CoreV1.PatchPersistentVolumeAsync(
-                        new V1Patch("""{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}""", V1Patch.PatchType.MergePatch), name, cancellationToken: cancellationToken).ConfigureAwait(false);
                     break;
                 default:
                     throw new KubernetesOperationException($"Unknown kind of object {what} in the artifact ledger of cluster {cluster}.");

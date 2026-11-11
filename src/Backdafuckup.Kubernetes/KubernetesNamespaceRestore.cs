@@ -11,8 +11,8 @@ namespace Backdafuckup.Kubernetes;
 
 /// <summary>
 /// The restore of a namespace's restore point into the same cluster, shaped like a VM restore for the engine: each volume
-/// with data is written into a new volume (<see cref="VolumeImport"/>), then the objects are created in Velero's order —
-/// the PVCs with data bound to their new volumes through static Filesystem PVs (spike S3). The whole namespace, the
+/// with data is written into a new volume and snapshotted (<see cref="VolumeImport"/>), then the objects are created in
+/// Velero's order — the PVCs with data from those snapshots, as ordinary volumes of the CSI driver. The whole namespace, the
 /// objects of an app or workload with what they need, or single PVCs (also under new names). Objects that exist are left
 /// as they are or replaced; a PVC with data never is. Disposing before <see cref="CompleteAsync"/> removes what was created.
 /// </summary>
@@ -142,7 +142,8 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
     {
         var volume = DataVolumes.First(v => v.DiskKey == target.DiskKey);
         var storageClass = string.IsNullOrEmpty(target.StorageId) ? volume.StorageClass : target.StorageId;
-        var import = await VolumeImport.CreateAsync(_flow, _run, target, storageClass, $"{Target}/{_options.ClaimName(volume.Claim)}", cancellationToken).ConfigureAwait(false);
+        var import = await VolumeImport.CreateAsync(
+            _flow, _run, target, storageClass, volume.SnapshotClass, Target, $"{Target}/{_options.ClaimName(volume.Claim)}", cancellationToken).ConfigureAwait(false);
         _imports.Add(import);
         return import;
     }
@@ -266,8 +267,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                 }
                 else
                 {
-                    // PVCs before their PVs: a PV whose PVC is gone is deleted with its volume by the cluster (Delete).
-                    foreach (var created in Enumerable.Reverse(_created).Where(o => KubernetesObjects.Kind(o) != "PersistentVolume"))
+                    foreach (var created in Enumerable.Reverse(_created))
                     {
                         await _applier.DeleteAsync(created, timeout.Token).ConfigureAwait(false);
                     }
@@ -284,32 +284,24 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             }
         }
 
-        // Restored volumes that never reached their PVC: the cluster deletes them (their ledger entries say how).
-        foreach (var import in _imports.Where(i => i.RetainedLedgerId is not null))
+        // The snapshots and work volumes of the restored volumes (a completed restore released them already).
+        foreach (var import in _imports)
         {
-            var bound = _completed || _created.Any(o => KubernetesObjects.Kind(o) == "PersistentVolume" && (string?)o["metadata"]?["annotations"]?["backdafuckup.io/restored-from"] == import.RetainedVolume);
-            if (bound)
+            using var timeout = new CancellationTokenSource(_flow.Timings.Deleted);
+            try
             {
-                await _flow.Ledger.UpdateAsync(import.RetainedLedgerId!.Value, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);
+                await import.ReleaseAsync(timeout.Token).ConfigureAwait(false);
             }
-            else
+            catch (Exception ex) when (ex is KubernetesOperationException or OperationCanceledException or HttpRequestException)
             {
-                try
-                {
-                    await _flow.DeleteAsync(VolumeImport.RetainedVolumeKind, null, import.RetainedVolume!, CancellationToken.None).ConfigureAwait(false);
-                    await _flow.Ledger.UpdateAsync(import.RetainedLedgerId!.Value, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);
-                }
-                catch (KubernetesOperationException ex)
-                {
-                    Log.Warning($"The restored volume {import.RetainedVolume} could not be released (retried later): {ex.Message}");
-                }
+                Log.Warning($"The snapshots of a restored volume could not all be deleted (retried later): {ex.Message}");
             }
         }
     }
 
     /// <summary>
-    /// A PVC: with data, its new volume becomes a static Filesystem PV for it (the work PV object goes, the volume stays);
-    /// without data, it is created on its StorageClass (empty), or bound again to its static PV (e.g. an NFS export).
+    /// A PVC: with data, from the snapshot of its restored volume; without data, created on its StorageClass (empty), or
+    /// bound again to its static PV (e.g. an NFS export).
     /// </summary>
     private async Task RestoreClaimAsync(
         JsonObject claim, IReadOnlyDictionary<string, string> sourceToNewDiskId, Dictionary<string, VolumeImport> volumes, List<string> restored, CancellationToken cancellationToken)
@@ -321,21 +313,22 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         var spec = (JsonObject)prepared["spec"]!;
         var backupVolume = (string?)claim["spec"]?["volumeName"] is { } pvName ? _objects.FirstOrDefault(o => KubernetesObjects.Kind(o) == "PersistentVolume" && KubernetesObjects.Name(o) == pvName) : null;
 
-        if (sourceToNewDiskId.TryGetValue($"{Source}/{originalName}", out var retained) && volumes.TryGetValue(retained, out _))
+        if (sourceToNewDiskId.TryGetValue($"{Source}/{originalName}", out var snapshot) && volumes.TryGetValue(snapshot, out var import))
         {
-            var work = await CallAsync($"reading the restored volume {retained}", () => _client.CoreV1.ReadPersistentVolumeAsync(retained, cancellationToken: cancellationToken)).ConfigureAwait(false);
-            var csi = work.Spec.Csi ?? throw new KubernetesOperationException($"The restored volume {retained} is not a CSI volume.");
-            var pv = StaticVolume(backupVolume, claim, name, retained, csi.Driver, csi.VolumeHandle, work.Spec.Capacity["storage"].ToString());
+            // A Filesystem PVC from the snapshot of the restored volume: an ordinary volume of the driver, a copy of it.
+            spec.Remove("volumeName");
+            spec["dataSource"] = new JsonObject { ["apiGroup"] = VolumeSnapshotFlow.Group, ["kind"] = "VolumeSnapshot", ["name"] = snapshot };
+            if (await WaitsForConsumerAsync((string?)spec["storageClassName"], cancellationToken).ConfigureAwait(false) && import.Node is { } node)
+            {
+                // Provisioned now, not when a pod comes: the snapshots go once the copy is made.
+                prepared["metadata"]!["annotations"] ??= new JsonObject();
+                prepared["metadata"]!["annotations"]!["volume.kubernetes.io/selected-node"] = node;
+            }
 
-            // The work PV object goes (Retain: the volume stays), the static Filesystem PV takes the volume for the PVC.
-            await CallAsync($"removing the work PV object {retained}", () => _client.CoreV1.DeletePersistentVolumeAsync(retained, cancellationToken: cancellationToken)).ConfigureAwait(false);
-            await CallAsync($"creating the PV {KubernetesObjects.Name(pv)} for {Target}/{name}", () => _applier.CreateAsync(pv, cancellationToken)).ConfigureAwait(false);
-            _created.Add(pv);
-            spec["volumeName"] = KubernetesObjects.Name(pv);
             await CallAsync($"creating the PVC {Target}/{name}", () => _applier.CreateAsync(prepared, cancellationToken)).ConfigureAwait(false);
             _created.Add(prepared);
             restored.Add($"PersistentVolumeClaim/{name}");
-            Log.Info($"PVC {Target}/{name}: bound to its restored volume (PV {KubernetesObjects.Name(pv)}, {csi.Driver} {csi.VolumeHandle}).");
+            Log.Info($"PVC {Target}/{name}: created from the snapshot of its restored volume ({Target}/{snapshot}).");
             return;
         }
 
@@ -373,84 +366,61 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         await TryCreateAsync(prepared, restored, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>The PV for a restored volume: the driver's attributes and the PV's settings from the restore point, the new volume, reserved for its PVC.</summary>
-    private JsonObject StaticVolume(JsonObject? backupVolume, JsonObject claim, string claimName, string retained, string driver, string handle, string capacity)
-    {
-        var name = $"pvc-bdfu-{_run}-{VolumeSnapshotFlow.Hash($"{Target}/{claimName}")}";
-        var original = backupVolume?["spec"] as JsonObject;
-        var csi = new JsonObject
-        {
-            ["driver"] = driver,
-            ["volumeHandle"] = handle,
-            ["fsType"] = (string?)original?["csi"]?["fsType"] ?? "ext4",
-        };
-        if (original?["csi"]?["volumeAttributes"] is JsonObject attributes)
-        {
-            csi["volumeAttributes"] = attributes.DeepClone();
-        }
-
-        var spec = new JsonObject
-        {
-            ["capacity"] = new JsonObject { ["storage"] = capacity },
-            ["accessModes"] = claim["spec"]?["accessModes"]?.DeepClone() ?? new JsonArray("ReadWriteOnce"),
-            ["persistentVolumeReclaimPolicy"] = (string?)original?["persistentVolumeReclaimPolicy"] ?? "Delete",
-            ["volumeMode"] = (string?)claim["spec"]?["volumeMode"] ?? "Filesystem",
-            ["csi"] = csi,
-            ["claimRef"] = new JsonObject { ["apiVersion"] = "v1", ["kind"] = "PersistentVolumeClaim", ["namespace"] = Target, ["name"] = claimName },
-        };
-        if ((string?)claim["spec"]?["storageClassName"] is { } storageClass)
-        {
-            spec["storageClassName"] = storageClass;
-        }
-
-        foreach (var field in new[] { "mountOptions", "nodeAffinity" })
-        {
-            if (original?[field] is { } value)
-            {
-                spec[field] = value.DeepClone();
-            }
-        }
-
-        return new JsonObject
-        {
-            ["apiVersion"] = "v1",
-            ["kind"] = "PersistentVolume",
-            ["metadata"] = new JsonObject
-            {
-                ["name"] = name,
-                ["labels"] = new JsonObject { [VolumeSnapshotFlow.ManagedByLabel] = "backdafuckup-restore" },
-
-                // The driver's provisioner deletes the volume with its PV (Delete) only when it is named as the provisioner.
-                ["annotations"] = new JsonObject { [ProvisionedBy] = driver, ["backdafuckup.io/restored-from"] = retained },
-            },
-            ["spec"] = spec,
-        };
-    }
-
-    /// <summary>Waits briefly for the PVCs with data to be bound; one that is not is a warning (the pods using it wait).</summary>
+    /// <summary>
+    /// Waits until the PVCs made from restored volumes are bound (the storage copies each volume from its snapshot), then
+    /// removes the snapshots and work volumes. One that is not bound in time is a warning; its snapshots stay for it.
+    /// </summary>
     private async Task WaitBoundAsync(CancellationToken cancellationToken)
     {
-        var claims = _created.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && o["spec"]?["volumeName"] is not null).ToList();
-        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromTicks(Math.Min(TimeSpan.FromMinutes(2).Ticks, _flow.Timings.Deleted.Ticks));
+        var claims = _created.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && o["spec"]?["dataSource"] is not null).ToList();
+        var started = DateTimeOffset.UtcNow;
+        var reported = started;
         foreach (var claim in claims)
         {
+            var snapshot = (string?)claim["spec"]?["dataSource"]?["name"];
             while (true)
             {
                 var live = await ReadQuietlyAsync(claim, cancellationToken).ConfigureAwait(false);
                 if ((string?)live?["status"]?["phase"] == "Bound")
                 {
+                    if (_imports.FirstOrDefault(i => i.Snapshot == snapshot) is { } import)
+                    {
+                        await import.ReleaseAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
                     break;
                 }
 
-                if (DateTimeOffset.UtcNow > deadline)
+                var waited = DateTimeOffset.UtcNow - started;
+                if (waited > _flow.Timings.RestoreCopy)
                 {
-                    Warn($"PVC {Target}/{KubernetesObjects.Name(claim)} is not bound yet ({(string?)live?["status"]?["phase"] ?? "gone"}): check the PV {(string?)claim["spec"]?["volumeName"]}.");
+                    Warn($"PVC {Target}/{KubernetesObjects.Name(claim)} is not bound after {waited.TotalMinutes:0} minutes ({(string?)live?["status"]?["phase"] ?? "gone"}); " +
+                         $"the snapshot {Target}/{snapshot} it is made from stays until it is.");
                     break;
+                }
+
+                if (DateTimeOffset.UtcNow - reported >= _flow.Timings.Progress)
+                {
+                    reported = DateTimeOffset.UtcNow;
+                    Log.Info($"Waiting for PVC {Target}/{KubernetesObjects.Name(claim)}: the storage copies the restored volume ({waited.TotalMinutes:0} min).");
                 }
 
                 await Task.Delay(_flow.Timings.Poll, cancellationToken).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>Whether volumes of the StorageClass are provisioned only for a pod (WaitForFirstConsumer).</summary>
+    private async Task<bool> WaitsForConsumerAsync(string? storageClass, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(storageClass))
+        {
+            return false;
+        }
+
+        var live = await ReadQuietlyAsync(new JsonObject { ["apiVersion"] = "storage.k8s.io/v1", ["kind"] = "StorageClass", ["metadata"] = new JsonObject { ["name"] = storageClass } }, cancellationToken)
+            .ConfigureAwait(false);
+        return (string?)live?["volumeBindingMode"] == "WaitForFirstConsumer";
     }
 
     private async Task<bool> TryCreateAsync(JsonObject prepared, List<string> restored, CancellationToken cancellationToken)

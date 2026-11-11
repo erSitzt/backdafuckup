@@ -1,27 +1,29 @@
 using System.Globalization;
+using System.Text.Json.Nodes;
 using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Operations;
 using k8s;
-using k8s.Autorest;
 using k8s.Models;
 
 namespace Backdafuckup.Kubernetes;
 
 /// <summary>
-/// A volume of a restore point written into a new volume (spike S3): a block PVC in the work namespace on the original
-/// StorageClass, a mover pod that writes the image into it, then the volume kept (its PV set to Retain, the PVC removed)
-/// for the restore to bind it to the target PVC as a Filesystem volume. <see cref="DiskId"/> is the kept PV.
+/// A volume of a restore point written into the cluster: a block PVC in the work namespace on the original StorageClass,
+/// a mover pod that writes the image into it, then a snapshot of it, exposed in the target namespace (a static
+/// VolumeSnapshotContent with the volume-mode-change annotation and a VolumeSnapshot on it). The target PVC is created
+/// from that snapshot (<see cref="DiskId"/>) as a Filesystem PVC: an ordinary volume of the CSI driver. Rebinding the
+/// written volume itself through a static PV does not hold on vSphere: deleting the work PV, even with Retain, removes the
+/// volume from CNS, after which it can neither be detached nor deleted.
 /// </summary>
 internal sealed class VolumeImport : IDiskWriter
 {
-    /// <summary>A PV that holds restored data until it is bound to its PVC; its cleanup lets the cluster delete the volume.</summary>
-    public const string RetainedVolumeKind = "k8s.RetainedVolume";
-
     private readonly VolumeSnapshotFlow _flow;
     private readonly string _name;
     private readonly string _run;
     private readonly RestoreDiskTarget _target;
+    private readonly string _targetNamespace;
+    private readonly string? _snapshotClass;
     private readonly string _source;
     private readonly List<(string Kind, string? Namespace, string Name, Guid LedgerId)> _created = [];
     private readonly HashSet<Guid> _deleted = [];
@@ -29,24 +31,28 @@ internal sealed class VolumeImport : IDiskWriter
     private Task _watching = Task.CompletedTask;
     private IMoverRestoreChannel? _channel;
     private int _disposed;
+    private bool _handedOver;
 
-    private VolumeImport(VolumeSnapshotFlow flow, string run, RestoreDiskTarget target, string source)
+    private VolumeImport(VolumeSnapshotFlow flow, string run, RestoreDiskTarget target, string targetNamespace, string? snapshotClass, string source)
     {
         _flow = flow;
         _run = run;
         _target = target;
+        _targetNamespace = targetNamespace;
+        _snapshotClass = snapshotClass;
         _source = source;
         _name = VolumeSnapshotFlow.ObjectName(run, $"r-{VolumeSnapshotFlow.Hash(source)}");
     }
 
     private static string Work => KubernetesSetup.WorkNamespace;
 
-    public string DiskId => RetainedVolume ?? string.Empty;
+    /// <summary>The VolumeSnapshot in the target namespace the target PVC is created from (once written).</summary>
+    public string DiskId => Snapshot ?? string.Empty;
 
-    /// <summary>The PV that holds the written data (Retain, no claim) once the write is done.</summary>
-    public string? RetainedVolume { get; private set; }
+    public string? Snapshot { get; private set; }
 
-    public Guid? RetainedLedgerId { get; private set; }
+    /// <summary>The node the mover ran on: a target PVC on a StorageClass with WaitForFirstConsumer is provisioned there.</summary>
+    public string? Node { get; private set; }
 
     public long Capacity => _target.CapacityBytes;
 
@@ -57,9 +63,10 @@ internal sealed class VolumeImport : IDiskWriter
     public string PodName => $"{_name}-mover";
 
     /// <summary>Creates the empty block PVC the image is written to.</summary>
-    public static async Task<VolumeImport> CreateAsync(VolumeSnapshotFlow flow, string run, RestoreDiskTarget target, string? storageClass, string source, CancellationToken cancellationToken)
+    public static async Task<VolumeImport> CreateAsync(
+        VolumeSnapshotFlow flow, string run, RestoreDiskTarget target, string? storageClass, string? snapshotClass, string targetNamespace, string source, CancellationToken cancellationToken)
     {
-        var import = new VolumeImport(flow, run, target, source);
+        var import = new VolumeImport(flow, run, target, targetNamespace, snapshotClass, source);
         var size = target.CapacityBytes.ToString(CultureInfo.InvariantCulture);
         await import.CreateAsync(KubernetesArtifactKinds.PersistentVolumeClaim, Work, import._name, () => flow.Client.CoreV1.CreateNamespacedPersistentVolumeClaimAsync(
             new V1PersistentVolumeClaim
@@ -104,24 +111,110 @@ internal sealed class VolumeImport : IDiskWriter
 
         TransferredBytes = await channel.Completion.WaitAsync(cancellationToken).ConfigureAwait(false);
         await StopWatchingAsync().ConfigureAwait(false);
+        try
+        {
+            Node = (await client.CoreV1.ReadNamespacedPodAsync(PodName, Work, cancellationToken: cancellationToken).ConfigureAwait(false)).Spec?.NodeName;
+        }
+        catch (k8s.Autorest.HttpOperationException)
+        {
+            // Only a hint for WaitForFirstConsumer.
+        }
 
-        // The mover is done: remove it, then keep the volume without its work PVC.
         await DeleteCreatedAsync(KubernetesArtifactKinds.Pod, cancellationToken).ConfigureAwait(false);
         await DeleteCreatedAsync(KubernetesArtifactKinds.Secret, cancellationToken).ConfigureAwait(false);
-        var claim = await _flow.CallAsync($"reading the PVC {Work}/{_name}", () => client.CoreV1.ReadNamespacedPersistentVolumeClaimAsync(_name, Work, cancellationToken: cancellationToken))
-            .ConfigureAwait(false);
-        var volume = claim.Spec.VolumeName is { Length: > 0 } bound
-            ? bound
-            : throw new KubernetesOperationException($"The PVC {Work}/{_name} is not bound to a volume after its mover finished (cluster {_flow.Cluster}).");
-        RetainedLedgerId = await _flow.Ledger.RecordAsync(RetainedVolumeKind, volume, null, null, cancellationToken).ConfigureAwait(false);
-        await _flow.CallAsync($"keeping the volume {volume} (Retain)", () => client.CoreV1.PatchPersistentVolumeAsync(
-            new V1Patch("""{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}""", V1Patch.PatchType.MergePatch), volume, cancellationToken: cancellationToken)).ConfigureAwait(false);
-        RetainedVolume = volume;
-        await DeleteCreatedAsync(KubernetesArtifactKinds.PersistentVolumeClaim, cancellationToken).ConfigureAwait(false);
-        _flow.Log.Info($"{_source}: {VolumeSnapshotFlow.Bytes(TransferredBytes)} of data written to the new volume {volume}.");
+        _flow.Log.Info($"{_source}: {VolumeSnapshotFlow.Bytes(TransferredBytes)} of data written; taking a snapshot of it for the target PVC.");
+
+        // A snapshot of the written volume …
+        await CreateAsync(KubernetesArtifactKinds.VolumeSnapshot, Work, _name, () => client.CustomObjects.CreateNamespacedCustomObjectAsync(
+            new JsonObject
+            {
+                ["apiVersion"] = $"{VolumeSnapshotFlow.Group}/{VolumeSnapshotFlow.Version}",
+                ["kind"] = "VolumeSnapshot",
+                ["metadata"] = Metadata(_name),
+                ["spec"] = new JsonObject
+                {
+                    ["volumeSnapshotClassName"] = _snapshotClass,
+                    ["source"] = new JsonObject { ["persistentVolumeClaimName"] = _name },
+                },
+            },
+            VolumeSnapshotFlow.Group,
+            VolumeSnapshotFlow.Version,
+            Work,
+            "volumesnapshots",
+            cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
+        var (contentName, _) = await _flow.WaitReadyAsync(Work, _name, $"the snapshot {Work}/{_name} of the restored volume", _flow.Timings.SnapshotReady, cancellationToken).ConfigureAwait(false);
+        var content = VolumeSnapshotFlow.Element(await _flow.CallAsync($"reading the snapshot content {contentName}", () =>
+            client.CustomObjects.GetClusterCustomObjectAsync(VolumeSnapshotFlow.Group, VolumeSnapshotFlow.Version, "volumesnapshotcontents", contentName, cancellationToken)).ConfigureAwait(false));
+        var handle = VolumeSnapshotFlow.Text(content, "status", "snapshotHandle")
+            ?? throw new KubernetesOperationException($"The snapshot content {contentName} of the restored volume has no snapshot handle (cluster {_flow.Cluster}).");
+        var driver = VolumeSnapshotFlow.Text(content, "spec", "driver") ?? string.Empty;
+
+        // … exposed in the target namespace, where a Filesystem PVC may come from it (the annotation allows the mode change).
+        var exposed = $"{_name}-x";
+        await CreateAsync(KubernetesArtifactKinds.VolumeSnapshotContent, null, exposed, () => client.CustomObjects.CreateClusterCustomObjectAsync(
+            new JsonObject
+            {
+                ["apiVersion"] = $"{VolumeSnapshotFlow.Group}/{VolumeSnapshotFlow.Version}",
+                ["kind"] = "VolumeSnapshotContent",
+                ["metadata"] = Metadata(exposed, new JsonObject { [VolumeSnapshotFlow.VolumeModeChangeAnnotation] = "true" }),
+                ["spec"] = new JsonObject
+                {
+                    ["deletionPolicy"] = "Retain",
+                    ["driver"] = driver,
+                    ["source"] = new JsonObject { ["snapshotHandle"] = handle },
+                    ["sourceVolumeMode"] = "Block",
+                    ["volumeSnapshotClassName"] = _snapshotClass,
+                    ["volumeSnapshotRef"] = new JsonObject { ["name"] = _name, ["namespace"] = _targetNamespace },
+                },
+            },
+            VolumeSnapshotFlow.Group,
+            VolumeSnapshotFlow.Version,
+            "volumesnapshotcontents",
+            cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
+        await CreateAsync(KubernetesArtifactKinds.VolumeSnapshot, _targetNamespace, _name, () => client.CustomObjects.CreateNamespacedCustomObjectAsync(
+            new JsonObject
+            {
+                ["apiVersion"] = $"{VolumeSnapshotFlow.Group}/{VolumeSnapshotFlow.Version}",
+                ["kind"] = "VolumeSnapshot",
+                ["metadata"] = Metadata(_name),
+                ["spec"] = new JsonObject
+                {
+                    ["volumeSnapshotClassName"] = _snapshotClass,
+                    ["source"] = new JsonObject { ["volumeSnapshotContentName"] = exposed },
+                },
+            },
+            VolumeSnapshotFlow.Group,
+            VolumeSnapshotFlow.Version,
+            _targetNamespace,
+            "volumesnapshots",
+            cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
+        await _flow.WaitReadyAsync(_targetNamespace, _name, $"the snapshot {_targetNamespace}/{_name} of the restored volume", _flow.Timings.SnapshotReady, cancellationToken).ConfigureAwait(false);
+
+        // The PVC, the snapshots and the work PVC stay until the target PVC is made from them (ReleaseAsync).
+        Snapshot = _name;
+        _handedOver = true;
     }
 
-    /// <summary>Removes what is left of the work objects; the engine and the restore session may both call it.</summary>
+    /// <summary>
+    /// Once the target PVC is bound (its volume copied from the snapshot): removes the snapshots, newest first, then the work
+    /// PVC with its volume (a volume with snapshots cannot be deleted on vSphere, so the snapshot must be gone first).
+    /// </summary>
+    public async Task ReleaseAsync(CancellationToken cancellationToken)
+    {
+        foreach (var (kind, ns, name, ledgerId) in Enumerable.Reverse(_created).Where(c => !_deleted.Contains(c.LedgerId)).ToList())
+        {
+            await _flow.DeleteAsync(kind, ns, name, cancellationToken).ConfigureAwait(false);
+            if (kind == KubernetesArtifactKinds.VolumeSnapshot && ns == Work)
+            {
+                await WaitGoneAsync(name, cancellationToken).ConfigureAwait(false);
+            }
+
+            await _flow.Ledger.UpdateAsync(ledgerId, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);
+            _deleted.Add(ledgerId);
+        }
+    }
+
+    /// <summary>Removes the work pod and token; everything else goes in <see cref="ReleaseAsync"/>, or here when the write failed.</summary>
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -135,28 +228,31 @@ internal sealed class VolumeImport : IDiskWriter
             await _channel.DisposeAsync().ConfigureAwait(false);
         }
 
-        // Whatever is left of the work objects (a failed write): the PVC goes with its volume (it is not Retain yet).
-        using var timeout = new CancellationTokenSource(_flow.Timings.Deleted);
-        for (var i = _created.Count - 1; i >= 0; i--)
+        if (!_handedOver)
         {
-            var (kind, ns, name, ledgerId) = _created[i];
-            if (_deleted.Contains(ledgerId))
-            {
-                continue;
-            }
-
+            using var timeout = new CancellationTokenSource(_flow.Timings.Deleted);
             try
             {
-                await _flow.DeleteAsync(kind, ns, name, timeout.Token).ConfigureAwait(false);
-                await _flow.Ledger.UpdateAsync(ledgerId, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);
+                await ReleaseAsync(timeout.Token).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is KubernetesOperationException or OperationCanceledException or HttpRequestException)
             {
-                _flow.Log.Warning($"{kind} {ns}/{name} could not be deleted (retried later): {ex.Message}");
+                _flow.Log.Warning($"The work objects of the restore of {_source} could not all be deleted (retried later): {ex.Message}");
             }
         }
 
         _stopWatching.Dispose();
+    }
+
+    private async Task WaitGoneAsync(string snapshot, CancellationToken cancellationToken)
+    {
+        var started = DateTimeOffset.UtcNow;
+        while (await VolumeSnapshotFlow.ExistsAsync(() => _flow.Client.CustomObjects.GetNamespacedCustomObjectAsync(
+                   VolumeSnapshotFlow.Group, VolumeSnapshotFlow.Version, Work, "volumesnapshots", snapshot, cancellationToken)).ConfigureAwait(false)
+               && DateTimeOffset.UtcNow - started < _flow.Timings.Deleted)
+        {
+            await Task.Delay(_flow.Timings.Poll, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task StopWatchingAsync()
@@ -182,11 +278,24 @@ internal sealed class VolumeImport : IDiskWriter
         }
     }
 
-    private async Task CreateAsync<T>(string kind, string ns, string objectName, Func<Task<T>> create, CancellationToken cancellationToken)
+    private async Task CreateAsync<T>(string kind, string? ns, string objectName, Func<Task<T>> create, CancellationToken cancellationToken)
     {
-        var ledgerId = await _flow.Ledger.RecordAsync(kind, $"{ns}/{objectName}", null, null, cancellationToken).ConfigureAwait(false);
+        var id = ns is null ? objectName : $"{ns}/{objectName}";
+        var ledgerId = await _flow.Ledger.RecordAsync(kind, id, null, null, cancellationToken).ConfigureAwait(false);
         _created.Add((kind, ns, objectName, ledgerId));
-        await _flow.CallAsync($"creating {kind} {ns}/{objectName}", create).ConfigureAwait(false);
+        await _flow.CallAsync($"creating {kind} {id}", create).ConfigureAwait(false);
+    }
+
+    private JsonObject Metadata(string objectName, JsonObject? annotations = null)
+    {
+        annotations ??= [];
+        annotations[VolumeSnapshotFlow.SourceAnnotation] = _source;
+        return new JsonObject
+        {
+            ["name"] = objectName,
+            ["labels"] = new JsonObject { [VolumeSnapshotFlow.ManagedByLabel] = "backdafuckup", [VolumeSnapshotFlow.RunLabel] = _run },
+            ["annotations"] = annotations,
+        };
     }
 
     private V1ObjectMeta Meta(string objectName) => new()
