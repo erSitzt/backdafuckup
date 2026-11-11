@@ -1,0 +1,32 @@
+{
+  "v": 3,
+  "createdOnFiles": { "v": 1, "at": "2026-11-11T13:05:00Z" },
+  "title": "Kubernetes UI mockups",
+  "launch": { "view": "canvas" },
+  "pages": [],
+  "boards": {
+    "Main.dc.html": { "x": 0, "y": 300, "w": 1440, "h": 900, "title": "A1 · Kubernetes clusters & inventory", "expand": "fill" },
+    "A2-JobEditor.dc.html": { "x": 1520, "y": 300, "w": 1440, "h": 900, "title": "A2 · Job editor: namespaces", "expand": "fill" },
+    "A3-Backups.dc.html": { "x": 3040, "y": 300, "w": 1440, "h": 900, "title": "A3 · Backups & Restore with namespaces", "expand": "fill" },
+    "A4-Restore.dc.html": { "x": 4560, "y": 300, "w": 1440, "h": 900, "title": "A4 · Restore wizard: objects", "expand": "fill" },
+    "B1-Applications.dc.html": { "x": 0, "y": 1640, "w": 1440, "h": 900, "title": "B1 · Applications per cluster", "expand": "fill" },
+    "B2-Policy.dc.html": { "x": 1520, "y": 1640, "w": 1440, "h": 900, "title": "B2 · Policy editor", "expand": "fill" },
+    "B3-Application.dc.html": { "x": 3040, "y": 1640, "w": 1440, "h": 900, "title": "B3 · Application detail", "expand": "fill" },
+    "B4-Restore.dc.html": { "x": 4560, "y": 1640, "w": 1440, "h": 900, "title": "B4 · Restore with preview", "expand": "fill" }
+  },
+  "order": [
+    "Main.dc.html",
+    "A2-JobEditor.dc.html",
+    "A3-Backups.dc.html",
+    "A4-Restore.dc.html",
+    "B1-Applications.dc.html",
+    "B2-Policy.dc.html",
+    "B3-Application.dc.html",
+    "B4-Restore.dc.html"
+  ],
+  "notes": {
+    "titleA": { "x": 0, "y": 0, "text": "Variante A — wie die VM-Seiten: Cluster neben Pools, Namespaces wie VMs", "kind": "title1", "maxW": 6000 },
+    "titleB": { "x": 0, "y": 1340, "text": "Variante B — Anwendungs-Sicht pro Cluster mit Policies", "kind": "title1", "maxW": 6000 }
+  },
+  "designSystems": []
+}

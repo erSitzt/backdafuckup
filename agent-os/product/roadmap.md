@@ -39,6 +39,12 @@
 - **File-level restore:** restore single files and folders from guest disks without restoring the whole VM. It moved here from phase 2 as a knock-out criterion (2026-11-02).
   - Browser download, back into the VM (Windows through the guest agent, Linux over SSH/SFTP with sudo), or to an SMB share.
   - File systems: NTFS, ext2/3/4, XFS, LVM (linear).
+- **Kubernetes workloads** (spec `2026-11-11-1343-kubernetes-workload-backup`, user request 2026-11-11): the RKE2 agent nodes leave the VM backup (VM snapshots of the nodes disturbed their vSphere CSI volumes), so namespaces are backed up at the Kubernetes level:
+  - their objects, and the data of PVCs on a CSI driver with snapshots (a short-lived VolumeSnapshot, copied at block level by a mover pod into the repository), with Velero-compatible hooks;
+  - restore of a namespace (all or selected objects), a single PVC and files in the same cluster;
+  - the server talks to the cluster API directly, or through an in-cluster agent that dials out.
+
+  Later: another cluster and whole-cluster DR, then NFS volumes at file level, changed block tracking (CSI SnapshotMetadata) and group snapshots.
 
 ## Phase 2: Post-Launch
 
