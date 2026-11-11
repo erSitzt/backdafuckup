@@ -160,6 +160,30 @@ public enum RestoreMode
     AlternateLocation,
 }
 
+/// <summary>How a Kubernetes namespace (a restore point of a namespace) is restored.</summary>
+public sealed record KubernetesRestoreOptions
+{
+    /// <summary>The namespace the objects go to: the original one, or another (created when missing).</summary>
+    public required string TargetNamespace { get; init; }
+
+    /// <summary>Objects that exist already are replaced (updated) instead of left as they are; never PVCs with data.</summary>
+    public bool ReplaceExisting { get; init; }
+
+    /// <summary>Only these PVCs (claim names), with their data, and no other object: the restore of single volumes. Null: the whole namespace.</summary>
+    public IReadOnlyList<string>? OnlyClaims { get; init; }
+
+    /// <summary>
+    /// Only these objects (<c>Kind/name</c>, e.g. a workload or every object of an app) and what they need: their ConfigMaps,
+    /// Secrets, ServiceAccount with its roles, PVCs with their data, Services and Ingresses. Null: the whole namespace.
+    /// </summary>
+    public IReadOnlyList<string>? Objects { get; init; }
+
+    /// <summary>New names for restored PVCs (claim → name), e.g. to restore one next to the original.</summary>
+    public IReadOnlyDictionary<string, string> ClaimNames { get; init; } = new Dictionary<string, string>();
+
+    public string ClaimName(string claim) => ClaimNames.TryGetValue(claim, out var name) && !string.IsNullOrWhiteSpace(name) ? name : claim;
+}
+
 public sealed record VmRestorePlan
 {
     public required RestoreMode Mode { get; init; }
@@ -167,6 +191,9 @@ public sealed record VmRestorePlan
     public required Repository.RestorePointManifest Manifest { get; init; }
 
     public required VmMetadataBlob Metadata { get; init; }
+
+    /// <summary>The restore of a Kubernetes namespace; null for a VM.</summary>
+    public KubernetesRestoreOptions? Kubernetes { get; init; }
 
     public required string VmName { get; init; }
 
@@ -215,7 +242,8 @@ public sealed record RestoreDiskTarget(string DiskKey, string SourceDiskId, stri
 
 /// <param name="GenerationId">The VM generation id the hypervisor gave the VM (Xen: <c>generation_id</c>), if known.</param>
 /// <param name="ReplacedVmId">The id of the VM this one replaced at the original location (renamed or deleted), if any.</param>
-public sealed record RestoredVm(string VmId, string Name, string? GenerationId = null, string? ReplacedVmId = null);
+/// <param name="Warnings">What did not go as planned but did not stop the restore (an object the cluster refused).</param>
+public sealed record RestoredVm(string VmId, string Name, string? GenerationId = null, string? ReplacedVmId = null, IReadOnlyList<string>? Warnings = null);
 
 /// <summary>
 /// VM generation ids (Xen: <c>generation_id</c>). An empty one means the VM has none: it was created from a template

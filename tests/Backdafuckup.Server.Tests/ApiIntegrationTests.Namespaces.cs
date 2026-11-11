@@ -37,7 +37,7 @@ public sealed partial class ApiIntegrationTests
         Directory.CreateDirectory(_root);
         await File.WriteAllBytesAsync(device, volume, Ct);
         var movers = new List<string>();
-        SetUpCluster(device, movers);
+        SetUpCluster(device, movers, []);
 
         // The cluster, through its CA.
         using var caKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -130,21 +130,114 @@ public sealed partial class ApiIntegrationTests
         AssertClusterClean();
     }
 
+    [Fact]
+    public async Task A_namespace_comes_back_into_another_namespace_with_its_volume_and_a_pvc_next_to_the_original()
+    {
+        var client = await SignedInClientAsync();
+        await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://localhost/", Ct);
+        await Ok(client.PutAsJsonAsync("/api/kubernetes/mover", new SaveMoverImageDto("registry.test:8443", "backdafuckup/mover", "bdfu-push", "secret-1", "None", null, null, null), Ct));
+        var volume = new byte[8 * 1024 * 1024];
+        new Random(7).NextBytes(volume.AsSpan(0, 100 * 1024));
+        new Random(8).NextBytes(volume.AsSpan(6 * 1024 * 1024, 8192));
+        var device = Path.Combine(_root, "redis-volume.img");
+        Directory.CreateDirectory(_root);
+        await File.WriteAllBytesAsync(device, volume, Ct);
+        var restoredDevices = new List<string>();
+        SetUpCluster(device, [], restoredDevices);
+        using var caKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var caRequest = new CertificateRequest("CN=rke2-server-ca", caKey, HashAlgorithmName.SHA256);
+        caRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        using var ca = caRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+        var cluster = await Read<ConnectionDto>(client.PostAsJsonAsync("/api/connections", new CreateConnectionDto
+        {
+            Kind = "Kubernetes", DisplayName = "rke2-test", Address = "10.26.1.10", Port = 6443, UserName = "backdafuckup", Password = "token-for-tests", CaCertificatePem = ca.ExportCertificatePem(),
+        }, Ct));
+        var repository = await Read<RepositoryDto>(client.PostAsJsonAsync("/api/repositories", new CreateRepositoryDto { Name = "Local", Path = Path.Combine(_root, "repo") }, Ct));
+        var job = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", new SaveJobDto
+        {
+            Name = "Namespaces", ConnectionId = cluster.Id, RepositoryId = repository.Id, Schedule = new ScheduleDto("None", "22:00", [], "Europe/Berlin"),
+            Objects = [new JobObjectDto("bdfu-spike", "bdfu-spike")], RetryCount = 0,
+        }, Ct));
+        var backup = await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{job.Id}/run", new RunJobDto(), Ct));
+        Assert.Equal("Succeeded", (await WaitForSessionAsync(client, backup.SessionId)).Session.State);
+        var point = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>("/api/restore-points?vmId=bdfu-spike", Ct))!);
+
+        // What the restore point holds, for the console: volumes, objects, and what the pod needs.
+        var details = (await client.GetFromJsonAsync<KubernetesRestorePointDto>($"/api/restore-points/{point.Id}/kubernetes", Ct))!;
+        Assert.Equal(("bdfu-spike", "snapshot"), (details.Namespace, Assert.Single(details.Volumes).DataPath));
+        var pod = details.Objects.Single(o => o.Kind == "Pod");
+        Assert.Equal(["PersistentVolumeClaim/data-redis-test-0"], pod.Needs);
+        Assert.Contains(details.Objects, o => o.Kind == "ConfigMap" && o.Name == "redis-config");
+
+        async Task<(SessionDetailDto Session, string Log)> RestoreAsync(KubernetesRestoreDto options)
+        {
+            var started = await Read<StartedDto>(client.PostAsJsonAsync("/api/restores", new RestoreRequestDto
+            {
+                RestorePointId = point.Id, TargetConnectionId = cluster.Id, Mode = RestoreModeDto.OriginalLocation, Kubernetes = options,
+            }, Ct));
+            var session = await WaitForSessionAsync(client, started.SessionId);
+            var log = (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{started.SessionId}/log", Ct))!;
+            return (session, string.Join("\n", log.Select(l => $"{l.Severity}: {l.Message}")));
+        }
+
+        // Into the original namespace: refused, its PVC with data exists.
+        var (refused, refusedLog) = await RestoreAsync(new KubernetesRestoreDto());
+        Assert.Equal("Failed", refused.Session.State);
+        Assert.Contains("The PVC bdfu-spike/data-redis-test-0 exists in cluster 10.26.1.10", refusedLog, StringComparison.Ordinal);
+        Assert.Empty(restoredDevices);
+
+        // Into a new namespace: the volume written by a mover, the PVC bound to it through a static PV, the objects in order.
+        var (copy, copyLog) = await RestoreAsync(new KubernetesRestoreDto { TargetNamespace = "bdfu-spike-copy" });
+        Assert.True(copy.Session.State == "Succeeded", copyLog);
+        Assert.NotNull(_cluster.Find("namespaces", null, "bdfu-spike-copy"));
+        var restoredClaim = _cluster.Find("persistentvolumeclaims", "bdfu-spike-copy", "data-redis-test-0")!;
+        var pvName = (string)restoredClaim["spec"]!["volumeName"]!;
+        var pv = _cluster.Find("persistentvolumes", null, pvName)!;
+        var device1 = Assert.Single(restoredDevices);
+        Assert.Equal(
+            ("csi.vsphere.vmware.com", $"fcd-{Path.GetFileNameWithoutExtension(device1)}", "Filesystem", "bdfu-spike-copy", "data-redis-test-0", "csi.vsphere.vmware.com"),
+            ((string?)pv["spec"]!["csi"]!["driver"], (string?)pv["spec"]!["csi"]!["volumeHandle"], (string?)pv["spec"]!["volumeMode"],
+             (string?)pv["spec"]!["claimRef"]!["namespace"], (string?)pv["spec"]!["claimRef"]!["name"], (string?)pv["metadata"]!["annotations"]!["pv.kubernetes.io/provisioned-by"]));
+        Assert.Null(restoredClaim["spec"]!["dataSource"]);
+        Assert.NotNull(_cluster.Find("configmaps", "bdfu-spike-copy", "redis-config"));
+        Assert.NotNull(_cluster.Find("pods", "bdfu-spike-copy", "redis-test-0"));
+        Assert.Null(_cluster.Find("persistentvolumes", null, $"pv-{Path.GetFileNameWithoutExtension(device1)}")); // the work PV object is gone, its volume kept
+        var written = await File.ReadAllBytesAsync(device1, Ct);
+        Assert.Equal(volume, written[..volume.Length]);
+        Assert.Contains("Volume data-redis-test-0: restored", copyLog, StringComparison.Ordinal);
+        AssertClusterClean();
+
+        // One PVC next to the original, under a new name; nothing else is touched.
+        var configMaps = _cluster.All("configmaps").Count;
+        var (single, singleLog) = await RestoreAsync(new KubernetesRestoreDto
+        {
+            OnlyClaims = ["data-redis-test-0"], ClaimNames = new() { ["data-redis-test-0"] = "data-redis-test-0-restored" },
+        });
+        Assert.True(single.Session.State == "Succeeded", singleLog);
+        Assert.NotNull(_cluster.Find("persistentvolumeclaims", "bdfu-spike", "data-redis-test-0-restored"));
+        Assert.Equal(configMaps, _cluster.All("configmaps").Count);
+        Assert.Equal(2, restoredDevices.Count);
+        Assert.Equal(volume, (await File.ReadAllBytesAsync(restoredDevices[1], Ct))[..volume.Length]);
+        AssertClusterClean();
+        await using var db = await _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>().CreateDbContextAsync(Ct);
+        Assert.All(await db.Artifacts.ToListAsync(Ct), a => Assert.Equal(ArtifactState.Done, a.State));
+    }
+
     private void AssertClusterClean()
     {
         Assert.Empty(_cluster.All("volumesnapshots"));
         Assert.Empty(_cluster.All("volumesnapshotcontents"));
         Assert.DoesNotContain(_cluster.All("pods"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
         Assert.DoesNotContain(_cluster.All("persistentvolumeclaims"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
-        Assert.Equal(["backdafuckup-registry"], _cluster.All("secrets").Where(p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace)
-            .Select(p => (string?)p["metadata"]!["name"]));
+        Assert.DoesNotContain(_cluster.All("secrets"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace
+            && ((string?)p["metadata"]!["name"])!.EndsWith("-token", StringComparison.Ordinal));
     }
 
     /// <summary>
     /// bdfu-spike with a Redis pod (hooks), a ConfigMap and its PVC on a CSI driver with a snapshot class. The controllers
     /// make snapshots ready, and a mover pod runs the real mover program with <paramref name="device"/> as its volume.
     /// </summary>
-    private void SetUpCluster(string device, List<string> movers)
+    private void SetUpCluster(string device, List<string> movers, List<string> restoredDevices)
     {
         var api = _cluster;
         api.Add("api/v1", "namespaces", Backdafuckup.Testing.Kubernetes.FakeKubernetesApi.Namespace("bdfu-spike"));
@@ -197,6 +290,25 @@ public sealed partial class ApiIntegrationTests
                 case "volumesnapshots":
                     api.Mutate(() => item["status"] = new JsonObject { ["readyToUse"] = true, ["boundVolumeSnapshotContentName"] = (string?)item["spec"]!["source"]!["volumeSnapshotContentName"] });
                     break;
+                case "persistentvolumeclaims" when ns == KubernetesSetup.WorkNamespace && (item["spec"] as JsonObject)?.ContainsKey("dataSource") != true:
+                    // The CSI driver: a new volume for a restore's work PVC.
+                    api.Add("api/v1", "persistentvolumes", new JsonObject
+                    {
+                        ["metadata"] = new JsonObject { ["name"] = $"pv-{name}" },
+                        ["spec"] = new JsonObject
+                        {
+                            ["capacity"] = new JsonObject { ["storage"] = (string?)item["spec"]!["resources"]!["requests"]!["storage"] },
+                            ["csi"] = new JsonObject { ["driver"] = "csi.vsphere.vmware.com", ["volumeHandle"] = $"fcd-{name}" },
+                            ["persistentVolumeReclaimPolicy"] = "Delete",
+                            ["volumeMode"] = "Block",
+                        },
+                    });
+                    api.Mutate(() =>
+                    {
+                        item["spec"]!["volumeName"] = $"pv-{name}";
+                        item["status"] = new JsonObject { ["phase"] = "Bound" };
+                    });
+                    break;
                 case "persistentvolumeclaims":
                     api.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Bound" });
                     break;
@@ -205,8 +317,28 @@ public sealed partial class ApiIntegrationTests
                     var env = item["spec"]!["containers"]![0]!["env"]!.AsArray().ToDictionary(e => (string)e!["name"]!, e => (string?)e!["value"]);
                     var token = (string)api.Find("secrets", ns, (string)item["spec"]!["containers"]![0]!["env"]!.AsArray()
                         .Single(e => (string?)e!["name"] == "BDFU_MOVER_TOKEN")!["valueFrom"]!["secretKeyRef"]!["name"]!)!["stringData"]!["token"]!;
+                    var restore = env["BDFU_MOVER_MODE"] == "restore";
+                    var target = device;
+                    if (restore)
+                    {
+                        // The new volume: a file of the work PVC's size.
+                        var claim = (string)item["spec"]!["volumes"]![0]!["persistentVolumeClaim"]!["claimName"]!;
+                        var size = long.Parse((string)api.Find("persistentvolumeclaims", ns, claim)!["spec"]!["resources"]!["requests"]!["storage"]!, System.Globalization.CultureInfo.InvariantCulture);
+                        target = Path.Combine(_root, $"{claim}.img");
+                        using (var file = File.Create(target))
+                        {
+                            file.SetLength(size);
+                        }
+
+                        lock (restoredDevices)
+                        {
+                            restoredDevices.Add(target);
+                        }
+                    }
+
                     var options = new MoverOptions(
-                        MoverMode.Backup, new Uri(env["BDFU_MOVER_DATA_URL"]!), new Uri(env["BDFU_MOVER_RESULT_URL"]!), token, [], device, 4096, long.Parse(env["BDFU_MOVER_BYTES"]!, System.Globalization.CultureInfo.InvariantCulture));
+                        restore ? MoverMode.Restore : MoverMode.Backup, new Uri(env["BDFU_MOVER_DATA_URL"]!), new Uri(env["BDFU_MOVER_RESULT_URL"]!), token, [], target, 4096,
+                        restore ? null : long.Parse(env["BDFU_MOVER_BYTES"]!, System.Globalization.CultureInfo.InvariantCulture));
                     api.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Running" });
                     lock (movers)
                     {

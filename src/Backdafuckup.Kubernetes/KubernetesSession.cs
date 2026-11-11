@@ -51,8 +51,18 @@ internal sealed class KubernetesSession(
             .ConfigureAwait(false);
     }
 
-    public Task<IVmRestoreSession> BeginRestoreAsync(VmRestorePlan plan, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken) =>
-        throw new NotSupportedException($"Restoring into a Kubernetes cluster is not available yet (cluster {settings.Address}).");
+    /// <summary>Restores a namespace's restore point (its objects and volumes) into this cluster.</summary>
+    public Task<IVmRestoreSession> BeginRestoreAsync(VmRestorePlan plan, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        if (plan.Manifest.Kubernetes is null || plan.Kubernetes is null)
+        {
+            throw new NotSupportedException($"Only restore points of Kubernetes namespaces can be restored into cluster {settings.Address}.");
+        }
+
+        IVmRestoreSession restore = new KubernetesNamespaceRestore(client, settings, plan, log, ledger, channels, images, timings ?? new KubernetesTimings());
+        return Task.FromResult(restore);
+    }
 
     /// <summary>Deletes a leftover object of a backup or restore (the ledger's id: <c>namespace/name</c>, or <c>name</c> when cluster-scoped).</summary>
     public async Task CleanupArtifactAsync(ProviderArtifact artifact, IOperationLog log, CancellationToken cancellationToken)

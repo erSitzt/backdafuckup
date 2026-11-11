@@ -1,0 +1,264 @@
+@page "/restore-namespace/{Id:guid}"
+@inject ApiClient Api
+@inject NavigationManager Navigation
+
+@* The restore of a Kubernetes namespace's restore point into its cluster: the whole namespace, apps and workloads with what
+   they need, or single PVCs (also under new names); into the original namespace or another one. *@
+<PageTitle>Restore namespace – backdafuckup</PageTitle>
+<PageHeader Title="@($"Restore namespace {_details?.Namespace}")" Back="/backups"
+            Description="Objects and the data of volumes come back into the cluster they were backed up from. PVCs with data are written to new volumes; objects that exist are left as they are unless you replace them." />
+
+@if (_error is not null && _details is null)
+{
+    <MudAlert Severity="Severity.Error">@_error</MudAlert>
+}
+else if (_point is null || _details is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
+        <MudText Typo="Typo.body2">
+            Restore point from <b>@Fmt.Time(_point.CreatedUtc)</b> (job @_point.JobName) · cluster @_details.Cluster · Kubernetes @_details.KubernetesVersion ·
+            @_details.Objects.Count objects · @_details.Volumes.Count(v => v.DataPath == "snapshot") of @_details.Volumes.Count PVCs with data ·
+            <ConsistencyChip Consistency="@_point.Consistency" Reason="@_point.ConsistencyReason" Warning="@_point.ConsistencyWarning" />
+        </MudText>
+    </MudPaper>
+
+    <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
+        <MudText Typo="Typo.subtitle1" Class="section-title mb-2">What to restore</MudText>
+        <MudToggleGroup T="string" @bind-Value="_what" SelectionMode="SelectionMode.SingleSelection" Color="Color.Primary" Outlined="true" CheckMark="false" Class="mb-3">
+            <MudToggleItem T="string" Value="@WhatNamespace" Text="Whole namespace" />
+            <MudToggleItem T="string" Value="@WhatApps" Text="Apps and workloads" />
+            <MudToggleItem T="string" Value="@WhatClaims" Text="Single PVCs" />
+        </MudToggleGroup>
+
+        @switch (_what)
+        {
+            case WhatNamespace:
+                <MudText Typo="Typo.body2">
+                    Every object of the namespace (@Summary(_details.Objects.Where(o => o.Namespace is not null && !o.Controlled).Select(o => o.Kind))) and the data of its PVCs.
+                    Objects made by controllers (@_details.Objects.Count(o => o.Controlled), e.g. the pods of a StatefulSet) are made again by their owners.
+                </MudText>
+                break;
+
+            case WhatApps:
+                <MudText Typo="Typo.body2" Class="mb-2">
+                    A workload comes with what it needs: its ConfigMaps and Secrets, ServiceAccount and roles, PVCs with their data, and the Services and Ingresses to it.
+                </MudText>
+                <div class="table-box">
+                    <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+                        <thead><tr><th style="width:48px"></th><th>Workload</th><th>Brings along</th></tr></thead>
+                        <tbody>
+                            @foreach (var app in Apps())
+                            {
+                                <tr class="group-row">
+                                    <td><MudCheckBox T="bool" Value="@app.Workloads.All(w => _objects.Contains(Key(w)))" ValueChanged="@(on => ToggleApp(app.Workloads, on))" Dense="true" Color="Color.Primary" /></td>
+                                    <td colspan="2"><b>@(app.Name ?? "Without an app label")</b><span class="cell-sub">@app.Workloads.Count workload(s)</span></td>
+                                </tr>
+                                @foreach (var workload in app.Workloads)
+                                {
+                                    <tr class="@(_objects.Contains(Key(workload)) ? "row-selected" : null)">
+                                        <td><MudCheckBox T="bool" Value="@_objects.Contains(Key(workload))" ValueChanged="@(on => Toggle(Key(workload), on))" Dense="true" Color="Color.Primary" /></td>
+                                        <td class="nowrap">@workload.Kind <b>@workload.Name</b></td>
+                                        <td>
+                                            @foreach (var need in workload.Needs ?? [])
+                                            {
+                                                <span class="@(need.StartsWith("PersistentVolumeClaim/", StringComparison.Ordinal) && HasData(need) ? "mini-chip info" : "mini-chip")"
+                                                      title="@(HasData(need) ? "with its data" : null)">@need</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                </div>
+                break;
+
+            case WhatClaims:
+                <div class="table-box">
+                    <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+                        <thead><tr><th style="width:48px"></th><th>PVC</th><th class="num">Size</th><th>Storage class</th><th>Restore as</th></tr></thead>
+                        <tbody>
+                            @foreach (var volume in _details.Volumes)
+                            {
+                                var withData = volume.DataPath == "snapshot";
+                                <tr class="@(_claims.ContainsKey(volume.Claim) ? "row-selected" : null)">
+                                    <td><MudCheckBox T="bool" Value="@_claims.ContainsKey(volume.Claim)" ValueChanged="@(on => ToggleClaim(volume.Claim, on))" Dense="true" Color="Color.Primary" Disabled="@(!withData)" /></td>
+                                    <td>@volume.Claim@if (!withData) {<span class="cell-sub">objects only: @volume.Reason</span>}</td>
+                                    <td class="num">@Fmt.Bytes(volume.SizeBytes)</td>
+                                    <td>@volume.StorageClass</td>
+                                    <td>
+                                        @if (_claims.ContainsKey(volume.Claim))
+                                        {
+                                            <MudTextField T="string" Value="@_claims[volume.Claim]" ValueChanged="@(v => _claims[volume.Claim] = v)" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width: 320px" />
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                </div>
+                <MudText Typo="Typo.caption" Class="help-text">A PVC is restored next to the original under a new name, or under its own name into another namespace. Its workload is not changed.</MudText>
+                break;
+        }
+    </MudPaper>
+
+    <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
+        <MudText Typo="Typo.subtitle1" Class="section-title mb-2">Where</MudText>
+        <div class="form-narrow">
+            <MudTextField @bind-Value="_target" Label="Target namespace" Variant="Variant.Outlined"
+                          HelperText="@(_target.Trim() == _details.Namespace ? "The original namespace." : "Created when it does not exist; RoleBindings to its ServiceAccounts follow the new name.")" />
+            @if (_what != WhatClaims)
+            {
+                <MudSwitch T="bool" @bind-Value="_replace" Color="Color.Primary" Class="mt-3"
+                           Label="Replace objects that exist with their state in the restore point (otherwise they are left as they are)" />
+            }
+        </div>
+        @if (_what != WhatClaims && _target.Trim() == _details.Namespace && Selected().Any())
+        {
+            <MudAlert Severity="Severity.Info" Dense="true" Class="mt-3">
+                PVCs with data must not exist in the target namespace: delete them (and stop their workloads) first, restore into another namespace, or restore single PVCs under new names.
+            </MudAlert>
+        }
+    </MudPaper>
+
+    @if (_error is not null)
+    {
+        <MudAlert Severity="Severity.Error" Dense="true" Class="mb-3">@_error</MudAlert>
+    }
+
+    <div class="d-flex gap-2">
+        <MudButton Href="/backups">Cancel</MudButton>
+        <MudSpacer />
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" Disabled="@(_busy || !Ready)" OnClick="StartAsync">Start restore</MudButton>
+    </div>
+}
+
+@code {
+    private const string WhatNamespace = "namespace";
+    private const string WhatApps = "apps";
+    private const string WhatClaims = "claims";
+
+    [Parameter] public Guid Id { get; set; }
+
+    private RestorePointDto? _point;
+    private KubernetesRestorePointDto? _details;
+    private string _what = WhatNamespace;
+    private string _target = string.Empty;
+    private bool _replace;
+    private readonly HashSet<string> _objects = [];
+    private readonly Dictionary<string, string> _claims = [];
+    private bool _busy;
+    private string? _error;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _details = await Api.GetAsync<KubernetesRestorePointDto>($"api/restore-points/{Id}/kubernetes");
+            _point = await Api.GetAsync<RestorePointDto>($"api/restore-points/{Id}");
+            _target = _details.Namespace;
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private bool Ready => !string.IsNullOrWhiteSpace(_target) && _what switch
+    {
+        WhatApps => _objects.Count > 0,
+        WhatClaims => _claims.Count > 0 && _claims.Values.All(v => !string.IsNullOrWhiteSpace(v)),
+        _ => true,
+    };
+
+    private IEnumerable<string> Selected() => _what switch
+    {
+        WhatApps => _objects,
+        WhatClaims => _claims.Keys,
+        _ => _details?.Objects.Select(Key) ?? [],
+    };
+
+    /// <summary>The workloads that are not made by a controller, grouped by their app.</summary>
+    private IEnumerable<(string? Name, List<KubernetesObjectDto> Workloads)> Apps() => _details!.Objects
+        .Where(o => o.Needs is not null)
+        .GroupBy(o => o.App)
+        .OrderBy(g => g.Key is null).ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+        .Select(g => (g.Key, g.OrderBy(o => o.Kind, StringComparer.Ordinal).ThenBy(o => o.Name, StringComparer.Ordinal).ToList()));
+
+    private bool HasData(string key) => key.StartsWith("PersistentVolumeClaim/", StringComparison.Ordinal)
+        && _details!.Volumes.Any(v => v.DataPath == "snapshot" && $"PersistentVolumeClaim/{v.Claim}" == key);
+
+    private static string Key(KubernetesObjectDto o) => $"{o.Kind}/{o.Name}";
+
+    private static string Summary(IEnumerable<string> kinds) =>
+        string.Join(", ", kinds.GroupBy(k => k).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Count()} {g.Key}"));
+
+    private void Toggle(string key, bool on)
+    {
+        if (on)
+        {
+            _objects.Add(key);
+        }
+        else
+        {
+            _objects.Remove(key);
+        }
+    }
+
+    private void ToggleApp(List<KubernetesObjectDto> workloads, bool on)
+    {
+        foreach (var workload in workloads)
+        {
+            Toggle(Key(workload), on);
+        }
+    }
+
+    private void ToggleClaim(string claim, bool on)
+    {
+        if (on)
+        {
+            _claims[claim] = _target.Trim() == _details!.Namespace ? $"{claim}-restored" : claim;
+        }
+        else
+        {
+            _claims.Remove(claim);
+        }
+    }
+
+    private async Task StartAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var options = new KubernetesRestoreDto
+            {
+                TargetNamespace = _target.Trim(),
+                ReplaceExisting = _replace && _what != WhatClaims,
+                Objects = _what == WhatApps ? [.. _objects] : null,
+                OnlyClaims = _what == WhatClaims ? [.. _claims.Keys] : null,
+                ClaimNames = _what == WhatClaims ? _claims.ToDictionary(kv => kv.Key, kv => kv.Value.Trim()) : [],
+            };
+            var started = await Api.PostAsync<StartedDto>("api/restores", new RestoreRequestDto
+            {
+                RestorePointId = Id,
+                TargetConnectionId = _point!.ConnectionId,
+                Mode = RestoreModeDto.OriginalLocation,
+                Kubernetes = options,
+            });
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

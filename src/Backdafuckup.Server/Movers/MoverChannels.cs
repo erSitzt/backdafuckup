@@ -30,11 +30,12 @@ public sealed class MoverChannels(AgentSettingsStore settings, ILogger<MoverChan
         return Register(new BackupChannel(this, id, endpoint, description, capacity), connectTimeout);
     }
 
-    public async Task<IMoverRestoreChannel> OpenRestoreAsync(string description, IDiskImageSource image, CancellationToken cancellationToken, TimeSpan? connectTimeout = null)
+    public async Task<IMoverRestoreChannel> OpenRestoreAsync(
+        string description, IDiskImageSource image, CancellationToken cancellationToken, TimeSpan? connectTimeout = null, IProgress<long>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(image);
         var (id, endpoint) = await NewEndpointAsync(cancellationToken).ConfigureAwait(false);
-        return Register(new RestoreChannel(this, id, endpoint, description, image), connectTimeout);
+        return Register(new RestoreChannel(this, id, endpoint, description, image, progress), connectTimeout);
     }
 
     /// <summary>The open channel with this id, if the request carries its token; null for anything else.</summary>
@@ -211,7 +212,7 @@ internal sealed class BackupChannel(MoverChannels owner, Guid id, MoverEndpoint 
 }
 
 /// <summary>Serves a restore point's disk to a mover (GET) and completes with the mover's report.</summary>
-internal sealed class RestoreChannel(MoverChannels owner, Guid id, MoverEndpoint endpoint, string description, IDiskImageSource image)
+internal sealed class RestoreChannel(MoverChannels owner, Guid id, MoverEndpoint endpoint, string description, IDiskImageSource image, IProgress<long>? progress = null)
     : MoverChannel(owner, id, endpoint, description), IMoverRestoreChannel
 {
     /// <summary>Bytes per record: reads of the image run this far ahead in parallel.</summary>
@@ -233,6 +234,7 @@ internal sealed class RestoreChannel(MoverChannels owner, Guid id, MoverEndpoint
             var total = await WriteDataAsync(response, cancellationToken).ConfigureAwait(false);
             await MoverStream.WriteEndAsync(response, total, cancellationToken).ConfigureAwait(false);
             await response.FlushAsync(cancellationToken).ConfigureAwait(false);
+            progress?.Report(image.Capacity);
             Interlocked.Exchange(ref _served, total);
         }
         catch (Exception ex)
@@ -313,6 +315,7 @@ internal sealed class RestoreChannel(MoverChannels owner, Guid id, MoverEndpoint
                     await next.Read.ConfigureAwait(false);
                     await MoverStream.WriteRecordAsync(response, next.Offset, next.Buffer.AsMemory(0, next.Length), cancellationToken).ConfigureAwait(false);
                     total += next.Length;
+                    progress?.Report(next.Offset + next.Length);
                 }
                 finally
                 {

@@ -188,6 +188,38 @@ public static class OperationEndpoints
 
     private static void MapRestorePoints(RouteGroupBuilder points)
     {
+        points.MapGet("/{id:guid}/kubernetes", async (Guid id, AppDbContext db, RepositoryManager repositories, CancellationToken ct) =>
+        {
+            var point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == id && r.State == RestorePointState.Available, ct);
+            if (point is null)
+            {
+                return Results.Problem("The restore point does not exist or is not available.", statusCode: StatusCodes.Status404NotFound);
+            }
+
+            var repository = await repositories.GetAsync(point.RepositoryId, ct);
+            await using var reader = await repository.OpenRestorePointAsync(id, ct);
+            if (reader.Manifest is not { Kubernetes: { } space, Metadata: { } metadata })
+            {
+                return Results.Problem("The restore point is not one of a Kubernetes namespace.", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            byte[] content;
+            await using (var blob = await reader.OpenBlobAsync(metadata, ct))
+            {
+                using var memory = new MemoryStream();
+                await blob.CopyToAsync(memory, ct);
+                content = memory.ToArray();
+            }
+
+            return Results.Ok(new KubernetesRestorePointDto(
+                space.Cluster,
+                space.Namespace,
+                space.KubernetesVersion,
+                [.. space.Volumes.Select(v => new KubernetesVolumeDto(v.Claim, v.DataPath, v.Reason, v.StorageClass, v.SizeBytes, v.VolumeMode))],
+                [.. Backdafuckup.Kubernetes.KubernetesRestorePoints.Objects(content).Select(o => new KubernetesObjectDto(o.ApiVersion, o.Kind, o.Name, o.Namespace, o.Controlled, o.App, o.Needs))],
+                [.. space.Hooks.Select(h => new KubernetesHookDto(h.Phase, h.Pod, h.Container, h.Command, h.ExitCode, h.Error, h.Seconds))]));
+        }).WithDescription("A restore point of a Kubernetes namespace: its volumes (with or without data), its objects (with their app and, for workloads, what a restore of them brings along) and its hooks.");
+
         points.MapGet("/", async (AppDbContext db, Guid? jobId, string? vmId, CancellationToken ct) =>
         {
             var query = db.RestorePoints.Include(r => r.Disks).Where(r => r.State == RestorePointState.Available);

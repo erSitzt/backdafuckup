@@ -99,8 +99,8 @@
     <ChildContent>
         @if (_menuPoint is { ObjectKind: RestorePointObjectKinds.KubernetesNamespace })
         {
-            @* Restores of namespaces (objects, PVCs, files) are the next step of the Kubernetes backup. *@
-            <MudMenuItem Icon="@AppIcons.Kubernetes" Disabled="true">Namespace restore: not available yet</MudMenuItem>
+            <MudMenuItem Icon="@AppIcons.Kubernetes" Href="@($"/restore-namespace/{_menuPoint.Id}")">Namespace, apps or PVCs</MudMenuItem>
+            <MudMenuItem Icon="@AppIcons.Files" Href="@($"/files/{_menuPoint.Id}")">Files and folders of a PVC</MudMenuItem>
         }
         else if (_menuPoint is { } point)
         {

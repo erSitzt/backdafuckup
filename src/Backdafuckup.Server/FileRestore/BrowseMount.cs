@@ -135,7 +135,8 @@ public sealed class BrowseMount
 
 /// <summary>What the browser shows about its restore point.</summary>
 public sealed record BrowsedRestorePoint(
-    Guid Id, Guid RepositoryId, string VmName, string VmNativeId, DateTimeOffset CreatedUtc, string Consistency, string? ConsistencyReason, bool ConsistencyWarning = false);
+    Guid Id, Guid RepositoryId, string VmName, string VmNativeId, DateTimeOffset CreatedUtc, string Consistency, string? ConsistencyReason, bool ConsistencyWarning = false,
+    string ObjectKind = Contracts.RestorePointObjectKinds.Vm);
 
 /// <summary>The browser is closed or belongs to another user (HTTP 404).</summary>
 public sealed class MountNotFoundException(string message) : Exception(message);

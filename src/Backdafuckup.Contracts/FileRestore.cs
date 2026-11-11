@@ -16,7 +16,8 @@ public sealed record FileMountDto(
     IReadOnlyList<string> Warnings,
     int IdleTimeoutMinutes,
     string VmNativeId,
-    bool ConsistencyWarning = false);
+    bool ConsistencyWarning = false,
+    string ObjectKind = RestorePointObjectKinds.Vm);
 
 /// <param name="Title">Display name: drive letter or mount point, label, otherwise the id.</param>
 /// <param name="Family">"windows" or "unix" for readable volumes.</param>

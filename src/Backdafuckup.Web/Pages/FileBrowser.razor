@@ -139,7 +139,10 @@ else
         <MudStack Spacing="3">
             <MudRadioGroup T="string" Value="_restoreTarget" ValueChanged="OnTargetChanged">
                 <MudRadio T="string" Value="@("share")" Color="Color.Primary">Copy to a network share (SMB)</MudRadio>
-                <MudRadio T="string" Value="@("vm")" Color="Color.Primary">Back into the VM @_mount?.VmName @(_volume?.Family == "unix" ? "(SSH)" : "(guest agent)")</MudRadio>
+                @if (_mount?.ObjectKind != RestorePointObjectKinds.KubernetesNamespace)
+                {
+                    <MudRadio T="string" Value="@("vm")" Color="Color.Primary">Back into the VM @_mount?.VmName @(_volume?.Family == "unix" ? "(SSH)" : "(guest agent)")</MudRadio>
+                }
             </MudRadioGroup>
             @if (_restoreTarget == "share")
             {

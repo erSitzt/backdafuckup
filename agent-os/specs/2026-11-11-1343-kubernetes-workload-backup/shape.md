@@ -98,6 +98,26 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
   - **Snapshots:** taken one after another before any volume is read. Each one is deleted as soon as its volume has been read.
   - **No change tracking:** every run reads every volume in full, logged as information, not a warning. Dedup stores only changed chunks.
   - **The mover image is pushed before the first snapshot,** so a missing registry stops the run before anything is created.
+- **Restores as built (task 8, part 1, 2026-11-11):**
+  - **The engine's VM restore carries a namespace:**
+    - Each volume with data is a "disk", written by a mover in restore mode into a new block PVC in `backdafuckup-system` on the original StorageClass.
+    - The volume is then kept: its PV is set to Retain and its PVC is removed. Then the "VM" is created: the namespace's objects.
+  - **Rebinding (spike S3):**
+    1. The work PV object is removed; the volume stays.
+    2. A static Filesystem PV takes the volume. It gets the driver attributes, fsType, reclaim policy, mount options and node affinity of the backed-up PV, a `claimRef` to the target PVC, and `pv.kubernetes.io/provisioned-by`, so Delete still deletes the volume.
+    3. The PVC from the restore point is created with `volumeName`.
+  - **Order and cleaning:**
+    - Velero's order: CRDs, namespace, StorageClasses, PVCs, Secrets, ConfigMaps, ServiceAccounts, quotas, roles, Services, custom resources, workloads, HPA, Ingress, pods.
+    - Each object is restored without uid, resourceVersion, timestamps, owner references, status and managed fields. Services lose their cluster IPs and node ports, Jobs their generated selector, ServiceAccounts their token references; RoleBindings to ServiceAccounts follow a new namespace name.
+    - Objects made by a controller (`ownerReferences` with `controller: true`) and what the cluster makes itself (ServiceAccount tokens, `kube-root-ca.crt`, the default ServiceAccount) are not restored.
+  - **What, three ways:**
+    - The whole namespace.
+    - Apps and workloads (user request 2026-11-11), grouped by `app.kubernetes.io/instance`, else the Helm release, else `app.kubernetes.io/name`. A workload brings what it needs: ConfigMaps and Secrets of its volumes and environment, pull secrets, its ServiceAccount with the RoleBindings and Roles naming it, its PVCs (a StatefulSet's from its claim templates), the Services selecting its pods and the Ingresses to them, its HPA and PDBs.
+    - Single PVCs with their data, also under new names next to the originals.
+  - **Where:** the original namespace or another one, created when missing.
+  - **Existing objects:** left as they are, or replaced (updated) on request. A PVC with data that exists in the target stops the restore before anything is written: delete it first, restore elsewhere, or under a new name. An objects-only PVC comes back empty on its StorageClass, or bound to its static PV again (e.g. an NFS export) when that PV is gone or available.
+  - **A restore that does not complete takes back what it created:** a namespace it created with everything in it, else each object. Restored volumes that never reached their PVC go through their ledger entry: the PV is set back to Delete, so the cluster deletes the volume.
+  - **Still open in task 8:** files (browse, ZIP, back into a live PVC), the object explorer (compare with the live cluster), and replacing a PVC in place (scale the workload down, swap, scale up).
 - **Agent path as a TCP tunnel:** exec (hooks) runs over the client's own WebSocket, which bypasses HTTP message handlers, so relaying HTTP requests is not enough.
   - The agent keeps a WebSocket to the server and carries TCP connections to the API server, as Rancher's remotedialer does.
   - The server gives each agent cluster a local port, so the same client code (HTTP, watch, exec, TLS and pinning) works unchanged on both paths.
