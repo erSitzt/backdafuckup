@@ -110,7 +110,7 @@ internal sealed class VolumeImport : IDiskWriter
             cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
         _flow.Log.Info($"Mover pod {Work}/{PodName} started to restore {_source}: new block PVC {_name} ({VolumeSnapshotFlow.Bytes(_target.CapacityBytes)}), image {mover.Image}.");
         var channel = _channel;
-        _watching = MoverPods.WatchAsync(_flow, PodName, _source, channel.Abort, _stopWatching.Token);
+        _watching = MoverPods.WatchAsync(_flow, PodName, _source, channel.Abort, _stopWatching.Token, mode: "restore");
 
         TransferredBytes = await channel.Completion.WaitAsync(cancellationToken).ConfigureAwait(false);
         await StopWatchingAsync().ConfigureAwait(false);

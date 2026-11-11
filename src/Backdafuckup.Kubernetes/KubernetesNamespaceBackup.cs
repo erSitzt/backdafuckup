@@ -112,7 +112,7 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         var succeeded = false;
         try
         {
-            hookRecords.AddRange(await KubernetesHooks.RunAsync(executor, ns, preHooks, log, cancellationToken).ConfigureAwait(false));
+            hookRecords.AddRange(await KubernetesHooks.RunAsync(executor, cluster, ns, preHooks, log, cancellationToken).ConfigureAwait(false));
             preTime = Stopwatch.GetElapsedTime(started);
             var fatal = preHooks.Zip(hookRecords).FirstOrDefault(p => p.First.FailOnError && p.Second.Error is not null);
             if (fatal.First is not null)
@@ -137,7 +137,7 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         {
             try
             {
-                hookRecords.AddRange(await KubernetesHooks.RunAsync(executor, ns, postHooks, log, succeeded ? cancellationToken : CancellationToken.None).ConfigureAwait(false));
+                hookRecords.AddRange(await KubernetesHooks.RunAsync(executor, cluster, ns, postHooks, log, succeeded ? cancellationToken : CancellationToken.None).ConfigureAwait(false));
             }
             catch (OperationCanceledException) when (!succeeded)
             {

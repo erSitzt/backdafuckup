@@ -52,6 +52,9 @@ internal sealed record TakenSnapshot(
     string Namespace, string Claim, string Name, string ContentName, string Handle, string Driver, string SnapshotClass,
     string? StorageClass, string VolumeMode, long RestoreSize, Guid LedgerId)
 {
+    /// <summary>When the VolumeSnapshot was created (for its lifetime).</summary>
+    public DateTimeOffset CreatedUtc { get; init; } = DateTimeOffset.UtcNow;
+
     public string Source => $"{Namespace}/{Claim}";
 }
 
@@ -104,6 +107,7 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
                 ["source"] = new JsonObject { ["persistentVolumeClaimName"] = claim },
             },
         };
+        var created = DateTimeOffset.UtcNow;
         await CallAsync($"creating the snapshot {ns}/{name}", () => client.CustomObjects.CreateNamespacedCustomObjectAsync(body, Group, Version, ns, "volumesnapshots", cancellationToken: cancellationToken))
             .ConfigureAwait(false);
 
@@ -117,8 +121,12 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
             ?? (pvc.Status?.Capacity?.TryGetValue("storage", out var capacity) == true ? capacity.ToInt64() : (long?)null)
             ?? throw new KubernetesOperationException($"The size of the snapshot {ns}/{name} is unknown (no restoreSize, no capacity of {ns}/{claim}).");
         log.Info($"Snapshot {ns}/{name} of {claim} ready after {(DateTimeOffset.UtcNow - started).TotalSeconds:0} s ({Bytes(size)}, handle {handle}).");
-        return new TakenSnapshot(
-            ns, claim, name, contentName, handle, Text(json, "spec", "driver") ?? string.Empty, snapshotClass, pvc.Spec.StorageClassName, pvc.Spec.VolumeMode ?? "Filesystem", size, ledgerId);
+        var driver = Text(json, "spec", "driver") ?? string.Empty;
+        KubernetesMetrics.RecordSnapshotReady(cluster, driver, DateTimeOffset.UtcNow - created);
+        return new TakenSnapshot(ns, claim, name, contentName, handle, driver, snapshotClass, pvc.Spec.StorageClassName, pvc.Spec.VolumeMode ?? "Filesystem", size, ledgerId)
+        {
+            CreatedUtc = created,
+        };
     }
 
     /// <summary>Exposes the snapshot to a mover pod that sends it through a channel; dispose the export to remove its objects.</summary>
@@ -153,6 +161,8 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
 
             await Task.Delay(timings.Poll, cancellationToken).ConfigureAwait(false);
         }
+
+        KubernetesMetrics.RecordSnapshotLifetime(cluster, snapshot.Driver, DateTimeOffset.UtcNow - snapshot.CreatedUtc);
 
         await ledger.UpdateAsync(snapshot.LedgerId, ArtifactState.Done, null, cancellationToken).ConfigureAwait(false);
         log.Info($"Snapshot {snapshot.Namespace}/{snapshot.Name} of {snapshot.Claim} deleted.");
