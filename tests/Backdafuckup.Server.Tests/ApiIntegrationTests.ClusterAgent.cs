@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Backdafuckup.Contracts;
 using Backdafuckup.Core.DataMover;
@@ -68,6 +69,28 @@ public sealed partial class ApiIntegrationTests
         var refused = await Assert.ThrowsAnyAsync<Exception>(() => ConnectAgentSocketAsync(new Uri($"wss://localhost/{ClusterTunnel.ControlPath(created.Id)}"), "not-the-token", Ct));
         Assert.Contains("401", refused.Message, StringComparison.Ordinal);
 
+        // The agent's Deployment as applied from an older manifest: the server brings it to its own image.
+        _cluster.Add("apis/apps/v1", "deployments", new JsonObject
+        {
+            ["metadata"] = new JsonObject { ["name"] = "backdafuckup-agent", ["namespace"] = "backdafuckup-system" },
+            ["spec"] = new JsonObject
+            {
+                ["template"] = new JsonObject
+                {
+                    ["spec"] = new JsonObject
+                    {
+                        ["containers"] = new JsonArray(new JsonObject
+                        {
+                            ["name"] = "agent",
+                            ["image"] = "registry.test:8443/backdafuckup/mover@sha256:" + new string('0', 64),
+                            ["env"] = new JsonArray(new JsonObject { ["name"] = "BDFU_MOVER_MODE", ["value"] = "agent" }),
+                        }),
+                    },
+                },
+            },
+        });
+        var image = Regex.Match(manifest, "image: \"([^\"]+)\"").Groups[1].Value;
+
         // The agent, with the ServiceAccount's token and CA where the kubelet puts them.
         var account = Path.Combine(_root, "serviceaccount");
         Directory.CreateDirectory(account);
@@ -94,6 +117,13 @@ public sealed partial class ApiIntegrationTests
         var inventory = await WaitAsync(async () => await client.GetFromJsonAsync<List<InventoryItemDto>>($"/api/connections/{created.Id}/inventory", Ct) is { Count: > 0 } items ? items : null);
         Assert.Contains(inventory, i => i.Kind == "Namespace" && i.NativeId == "bdfu-spike" && i.Properties["snapshotVolumes"] == "1");
         Assert.True(api.Requests > 0, "the requests went over TLS to the API server");
+        var agentContainer = await WaitAsync(async () =>
+        {
+            await Task.CompletedTask;
+            var container = _cluster.Find("deployments", "backdafuckup-system", "backdafuckup-agent")!["spec"]!["template"]!["spec"]!["containers"]![0]!.AsObject();
+            return (string?)container["image"] == image ? container : null;
+        });
+        Assert.Equal("agent", (string?)agentContainer["env"]![0]!["value"]); // only the image changed
 
         // A backup through the tunnel; the mover pods send the volume to the server directly.
         var repository = await Read<RepositoryDto>(client.PostAsJsonAsync("/api/repositories", new CreateRepositoryDto { Name = "Local", Path = Path.Combine(_root, "repo") }, Ct));

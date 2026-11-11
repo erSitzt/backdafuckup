@@ -207,8 +207,9 @@ public static class KubernetesSetup
             name: {{ServiceAccount}}
             namespace: {{WorkNamespace}}
         ---
-        # The work namespace: the temporary PVCs from snapshots, the mover pods that read and write them, and the pull secret
-        # for the mover image when the registry needs a login.
+        # The work namespace: the temporary PVCs from snapshots, the mover pods that read and write them, the pull secret
+        # for the mover image when the registry needs a login, and the image of the agent (when the cluster has one), which
+        # the server keeps at its own version.
         apiVersion: rbac.authorization.k8s.io/v1
         kind: Role
         metadata:
@@ -218,6 +219,10 @@ public static class KubernetesSetup
           - apiGroups: [""]
             resources: [persistentvolumeclaims, pods, secrets]
             verbs: [create, delete, patch, update]
+          - apiGroups: [apps]
+            resources: [deployments]
+            resourceNames: [{{AgentName}}]
+            verbs: [patch]
         ---
         apiVersion: rbac.authorization.k8s.io/v1
         kind: RoleBinding

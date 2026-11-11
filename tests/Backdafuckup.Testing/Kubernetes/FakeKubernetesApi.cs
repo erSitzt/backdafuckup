@@ -199,7 +199,13 @@ public sealed class FakeKubernetesApi
 
         if ((request.Method == HttpMethod.Put || request.Method == HttpMethod.Patch) && name is not null)
         {
-            var body = JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!.AsObject();
+            var parsed = JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!;
+            if (parsed is JsonArray operations)
+            {
+                return JsonPatch(apiPath, plural, ns, name, path, operations);
+            }
+
+            var body = parsed.AsObject();
             JsonObject changed;
             lock (_lock)
             {
@@ -318,6 +324,56 @@ public sealed class FakeKubernetesApi
 
     private static bool Matches(JsonObject item, string? ns, string name) =>
         (string?)item["metadata"]?["name"] == name && (ns is null || (string?)item["metadata"]?["namespace"] == ns);
+
+    /// <summary>JSON patch (RFC 6902) with test, replace and add on object members and array items; a failed test is 422.</summary>
+    private HttpResponseMessage JsonPatch(string apiPath, string plural, string? ns, string name, string path, JsonArray operations)
+    {
+        JsonObject changed;
+        lock (_lock)
+        {
+            var index = _objects.FindIndex(o => o.ApiPath == apiPath && o.Plural == plural && Matches(o.Item, ns, name));
+            if (index < 0)
+            {
+                return NotFound(path);
+            }
+
+            var copy = (JsonObject)_objects[index].Item.DeepClone();
+            foreach (var operation in operations.Select(o => o!.AsObject()))
+            {
+                var pointer = ((string)operation["path"]!).Split('/', StringSplitOptions.RemoveEmptyEntries);
+                JsonNode parent = copy;
+                foreach (var step in pointer[..^1])
+                {
+                    parent = parent is JsonArray array ? array[int.Parse(step, System.Globalization.CultureInfo.InvariantCulture)]! : parent[step]!;
+                }
+
+                var last = pointer[^1];
+                var value = operation["value"]?.DeepClone();
+                switch ((string)operation["op"]!)
+                {
+                    case "test" when !JsonNode.DeepEquals(parent is JsonArray items ? items[int.Parse(last, System.Globalization.CultureInfo.InvariantCulture)] : parent[last], value):
+                        return Json((HttpStatusCode)422, new JsonObject { ["kind"] = "Status", ["status"] = "Failure", ["message"] = $"test failed at {operation["path"]}", ["code"] = 422 });
+                    case "test":
+                        break;
+                    case "replace" or "add" when parent is JsonArray items:
+                        items[int.Parse(last, System.Globalization.CultureInfo.InvariantCulture)] = value;
+                        break;
+                    case "replace" or "add":
+                        parent[last] = value;
+                        break;
+                }
+            }
+
+            _objects[index] = (apiPath, plural, copy);
+            changed = copy;
+        }
+
+        Patched?.Invoke(plural, changed);
+        lock (_lock)
+        {
+            return Json(HttpStatusCode.OK, (JsonObject)changed.DeepClone());
+        }
+    }
 
     /// <summary>JSON merge patch (RFC 7386): objects merge, null removes, anything else replaces.</summary>
     private static void MergePatch(JsonObject target, JsonObject patch)

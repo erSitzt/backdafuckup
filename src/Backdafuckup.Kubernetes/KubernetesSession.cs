@@ -16,9 +16,19 @@ public interface IKubernetesNamespaceReader
     Task<IReadOnlyList<System.Text.Json.Nodes.JsonObject>> ReadObjectsAsync(string ns, CancellationToken cancellationToken);
 }
 
+/// <summary>The cluster's agent Deployment, kept at the server's mover image.</summary>
+public interface IKubernetesAgentUpdater
+{
+    /// <summary>
+    /// Sets the image of the agent's Deployment (the agent restarts with it); returns the image it had, or null when it
+    /// runs <paramref name="image"/> already or the cluster has no agent Deployment.
+    /// </summary>
+    Task<string?> UpdateAgentImageAsync(string image, CancellationToken cancellationToken);
+}
+
 internal sealed class KubernetesSession(
     IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
-    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore
+    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater
 {
     private PlatformInfo? _platform;
 
@@ -76,6 +86,47 @@ internal sealed class KubernetesSession(
 
         IVmRestoreSession restore = new KubernetesNamespaceRestore(client, settings, plan, log, ledger, channels, images, timings ?? new KubernetesTimings());
         return Task.FromResult(restore);
+    }
+
+    public async Task<string?> UpdateAgentImageAsync(string image, CancellationToken cancellationToken)
+    {
+        const string Ns = KubernetesSetup.WorkNamespace;
+        const string Name = KubernetesSetup.AgentName;
+        k8s.Models.V1Deployment deployment;
+        try
+        {
+            deployment = await client.AppsV1.ReadNamespacedDeploymentAsync(Name, Ns, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        var containers = deployment.Spec?.Template?.Spec?.Containers?.ToList() ?? [];
+        var index = containers.FindIndex(c => c.Name == "agent");
+        if (index < 0 || containers[index].Image == image)
+        {
+            return null;
+        }
+
+        // Only the agent container's image, and only if it is still where it was read.
+        var current = containers[index].Image;
+        var patch = new System.Text.Json.Nodes.JsonArray(
+            new System.Text.Json.Nodes.JsonObject { ["op"] = "test", ["path"] = $"/spec/template/spec/containers/{index}/name", ["value"] = "agent" },
+            new System.Text.Json.Nodes.JsonObject { ["op"] = "replace", ["path"] = $"/spec/template/spec/containers/{index}/image", ["value"] = image });
+        try
+        {
+            await client.AppsV1.PatchNamespacedDeploymentAsync(new k8s.Models.V1Patch(patch.ToJsonString(), k8s.Models.V1Patch.PatchType.JsonPatch), Name, Ns, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            throw new KubernetesOperationException(
+                $"The agent's Deployment {Ns}/{Name} in cluster {settings.ClusterName()} runs {current}, and the ServiceAccount may not change it: apply the current setup manifest with the agent once; from then on the server keeps the agent up to date itself.",
+                ex);
+        }
+
+        return current;
     }
 
     /// <summary>Starts a mover pod next to a live PVC that puts restored files into it.</summary>

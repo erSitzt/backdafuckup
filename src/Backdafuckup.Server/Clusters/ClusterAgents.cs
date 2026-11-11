@@ -28,6 +28,9 @@ public sealed class ClusterAgents(IDbContextFactory<AppDbContext> dbFactory, Cre
 {
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan OpenTimeout = TimeSpan.FromSeconds(20);
+
+    /// <summary>How long an agent update waits for sessions of clusters to end before it looks again.</summary>
+    internal TimeSpan UpdateRetry { get; set; } = TimeSpan.FromMinutes(10);
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull };
 
     private readonly ConcurrentDictionary<Guid, Endpoint> _endpoints = new();
@@ -146,6 +149,7 @@ public sealed class ClusterAgents(IDbContextFactory<AppDbContext> dbFactory, Cre
             "The agent of cluster {Cluster} connected from {Remote}: pod {Pod} on node {Node}, version {Version}, API server {ApiServer}; tunnel port {Port}.",
             connection.DisplayName, remote, session.Pod, session.Node, session.Version, session.ApiServer, endpoint.Port);
         _ = RefreshAsync(connection.Id, connection.DisplayName);
+        _ = KeepCurrentAsync(connection, endpoint, session);
         try
         {
             while (await ReceiveAsync(socket, linked.Token).ConfigureAwait(false) is { } message)
@@ -226,6 +230,50 @@ public sealed class ClusterAgents(IDbContextFactory<AppDbContext> dbFactory, Cre
         {
             logger.LogWarning("Cluster {Cluster} could not be read through its agent: {Error}", name, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Brings the agent's Deployment to this server's mover image (the agent then restarts with it and connects again).
+    /// Not while sessions of clusters run: the tunnel is down for the restart. Waits for them as long as the agent stays connected.
+    /// </summary>
+    private async Task KeepCurrentAsync(HypervisorConnection connection, Endpoint endpoint, AgentSession session)
+    {
+        try
+        {
+            while (endpoint.Session == session)
+            {
+                if (!await ClusterSessionsRunAsync().ConfigureAwait(false))
+                {
+                    var mover = await services.GetRequiredService<Movers.MoverRegistry>().EnsurePushedAsync(null, _stopping.Token).ConfigureAwait(false);
+                    await using var cluster = await services.GetRequiredService<ConnectionManager>().OpenAsync(connection.Id, _stopping.Token).ConfigureAwait(false);
+                    if (cluster is IKubernetesAgentUpdater updater && await updater.UpdateAgentImageAsync(mover.Image, _stopping.Token).ConfigureAwait(false) is { } previous)
+                    {
+                        logger.LogInformation("The agent of cluster {Cluster} ran {Previous}; its Deployment now runs {Image}, and the agent reconnects with it.", connection.DisplayName, previous, mover.Image);
+                    }
+
+                    return;
+                }
+
+                logger.LogInformation("The agent of cluster {Cluster} is checked for a newer image once no session of a cluster runs.", connection.DisplayName);
+                await Task.Delay(UpdateRetry, _stopping.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Stopping.
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("The agent of cluster {Cluster} could not be brought to this server's version: {Error}", connection.DisplayName, ex.Message);
+        }
+    }
+
+    private async Task<bool> ClusterSessionsRunAsync()
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(_stopping.Token).ConfigureAwait(false);
+        return await db.Sessions.AnyAsync(
+            s => s.ObjectKind == RestorePointObjectKinds.KubernetesNamespace && (s.State == SessionState.Queued || s.State == SessionState.Running || s.State == SessionState.Stopping),
+            _stopping.Token).ConfigureAwait(false);
     }
 
     private async Task MarkDisconnectedAsync(Guid connectionId, string name)
