@@ -119,6 +119,9 @@ public interface IVmRestoreSession : IAsyncDisposable
 {
     Task<RestoreValidation> ValidateAsync(CancellationToken cancellationToken);
 
+    /// <summary>Whether the disk is restored at all (a namespace restore of selected objects restores only their volumes).</summary>
+    bool RestoresDisk(string diskKey) => true;
+
     Task<IDiskWriter> CreateDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken);
 
     /// <summary>Creates an empty disk (for a disk that was left out of the backup) and returns its id.</summary>

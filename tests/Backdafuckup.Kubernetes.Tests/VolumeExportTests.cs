@@ -324,7 +324,7 @@ public sealed class VolumeExportTests
             return Task.FromResult<IMoverBackupChannel>(channel);
         }
 
-        public Task<IMoverRestoreChannel> OpenRestoreAsync(string description, IDiskImageSource image, CancellationToken cancellationToken, TimeSpan? connectTimeout = null) =>
+        public Task<IMoverRestoreChannel> OpenRestoreAsync(string description, IDiskImageSource image, CancellationToken cancellationToken, TimeSpan? connectTimeout = null, IProgress<long>? progress = null) =>
             throw new NotSupportedException();
     }
 

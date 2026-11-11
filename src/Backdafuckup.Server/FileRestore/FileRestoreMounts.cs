@@ -90,7 +90,8 @@ public sealed class FileRestoreMounts(
         mount.Image.Warnings,
         (int)options.Value.IdleTimeout.TotalMinutes,
         mount.Point.VmNativeId,
-        mount.Point.ConsistencyWarning);
+        mount.Point.ConsistencyWarning,
+        mount.Point.ObjectKind);
 
     public async Task<GuestEntryPageDto> ListAsync(BrowseMount mount, string volume, GuestPath path, int offset, int limit, CancellationToken cancellationToken)
     {
@@ -300,7 +301,7 @@ public sealed class FileRestoreMounts(
             reader = await repository.OpenRestorePointAsync(point.Id, cancellationToken).ConfigureAwait(false);
             var disks = await OpenDisksAsync(reader, cache, cancellationToken).ConfigureAwait(false);
 
-            var browsed = new BrowsedRestorePoint(point.Id, point.RepositoryId, point.VmName, point.VmNativeId, point.CreatedUtc, point.Consistency, point.ConsistencyReason, point.ConsistencyWarning);
+            var browsed = new BrowsedRestorePoint(point.Id, point.RepositoryId, point.VmName, point.VmNativeId, point.CreatedUtc, point.Consistency, point.ConsistencyReason, point.ConsistencyWarning, point.ObjectKind);
             sessionId = await CreateSessionAsync(browsed, user, cancellationToken).ConfigureAwait(false);
             var log = events.CreateLog(sessionId.Value, null);
             log.Info($"Opened by {user}: restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} ({point.Consistency}-consistent), {disks.Count} disk(s).");

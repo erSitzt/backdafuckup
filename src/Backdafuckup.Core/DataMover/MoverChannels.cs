@@ -41,7 +41,9 @@ public interface IMoverChannels
     /// <param name="connectTimeout">How long to wait for the mover (default: the server's); longer when its volume is first copied from a snapshot.</param>
     Task<IMoverBackupChannel> OpenBackupAsync(string description, long capacity, CancellationToken cancellationToken, TimeSpan? connectTimeout = null);
 
-    Task<IMoverRestoreChannel> OpenRestoreAsync(string description, IDiskImageSource image, CancellationToken cancellationToken, TimeSpan? connectTimeout = null);
+    /// <param name="progress">Gets the image position the server has sent up to.</param>
+    Task<IMoverRestoreChannel> OpenRestoreAsync(
+        string description, IDiskImageSource image, CancellationToken cancellationToken, TimeSpan? connectTimeout = null, IProgress<long>? progress = null);
 }
 
 /// <summary>What a cluster needs to start movers: the image, and the pull secret (its name, and its content when the server creates it).</summary>

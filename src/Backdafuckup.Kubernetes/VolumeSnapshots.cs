@@ -75,6 +75,12 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
 
     public KubernetesTimings Timings => timings;
 
+    /// <summary>The server's mover channels, for restores (backups get them per export).</summary>
+    public IMoverChannels? Channels { get; init; }
+
+    /// <summary>The mover image, for restores.</summary>
+    public MoverDeployment? Mover { get; set; }
+
     /// <summary>Takes a snapshot of the PVC and waits until it is ready to use.</summary>
     public async Task<TakenSnapshot> TakeAsync(string ns, string claim, string snapshotClass, string run, CancellationToken cancellationToken)
     {
@@ -168,6 +174,11 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
                     break;
                 case KubernetesArtifactKinds.Secret:
                     await client.CoreV1.DeleteNamespacedSecretAsync(name, ns, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    break;
+                case VolumeImport.RetainedVolumeKind:
+                    // A restored volume that was never bound to its PVC: the cluster deletes it once its PV says Delete.
+                    await client.CoreV1.PatchPersistentVolumeAsync(
+                        new V1Patch("""{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}""", V1Patch.PatchType.MergePatch), name, cancellationToken: cancellationToken).ConfigureAwait(false);
                     break;
                 default:
                     throw new KubernetesOperationException($"Unknown kind of object {what} in the artifact ledger of cluster {cluster}.");

@@ -82,12 +82,26 @@ public sealed class RestoreSessionRunner(
                 PowerOn = request.PowerOn,
                 ReplaceExisting = request.ReplaceExisting,
                 DeleteReplaced = request.DeleteReplaced,
-                OriginalVmIds = originalLocation ? await OriginalVmIdsAsync(targetConnection, point.VmNativeId, cancellationToken).ConfigureAwait(false) : [],
+                OriginalVmIds = originalLocation && manifest.Kubernetes is null ? await OriginalVmIdsAsync(targetConnection, point.VmNativeId, cancellationToken).ConfigureAwait(false) : [],
                 SessionId = session.Id,
+                Kubernetes = manifest.Kubernetes is { } space
+                    ? new KubernetesRestoreOptions
+                    {
+                        TargetNamespace = string.IsNullOrWhiteSpace(request.Kubernetes?.TargetNamespace) ? space.Namespace : request.Kubernetes.TargetNamespace.Trim(),
+                        ReplaceExisting = request.Kubernetes?.ReplaceExisting == true,
+                        OnlyClaims = request.Kubernetes?.OnlyClaims,
+                        Objects = request.Kubernetes?.Objects,
+                        ClaimNames = request.Kubernetes?.ClaimNames ?? [],
+                    }
+                    : null,
             };
 
-            log.Info($"Restoring {manifest.Vm.Name} from {manifest.CreatedUtc.ToLocalTime():g} to {(plan.Mode == RestoreMode.OriginalLocation ? "the original location" : "an alternate location")} as '{plan.VmName}'" +
-                     (resume ? ", with its memory: it resumes where it was at the backup." : "."));
+            if (plan.Kubernetes is null)
+            {
+                log.Info($"Restoring {manifest.Vm.Name} from {manifest.CreatedUtc.ToLocalTime():g} to {(plan.Mode == RestoreMode.OriginalLocation ? "the original location" : "an alternate location")} as '{plan.VmName}'" +
+                         (resume ? ", with its memory: it resumes where it was at the backup." : "."));
+            }
+
             await using var hypervisor = await connections.OpenAsync(targetConnection, cancellationToken).ConfigureAwait(false);
             var ledger = new DbArtifactLedger(dbFactory, targetConnection, session.Id, null, time);
             await using var restore = await hypervisor.BeginRestoreAsync(plan, log, ledger, cancellationToken).ConfigureAwait(false);
@@ -115,7 +129,10 @@ public sealed class RestoreSessionRunner(
                 warnings |= DomainControllerNotes(manifest, plan, log);
             }
 
-            var total = Math.Max(1, manifest.Disks.Sum(d => d.CapacityBytes) + (resume ? manifest.Memory!.CapacityBytes : 0));
+            // A namespace restore of selected objects restores only their volumes.
+            var disks = manifest.Disks.Where(d => restore.RestoresDisk(d.Key)).ToList();
+            var noun = plan.Kubernetes is null ? "Disk" : "Volume";
+            var total = Math.Max(1, disks.Sum(d => d.CapacityBytes) + (resume ? manifest.Memory!.CapacityBytes : 0));
             long done = 0;
             long transferred = 0;
             var transferStarted = time.GetUtcNow();
@@ -164,10 +181,10 @@ public sealed class RestoreSessionRunner(
                 return writer.DiskId;
             }
 
-            foreach (var disk in manifest.Disks)
+            foreach (var disk in disks)
             {
                 mapping[MetadataId(disk.Key, disk.SourceDiskId)] = await RestoreImageAsync(
-                    new RestoreDiskTarget(disk.Key, disk.SourceDiskId, disk.Name, disk.CapacityBytes, plan.DiskStorage[disk.Key]), $"Disk {disk.Name}").ConfigureAwait(false);
+                    new RestoreDiskTarget(disk.Key, disk.SourceDiskId, disk.Name, disk.CapacityBytes, plan.DiskStorage[disk.Key]), $"{noun} {disk.Name}").ConfigureAwait(false);
             }
 
             foreach (var disk in manifest.ExcludedDisks)
@@ -192,6 +209,7 @@ public sealed class RestoreSessionRunner(
             }
 
             var restored = await restore.CompleteAsync(cancellationToken).ConfigureAwait(false);
+            warnings |= restored.Warnings is { Count: > 0 };
             if (restored.ReplacedVmId is { } replaced && replaced != restored.VmId)
             {
                 warnings |= await FollowRestoredVmAsync(session.Id, point.VmName, targetConnection, replaced, restored, log).ConfigureAwait(false);
@@ -205,10 +223,10 @@ public sealed class RestoreSessionRunner(
             }
 
             log.Info(
-                $"Restore finished: VM '{restored.Name}' ({restored.VmId}), {VmBackupTask.Format(done)} restored in {MetricsText.Duration(final.Seconds)} " +
+                $"Restore finished: {(plan.Kubernetes is null ? $"VM '{restored.Name}' ({restored.VmId})" : $"namespace {restored.Name}")}, {VmBackupTask.Format(done)} restored in {MetricsText.Duration(final.Seconds)} " +
                 $"({MetricsText.Rate(final.ProcessingRate)}), {VmBackupTask.Format(transferred)} transferred ({MetricsText.Rate(transferred / Math.Max(0.001, final.Seconds))}).");
             await FinishAsync(task.Id, SessionState.Succeeded, null, done, final).ConfigureAwait(false);
-            return (warnings ? SessionState.Warning : SessionState.Succeeded, $"Restored as '{restored.Name}'.");
+            return (warnings ? SessionState.Warning : SessionState.Succeeded, plan.Kubernetes is null ? $"Restored as '{restored.Name}'." : $"Restored into namespace {restored.Name}.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
