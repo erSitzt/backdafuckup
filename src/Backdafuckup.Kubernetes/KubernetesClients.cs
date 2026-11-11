@@ -25,22 +25,27 @@ internal sealed class TlsObserver
     public ConcurrentDictionary<string, X509Certificate2> Rejected { get; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
-/// <summary>Builds the API client of a cluster: bearer token, and the API server's certificate pinned (trust on first use).</summary>
-internal static class KubernetesClients
+/// <summary>Builds the API client of a cluster: bearer token, and the API servers trusted through the cluster CA (or a pinned certificate).</summary>
+public static class KubernetesClients
 {
     /// <param name="observer">Collects the certificates the client accepted and refused; null when nobody asks.</param>
     /// <param name="transport">Tests only: answers every request instead of the network.</param>
-    public static IKubernetes Create(ConnectionSettings settings, TlsObserver? observer, DelegatingHandler? transport)
+    internal static IKubernetes Create(ConnectionSettings settings, TlsObserver? observer, DelegatingHandler? transport)
     {
         ArgumentNullException.ThrowIfNull(settings);
         var pins = new HashSet<string>(settings.Pins.Select(p => p.SpkiSha256), StringComparer.OrdinalIgnoreCase);
+        var authorities = CertificateAuthorities(settings);
         var config = new KubernetesClientConfiguration
         {
             Host = BaseUrl(settings),
             AccessToken = settings.Credential.Password,
             UserAgent = "backdafuckup",
             HttpClientTimeout = TimeSpan.FromSeconds(60),
-            FirstMessageHandlerSetup = handler =>
+
+            // The cluster's CA: every API server behind a load balancer has its own certificate, and RKE2 renews them; the
+            // client checks the chain against this CA only, also for the WebSockets of exec.
+            SslCaCerts = authorities.Count > 0 ? authorities : null,
+            FirstMessageHandlerSetup = authorities.Count > 0 ? null : handler =>
             {
                 if (handler is SocketsHttpHandler sockets)
                 {
@@ -63,6 +68,29 @@ internal static class KubernetesClients
         };
         return transport is null ? new k8s.Kubernetes(config) : new k8s.Kubernetes(config, transport);
     }
+
+    /// <summary>The CA certificates among the pins: a cluster is trusted through the CA that signs its API servers.</summary>
+    public static X509Certificate2Collection CertificateAuthorities(ConnectionSettings settings)
+    {
+        var result = new X509Certificate2Collection();
+        foreach (var pin in settings.Pins.Where(p => !string.IsNullOrWhiteSpace(p.Pem)))
+        {
+            var certificate = X509Certificate2.CreateFromPem(pin.Pem);
+            if (IsAuthority(certificate))
+            {
+                result.Add(certificate);
+            }
+            else
+            {
+                certificate.Dispose();
+            }
+        }
+
+        return result;
+    }
+
+    public static bool IsAuthority(X509Certificate2 certificate) =>
+        certificate.Extensions.OfType<X509BasicConstraintsExtension>().Any(b => b.CertificateAuthority);
 
     /// <summary>The API's base URL: https, the address and port, and the optional path prefix (Rancher's proxy).</summary>
     public static string BaseUrl(ConnectionSettings settings)

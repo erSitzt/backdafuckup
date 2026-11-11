@@ -25,8 +25,8 @@
         </div>
         <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
             Apply it in the cluster yourself (kubectl apply -f @KubernetesSetupFile, or as a Fleet bundle). It creates the work namespace backdafuckup-system, a ServiceAccount
-            with a token, and the roles. Backup reads every object, Secrets included, takes and removes volume snapshots and runs hooks in pods. Then read the token
-            for <b>Add cluster</b>: <span class="mono">kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.token}' | base64 -d</span>
+            with a token, and the roles. Backup reads every object, Secrets included, takes and removes volume snapshots and runs hooks in pods. Then <b>Add cluster</b>
+            with the token and the cluster CA from its token secret.
         </MudText>
         <MudSwitch T="bool" Value="_withRestore" ValueChanged="OnRestoreChangedAsync" Color="Color.Primary" Class="mb-2"
                    Label="With the restore role: create and change objects in any namespace (leave it off for an account that only backs up)" />
@@ -59,7 +59,7 @@ else if (_clusters.Count > 0)
                 {
                     var summary = Summary(cluster.Id);
                     <tr class="cursor-pointer @(cluster.Id == _selected ? "row-selected" : null)" @onclick="@(() => _selected = cluster.Id)">
-                        <td><b>@cluster.DisplayName</b><span class="cell-sub">@cluster.MasterAddress</span></td>
+                        <td><b>@cluster.DisplayName</b><span class="cell-sub">@cluster.Address:@cluster.Port</span></td>
                         <td><StateChip State="@cluster.Status" /><span class="cell-sub">direct API</span></td>
                         <td class="c-560">@cluster.ProductVersion</td>
                         <td class="c-760">

@@ -69,6 +69,12 @@ public sealed record CreateConnectionDto
     /// <summary>Certificates the user confirmed in the trust dialog (SPKI SHA-256 per host address).</summary>
     public List<CertificateDto> TrustedCertificates { get; init; } = [];
 
+    /// <summary>
+    /// Kubernetes: the cluster's CA certificate (PEM, the ca.crt of the token secret). The API servers are trusted when
+    /// they present a certificate it signed.
+    /// </summary>
+    public string? CaCertificatePem { get; init; }
+
     public bool AllowInsecureNbd { get; init; }
 }
 

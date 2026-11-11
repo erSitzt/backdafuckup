@@ -1,48 +1,28 @@
-@using System.Net
-@using System.Net.Http.Json
 @inject ApiClient Api
 @inject ISnackbar Snackbar
 
-@* Adds a Kubernetes cluster: its API address, the API server's certificate confirmed by the user (trust on first use),
-   then a ServiceAccount token from the setup manifest. *@
+@* Adds a Kubernetes cluster: the address of its API (load balancer or a server), and the ServiceAccount token and the
+   cluster CA from the token secret of the setup manifest. The CA is the trust anchor: every API server behind a load
+   balancer has its own certificate, and the cluster renews them. *@
 <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
-    <MudText Typo="Typo.h6" Class="mb-3">Add Kubernetes cluster</MudText>
-
-    @if (_step == Step.Address)
-    {
-        <MudText Typo="Typo.body2" Class="mb-3">The address of the cluster's API server (its load balancer, or a server node). The certificate is shown for confirmation next.</MudText>
-        <div class="field-grid schedule-row" style="grid-template-columns: minmax(0, 1fr) 140px; max-width: 640px">
-            <MudTextField @bind-Value="_address" Label="API server: host name or IP address" Variant="Variant.Outlined" AutoFocus="true" />
+    <MudText Typo="Typo.h6" Class="mb-1">Add Kubernetes cluster</MudText>
+    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
+        Apply the setup manifest in the cluster first. Its token secret holds both values below:
+        <span class="mono d-block mt-1">kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.token}' | base64 -d</span>
+        <span class="mono d-block">kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.ca\.crt}' | base64 -d</span>
+    </MudText>
+    <div class="form-wide">
+        <div class="field-grid" style="grid-template-columns: minmax(0, 2fr) 140px minmax(0, 1fr)">
+            <MudTextField @bind-Value="_address" Label="API server: host name or IP address" Variant="Variant.Outlined" AutoFocus="true"
+                          HelperText="As in the kubeconfig's server URL, without https:// and port." />
             <MudNumericField @bind-Value="_port" Label="Port" Variant="Variant.Outlined" />
+            <MudTextField @bind-Value="_displayName" Label="Display name" Variant="Variant.Outlined" />
         </div>
-    }
-    else if (_step == Step.Trust)
-    {
-        <MudAlert Severity="Severity.Warning" Class="mb-3">
-            Verify the certificate before you trust it. Compare it with the one in your kubeconfig, e.g.
-            <span class="mono">kubectl config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}'</span> names the CA that signed it.
-        </MudAlert>
-        @foreach (var cert in _pending)
-        {
-            <MudSimpleTable Dense="true" Elevation="0" Class="mb-3">
-                <tbody>
-                    <tr><td style="width:180px">Host</td><td>@cert.HostAddress</td></tr>
-                    <tr><td>Subject</td><td>@cert.Subject</td></tr>
-                    <tr><td>Issuer</td><td>@cert.Issuer @(cert.ValidAgainstSystemCa ? "(trusted CA)" : "(self-signed or the cluster's own CA)")</td></tr>
-                    <tr><td>Valid</td><td>@Fmt.Time(cert.NotBefore) – @Fmt.Time(cert.NotAfter)</td></tr>
-                    <tr><td>Public key SHA-256</td><td class="mono">@cert.SpkiSha256</td></tr>
-                </tbody>
-            </MudSimpleTable>
-        }
-    }
-    else
-    {
-        <div class="form-narrow">
-            <MudTextField @bind-Value="_displayName" Label="Display name" Variant="Variant.Outlined" Class="mb-3" />
-            <MudTextField @bind-Value="_token" Label="ServiceAccount token" InputType="InputType.Password" Variant="Variant.Outlined"
-                          HelperText="From the setup manifest: kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.token}' | base64 -d" />
-        </div>
-    }
+        <MudTextField @bind-Value="_token" Label="ServiceAccount token" InputType="InputType.Password" Variant="Variant.Outlined" Class="mt-3" />
+        <MudTextField @bind-Value="_ca" Label="Cluster CA certificate (PEM)" Variant="Variant.Outlined" Lines="5" Class="mt-3"
+                      Placeholder="-----BEGIN CERTIFICATE-----" Style="font-family: ui-monospace, Consolas, monospace; font-size: .8rem"
+                      HelperText="The API servers are trusted when their certificate is signed by this CA (for the address above)." />
+    </div>
 
     @if (_error is not null)
     {
@@ -52,18 +32,7 @@
     <div class="d-flex gap-2 mt-4">
         <MudButton Variant="Variant.Text" OnClick="OnCancel">Cancel</MudButton>
         <MudSpacer />
-        @if (_step == Step.Address)
-        {
-            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || string.IsNullOrWhiteSpace(_address))" OnClick="ProbeAsync">Next</MudButton>
-        }
-        else if (_step == Step.Trust)
-        {
-            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="Trust">Trust certificate</MudButton>
-        }
-        else
-        {
-            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || string.IsNullOrWhiteSpace(_token))" OnClick="CreateAsync">Connect and add</MudButton>
-        }
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || !Complete)" OnClick="CreateAsync">Connect and add</MudButton>
     </div>
     @if (_busy)
     {
@@ -72,91 +41,39 @@
 </MudPaper>
 
 @code {
-    private enum Step { Address, Trust, Credentials }
-
     [Parameter] public EventCallback OnDone { get; set; }
     [Parameter] public EventCallback OnCancel { get; set; }
 
-    private Step _step = Step.Address;
     private string _address = string.Empty;
     private int _port = 6443;
     private string _displayName = string.Empty;
     private string _token = string.Empty;
+    private string _ca = string.Empty;
     private bool _busy;
     private string? _error;
-    private readonly List<CertificateDto> _trusted = [];
-    private List<CertificateDto> _pending = [];
 
-    private async Task ProbeAsync()
-    {
-        await RunAsync(async () =>
-        {
-            var cert = await Api.PostAsync<CertificateDto>("api/connections/probe", new ProbeRequestDto(_address.Trim(), _port, "Kubernetes"));
-            _pending = [cert];
-            _displayName = string.IsNullOrEmpty(_displayName) ? _address.Trim() : _displayName;
-            _step = Step.Trust;
-        });
-    }
-
-    private void Trust()
-    {
-        _trusted.AddRange(_pending);
-        _pending = [];
-        _step = Step.Credentials;
-    }
+    private bool Complete => !string.IsNullOrWhiteSpace(_address) && !string.IsNullOrWhiteSpace(_token) && _ca.Contains("BEGIN CERTIFICATE", StringComparison.Ordinal);
 
     private async Task CreateAsync()
-    {
-        await RunAsync(async () =>
-        {
-            var request = new CreateConnectionDto
-            {
-                Kind = "Kubernetes",
-                DisplayName = _displayName.Trim(),
-                Address = _address.Trim(),
-                Port = _port,
-                UserName = "backdafuckup",
-                Password = _token.Trim(),
-                TrustedCertificates = _trusted,
-            };
-            using var response = await Api.PostRawAsync("api/connections", request);
-            if (response.StatusCode == HttpStatusCode.Conflict && response.Content.Headers.ContentType?.MediaType == "application/json"
-                && await TryReadUntrustedAsync(response) is { Certificates.Count: > 0 } untrusted)
-            {
-                _pending = untrusted.Certificates.ToList();
-                _step = Step.Trust;
-                return;
-            }
-
-            if (!response.IsSuccessStatusCode)
-            {
-                throw new ApiException(await ApiClient.ReadProblemAsync(response), response.StatusCode, null);
-            }
-
-            Snackbar.Add($"Cluster {_displayName} added.", Severity.Success);
-            await OnDone.InvokeAsync();
-        });
-    }
-
-    private static async Task<UntrustedCertificatesDto?> TryReadUntrustedAsync(HttpResponseMessage response)
-    {
-        try
-        {
-            return await response.Content.ReadFromJsonAsync<UntrustedCertificatesDto>();
-        }
-        catch (System.Text.Json.JsonException)
-        {
-            return null;
-        }
-    }
-
-    private async Task RunAsync(Func<Task> action)
     {
         _busy = true;
         _error = null;
         try
         {
-            await action();
+            var address = _address.Trim();
+            var name = string.IsNullOrWhiteSpace(_displayName) ? address : _displayName.Trim();
+            await Api.PostAsync("api/connections", new CreateConnectionDto
+            {
+                Kind = "Kubernetes",
+                DisplayName = name,
+                Address = address,
+                Port = _port,
+                UserName = "backdafuckup",
+                Password = _token.Trim(),
+                CaCertificatePem = _ca.Trim(),
+            });
+            Snackbar.Add($"Cluster {name} added.", Severity.Success);
+            await OnDone.InvokeAsync();
         }
         catch (ApiException ex)
         {

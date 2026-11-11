@@ -22,7 +22,7 @@ public sealed class KubernetesProviderTests
         var result = await provider.TestConnectionAsync(Settings(), Ct);
 
         Assert.True(result.Success, result.Error);
-        Assert.Equal(("uid-kube-system", "Kubernetes", "v1.32.13+rke2r1", "https://10.26.1.10:6443"),
+        Assert.Equal(("uid-kube-system", "Kubernetes", "v1.32.13+rke2r1", "10.26.1.10"),
             (result.Platform!.PlatformId, result.Platform.ProductName, result.Platform.ProductVersion, result.Platform.MasterAddress));
         Assert.Contains("GET /version", api.Requests);
     }
@@ -39,6 +39,26 @@ public sealed class KubernetesProviderTests
         Assert.False(result.Success);
         Assert.Contains(expected, result.Error, StringComparison.Ordinal);
         Assert.Contains("https://10.26.1.10:6443", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_cluster_ca_among_the_pins_is_the_trust_anchor_and_a_server_certificate_is_not()
+    {
+        using var caKey = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+        var caRequest = new System.Security.Cryptography.X509Certificates.CertificateRequest("CN=rke2-server-ca", caKey, System.Security.Cryptography.HashAlgorithmName.SHA256);
+        caRequest.CertificateExtensions.Add(new System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension(true, false, 0, true));
+        using var ca = caRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+        using var leafKey = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+        using var leaf = new System.Security.Cryptography.X509Certificates.CertificateRequest("CN=kube-apiserver", leafKey, System.Security.Cryptography.HashAlgorithmName.SHA256)
+            .Create(ca, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30), [1, 2, 3]);
+        var settings = Settings() with
+        {
+            Pins = [new PinnedCertificate("cluster CA", "a", "b", ca.ExportCertificatePem()), new PinnedCertificate("10.26.1.10", "c", "d", leaf.ExportCertificatePem())],
+        };
+
+        var authorities = KubernetesClients.CertificateAuthorities(settings);
+
+        Assert.Equal("CN=rke2-server-ca", Assert.Single(authorities).Subject);
     }
 
     [Fact]

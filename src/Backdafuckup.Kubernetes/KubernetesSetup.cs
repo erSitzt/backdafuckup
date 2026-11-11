@@ -20,8 +20,9 @@ public static class KubernetesSetup
 
     private static readonly string Backup = $$"""
         # backdafuckup: access to this cluster for backing up and restoring namespaces.
-        # Apply it (kubectl apply -f, or as a Fleet bundle), then read the token for the console:
+        # Apply it (kubectl apply -f, or as a Fleet bundle), then read the token and the cluster CA for the console:
         #   kubectl -n {{WorkNamespace}} get secret {{TokenSecret}} -o jsonpath='{.data.token}' | base64 -d
+        #   kubectl -n {{WorkNamespace}} get secret {{TokenSecret}} -o jsonpath='{.data.ca\.crt}' | base64 -d
         apiVersion: v1
         kind: Namespace
         metadata:
