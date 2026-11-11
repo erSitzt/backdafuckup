@@ -5,7 +5,8 @@ using Microsoft.EntityFrameworkCore;
 namespace Backdafuckup.Server.Sql;
 
 /// <summary>
-/// Fills <see cref="RestorePointEntity.SqlDatabaseCount"/>, <see cref="RestorePointEntity.SqlConsistentCount"/> and
+/// Fills <see cref="RestorePointEntity.SqlDatabaseCount"/>, <see cref="RestorePointEntity.SqlUserDatabaseCount"/> with
+/// <see cref="RestorePointEntity.SqlConsistentCount"/>, and
 /// <see cref="RestorePointEntity.DomainController"/> once for restore points recorded before they existed, by reading their
 /// guest metadata. Runs in the background after startup; a restore point that cannot be read stays
 /// unknown and is tried again at the next start.
@@ -34,7 +35,7 @@ public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory
         await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
         {
             points = (await db.RestorePoints
-                .Where(r => (r.SqlDatabaseCount == null || r.SqlConsistentCount == null || r.DomainController == null) && r.State == RestorePointState.Available)
+                .Where(r => (r.SqlDatabaseCount == null || r.SqlUserDatabaseCount == null || r.DomainController == null) && r.State == RestorePointState.Available)
                 .Select(r => new { r.Id, r.RepositoryId })
                 .ToListAsync(cancellationToken).ConfigureAwait(false))
                 .Select(r => (r.Id, r.RepositoryId))
@@ -59,12 +60,13 @@ public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory
             }
 
             var count = metadata?.SqlDatabases.Count ?? 0;
-            var consistent = metadata?.SqlDatabases.Count(d => d.Consistency == "application") ?? 0;
+            var (user, consistent) = metadata?.UserDatabaseConsistency() ?? (0, 0);
             var (domainController, adDomain) = DomainController(metadata);
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await db.RestorePoints.Where(r => r.Id == id).ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.SqlDatabaseCount, r => r.SqlDatabaseCount ?? count)
-                .SetProperty(r => r.SqlConsistentCount, r => r.SqlConsistentCount ?? consistent)
+                .SetProperty(r => r.SqlConsistentCount, r => r.SqlUserDatabaseCount == null ? consistent : r.SqlConsistentCount)
+                .SetProperty(r => r.SqlUserDatabaseCount, r => r.SqlUserDatabaseCount ?? user)
                 .SetProperty(r => r.DomainController, r => r.DomainController ?? domainController)
                 .SetProperty(r => r.AdDomain, r => r.DomainController == null ? adDomain : r.AdDomain), cancellationToken).ConfigureAwait(false);
             done++;

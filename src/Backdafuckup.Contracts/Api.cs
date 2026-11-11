@@ -249,7 +249,8 @@ public sealed record RestorePointDiskDto(string Key, string Name, long CapacityB
 
 public sealed record RestorePointNicDto(string Device, string Mac, string NetworkId, string NetworkName);
 
-/// <param name="SqlConsistentCount">Of <c>SqlDatabaseCount</c>, the application-consistent databases; null if not known yet.</param>
+/// <param name="SqlUserDatabaseCount">The user databases of <c>SqlDatabaseCount</c> (not master, model, msdb); null if not known yet.</param>
+/// <param name="SqlConsistentCount">Of <c>SqlUserDatabaseCount</c>, the application-consistent databases.</param>
 /// <param name="ConsistencyWarning">The consistency is worse than the job promised; not for a SQL Server snapshot's own note.</param>
 /// <param name="DomainControllerEvidence">
 /// Only from <c>GET /api/restore-points/{id}</c>, for a restore point with memory, which has no guest details: why the VM is
@@ -282,7 +283,8 @@ public sealed record RestorePointDto(
     long? MemoryImageBytes = null,
     string? DomainControllerEvidence = null,
     int? SqlConsistentCount = null,
-    bool ConsistencyWarning = false);
+    bool ConsistencyWarning = false,
+    int? SqlUserDatabaseCount = null);
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 
@@ -324,7 +326,8 @@ public sealed record BackupVmPointDto(
     string? AdDomain,
     long? MemoryImageBytes = null,
     int? SqlConsistentCount = null,
-    bool ConsistencyWarning = false);
+    bool ConsistencyWarning = false,
+    int? SqlUserDatabaseCount = null);
 
 /// <summary>
 /// A VM in one job: its restore points there and its state. <see cref="JobId"/> is null (and <see cref="JobExists"/>

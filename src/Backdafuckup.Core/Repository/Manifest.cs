@@ -55,8 +55,14 @@ public sealed record RestorePointManifest
     public int? SqlDatabaseCount { get; init; }
 
     /// <summary>
-    /// Of <see cref="SqlDatabaseCount"/>, the databases that are application-consistent (VSS with SQL Server's writer, or a
-    /// SQL Server snapshot that recorded them); null in manifests from before it was recorded.
+    /// The user databases of <see cref="SqlDatabaseCount"/> (not master, model, msdb, tempdb); null in manifests from before
+    /// it was recorded.
+    /// </summary>
+    public int? SqlUserDatabaseCount { get; init; }
+
+    /// <summary>
+    /// Of <see cref="SqlUserDatabaseCount"/>, the databases that are application-consistent (VSS with SQL Server's writer, or
+    /// a SQL Server snapshot that recorded them). Only valid together with <see cref="SqlUserDatabaseCount"/>.
     /// </summary>
     public int? SqlConsistentCount { get; init; }
 

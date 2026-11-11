@@ -502,7 +502,10 @@ public sealed class RestorePointEntity
     /// <summary>SQL Server databases in the guest metadata; null until known (restore points from before it was recorded).</summary>
     public int? SqlDatabaseCount { get; set; }
 
-    /// <summary>Of <see cref="SqlDatabaseCount"/>, the application-consistent ones; null until known (older restore points are checked at start).</summary>
+    /// <summary>The user databases of <see cref="SqlDatabaseCount"/> (not master, model, msdb, tempdb); null until known (older restore points are checked at start).</summary>
+    public int? SqlUserDatabaseCount { get; set; }
+
+    /// <summary>Of <see cref="SqlUserDatabaseCount"/>, the application-consistent ones; valid when that is known.</summary>
     public int? SqlConsistentCount { get; set; }
 
     /// <summary>Size of the RAM image of a snapshot with memory (a restore can resume the VM); null without memory.</summary>

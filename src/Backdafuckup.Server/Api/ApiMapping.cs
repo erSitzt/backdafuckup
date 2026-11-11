@@ -92,5 +92,6 @@ internal static class ApiMapping
         VmGenerationIds.IsSet(r.Vm?.GenerationId),
         r.MemoryImageBytes,
         SqlConsistentCount: r.SqlConsistentCount,
-        ConsistencyWarning: r.ConsistencyWarning);
+        ConsistencyWarning: r.ConsistencyWarning,
+        SqlUserDatabaseCount: r.SqlUserDatabaseCount);
 }

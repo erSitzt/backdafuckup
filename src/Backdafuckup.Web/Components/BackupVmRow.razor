@@ -38,7 +38,7 @@
     <td class="c-420">
         @if (Latest is not null)
         {
-            @foreach (var pill in RestorePointPills.For(Latest.Consistency, Latest.ConsistencyReason, Latest.ConsistencyWarning, Latest.MemoryImageBytes, Latest.SqlDatabaseCount, Latest.SqlConsistentCount, Latest.DomainController, Latest.AdDomain, "the newest restore point"))
+            @foreach (var pill in RestorePointPills.For(Latest.Consistency, Latest.ConsistencyReason, Latest.ConsistencyWarning, Latest.MemoryImageBytes, Latest.SqlDatabaseCount, Latest.SqlUserDatabaseCount, Latest.SqlConsistentCount, Latest.DomainController, Latest.AdDomain, "the newest restore point"))
             {
                 <span class="@pill.Css" title="@pill.Title">@if (pill.Icon is not null) { @AppIcons.Svg(pill.Icon, "mini-chip-icon") }@pill.Text</span>
             }

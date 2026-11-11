@@ -263,7 +263,7 @@ public sealed partial class EngineIntegrationTests : IAsyncLifetime
         Assert.Null(point.ConsistencyReason);
         Assert.True(File.Exists(Path.Combine(point.ManifestPath!, "guest-metadata.zst")));
         Assert.Equal(2, point.SqlDatabaseCount);
-        Assert.Equal(1, point.SqlConsistentCount);
+        Assert.Equal((2, 1), (point.SqlUserDatabaseCount, point.SqlConsistentCount));
         Assert.False(point.ConsistencyWarning);
         Assert.False(point.DomainController);
         Assert.Null(point.AdDomain);
@@ -301,11 +301,11 @@ public sealed partial class EngineIntegrationTests : IAsyncLifetime
         Assert.Contains(log, m => m.Contains(@"SQL database MSSQLSERVER\notselected is only crash-consistent", StringComparison.Ordinal));
 
         // Older restore points (counts unknown) get the counts from their guest metadata.
-        await db.RestorePoints.Where(r => r.Id == point.Id)
-            .ExecuteUpdateAsync(s => s.SetProperty(r => r.SqlDatabaseCount, (int?)null).SetProperty(r => r.SqlConsistentCount, (int?)null), Ct);
+        await db.RestorePoints.Where(r => r.Id == point.Id).ExecuteUpdateAsync(s => s
+            .SetProperty(r => r.SqlDatabaseCount, (int?)null).SetProperty(r => r.SqlUserDatabaseCount, (int?)null).SetProperty(r => r.SqlConsistentCount, 7), Ct);
         Assert.Equal(1, await Services.GetRequiredService<SqlCatalogBackfill>().RunAsync(Ct));
         var backfilled = await LatestRestorePointAsync();
-        Assert.Equal((2, 1), (backfilled.SqlDatabaseCount, backfilled.SqlConsistentCount));
+        Assert.Equal((2, 2, 1), (backfilled.SqlDatabaseCount, backfilled.SqlUserDatabaseCount, backfilled.SqlConsistentCount));
     }
 
     [Fact]
@@ -683,8 +683,8 @@ public sealed partial class EngineIntegrationTests : IAsyncLifetime
 
         // That is what a SQL Server snapshot promises: no warning, and every database counts as consistent.
         Assert.False(point.ConsistencyWarning);
-        Assert.True(point.SqlDatabaseCount > 0);
-        Assert.Equal(point.SqlDatabaseCount, point.SqlConsistentCount);
+        Assert.True(point.SqlUserDatabaseCount > 0);
+        Assert.Equal(point.SqlUserDatabaseCount, point.SqlConsistentCount);
         var repository = await Services.GetRequiredService<RepositoryManager>().GetAsync(point.RepositoryId, Ct);
         await using (var reader = await repository.OpenRestorePointAsync(point.Id, Ct))
         {
@@ -769,8 +769,8 @@ public sealed partial class EngineIntegrationTests : IAsyncLifetime
         Assert.Equal("crash", failed.Consistency);
         Assert.Contains("suspending failed: permission denied", failed.ConsistencyReason, StringComparison.Ordinal);
         Assert.True(point.ConsistencyWarning);
-        Assert.Equal(stored.SqlDatabases.Count(d => d.Consistency == "application"), point.SqlConsistentCount);
-        Assert.True(point.SqlConsistentCount < point.SqlDatabaseCount);
+        Assert.Equal(stored.UserDatabaseConsistency(), (point.SqlUserDatabaseCount!.Value, point.SqlConsistentCount!.Value));
+        Assert.True(point.SqlConsistentCount < point.SqlUserDatabaseCount);
     }
 
     [Fact]

@@ -990,6 +990,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("sql_database_count");
 
+                    b.Property<int?>("SqlUserDatabaseCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("sql_user_database_count");
+
                     b.Property<string>("State")
                         .IsRequired()
                         .HasMaxLength(16)
