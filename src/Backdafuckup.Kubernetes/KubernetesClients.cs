@@ -66,7 +66,8 @@ public static class KubernetesClients
                 }
             },
         };
-        return transport is null ? new k8s.Kubernetes(config) : new k8s.Kubernetes(config, transport);
+        // Retries outside the transport: what the API server asks to retry, also from the fake API of tests.
+        return transport is null ? new k8s.Kubernetes(config, new RetryHandler()) : new k8s.Kubernetes(config, new RetryHandler(), transport);
     }
 
     /// <summary>The CA certificates among the pins: a cluster is trusted through the CA that signs its API servers.</summary>
@@ -98,5 +99,31 @@ public static class KubernetesClients
         var path = settings.Options.TryGetValue(KubernetesConnectionOptions.BasePath, out var p) && !string.IsNullOrWhiteSpace(p) ? "/" + p.Trim().Trim('/') : string.Empty;
         var host = settings.Address.Contains(':', StringComparison.Ordinal) && !settings.Address.StartsWith('[') ? $"[{settings.Address}]" : settings.Address;
         return $"https://{host}:{settings.Port}{path}";
+    }
+}
+
+/// <summary>
+/// Repeats a request the API server asks to repeat: 429 (API priority and fairness, or "storage is (re)initializing"
+/// while a resource's cache is rebuilt) and 503, after its Retry-After (1 to 5 s), up to five times. The server has not
+/// processed such a request, so repeating a create is safe too.
+/// </summary>
+internal sealed class RetryHandler(int attempts = 5) : DelegatingHandler
+{
+    internal static TimeSpan MaxWait { get; set; } = TimeSpan.FromSeconds(5);
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (attempt >= attempts || response.StatusCode is not (System.Net.HttpStatusCode.TooManyRequests or System.Net.HttpStatusCode.ServiceUnavailable))
+            {
+                return response;
+            }
+
+            var wait = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(attempt);
+            response.Dispose();
+            await Task.Delay(wait < TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : wait > MaxWait ? MaxWait : wait, cancellationToken).ConfigureAwait(false);
+        }
     }
 }

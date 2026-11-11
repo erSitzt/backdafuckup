@@ -27,7 +27,18 @@ public sealed class KubernetesProviderTests
         Assert.Contains("GET /version", api.Requests);
     }
 
-    [Theory]
+    [Fact]
+    public async Task A_busy_api_server_is_asked_again_after_its_retry_after()
+    {
+        var api = new FakeKubernetesApi { Busy = 2 };
+
+        var result = await new KubernetesProvider(api.CreateHandler).TestConnectionAsync(Settings(), Ct);
+
+        Assert.True(result.Success, result.Error);
+        Assert.Equal(3, api.Requests.Count(r => r == "GET /version"));
+    }
+
+        [Theory]
     [InlineData(HttpStatusCode.Unauthorized, "refused the token (401 Unauthorized)")]
     [InlineData(HttpStatusCode.Forbidden, "403 Forbidden): the ServiceAccount lacks a permission")]
     public async Task A_refused_token_names_the_cluster_and_the_reason(HttpStatusCode status, string expected)

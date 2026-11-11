@@ -73,10 +73,14 @@ internal static class KubernetesResources
                 log.Warning($"The {what} of namespace {ns} could not be read in cluster {cluster} (403: the ServiceAccount may not list them); they are not in the restore point.");
                 return null;
             }
+            catch (HttpOperationException ex)
+            {
+                throw new KubernetesOperationException($"Reading the {what} of namespace {ns} in cluster {cluster} failed: {VolumeSnapshotFlow.Problem(ex)}", ex);
+            }
         }
 
         // The namespace itself and the core kinds.
-        AddAll("v1", "Namespace", [Node(await client.CoreV1.ReadNamespaceAsync(ns, cancellationToken: cancellationToken).ConfigureAwait(false))]);
+        AddAll("v1", "Namespace", [Node(await TryAsync("Namespace object", () => client.CoreV1.ReadNamespaceAsync(ns, cancellationToken: cancellationToken)).ConfigureAwait(false))]);
         AddAll("v1", "ConfigMap", Items(await TryAsync("ConfigMaps", () => client.CoreV1.ListNamespacedConfigMapAsync(ns, cancellationToken: cancellationToken)).ConfigureAwait(false)));
         AddAll("v1", "Secret", Items(await TryAsync("Secrets", () => client.CoreV1.ListNamespacedSecretAsync(ns, cancellationToken: cancellationToken)).ConfigureAwait(false)));
         AddAll("v1", "ServiceAccount", Items(await TryAsync("ServiceAccounts", () => client.CoreV1.ListNamespacedServiceAccountAsync(ns, cancellationToken: cancellationToken)).ConfigureAwait(false)));

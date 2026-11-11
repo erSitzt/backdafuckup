@@ -23,6 +23,9 @@ public sealed class FakeKubernetesApi
     /// <summary>When set, every request is answered with this status (e.g. 401 for a refused token).</summary>
     public HttpStatusCode? FailWith { get; set; }
 
+    /// <summary>The next this many requests are answered with 429 "storage is (re)initializing" and Retry-After: 1.</summary>
+    public int Busy { get; set; }
+
     /// <summary>The paths requested, for asserting what the client asked.</summary>
     public List<string> Requests { get; } = [];
 
@@ -103,6 +106,20 @@ public sealed class FakeKubernetesApi
         lock (_lock)
         {
             Requests.Add($"{request.Method} /{path}");
+        }
+
+        lock (_lock)
+        {
+            if (Busy > 0)
+            {
+                Busy--;
+                var busy = Json(HttpStatusCode.TooManyRequests, new JsonObject
+                {
+                    ["kind"] = "Status", ["apiVersion"] = "v1", ["status"] = "Failure", ["message"] = "storage is (re)initializing", ["reason"] = "TooManyRequests", ["code"] = 429,
+                });
+                busy.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(1));
+                return busy;
+            }
         }
 
         if (FailWith is { } status)

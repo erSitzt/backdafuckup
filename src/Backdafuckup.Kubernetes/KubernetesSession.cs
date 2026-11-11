@@ -36,7 +36,14 @@ internal sealed class KubernetesSession(
         ArgumentNullException.ThrowIfNull(request);
         if (_platform is null)
         {
-            _platform = await KubernetesInventory.GetPlatformAsync(client, settings, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                _platform = await KubernetesInventory.GetPlatformAsync(client, settings, cancellationToken).ConfigureAwait(false);
+            }
+            catch (k8s.Autorest.HttpOperationException ex)
+            {
+                throw new KubernetesOperationException($"Reading the version of cluster {settings.Address} failed: {VolumeSnapshotFlow.Problem(ex)}", ex);
+            }
         }
 
         return await KubernetesNamespaceBackup.StartAsync(

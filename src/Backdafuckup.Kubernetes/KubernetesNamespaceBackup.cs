@@ -71,6 +71,10 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         {
             throw new KubernetesOperationException($"The namespace {ns} does not exist in cluster {cluster} (any more).", ex);
         }
+        catch (HttpOperationException ex)
+        {
+            throw new KubernetesOperationException($"Reading the namespace {ns} in cluster {cluster} failed: {VolumeSnapshotFlow.Problem(ex)}", ex);
+        }
 
         var volumes = await flow.CallAsync($"listing the PVCs of {ns}", () => KubernetesInventory.VolumesAsync(client, ns, cancellationToken)).ConfigureAwait(false);
         var withData = volumes.Where(v => v.DataPath == DataPaths.Snapshot).ToList();
