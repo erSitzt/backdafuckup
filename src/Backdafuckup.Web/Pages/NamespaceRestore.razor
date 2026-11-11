@@ -22,7 +22,7 @@ else
         <MudText Typo="Typo.body2">
             Restore point from <b>@Fmt.Time(_point.CreatedUtc)</b> (job @_point.JobName) · cluster @_details.Cluster · Kubernetes @_details.KubernetesVersion ·
             @_details.Objects.Count objects · @_details.Volumes.Count(v => v.DataPath == "snapshot") of @_details.Volumes.Count PVCs with data ·
-            <ConsistencyChip Consistency="@_point.Consistency" Reason="@_point.ConsistencyReason" Warning="@_point.ConsistencyWarning" />
+            <ConsistencyChip Consistency="@_point.Consistency" Reason="@_point.ConsistencyReason" Warning="@_point.ConsistencyWarning" Hooks="true" />
         </MudText>
     </MudPaper>
 
