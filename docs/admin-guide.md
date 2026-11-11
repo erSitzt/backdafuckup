@@ -10,6 +10,7 @@
 | Repository storage | A directory on a volume mounted on the backup server, e.g. an iSCSI LUN from an HPE MSA. |
 | XCP-ng / XenServer | XCP-ng 8.3 or XenServer 8, with a pool admin account for the connection. |
 | NBD network | Recommended: a pool network with the NBD purpose that the backup server can reach. Without it, backups fall back to the slower HTTP export. |
+| Kubernetes (optional) | Clusters with a CSI driver that takes volume snapshots, and a container registry for the mover image. See [Kubernetes namespaces](#kubernetes-namespaces). |
 
 ### Network ports
 
@@ -24,6 +25,10 @@
 | Backup server → file servers, domain controllers, DFS namespace servers | TCP 445 (SMB) | File restore to a network share, DFS referrals |
 | Backup server → Linux VMs | TCP 22 (SSH) | File restore into Linux VMs |
 | Backup server → PostgreSQL | TCP 5432 | Catalog (usually on the same machine) |
+| Backup server → Kubernetes API servers | TCP 6443 (HTTPS) | Inventory, objects, snapshots, mover pods, hooks (exec) |
+| Mover pods in a cluster → backup server | TCP 9555 (HTTPS) | Volume data of backups and restores, files of a file restore into a PVC. Outbound from the pods only. |
+| Backup server → container registry | HTTPS (the registry's port) | Pushing the mover image |
+| Cluster nodes → container registry | HTTPS (the registry's port) | Pulling the mover image |
 
 The backup server also needs DNS for the host names of pools, shares and VMs.
 
@@ -238,13 +243,15 @@ Restore points show their consistency under *Backups & Restore*:
 
 ## Backups & Restore
 
-The page lists every VM with restore points once, with its newest restore point. Expanding a VM loads all its restore points (Restore, Verify, Delete); the *Restore* button of a VM restores from its newest one.
+The page lists every VM and Kubernetes namespace with restore points once, with its newest restore point. Expanding one loads all its restore points (Restore, Verify, Delete); its *Restore* button restores from its newest one.
+
+- **Kinds:** each kind of object has an icon and a color, before every name and as a stripe on its job's block: blue for VMs, teal for Kubernetes namespaces. A job's block also names its source (*pool …* or *cluster …*). With more than one kind, a row above the filters shows the counts and filters by kind (`/backups?kind=vm`, `kind=k8s`). *History*, *Home* and the session page mark sessions the same way and say *Namespace backup* or *Namespace restore*.
 
 - **By job** (the default): one block per job, with its schedule and how many of its VMs missed a run, have no restore point, or are crash-consistent with a warning.
   - A VM in two jobs is listed under both, each with its own restore points.
   - VMs that are in a job but have no restore point of it yet (just added, or every run failed for them) are listed with *no restore point*.
   - Restore points of deleted jobs are listed last under *Without job*.
-- **By VM:** one row per VM with all its jobs.
+- **By VM** (*By VM or namespace* once there are namespaces): one row per VM or namespace with all its jobs.
 - **Missed a run:** a VM's newest restore point in a job is older than the job's most recent scheduled start that is at least 12 hours ago (a job with hundreds of VMs runs for hours). Jobs without a schedule and disabled jobs never mark a VM.
 - **Filters:** name (VM or job), jobs, repository, content (Active Directory, SQL Server), consistency of the newest restore point, state (missed a run, no restore point, up to date) and the age of the newest restore point. Sorting by name, oldest restore point first, or size. On a phone only the search is shown; *Filters* opens the rest and shows how many are set.
 - **Links:** filters, grouping and sort are in the address, e.g. `/backups?state=stale&state=nopoint` for every VM that needs attention; reload and Back keep them.
@@ -566,6 +573,218 @@ Only folders named `{GUID}` or `{GUID}.bdfu-*` directly in `Policies` are ever t
   - Authoritative restores (e.g. a deleted OU with everything below it on all DCs, without object restore) are done with `ntdsutil` in Directory Services Restore Mode on a DC restored to an isolated network.
   - Recovering a whole forest follows Microsoft's *AD Forest Recovery* guide.
 
+## Kubernetes namespaces
+
+backdafuckup backs up namespaces of Kubernetes clusters, with their objects and the data of their PVCs. It restores them into the same cluster:
+- the whole namespace;
+- apps and workloads;
+- single PVCs;
+- single objects;
+- files of a PVC.
+
+It was built for RKE2 on vSphere with the vSphere CSI driver. Any CSI driver with volume snapshots works the same way.
+
+### Requirements
+
+| Item | Notes |
+|---|---|
+| Cluster | Tested with RKE2 1.32 and vSphere CSI 3.6.3. The API server must be reachable from the backup server. |
+| Volume snapshots | The snapshot CRDs and the snapshot controller (RKE2 ships both), the CSI driver's snapshotter, and a VolumeSnapshotClass for the driver (`deletionPolicy: Delete`). PVCs on storage without a snapshot class (NFS, for example) are backed up as objects only. |
+| vSphere CSI | 3.5 or later. 3.3.1 is end of life and not supported on Kubernetes 1.32. vSphere allows 3 snapshots per volume by default and costs I/O for each; backdafuckup keeps a snapshot only while its volume is read. |
+| Container registry | For the mover image: reachable by the backup server (push) and the cluster's nodes (pull). |
+| Server address | *Guest agents → Settings → server address*: the mover pods connect to it, like the guest agents. |
+
+### Connect a cluster
+
+1. Open *Backup Infrastructure → Kubernetes Clusters → Setup manifest*. Copy or download `backdafuckup-setup.yaml`.
+   - Turn *With the restore role* off for an account that only backs up.
+2. Apply it with `kubectl apply -f backdafuckup-setup.yaml`, or as a Fleet bundle. It creates:
+
+   | Object | Purpose |
+   |---|---|
+   | Namespace `backdafuckup-system` with `pod-security.kubernetes.io/enforce: baseline` | The work namespace: temporary PVCs and the mover pods |
+   | ServiceAccount `backdafuckup` and its token Secret `backdafuckup-token` | The account the server uses |
+   | ClusterRole `backdafuckup-backup` | Read every object, Secrets included. Create and delete VolumeSnapshots and VolumeSnapshotContents. `pods/exec` for hooks. PersistentVolumes |
+   | Role `backdafuckup-work` in `backdafuckup-system` | PVCs, pods and Secrets of the work namespace |
+   | ClusterRole `backdafuckup-restore` (optional) | Create, change and delete objects in every namespace: restores, and the mover pod of a file restore in the PVC's namespace |
+
+3. Read the token and the cluster CA. The commands are in the manifest's header:
+   ```sh
+   kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.token}' | base64 -d
+   kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.ca\.crt}' | base64 -d
+   ```
+4. Choose *Add cluster* and enter:
+   - the API server's host name or IP address and port, as in the kubeconfig's server URL, without `https://`;
+   - a display name;
+   - the token;
+   - the cluster CA certificate (PEM).
+
+   The server trusts an API server whose certificate that CA signed for the address. The token is stored encrypted, like credentials.
+5. The inventory lists the namespaces and their PVCs. *Backup of its data* shows how each PVC's data is backed up:
+   - *snapshot*: its driver has a VolumeSnapshotClass;
+   - *objects only*: it has none.
+
+   *Rescan* reads the inventory again.
+
+The server connects to the API server itself. For clusters it cannot reach, an agent in the cluster that dials out is planned.
+
+### The mover image
+
+Volume data moves through mover pods: a small Linux container with the .NET mover on Ubuntu 24.04 "chiseled". The server ships it and pushes it to your registry. Set it up under *Kubernetes Clusters → Mover image*:
+
+- **Registry and repository:** the registry API's host name and port, without `https://`, and the image path. For Nexus, use the Docker connector of a hosted repository.
+- **Push user and password:** an account that may push to the repository.
+- **User-Agent:** the default starts like the Docker client's, because proxies in front of registries often let only Docker clients through.
+- **Pull secret**, one of three:
+  - *Create* (the default): `backdafuckup-registry` in `backdafuckup-system`, from an optional read-only pull user, otherwise from the push user;
+  - *Existing*: a docker-registry Secret there that you name, e.g. one a reflector copies in;
+  - *None*: the nodes pull without a login.
+- **Push:**
+  - The server pushes the blobs the registry lacks, then the manifest.
+  - The tag is `<version>-<digest prefix>`, so registries that forbid redeploying a tag accept every build.
+  - Pods use the image by its digest, so the mover always matches the server.
+  - After a server update, a backup pushes the new image itself before its first snapshot. A missing registry therefore stops a run before anything is created.
+- **TLS to the server:** the mover pods check the server certificate against its pins, like the guest agents. With a certificate from your own CA, set `Agent:ServerPins`, because the image contains no internal CAs.
+
+**The mover pods in `backdafuckup-system`:**
+- They run as root, because block devices belong to root.
+- They have no capabilities, no privilege escalation, a read-only root file system and seccomp `RuntimeDefault`.
+- Resources: 100m CPU and 64 MiB requested, 256 MiB limit.
+- This is why the work namespace enforces the Pod Security level "baseline".
+
+### Backup jobs
+
+Create a job under *Backup Jobs → New* with the kind *Kubernetes namespaces*, a cluster and its namespaces. Schedule, retention and repository work as for VMs. Guest processing does not apply to clusters and is refused.
+
+Each run makes one restore point per namespace:
+1. **Objects:**
+   - What is read: every object of the namespace, in the API's preferred version. That covers the built-in kinds (core, apps, batch, networking, policy, RBAC, autoscaling) and every namespaced custom resource, in its storage version.
+   - Also read: the namespace itself, the PVs and StorageClasses of its PVCs, and the CRDs that have objects in it.
+   - Left out: events, endpoints and leases, because the cluster makes them. A kind the account may not list gives a warning.
+2. **Pre-hooks**, see below.
+3. **Snapshots:** one VolumeSnapshot per PVC that has a snapshot class, taken one after another. Then the post-hooks run.
+4. **Data, one volume after another:**
+   - The snapshot is exposed in `backdafuckup-system`: a VolumeSnapshotContent and VolumeSnapshot on the same snapshot, with `snapshot.storage.kubernetes.io/allow-volume-mode-change`, and a block PVC from it.
+   - A mover pod reads the device and sends its non-zero blocks to the server. The server stores them like a VM disk, with dedup and compression.
+   - Then the pod, the PVC and both snapshots are deleted.
+
+**What to expect:**
+- **Every run reads every volume in full.** CSI drivers of vanilla clusters have no changed block tracking. The repository stores only the chunks that changed, and the session log notes the full read as information.
+- **The copy takes time.** On vSphere the block PVC is a full copy of the snapshot on the same datastore, made before the mover starts. The server waits up to 4 hours for the mover.
+- **PVCs without a snapshot class** are backed up as objects only. The restore point and the session log say so.
+
+**Hooks** use Velero's annotations on the pod, so existing annotations keep working:
+
+| Annotation | Meaning |
+|---|---|
+| `pre.hook.backup.velero.io/command` | The command as a JSON array, e.g. `["redis-cli", "save"]`. It runs in the pod before the first snapshot. |
+| `pre.hook.backup.velero.io/container` | The container; default: the pod's first. |
+| `pre.hook.backup.velero.io/on-error` | `Fail` (the default): the namespace is not backed up. `Continue`: the backup goes on and is crash-consistent with a warning. |
+| `pre.hook.backup.velero.io/timeout` | Default `30s`; `s` and `m` are understood. |
+| `post.hook.backup.velero.io/…` | The same, after the last snapshot. Post-hooks also run when a snapshot fails. |
+
+Only running pods run hooks, through `pods/exec`.
+
+**Consistency:**
+- Each volume is crash-consistent at the moment of its snapshot. The volumes of a namespace are captured one after another, because vSphere has no group snapshots.
+- When every pre-hook succeeded, the restore point is *app-consistent (hooks)*.
+- A failed hook with `on-error: Continue` makes it crash-consistent with a warning.
+
+**Secrets:** the restore point holds the namespace's Secrets with their values.
+- The repository protects them like disk images, through its file permissions.
+- There is no encryption at rest yet.
+- The console shows the keys of a Secret, never its values.
+
+### Restore
+
+*Backups & Restore → Restore* on a namespace offers three ways:
+
+**Namespace, apps or PVCs:**
+- **What:**
+  - **Whole namespace.**
+  - **Apps and workloads.** Workloads are grouped by `app.kubernetes.io/instance`, else by the Helm release, else by `app.kubernetes.io/name`. A workload brings what it needs:
+    - the ConfigMaps and Secrets of its volumes and environment, and its pull secrets;
+    - its ServiceAccount, with the Roles and RoleBindings that name it;
+    - its PVCs (a StatefulSet's from its claim templates);
+    - the Services that select its pods and the Ingresses to them;
+    - its HPA and PDBs.
+  - **Single PVCs**, also under new names next to the originals.
+- **Where:** the original namespace or another one, created when missing.
+- **Existing objects** are left as they are, or replaced on request.
+  - A PVC with data that already exists stops the restore before anything is written.
+  - The exception is *Replace the PVCs in place* (below).
+- **Order and cleaning:**
+  - Objects go in Velero's order: CRDs, namespace, StorageClasses, PVCs, Secrets, ConfigMaps, ServiceAccounts, roles, Services, custom resources, workloads.
+  - They are restored without uid, resourceVersion, timestamps, owner references, status and managed fields.
+  - Objects made by a controller are not restored, nor what the cluster makes itself: ServiceAccount tokens, `kube-root-ca.crt`, the default ServiceAccount.
+- **Volume data:**
+  - A mover writes the image into a new block PVC in `backdafuckup-system`, on the original StorageClass.
+  - A snapshot of it is exposed in the target namespace, and the PVC is created from that snapshot. This needs the snapshot class, and on vSphere it costs one more full copy of the volume.
+  - Once the PVC is bound, the snapshots and the work PVC are deleted. A PVC may take up to 6 hours to be bound.
+  - Why not hand the written volume to the PVC directly: on vSphere, deleting a CSI PV object, even with `Retain`, makes the driver's syncer unregister the volume. The volume can then be neither detached nor deleted until the syncer's next full sync.
+- **Replace the PVCs in place** (with typed confirmation):
+  1. The controllers of the pods that mount the PVC (Deployment, StatefulSet, ReplicaSet, ReplicationController) are scaled to 0. Their replica counts go into the artifact ledger, so a crash still scales them back.
+  2. The PVC is deleted and created again from the restored volume.
+  3. The controllers are scaled back.
+
+  A pod of a DaemonSet or Job, or one without a controller, stops the swap before anything changes. In the lab a Redis StatefulSet was down for about 9 s.
+- **A restore that does not complete removes what it created:** a namespace it created, with everything in it; otherwise each object it created. Work PVCs and snapshots go through the ledger.
+
+**Objects: compare and pick:**
+- **Compare:** the restore point against the live namespace. Each object is *same*, *changed*, *deleted since* or *new since*. The deployment revision annotation and a PVC's `volumeName` do not count as changes.
+- **Show:** an object as stored and as it is now. Secrets show their keys only.
+- **Restore:** the picked objects exactly as stored, without what they need. Existing ones are replaced on request. PVCs with data come back only when they do not exist; otherwise use *Single PVCs*.
+
+**Files and folders of a PVC:**
+- The file browser reads the PVC's image: ext4 or XFS on the whole device. The ZIP download works as for VMs.
+- **Back into the PVC** (the default target) writes into the live volume while the workload keeps running:
+  - **The mover pod:** a mover pod in the PVC's own namespace mounts it as a file system. It runs on the node of the pods that use the PVC, tolerating that node's taints; for ReadWriteMany it runs anywhere.
+  - **Target:** the original location or another folder in the PVC. Existing files are replaced, or kept with `RESTORED-<name>` copies next to them. Owner and group come from the backup, or from the folder each item goes into.
+  - **How files are written:** as by the SSH restore script into Linux VMs. Each file is written under a hidden temporary name, flushed, given its owner, mode and times, and then renamed over the old one. Links come after the files and folder times last. Nothing is written through a symbolic link or outside the volume. Each item that fails is listed in the session log.
+  - **Privileges:** the pod runs as root with `CHOWN`, `DAC_OVERRIDE`, `FOWNER` and `FSETID`, which the Pod Security level "baseline" allows.
+  - **Refused before anything is created**, with the ZIP download as the alternative:
+    - a namespace that enforces "restricted";
+    - a block PVC;
+    - a ReadWriteOncePod PVC that is in use.
+  - **Modes come from the backup.** The kubelet applies `fsGroup` only when it mounts a volume, not to files written later.
+  - **SELinux:** nodes with per-pod MCS labels would deny the second pod access to the volume.
+
+### Cleaning up
+
+**Labels and ledger:**
+- Every object backdafuckup creates in a cluster carries `app.kubernetes.io/managed-by: backdafuckup` and `backdafuckup.io/run`: snapshots and their contents, PVCs, pods and Secrets.
+- These objects and the workloads it scales go into the artifact ledger.
+- They are removed when the session ends, also after a failure. What a crash leaves behind is removed at the server's start and retried every 10 minutes (`bdfu_artifacts_pending`).
+
+**To check a cluster:**
+```sh
+kubectl get volumesnapshot,volumesnapshotcontent -A -l app.kubernetes.io/managed-by=backdafuckup
+kubectl -n backdafuckup-system get pvc,pods,secrets
+```
+Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-registry` stay. Do not delete the others by hand while a session runs.
+
+### Limits
+
+- **Restores go into the same cluster.** Another cluster, with namespace and StorageClass mapping, and whole-cluster recovery are planned.
+- **Namespaces are chosen by name.** A label selector is planned.
+- **No changed block tracking and no group snapshots** on vanilla vSphere CSI.
+- **NFS volumes** are backed up as objects only. Their data at file level is planned.
+- **GitOps:** Fleet or Argo CD may set restored objects back to the state in Git. Restore those from Git, and use backdafuckup for the data and for objects made by hand.
+- **Metrics:** Kubernetes sessions count in the session metrics. Metrics of their own (snapshots, volumes) are not there yet.
+
+### Troubleshooting
+
+| Message | Cause | What to do |
+|---|---|---|
+| `TooManyRequests` … "storage is (re)initializing" | The API server restarts its watch cache. | backdafuckup retries 429 and 503 up to 5 times and follows `Retry-After`. If it persists, check the API servers. |
+| "403 Forbidden: the ServiceAccount lacks a permission (apply the current setup manifest)" | The cluster has an older manifest, or one without the restore role. | Apply the current manifest from the console. |
+| "The mover pod … cannot start (ImagePullBackOff)" | The image is not in the registry, or the nodes may not pull it. | *Mover image → Push*; check the pull secret mode. |
+| "The mover for … did not connect to https://…:9555/… within … minutes" | The pod was not scheduled, its volume was not attached, or it cannot reach the server. | Check the server address under *Guest agents → Settings* and the firewall from the pod network to TCP 9555; see the pod's events. |
+| "The certificate of the backup server … is not trusted" (in the mover's log) | The server certificate is from your own CA. | Set `Agent:ServerPins`. |
+| "The snapshot … was not ready to use after 10 minutes" | The CSI snapshotter cannot create the snapshot (limit reached, storage, class). | Check the VolumeSnapshot's events and the `csi-snapshotter` log. On vSphere, check the volume's snapshot count. |
+| "The namespace … enforces the Pod Security level "restricted"" | File restore into a PVC of such a namespace. | Download the files as ZIP, or allow "baseline" for the namespace during the restore. |
+| "The PVC … is ReadWriteOncePod and used by …" | No second pod may mount the PVC. | Scale the workload to 0 for the restore, or download the files. |
+
 ## API and API tokens
 
 The console's API is described under *API reference* (`/api-docs`). Scripts and tools use an **API token** instead of a password:
@@ -626,6 +845,8 @@ What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the S
 | `bdfu_agents` {state}, `bdfu_agent_last_contact_timestamp_seconds` {agent} | gauge | Guest agents online and offline |
 | `bdfu_sql_last_log_backup_timestamp_seconds`, `bdfu_sql_log_backup_interval_seconds` {vm, sql_instance, database} | gauge | Newest log backup per database and the job's interval. A database that the newest run of its VM no longer saw (dropped) is left out |
 | `bdfu_artifacts_pending` | gauge | Snapshots and disks still to be removed or reduced (retried every 10 minutes) |
+
+Kubernetes namespaces count in the session metrics (`bdfu_sessions_total` and the others) like VMs; metrics of their own (snapshots, volumes, mover pods) are not there yet.
 
 The .NET runtime (`dotnet_*`), HTTP (`http_server_*`), Kestrel and Npgsql (`db_client_*`) metrics come along. The session log also names the disk-to-disk gap of every snapshot with two or more disks: "Disks of … captured over 9 s …".
 
