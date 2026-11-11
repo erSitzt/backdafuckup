@@ -63,10 +63,22 @@ public static class InfrastructureEndpoints
                 return Results.Problem($"A connection named '{request.DisplayName}' already exists.", statusCode: StatusCodes.Status409Conflict);
             }
 
+            var pins = request.TrustedCertificates.Select(c => new PinnedCertificate(c.HostAddress, c.SpkiSha256, c.Sha256Thumbprint, string.Empty)).ToList();
+            if (kind == HypervisorKind.Kubernetes)
+            {
+                if (CaPin(request.CaCertificatePem) is not { } ca)
+                {
+                    return Results.Problem("Give the cluster's CA certificate (PEM): the ca.crt of the token secret, e.g. kubectl -n backdafuckup-system get secret backdafuckup-token -o jsonpath='{.data.ca\\.crt}' | base64 -d.",
+                        statusCode: StatusCodes.Status400BadRequest);
+                }
+
+                pins = [ca];
+            }
+
             var settings = new ConnectionSettings(
                 Guid.Empty, kind, request.Address.Trim(), request.Port,
                 new System.Net.NetworkCredential(request.UserName, request.Password), TlsTrustMode.Pinned,
-                request.TrustedCertificates.Select(c => new PinnedCertificate(c.HostAddress, c.SpkiSha256, c.Sha256Thumbprint, string.Empty)).ToList(),
+                pins,
                 new Dictionary<string, string>());
             var result = await manager.Provider(kind).TestConnectionAsync(settings, ct);
             if (result.UntrustedHosts.Count > 0)
@@ -112,7 +124,8 @@ public static class InfrastructureEndpoints
 
             db.Connections.Add(connection);
             await db.SaveChangesAsync(ct);
-            await RefreshInventoryAsync(connection.Id, db, manager, time, ct);
+            await TryRefreshInventoryAsync(connection.Id, db, manager, time, ct);
+            await db.Entry(connection).ReloadAsync(ct);
             return Results.Created($"/api/connections/{connection.Id}", connection.ToDto());
         });
 
@@ -138,15 +151,9 @@ public static class InfrastructureEndpoints
 
         connections.MapPost("/{id:guid}/rescan", async (Guid id, AppDbContext db, ConnectionManager manager, TimeProvider time, CancellationToken ct) =>
         {
-            try
-            {
-                await RefreshInventoryAsync(id, db, manager, time, ct);
-                return Results.NoContent();
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway);
-            }
+            return await TryRefreshInventoryAsync(id, db, manager, time, ct) is { } error
+                ? Results.Problem(error, statusCode: StatusCodes.Status502BadGateway)
+                : Results.NoContent();
         });
 
         connections.MapGet("/{id:guid}/inventory", async (Guid id, AppDbContext db, CancellationToken ct) =>
@@ -345,6 +352,47 @@ public static class InfrastructureEndpoints
         return imported;
     }
 
+    /// <summary>
+    /// Reads the inventory; a failure marks the connection as failed with the message (also right after it was added: it
+    /// stays, shows the error and can be rescanned or removed). Returns the error, or null.
+    /// </summary>
+    private static async Task<string?> TryRefreshInventoryAsync(Guid connectionId, AppDbContext db, ConnectionManager manager, TimeProvider time, CancellationToken ct)
+    {
+        try
+        {
+            await RefreshInventoryAsync(connectionId, db, manager, time, ct);
+            return null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            // Status fields only, without the row version: background services touch the same row.
+            var name = await db.Connections.Where(c => c.Id == connectionId).Select(c => c.DisplayName).FirstOrDefaultAsync(ct);
+            var error = $"Reading the inventory of {name ?? connectionId.ToString()} failed: {ex.Message}";
+            await db.Connections.Where(c => c.Id == connectionId)
+                .ExecuteUpdateAsync(u => u.SetProperty(c => c.Status, ConnectionStatus.Error).SetProperty(c => c.LastError, error), ct);
+            return error;
+        }
+    }
+
+    /// <summary>The cluster CA as a pin, or null when the PEM is missing, unreadable or not a CA certificate.</summary>
+    private static PinnedCertificate? CaPin(string? pem)
+    {
+        if (string.IsNullOrWhiteSpace(pem))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var certificate = System.Security.Cryptography.X509Certificates.X509Certificate2.CreateFromPem(pem.Trim());
+            return Backdafuckup.Kubernetes.KubernetesClients.IsAuthority(certificate) ? Backdafuckup.Core.Tls.CertificatePinning.ToPin("cluster CA", certificate) : null;
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        {
+            return null;
+        }
+    }
+
     private static async Task RefreshInventoryAsync(Guid connectionId, AppDbContext db, ConnectionManager manager, TimeProvider time, CancellationToken ct)
     {
         await using var session = await manager.OpenAsync(connectionId, ct);
@@ -367,13 +415,14 @@ public static class InfrastructureEndpoints
             entry.RefreshedUtc = now;
         }
 
-        var connection = await db.Connections.FindAsync([connectionId], ct);
-        if (connection is not null)
-        {
-            connection.PlatformName = inventory.Platform.PlatformName;
-            connection.ProductVersion = inventory.Platform.ProductVersion;
-        }
-
         await db.SaveChangesAsync(ct);
+
+        // Status fields only, without the row version: background services touch the same row.
+        await db.Connections.Where(c => c.Id == connectionId).ExecuteUpdateAsync(u => u
+            .SetProperty(c => c.PlatformName, inventory.Platform.PlatformName)
+            .SetProperty(c => c.ProductVersion, inventory.Platform.ProductVersion)
+            .SetProperty(c => c.Status, ConnectionStatus.Connected)
+            .SetProperty(c => c.LastError, (string?)null)
+            .SetProperty(c => c.LastConnectedUtc, now), ct);
     }
 }

@@ -46,12 +46,15 @@ internal static class KubernetesInventory
     private const string SnapshotGroup = "snapshot.storage.k8s.io";
     private const string DefaultSnapshotClassAnnotation = "snapshot.storage.kubernetes.io/is-default-class";
 
-    /// <summary>The cluster's identity: the uid of the namespace kube-system, which lives as long as the cluster.</summary>
+    /// <summary>
+    /// The cluster's identity: the uid of the namespace kube-system, which lives as long as the cluster. The address is the
+    /// one given (the server connects to the platform's master address next time), never the URL.
+    /// </summary>
     public static async Task<PlatformInfo> GetPlatformAsync(IKubernetes client, ConnectionSettings settings, CancellationToken cancellationToken)
     {
         var version = await client.Version.GetCodeAsync(cancellationToken).ConfigureAwait(false);
         var kubeSystem = await client.CoreV1.ReadNamespaceAsync("kube-system", cancellationToken: cancellationToken).ConfigureAwait(false);
-        return new PlatformInfo(kubeSystem.Metadata.Uid, settings.Address, KubernetesClients.BaseUrl(settings), "Kubernetes", version.GitVersion);
+        return new PlatformInfo(kubeSystem.Metadata.Uid, settings.Address, settings.Address, "Kubernetes", version.GitVersion);
     }
 
     public static async Task<Inventory> GetAsync(IKubernetes client, ConnectionSettings settings, CancellationToken cancellationToken)

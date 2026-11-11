@@ -13,7 +13,7 @@ internal sealed class KubernetesSession(IKubernetes client, ConnectionSettings s
 {
     private PlatformInfo? _platform;
 
-    public PlatformInfo Platform => _platform ?? new PlatformInfo(string.Empty, settings.Address, KubernetesClients.BaseUrl(settings), "Kubernetes", string.Empty);
+    public PlatformInfo Platform => _platform ?? new PlatformInfo(string.Empty, settings.Address, settings.Address, "Kubernetes", string.Empty);
 
     public async Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken)
     {

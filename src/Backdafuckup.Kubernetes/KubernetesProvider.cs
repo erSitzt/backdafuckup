@@ -38,6 +38,13 @@ public sealed class KubernetesProvider(Func<DelegatingHandler>? transport = null
         }
         catch (Exception ex) when (ex is HttpRequestException or AuthenticationException or IOException)
         {
+            if (KubernetesClients.CertificateAuthorities(settings) is { Count: > 0 } authorities && ex is HttpRequestException or AuthenticationException)
+            {
+                var ca = authorities[0];
+                return new ConnectResult(false, $"The API server {url} did not present a certificate signed by the cluster CA given ({ca.Subject}), " +
+                    $"or not for the address {settings.Address}: {ex.Message}", null, [], []);
+            }
+
             if (!tls.Rejected.IsEmpty)
             {
                 return new ConnectResult(false, $"The TLS certificate of the API server {url} is not trusted yet.", null,
