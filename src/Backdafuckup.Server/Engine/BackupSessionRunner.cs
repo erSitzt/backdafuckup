@@ -255,7 +255,11 @@ internal sealed class VmBackupTask(
 
             await using var backup = started;
             var (consistency, consistencyReason, consistencyWarning) = CheckConsistency(guest, backup.GuestFreeze);
+            var guestReason = consistencyReason;
             consistencyReason = AcrossDisks(consistency, consistencyReason, backup);
+
+            // Disks captured one after another are a warning too; a SQL Server snapshot's own note is not.
+            var pointWarning = consistencyWarning || !string.Equals(consistencyReason, guestReason, StringComparison.Ordinal);
             if (backup.Snapshot is { } facts)
             {
                 var sqlSuspended = guest?.Quiescer is { SqlSuspendedMs: > 0 } q ? TimeSpan.FromMilliseconds(q.SqlSuspendedMs) : (TimeSpan?)null;
@@ -300,11 +304,13 @@ internal sealed class VmBackupTask(
             ManifestBlob? vssBlob = null;
             ManifestBlob? sqlSnapshotBlob = null;
             int? sqlDatabases = null;
+            var sqlConsistent = 0;
             StoredAdDatabase? directory = null;
             if (guest?.Quiescer is { Prepared: { } prepared } quiescer)
             {
                 var stored = StoredGuestMetadata.Build(prepared, quiescer.Thawed, consistency, consistencyReason, quiescer.SqlSnapshot);
                 sqlDatabases = stored.SqlDatabases.Count;
+                sqlConsistent = stored.SqlDatabases.Count(d => d.Consistency == "application");
                 directory = stored.ActiveDirectory;
                 if (directory is { Consistency: not "application" } && consistency == "application")
                 {
@@ -371,8 +377,10 @@ internal sealed class VmBackupTask(
                 Metadata = metadata,
                 Consistency = consistency,
                 ConsistencyReason = consistencyReason,
+                ConsistencyWarning = pointWarning,
                 Guest = guestBlob,
                 SqlDatabaseCount = guest?.Quiescer is { Prepared: not null } ? sqlDatabases : 0,
+                SqlConsistentCount = sqlConsistent,
                 DomainController = guest?.Quiescer is { Prepared: not null } ? directory is not null : null,
                 AdDomain = directory is null ? null : directory.DomainDns ?? string.Empty,
                 VssDocuments = vssBlob,
@@ -534,7 +542,7 @@ internal sealed class VmBackupTask(
             }
 
             return ("crash", sql.AllDatabasesConsistent
-                ? "SQL Server snapshot: the SQL Server databases are application-consistent; files outside SQL Server are crash-consistent."
+                ? RestorePointConsistency.SqlSnapshotNote
                 : $"SQL Server snapshot: {freeze.Reason ?? sql.Summary} Files outside SQL Server are crash-consistent.",
                 !sql.AllDatabasesConsistent || sql.Warnings is { Count: > 0 });
         }
@@ -742,7 +750,9 @@ internal sealed class VmBackupTask(
         entity.ManifestPath = manifestPath;
         entity.Consistency = manifest.Consistency;
         entity.ConsistencyReason = manifest.ConsistencyReason;
+        entity.ConsistencyWarning = manifest.ConsistencyWarning ?? RestorePointConsistency.IsWarning(manifest.ConsistencyReason);
         entity.SqlDatabaseCount = manifest.SqlDatabaseCount ?? (manifest.Guest is null ? 0 : null);
+        entity.SqlConsistentCount = manifest.SqlConsistentCount ?? (manifest.Guest is null ? 0 : null);
         entity.DomainController = manifest.DomainController ?? (manifest.Guest is null ? false : null);
         entity.AdDomain = manifest.AdDomain;
         entity.SqlBackupSetsRecorded = manifest.SqlSnapshot is null ? true : null;

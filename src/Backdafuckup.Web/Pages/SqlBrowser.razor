@@ -25,7 +25,7 @@ else
     <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3" Wrap="Wrap.Wrap">
         <MudText Typo="Typo.h5">SQL Server: @_mount.VmName</MudText>
         <MudChip T="string" Size="Size.Small" Color="Color.Default">@_mount.RestorePointCreatedUtc.ToLocalTime().ToString("g")</MudChip>
-        <ConsistencyChip Consistency="@_mount.Consistency" Reason="@_mount.ConsistencyReason" />
+        <ConsistencyChip Consistency="@_mount.Consistency" Reason="@_mount.ConsistencyReason" Warning="@_mount.ConsistencyWarning" />
         <MudSpacer />
         <MudText Typo="Typo.caption">Closes after @_mount.IdleTimeoutMinutes minutes without use.</MudText>
         <MudButton Variant="Variant.Outlined" Size="Size.Small" OnClick="CloseAsync" StartIcon="@Icons.Material.Filled.Close">Close</MudButton>

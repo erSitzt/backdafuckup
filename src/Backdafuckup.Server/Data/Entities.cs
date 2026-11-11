@@ -493,8 +493,17 @@ public sealed class RestorePointEntity
 
     public string? ConsistencyReason { get; set; }
 
+    /// <summary>
+    /// The consistency is worse than the job's guest processing promises (see <c>RestorePointManifest.ConsistencyWarning</c>):
+    /// the restore point shows it as a warning. Not for the note of a SQL Server snapshot that recorded every database.
+    /// </summary>
+    public bool ConsistencyWarning { get; set; }
+
     /// <summary>SQL Server databases in the guest metadata; null until known (restore points from before it was recorded).</summary>
     public int? SqlDatabaseCount { get; set; }
+
+    /// <summary>Of <see cref="SqlDatabaseCount"/>, the application-consistent ones; null until known (older restore points are checked at start).</summary>
+    public int? SqlConsistentCount { get; set; }
 
     /// <summary>Size of the RAM image of a snapshot with memory (a restore can resume the VM); null without memory.</summary>
     public long? MemoryImageBytes { get; set; }

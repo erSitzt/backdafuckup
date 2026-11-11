@@ -1,12 +1,13 @@
-@* "application" or "crash" consistency of a restore point or a database, with the reason as a tooltip. *@
+@* "application" or "crash" consistency of a restore point or a database, with the reason as a tooltip. Crash-consistent is
+   what a backup without guest processing promises: it shows as a warning only when it is less than the job promised. *@
 @if (Consistency == "application")
 {
     <MudChip T="string" Size="Size.Small" Color="Color.Success" Icon="@AppIcons.ApplicationConsistent">application-consistent</MudChip>
 }
 else
 {
-    <MudTooltip Text="@($"The newest changes before the snapshot may be missing. {Reason}")">
-        <MudChip T="string" Size="Size.Small" Color="Color.Warning" Icon="@Icons.Material.Filled.Warning">crash-consistent</MudChip>
+    <MudTooltip Text="@($"Like after a power failure: the newest changes before the snapshot may be missing. {Reason}")">
+        <MudChip T="string" Size="Size.Small" Color="@(Warning ? Color.Warning : Color.Default)" Icon="@(Warning ? Icons.Material.Filled.Warning : null)">crash-consistent</MudChip>
     </MudTooltip>
 }
 
@@ -16,4 +17,8 @@ else
 
     [Parameter]
     public string? Reason { get; set; }
+
+    /// <summary>Less consistent than promised (default): a database that is only crash-consistent always is.</summary>
+    [Parameter]
+    public bool Warning { get; set; } = true;
 }

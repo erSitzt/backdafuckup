@@ -38,22 +38,9 @@
     <td class="c-420">
         @if (Latest is not null)
         {
-            @if (Latest.DomainController)
+            @foreach (var pill in RestorePointPills.For(Latest.Consistency, Latest.ConsistencyReason, Latest.ConsistencyWarning, Latest.MemoryImageBytes, Latest.SqlDatabaseCount, Latest.SqlConsistentCount, Latest.DomainController, Latest.AdDomain, "the newest restore point"))
             {
-                <span class="mini-chip info" title="@($"Domain controller{(string.IsNullOrEmpty(Latest.AdDomain) ? string.Empty : $" of {Latest.AdDomain}")}: its Active Directory database is in the newest restore point")"><MudIcon Icon="@AppIcons.ActiveDirectory" Class="mini-chip-icon" />AD</span>
-            }
-            @if (Latest.SqlDatabaseCount > 0)
-            {
-                <span class="mini-chip info" title="@($"{Latest.SqlDatabaseCount} SQL Server database(s) in the newest restore point")"><MudIcon Icon="@AppIcons.Database" Class="mini-chip-icon" />SQL @Latest.SqlDatabaseCount</span>
-            }
-            @if (Latest.MemoryImageBytes is { } ram && Latest.Consistency != "application")
-            {
-                <span class="mini-chip info" title="@($"Snapshot with memory ({Fmt.Bytes(ram)} RAM): the disks match each other; a restore can resume the VM.")"><MudIcon Icon="@AppIcons.Memory" Class="mini-chip-icon" />RAM</span>
-            }
-            else if (Latest.Consistency != "application")
-            {
-                <span class="@(Latest.ConsistencyReason is null ? "mini-chip" : "mini-chip warning")"
-                      title="@(Latest.ConsistencyReason ?? "Without guest processing: like a power failure; most applications recover by themselves.")">crash</span>
+                <span class="@pill.Css" title="@pill.Title">@if (pill.Icon is not null) { @AppIcons.Svg(pill.Icon, "mini-chip-icon") }@pill.Text</span>
             }
         }
     </td>

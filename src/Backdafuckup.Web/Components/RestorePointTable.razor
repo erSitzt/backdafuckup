@@ -44,26 +44,9 @@
                     <td class="nowrap-wide">@Fmt.Time(p.CreatedUtc)</td>
                     <td class="c-560">@p.Kind</td>
                     <td class="c-420">
-                        @if (p.Consistency == "application")
+                        @foreach (var pill in RestorePointPills.For(p.Consistency, p.ConsistencyReason, p.ConsistencyWarning, p.MemoryImageBytes, p.SqlDatabaseCount ?? 0, p.SqlConsistentCount, p.DomainController, p.AdDomain, "this restore point"))
                         {
-                            <span class="mini-chip success"><MudIcon Icon="@AppIcons.ApplicationConsistent" Class="mini-chip-icon" />application</span>
-                        }
-                        else if (p.MemoryImageBytes is { } ram)
-                        {
-                            <span class="mini-chip info" title="@($"Snapshot with memory ({Fmt.Bytes(ram)} RAM): the disks match each other; a restore can resume the VM where it was, or boot it like after a power failure.")"><MudIcon Icon="@AppIcons.Memory" Class="mini-chip-icon" />RAM</span>
-                        }
-                        else
-                        {
-                            <span class="@(p.ConsistencyReason is null ? "mini-chip" : "mini-chip warning")"
-                                  title="@(p.ConsistencyReason ?? "Without guest processing: like a power failure; most applications recover by themselves.")">crash</span>
-                        }
-                        @if (p.SqlDatabaseCount > 0)
-                        {
-                            <span class="mini-chip info" title="@($"{p.SqlDatabaseCount} SQL Server database(s) in this restore point")"><MudIcon Icon="@AppIcons.Database" Class="mini-chip-icon" />SQL @p.SqlDatabaseCount</span>
-                        }
-                        @if (p.DomainController)
-                        {
-                            <span class="mini-chip info" title="@(string.IsNullOrEmpty(p.AdDomain) ? "Domain controller: its Active Directory database is in this restore point" : $"Domain controller of {p.AdDomain}: its Active Directory database is in this restore point")"><MudIcon Icon="@AppIcons.ActiveDirectory" Class="mini-chip-icon" />AD</span>
+                            <span class="@pill.Css" title="@pill.Title">@if (pill.Icon is not null) { @AppIcons.Svg(pill.Icon, "mini-chip-icon") }@pill.Text</span>
                         }
                     </td>
                     <td class="c-760 num">@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))</td>

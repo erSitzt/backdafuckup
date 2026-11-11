@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Components;
 using MudBlazor;
 
 namespace Backdafuckup.Web;
@@ -88,4 +89,11 @@ public static class AppIcons
 
     /// <summary>Checking data or a connection.</summary>
     public const string Verify = Icons.Material.Filled.FactCheck;
+
+    /// <summary>
+    /// An icon as plain inline SVG in the text color, for rows rendered in bulk (Backups &amp; Restore) where a MudIcon
+    /// component per chip would cost a component each.
+    /// </summary>
+    public static MarkupString Svg(string icon, string cssClass) =>
+        new($"<svg class=\"{cssClass}\" viewBox=\"0 0 24 24\" fill=\"currentColor\" aria-hidden=\"true\" focusable=\"false\">{icon}</svg>");
 }

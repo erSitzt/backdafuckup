@@ -70,6 +70,7 @@ public sealed partial class ApiIntegrationTests
             var dc = Point(nightly, "Nightly", "vm-c", "app03", now.AddHours(-2));
             dc.Consistency = "crash";
             dc.ConsistencyReason = "Guest processing failed: the agent on app03 (10.0.0.3) did not answer within 60 s.";
+            dc.ConsistencyWarning = true;
             dc.DomainController = true;
             dc.AdDomain = "corp.local";
             var sql = Point(archive, "Archive", "vm-a", "app01", now.AddHours(-3));

@@ -84,8 +84,10 @@ public static class BackupVms
                     r.Kind,
                     r.Consistency,
                     r.ConsistencyReason,
+                    r.ConsistencyWarning,
                     r.LogicalBytes,
                     r.SqlDatabaseCount,
+                    r.SqlConsistentCount,
                     r.DomainController,
                     r.AdDomain,
                     r.MemoryImageBytes,
@@ -100,7 +102,7 @@ public static class BackupVms
             var newest = vmJob.MaxBy(g => g.Latest.CreatedUtc)!;
             var l = newest.Latest;
             var latest = new BackupVmPointDto(l.Id, vmJob.Key.JobId, l.CreatedUtc, l.Kind.ToString(), l.Consistency, l.ConsistencyReason, l.LogicalBytes,
-                l.SqlDatabaseCount ?? 0, l.DomainController == true, l.AdDomain, l.MemoryImageBytes);
+                l.SqlDatabaseCount ?? 0, l.DomainController == true, l.AdDomain, l.MemoryImageBytes, l.SqlConsistentCount, l.ConsistencyWarning);
             var job = vmJob.Key.JobId is { } id ? jobs.GetValueOrDefault(id) : null;
             entries.Add(new Entry(vmJob.Key.VmNativeId, l.VmName, l.ConnectionId ?? job?.ConnectionId, Describe(job, vmJob.Key.JobId, job?.Name ?? l.JobName,
                 vmJob.Sum(g => g.Count), vmJob.Sum(g => g.Stored), [.. vmJob.Select(g => g.RepositoryId).Distinct()], latest, now)));
@@ -210,7 +212,7 @@ public static class BackupVms
 
     private static string? ConsistencyOf(BackupVmPointDto? point) => point is null ? null
         : point.Consistency == "application" ? "application"
-        : point.ConsistencyReason is null ? "crash" : "warning";
+        : point.ConsistencyWarning ? "warning" : "crash";
 
     private sealed record Entry(string VmNativeId, string VmName, Guid? ConnectionId, BackupVmJobDto Job);
 }

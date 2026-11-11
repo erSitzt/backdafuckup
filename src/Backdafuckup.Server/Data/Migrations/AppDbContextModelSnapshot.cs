@@ -922,6 +922,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("consistency_reason");
 
+                    b.Property<bool>("ConsistencyWarning")
+                        .HasColumnType("boolean")
+                        .HasColumnName("consistency_warning");
+
                     b.Property<DateTimeOffset>("CreatedUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_utc");
@@ -977,6 +981,10 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<bool?>("SqlBackupSetsRecorded")
                         .HasColumnType("boolean")
                         .HasColumnName("sql_backup_sets_recorded");
+
+                    b.Property<int?>("SqlConsistentCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("sql_consistent_count");
 
                     b.Property<int?>("SqlDatabaseCount")
                         .HasColumnType("integer")

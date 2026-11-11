@@ -40,11 +40,25 @@ public sealed record RestorePointManifest
     /// <summary>Why a backup with guest processing is only crash-consistent.</summary>
     public string? ConsistencyReason { get; init; }
 
+    /// <summary>
+    /// Whether the consistency is worse than the job's guest processing promises: the guest could not be frozen, a SQL Server
+    /// snapshot left databases out, or the disks were captured one after another. The note of a SQL Server snapshot that
+    /// recorded every database is no warning. Null in manifests from before it was recorded:
+    /// <see cref="RestorePointConsistency.IsWarning"/> decides then.
+    /// </summary>
+    public bool? ConsistencyWarning { get; init; }
+
     /// <summary>What the guest contained (volumes, VSS writers, SQL databases), as reported by the agent.</summary>
     public ManifestBlob? Guest { get; init; }
 
     /// <summary>Number of SQL Server databases in <see cref="Guest"/>; null in manifests written before it was recorded.</summary>
     public int? SqlDatabaseCount { get; init; }
+
+    /// <summary>
+    /// Of <see cref="SqlDatabaseCount"/>, the databases that are application-consistent (VSS with SQL Server's writer, or a
+    /// SQL Server snapshot that recorded them); null in manifests from before it was recorded.
+    /// </summary>
+    public int? SqlConsistentCount { get; init; }
 
     /// <summary>Whether the VM was a domain controller (its directory facts are in <see cref="Guest"/>); null in older manifests.</summary>
     public bool? DomainController { get; init; }
