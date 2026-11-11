@@ -29,23 +29,46 @@ else
                         <MudTextField @bind-Value="_name" Label="Name" Variant="Variant.Outlined" Class="mb-4" AutoFocus="true" />
                         <MudTextField @bind-Value="_description" Label="Description" Variant="Variant.Outlined" Lines="3"
                                       HelperText="Optional: what the job is for, or whom to ask about it." />
+                        <MudText Typo="Typo.body2" Class="mt-5 mb-2"><b>What the job backs up</b></MudText>
+                        <MudToggleGroup T="string" Value="_kind" ValueChanged="OnKindChangedAsync" SelectionMode="SelectionMode.SingleSelection" Color="Color.Primary"
+                                        Outlined="true" CheckMark="false" Disabled="@(Id is not null)">
+                            <MudToggleItem T="string" Value="@KindVms">
+                                <span class="d-flex align-center gap-2"><MudIcon Icon="@AppIcons.Vm" Size="Size.Small" />Virtual machines</span>
+                            </MudToggleItem>
+                            <MudToggleItem T="string" Value="@KindNamespaces">
+                                <span class="d-flex align-center gap-2"><MudIcon Icon="@AppIcons.Kubernetes" Size="Size.Small" />Kubernetes namespaces</span>
+                            </MudToggleItem>
+                        </MudToggleGroup>
+                        <MudText Typo="Typo.caption" Class="help-text">
+                            @(Id is not null
+                                ? "A saved job keeps what it backs up; create a new job for the other kind."
+                                : IsCluster
+                                    ? "Namespaces of a Kubernetes cluster: their objects, and the data of their volumes whose storage takes CSI snapshots."
+                                    : "VMs of a pool: their disks, with change tracking, and optionally application-consistent through the agent.")
+                        </MudText>
                     </div>
                     break;
 
                 case 1:
-                    @if (_pools.Count == 0)
+                    @if (!Connections.Any())
                     {
                         <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">
-                            No virtualization pool or Kubernetes cluster yet. Add one under <MudLink Href="/infrastructure/pools">Virtualization Pools</MudLink> or
-                            <MudLink Href="/infrastructure/kubernetes">Kubernetes Clusters</MudLink>; its VMs or namespaces are listed here then.
+                            @if (IsCluster)
+                            {
+                                <span>No Kubernetes cluster yet. Add one under <MudLink Href="/infrastructure/kubernetes">Kubernetes Clusters</MudLink>; its namespaces are listed here then.</span>
+                            }
+                            else
+                            {
+                                <span>No virtualization pool yet. Add one under <MudLink Href="/infrastructure/pools">Virtualization Pools</MudLink>; its VMs are listed here then.</span>
+                            }
                         </MudAlert>
                     }
                     <div class="field-toolbar">
-                        <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="Pool or cluster" Variant="Variant.Outlined" Margin="Margin.Dense"
-                                   ToStringFunc="@(id => _pools.FirstOrDefault(p => p.Id == id) is { } c ? ConnectionLabel(c) : string.Empty)">
-                            @foreach (var pool in _pools)
+                        <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="@(IsCluster ? "Cluster" : "Pool")" Variant="Variant.Outlined" Margin="Margin.Dense"
+                                   ToStringFunc="@(id => _pools.FirstOrDefault(p => p.Id == id)?.DisplayName ?? string.Empty)">
+                            @foreach (var pool in Connections)
                             {
-                                <MudSelectItem T="Guid" Value="pool.Id">@ConnectionLabel(pool)</MudSelectItem>
+                                <MudSelectItem T="Guid" Value="pool.Id">@pool.DisplayName</MudSelectItem>
                             }
                         </MudSelect>
                         <MudTextField @bind-Value="_vmFilter" Placeholder="@(IsCluster ? "Filter namespaces" : "Filter VMs")" Variant="Variant.Outlined" Margin="Margin.Dense" Adornment="Adornment.Start"
@@ -82,8 +105,8 @@ else
                             <span>
                                 Every object of a namespace is backed up, Secrets included. PVCs on a CSI driver with a VolumeSnapshotClass are backed up with their data
                                 (a snapshot, read by a mover pod, deleted right after); other PVCs, e.g. on NFS, only as objects. Pods with the annotation
-                                <span class="mono">pre.hook.backup.velero.io/command</span> run it before the snapshots (application-consistent), and
-                                <span class="mono">post.hook.backup.velero.io/command</span> after them.
+                                <span class="mono nowrap">pre.hook.backup.velero.io/command</span> run it before the snapshots (application-consistent), and
+                                <span class="mono nowrap">post.hook.backup.velero.io/command</span> after them.
                             </span>
                         </div>
                         break;
@@ -520,10 +543,25 @@ else
         "Check the settings, then save the job.",
     ];
 
-    /// <summary>The job backs up namespaces of a Kubernetes cluster rather than VMs of a pool.</summary>
-    private bool IsCluster => _pools?.FirstOrDefault(p => p.Id == _connectionId)?.Kind == "Kubernetes";
+    private const string KindVms = "XenServer";
+    private const string KindNamespaces = "Kubernetes";
 
-    private static string ConnectionLabel(ConnectionDto connection) => connection.Kind == "Kubernetes" ? $"{connection.DisplayName} (Kubernetes cluster)" : connection.DisplayName;
+    /// <summary>What the job backs up: VMs of a pool (<see cref="KindVms"/>) or namespaces of a Kubernetes cluster.</summary>
+    private string _kind = KindVms;
+
+    private bool IsCluster => _kind == KindNamespaces;
+
+    /// <summary>The pools, or the clusters, the job can use.</summary>
+    private IEnumerable<ConnectionDto> Connections => (_pools ?? []).Where(c => c.Kind == _kind);
+
+    private async Task OnKindChangedAsync(string kind)
+    {
+        _kind = kind;
+        _selected.Clear();
+        _withMemory.Clear();
+        _connectionId = Connections.FirstOrDefault()?.Id ?? Guid.Empty;
+        await LoadVmsAsync();
+    }
 
     /// <summary>What was chosen in each step, under its label in the step bar.</summary>
     private IReadOnlyList<string?> Hints() =>
@@ -607,7 +645,7 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        _pools = [.. (await Api.GetAsync<List<ConnectionDto>>("api/connections")).OrderBy(c => c.Kind == "Kubernetes").ThenBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)];
+        _pools = [.. (await Api.GetAsync<List<ConnectionDto>>("api/connections")).OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)];
         _repositories = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
         _credentials = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
         var logins = await Api.GetAsync<List<SqlCredentialDto>>("api/credentials/sql");
@@ -618,6 +656,7 @@ else
             _name = job.Name;
             _description = job.Description;
             _connectionId = job.ConnectionId;
+            _kind = _pools.FirstOrDefault(p => p.Id == job.ConnectionId)?.Kind ?? KindVms;
             _repositoryId = job.RepositoryId;
             _retention = job.RetentionPoints;
             _parallelVms = job.MaxParallelVms;
@@ -666,7 +705,9 @@ else
         }
         else
         {
-            _connectionId = _pools.FirstOrDefault()?.Id ?? Guid.Empty;
+            // VMs unless there are only clusters.
+            _kind = _pools.Any(p => p.Kind == KindVms) || !_pools.Any(p => p.Kind == KindNamespaces) ? KindVms : KindNamespaces;
+            _connectionId = Connections.FirstOrDefault()?.Id ?? Guid.Empty;
             _repositoryId = _repositories.FirstOrDefault()?.Id ?? Guid.Empty;
         }
 
