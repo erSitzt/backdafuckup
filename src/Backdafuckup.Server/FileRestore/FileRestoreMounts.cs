@@ -471,9 +471,14 @@ public sealed class FileRestoreMounts(
         e.LinkTarget,
         e.Unsupported);
 
+    /// <summary>
+    /// Drive letter or mount point (with the label), else the label, the LVM volume, the partition type; a file system on
+    /// the whole disk (a Kubernetes PVC) is named after its disk; the id is the last resort.
+    /// </summary>
     internal static string Title(GuestVolume v)
     {
-        var name = v.MountPoint ?? (string.IsNullOrEmpty(v.Label) ? null : v.Label) ?? v.LvmName ?? v.PartitionType ?? v.Id;
+        var wholeDisk = v.PartitionType is null && v.LvmName is null && v.StartOffset == 0 && !string.IsNullOrEmpty(v.DiskName) ? v.DiskName : null;
+        var name = v.MountPoint ?? (string.IsNullOrEmpty(v.Label) ? null : v.Label) ?? v.LvmName ?? v.PartitionType ?? wholeDisk ?? v.Id;
         return v.MountPoint is not null && !string.IsNullOrEmpty(v.Label) ? $"{name} ({v.Label})" : name;
     }
 
@@ -483,11 +488,12 @@ public sealed class FileRestoreMounts(
     /// <summary>A guest path as the user knows it: <c>C:\Users\x</c> or <c>/home/x</c>.</summary>
     internal static string Describe(GuestVolume? v, string volume, GuestPath path)
     {
-        // The drive letter or mount point alone ("C:", "/home"); a label would make the path unreadable.
+        // The drive letter or mount point alone ("C:", "/home"); a label would make the path unreadable. A Linux volume
+        // without a mount point is named before a colon: "data-redis-0:/appendonlydir".
         var prefix = v?.MountPoint ?? (v is null ? volume : Title(v));
         return v?.FileSystem is "NTFS" or "FAT"
             ? $"{prefix.TrimEnd('\\')}\\{string.Join('\\', path.Components)}"
-            : $"{prefix.TrimEnd('/')}{path}";
+            : v?.MountPoint is null ? $"{prefix}:{path}" : $"{prefix.TrimEnd('/')}{path}";
     }
 
     internal static string AsciiName(string name)
