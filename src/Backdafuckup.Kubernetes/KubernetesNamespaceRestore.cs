@@ -34,6 +34,8 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
     private readonly List<VolumeImport> _imports = [];
     private readonly List<JsonObject> _created = [];
     private readonly List<string> _warnings = [];
+    private readonly Dictionary<string, IReadOnlyList<(string Kind, string Name)>> _swaps = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, PausedWorkload> _paused = new(StringComparer.Ordinal);
     private bool _namespaceCreated;
     private bool _completed;
 
@@ -101,13 +103,35 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             errors.Add("Nothing to restore: the selection holds no object of the restore point.");
         }
 
+        if (_options.ReplaceClaims && _options.OnlyClaims is null)
+        {
+            errors.Add("Replacing PVCs is a restore of single PVCs.");
+        }
+
         foreach (var volume in DataVolumes)
         {
             var name = _options.ClaimName(volume.Claim);
-            if (await ExistsAsync(() => _client.CoreV1.ReadNamespacedPersistentVolumeClaimAsync(name, Target, cancellationToken: cancellationToken)).ConfigureAwait(false))
+            if (!await ExistsAsync(() => _client.CoreV1.ReadNamespacedPersistentVolumeClaimAsync(name, Target, cancellationToken: cancellationToken)).ConfigureAwait(false))
             {
-                errors.Add($"The PVC {Target}/{name} exists in cluster {_settings.Address}: delete it first, restore into another namespace, or restore the PVC under a new name.");
+                continue;
             }
+
+            if (!_options.ReplaceClaims)
+            {
+                errors.Add($"The PVC {Target}/{name} exists in cluster {_settings.Address}: delete it first, restore into another namespace, restore the PVC under a new name, or replace it.");
+                continue;
+            }
+
+            var (workloads, problem) = await WorkloadPause.FindAsync(_client, Target, name, cancellationToken).ConfigureAwait(false);
+            if (problem is not null)
+            {
+                errors.Add(problem);
+                continue;
+            }
+
+            _swaps[name] = workloads;
+            Log.Info($"PVC {Target}/{name} is replaced: its current data is deleted" +
+                         (workloads.Count > 0 ? $"; {string.Join(", ", workloads.Select(w => $"{w.Kind} {w.Name}"))} is scaled to 0 for the swap and back afterwards." : "."));
         }
 
         foreach (var volume in _descriptor.Volumes.Where(v => v.DiskKey is null && _selected.Contains($"PersistentVolumeClaim/{v.Claim}")))
@@ -239,6 +263,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         }
 
         await WaitBoundAsync(cancellationToken).ConfigureAwait(false);
+        await ResumeAsync(cancellationToken).ConfigureAwait(false);
         Log.Info($"{restored.Count} object(s) restored{(restored.Count > 0 ? $" ({Summary(restored)})" : string.Empty)}" +
                  (replaced.Count > 0 ? $"; {replaced.Count} replaced ({Summary(replaced)})" : string.Empty) +
                  (existing.Count > 0 ? $"; {existing.Count} existed and were left as they are ({Summary(existing)})" : string.Empty) +
@@ -263,6 +288,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         if (!_completed)
         {
             using var timeout = new CancellationTokenSource(_flow.Timings.Deleted);
+            await ResumeAsync(timeout.Token).ConfigureAwait(false);
             try
             {
                 if (_namespaceCreated)
@@ -331,6 +357,11 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                 prepared["metadata"]!["annotations"]!["volume.kubernetes.io/selected-node"] = node;
             }
 
+            if (_swaps.TryGetValue(name, out var users))
+            {
+                await SwapOutAsync(name, users, cancellationToken).ConfigureAwait(false);
+            }
+
             await CallAsync($"creating the PVC {Target}/{name}", () => _applier.CreateAsync(prepared, cancellationToken)).ConfigureAwait(false);
             _created.Add(prepared);
             restored.Add($"PersistentVolumeClaim/{name}");
@@ -370,6 +401,48 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         }
 
         await TryCreateAsync(prepared, restored, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Stops the workloads using the PVC (once each), then deletes the PVC and waits until it is gone.</summary>
+    private async Task SwapOutAsync(string claim, IReadOnlyList<(string Kind, string Name)> users, CancellationToken cancellationToken)
+    {
+        var toPause = users.Where(w => !_paused.ContainsKey($"{w.Kind}/{w.Name}")).ToList();
+        foreach (var workload in await WorkloadPause.PauseAsync(_flow, Target, claim, toPause, cancellationToken).ConfigureAwait(false))
+        {
+            _paused[workload.Key] = workload;
+        }
+
+        var existing = new JsonObject { ["apiVersion"] = "v1", ["kind"] = "PersistentVolumeClaim", ["metadata"] = new JsonObject { ["name"] = claim, ["namespace"] = Target } };
+        await CallAsync($"deleting the PVC {Target}/{claim}", () => _applier.DeleteAsync(existing, cancellationToken)).ConfigureAwait(false);
+        var started = DateTimeOffset.UtcNow;
+        while (await ReadQuietlyAsync(existing, cancellationToken).ConfigureAwait(false) is not null)
+        {
+            if (DateTimeOffset.UtcNow - started > _flow.Timings.Deleted)
+            {
+                throw new KubernetesOperationException($"The PVC {Target}/{claim} is still there {_flow.Timings.Deleted.TotalMinutes:0} minutes after its deletion (cluster {_settings.Address}).");
+            }
+
+            await Task.Delay(_flow.Timings.Poll, cancellationToken).ConfigureAwait(false);
+        }
+
+        Log.Info($"PVC {Target}/{claim} with its former data deleted.");
+    }
+
+    /// <summary>Scales the stopped workloads back (also when the restore did not complete).</summary>
+    private async Task ResumeAsync(CancellationToken cancellationToken)
+    {
+        foreach (var workload in _paused.Values.ToList())
+        {
+            try
+            {
+                await WorkloadPause.ResumeAsync(_flow, workload, cancellationToken).ConfigureAwait(false);
+                _paused.Remove(workload.Key);
+            }
+            catch (KubernetesOperationException ex)
+            {
+                Warn($"{workload.Kind} {workload.Namespace}/{workload.Name} could not be scaled back to {workload.Replicas} (retried later): {ex.Message}");
+            }
+        }
     }
 
     /// <summary>

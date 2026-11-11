@@ -20,6 +20,9 @@ public static class KubernetesArtifactKinds
     public const string PersistentVolumeClaim = "k8s.PersistentVolumeClaim";
     public const string Pod = "k8s.Pod";
     public const string Secret = "k8s.Secret";
+
+    /// <summary>A workload scaled to 0 for a PVC swap (id <c>namespace/Kind/name</c>, data: its replicas); its cleanup scales it back.</summary>
+    public const string ScaledWorkload = "k8s.ScaledWorkload";
 }
 
 /// <summary>Waits of the snapshot flow; tests shorten them.</summary>

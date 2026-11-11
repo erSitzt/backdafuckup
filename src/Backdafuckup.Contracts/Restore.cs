@@ -58,6 +58,9 @@ public sealed record KubernetesRestoreDto
 
     public List<string>? OnlyClaims { get; init; }
 
+    /// <summary>With <see cref="OnlyClaims"/>: replace the PVCs of their names (their workloads are stopped for the swap; their current data is deleted).</summary>
+    public bool ReplaceClaims { get; init; }
+
     /// <summary>Only these objects (<c>Kind/name</c>) and what they need (ConfigMaps, Secrets, PVCs, Services …). Null: the whole namespace.</summary>
     public List<string>? Objects { get; init; }
 
