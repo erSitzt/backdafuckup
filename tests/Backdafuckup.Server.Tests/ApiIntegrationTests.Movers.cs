@@ -130,6 +130,60 @@ public sealed partial class ApiIntegrationTests
     }
 
     [Fact]
+    public async Task A_files_channel_holds_its_writer_back_and_releases_it_with_the_reason_when_the_mover_fails()
+    {
+        var channels = await MoverChannelsAsync();
+
+        // Nobody reads: the writer stops at the pipe's limit, and the pod watcher's abort releases it with the reason.
+        await using (var files = await channels.OpenFilesAsync("PVC bdfu-spike/data-a", Ct))
+        {
+            var written = 0L;
+            var writer = Task.Factory.StartNew(
+                () =>
+                {
+                    var chunk = new byte[256 * 1024];
+                    while (true)
+                    {
+                        files.Content.Write(chunk);
+                        Interlocked.Add(ref written, chunk.Length);
+                    }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            await Task.Delay(500, Ct);
+            Assert.False(writer.IsCompleted);
+            Assert.InRange(Interlocked.Read(ref written), 1, 16L * 1024 * 1024);
+            files.Abort(new InvalidOperationException("The mover pod bdfu-spike/bdfu-x-mover cannot start (ImagePullBackOff)"));
+            var error = await Assert.ThrowsAsync<IOException>(() => writer);
+            Assert.Contains("ImagePullBackOff", error.Message, StringComparison.Ordinal);
+            Assert.False(files.IsUsable);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => files.Completion);
+        }
+
+        // The mover reports an error while the server still sends: writes fail with the mover's reason, as does the restore.
+        await using (var files = await channels.OpenFilesAsync("PVC bdfu-spike/data-b", Ct))
+        {
+            using var mover = Mover(files.Endpoint.Token);
+            var get = mover.GetAsync(files.Endpoint.DataUrl, HttpCompletionOption.ResponseHeadersRead, Ct);
+            await files.Connected.WaitAsync(Ct);
+            await Task.Run(() => files.Content.Write("BDFUFIL1"u8), Ct);
+            using var response = await get;
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            using (var again = Mover(files.Endpoint.Token))
+            {
+                Assert.Equal(HttpStatusCode.Conflict, (await again.GetAsync(files.Endpoint.DataUrl, Ct)).StatusCode);
+            }
+
+            Assert.Equal(HttpStatusCode.NoContent, (await mover.PostAsJsonAsync(files.Endpoint.ResultUrl, new MoverResult(0, "No space left on device (/bdfu-volume/dump.rdb)"), Ct)).StatusCode);
+            var failed = await Assert.ThrowsAsync<IOException>(() => files.Completion);
+            Assert.Equal("The mover for PVC bdfu-spike/data-b failed: No space left on device (/bdfu-volume/dump.rdb)", failed.Message);
+            var refused = Assert.Throws<IOException>(() => files.Content.Write(new byte[16]));
+            Assert.Equal(failed.Message, refused.Message);
+        }
+    }
+
+    [Fact]
     public async Task The_mover_image_goes_to_the_registry_set_in_the_console_and_a_backup_pushes_only_what_is_missing()
     {
         var console = await SignedInClientAsync();

@@ -78,6 +78,9 @@ public enum FileRestoreTargetKindDto
 
     /// <summary>Into a Linux VM over SSH/SFTP (root login or sudo): the original location or another folder.</summary>
     Ssh,
+
+    /// <summary>Into a live PVC of a namespace's restore point, through a mover pod: the original location or another folder.</summary>
+    Pvc,
 }
 
 public sealed record FileRestoreTargetDto
@@ -99,10 +102,19 @@ public sealed record FileRestoreTargetDto
     /// <summary>Agent target: the VM to restore into; null is the VM of the restore point.</summary>
     public string? VmNativeId { get; init; }
 
-    /// <summary>Agent or SSH target: a folder in the VM (D:\Restore, /srv/restore); null restores to the original location.</summary>
+    /// <summary>
+    /// Agent or SSH target: a folder in the VM (D:\Restore, /srv/restore); PVC target: a folder in the PVC (/restore).
+    /// Null restores to the original location.
+    /// </summary>
     public string? Folder { get; init; }
 
-    /// <summary>Agent target: owner and permissions from the backup. SSH target: owner and group from the backup.</summary>
+    /// <summary>PVC target: the PVC in the namespace of the restore point; null is the PVC the files come from.</summary>
+    public string? Claim { get; init; }
+
+    /// <summary>
+    /// Agent target: owner and permissions from the backup. SSH and PVC targets: owner and group from the backup
+    /// (otherwise those of the folder an item goes into).
+    /// </summary>
     public bool RestorePermissions { get; init; }
 }
 

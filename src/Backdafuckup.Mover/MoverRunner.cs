@@ -32,13 +32,17 @@ internal static partial class MoverRunner
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", options.Token);
         try
         {
-            if (options.Mode == MoverMode.Backup)
+            switch (options.Mode)
             {
-                await BackupAsync(http, options, log, cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                await RestoreAsync(http, options, log, cancellationToken).ConfigureAwait(false);
+                case MoverMode.Backup:
+                    await BackupAsync(http, options, log, cancellationToken).ConfigureAwait(false);
+                    break;
+                case MoverMode.Files:
+                    await FilesAsync(http, options, log, cancellationToken).ConfigureAwait(false);
+                    break;
+                default:
+                    await RestoreAsync(http, options, log, cancellationToken).ConfigureAwait(false);
+                    break;
             }
 
             return 0;
@@ -145,6 +149,29 @@ internal static partial class MoverRunner
         {
             device.Dispose();
         }
+    }
+
+    private static async Task FilesAsync(HttpClient http, MoverOptions options, TextWriter log, CancellationToken cancellationToken)
+    {
+        using var response = await SendAsync(http, new HttpRequestMessage(HttpMethod.Get, options.DataUrl), options.DataUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+            .ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            throw new HttpRequestException($"The backup server {options.DataUrl.Authority} refused the files: {(int)response.StatusCode} {Detail(body)}");
+        }
+
+        if (!OperatingSystem.IsLinux())
+        {
+            throw new PlatformNotSupportedException("The mover puts files into volumes on Linux only.");
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        log.WriteLine($"Restoring files from {options.DataUrl.Authority} into {options.Root}: existing files {(options.Keep ? "stay (RESTORED- copies)" : "are replaced")}, owners {(options.Owners ? "from the backup" : "of the folders they go into")}.");
+        var started = Stopwatch.GetTimestamp();
+        var report = await new VolumeFiles(options.Root, options.Keep, options.Owners, log).ApplyAsync(stream, cancellationToken).ConfigureAwait(false);
+        await ReportAsync(http, options, new MoverResult(report.Bytes, null, report), cancellationToken).ConfigureAwait(false);
+        log.WriteLine($"Done in {Stopwatch.GetElapsedTime(started):hh\\:mm\\:ss}: {report.Files} file(s), {Size(report.Bytes)}; {report.Renamed} as RESTORED- copies, {report.Failed} failed, {report.Partial} without all of owner, mode or times.");
     }
 
     private static async Task ReportAsync(HttpClient http, MoverOptions options, MoverResult result, CancellationToken cancellationToken)

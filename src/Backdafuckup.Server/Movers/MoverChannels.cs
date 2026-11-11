@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.IO.Pipelines;
 using System.Security.Cryptography;
 using System.Text;
 using Backdafuckup.Core.DataMover;
@@ -36,6 +37,12 @@ public sealed class MoverChannels(AgentSettingsStore settings, ILogger<MoverChan
         ArgumentNullException.ThrowIfNull(image);
         var (id, endpoint) = await NewEndpointAsync(cancellationToken).ConfigureAwait(false);
         return Register(new RestoreChannel(this, id, endpoint, description, image, progress), connectTimeout);
+    }
+
+    public async Task<IMoverFilesChannel> OpenFilesAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null)
+    {
+        var (id, endpoint) = await NewEndpointAsync(cancellationToken).ConfigureAwait(false);
+        return Register(new FilesChannel(this, id, endpoint, description), connectTimeout);
     }
 
     /// <summary>The open channel with this id, if the request carries its token; null for anything else.</summary>
@@ -340,5 +347,192 @@ internal sealed class RestoreChannel(MoverChannels owner, Guid id, MoverEndpoint
                 ArrayPool<byte>.Shared.Return(pending.Buffer);
             }
         }
+    }
+}
+
+/// <summary>
+/// Serves the files the server writes to <see cref="Content"/> to a mover (GET) through a pipe, which holds the writer
+/// back while the mover is behind; completes with the mover's report of what it put in place.
+/// </summary>
+internal sealed class FilesChannel : MoverChannel, IMoverFilesChannel
+{
+    private static readonly TimeSpan ReportGrace = TimeSpan.FromSeconds(30);
+
+    private readonly Pipe _pipe = new(new PipeOptions(pauseWriterThreshold: 8 * 1024 * 1024, resumeWriterThreshold: 2 * 1024 * 1024, useSynchronizationContext: false));
+    private readonly TaskCompletionSource _connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<MoverFileReport> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _served = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly CancellationTokenSource _failed = new();
+    private Exception? _error;
+
+    public FilesChannel(MoverChannels owner, Guid id, MoverEndpoint endpoint, string description)
+        : base(owner, id, endpoint, description)
+    {
+        Content = new ContentStream(this);
+        _ = _connected.Task.ContinueWith(t => t.Exception, TaskScheduler.Default);
+        _ = _completion.Task.ContinueWith(t => t.Exception, TaskScheduler.Default);
+    }
+
+    public Task Connected => _connected.Task;
+
+    public Stream Content { get; }
+
+    public bool IsUsable => !_failed.IsCancellationRequested;
+
+    public Task<MoverFileReport> Completion => _completion.Task;
+
+    /// <summary>Copies what the server writes to the mover's response until the writer closes the stream.</summary>
+    internal async Task ServeAsync(Stream response, CancellationToken cancellationToken)
+    {
+        _connected.TrySetResult();
+        try
+        {
+            await _pipe.Reader.CopyToAsync(response, cancellationToken).ConfigureAwait(false);
+            await response.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await _pipe.Reader.CompleteAsync().ConfigureAwait(false);
+            _served.TrySetResult();
+        }
+        catch (Exception ex)
+        {
+            await _pipe.Reader.CompleteAsync(ex).ConfigureAwait(false);
+
+            // A mover that stops reading usually reports why: its report comes first.
+            _ = FailUnlessReportedAsync(new IOException($"Sending the files for {Description} to its mover failed: {ex.Message}", ex));
+            throw;
+        }
+    }
+
+    internal override void Report(MoverResult result)
+    {
+        if (result.Error is { } error)
+        {
+            Fail(new IOException($"The mover for {Description} failed: {error}"));
+        }
+        else if (result.Files is not { } files)
+        {
+            Fail(new InvalidDataException($"The mover for {Description} reported no files; is it an older version of the mover image?"));
+        }
+        else
+        {
+            // The mover may read the end of the stream before the server has noted it sent everything.
+            _ = CompleteWhenServedAsync(files);
+        }
+    }
+
+    private async Task CompleteWhenServedAsync(MoverFileReport files)
+    {
+        if (await Task.WhenAny(_served.Task, Task.Delay(ReportGrace)).ConfigureAwait(false) == _served.Task)
+        {
+            _completion.TrySetResult(files);
+        }
+        else
+        {
+            Fail(new InvalidDataException($"The mover for {Description} reports success, but the server has not sent all files."));
+        }
+    }
+
+    protected override void Fail(Exception error)
+    {
+        Interlocked.CompareExchange(ref _error, error, null);
+        _connected.TrySetException(error);
+        _completion.TrySetException(error);
+        Stop();
+    }
+
+    protected override void Cancel()
+    {
+        Interlocked.CompareExchange(ref _error, new OperationCanceledException($"The file restore into {Description} was ended."), null);
+        _connected.TrySetCanceled();
+        _completion.TrySetCanceled();
+        Stop();
+    }
+
+    /// <summary>Releases a writer waiting for the mover and ends the copy to the mover (both thread-safe).</summary>
+    private void Stop()
+    {
+        _failed.Cancel();
+        try
+        {
+            _pipe.Reader.CancelPendingRead();
+        }
+        catch (InvalidOperationException)
+        {
+            // The copy has ended.
+        }
+    }
+
+    private async Task FailUnlessReportedAsync(Exception error)
+    {
+        await Task.WhenAny(_completion.Task, Task.Delay(ReportGrace)).ConfigureAwait(false);
+        Fail(error);
+    }
+
+    /// <summary>Blocking writes into the pipe; each write waits while the mover is behind and fails once the channel has.</summary>
+    private sealed class ContentStream(FilesChannel channel) : Stream
+    {
+        private int _closed;
+
+        public override bool CanRead => false;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => true;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            if (Volatile.Read(ref _closed) != 0 || !channel.IsUsable)
+            {
+                throw Broken();
+            }
+
+            channel._pipe.Writer.Write(buffer);
+            FlushResult result;
+            try
+            {
+                result = channel._pipe.Writer.FlushAsync(channel._failed.Token).AsTask().GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                throw Broken();
+            }
+
+            if (result.IsCompleted || result.IsCanceled)
+            {
+                throw Broken();
+            }
+        }
+
+        public override void WriteByte(byte value) => Write([value]);
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && Interlocked.Exchange(ref _closed, 1) == 0)
+            {
+                channel._pipe.Writer.Complete();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        private IOException Broken() =>
+            channel._error is { } error
+                ? new IOException(error.Message, error)
+                : new IOException($"The stream to the mover for {channel.Description} is closed.");
     }
 }

@@ -2,6 +2,7 @@ using System.Text.Json;
 using Backdafuckup.Agent.Protocol;
 using GuestVolume = Backdafuckup.FileLevel.GuestVolume;
 using Backdafuckup.Contracts;
+using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Operations;
 using Backdafuckup.FileLevel;
 using Backdafuckup.FileLevel.Restore;
@@ -76,6 +77,7 @@ public sealed class FileRestoreSessionRunner(
             {
                 FileRestoreTargetKindDto.Agent => await RunAgentAsync(request, point, disks, paths, log, progress, cancellationToken).ConfigureAwait(false),
                 FileRestoreTargetKindDto.Ssh => await RunSshAsync(request, point, disks, paths, log, progress, session.TriggeredBy, cancellationToken).ConfigureAwait(false),
+                FileRestoreTargetKindDto.Pvc => await RunPvcAsync(request, point, reader.Manifest, disks, paths, log, progress, session.Id, cancellationToken).ConfigureAwait(false),
                 _ => await RunShareAsync(request, point, disks, paths, log, progress, cancellationToken).ConfigureAwait(false),
             };
             var done = result;
@@ -457,6 +459,139 @@ public sealed class FileRestoreSessionRunner(
             },
             "file-restore-ssh").ConfigureAwait(false);
         return (result!, targetText, 0);
+    }
+
+    /// <summary>
+    /// Into the live PVC of a namespace's restore point: a mover pod mounts the PVC next to the workload, and the pipeline
+    /// streams the selection to it (<see cref="MoverFilesTarget"/>). The mover decides conflicts and owners in the volume
+    /// and reports per item, which adjusts the counts of what was sent.
+    /// </summary>
+    private async Task<(FileRestoreResult Result, string Target, int Warnings)> RunPvcAsync(
+        FileRestoreRequestDto request, RestorePointEntity point, Core.Repository.RestorePointManifest manifest, List<GuestDiskSource> disks, List<GuestPath> paths, IOperationLog log,
+        RestoreProgress progress, Guid sessionId, CancellationToken cancellationToken)
+    {
+        if (manifest.Kubernetes is not { } space)
+        {
+            throw new InvalidOperationException($"Files go back into a PVC only from a restore point of a Kubernetes namespace; {point.VmName} is none.");
+        }
+
+        if (point.ConnectionId is not { } connectionId)
+        {
+            throw new InvalidOperationException($"The cluster of the restore point of namespace {space.Namespace} is no longer connected. Download the files as ZIP.");
+        }
+
+        // The volume and its PVC, checked on the image before a pod is started.
+        string claim = string.Empty;
+        string parentText = string.Empty;
+        await FileLevelWorkers.RunDedicated(
+            () =>
+            {
+                using var image = GuestImage.Open(disks);
+                var volume = ReadableVolume(image, request.Volume);
+                if (volume.FileSystem is not ("ext" or "XFS"))
+                {
+                    throw new InvalidOperationException($"Volume {FileRestoreMounts.Title(volume)} is {volume.FileSystem}; files go back into PVCs with ext or XFS file systems only.");
+                }
+
+                claim = string.IsNullOrWhiteSpace(request.Target.Claim)
+                    ? volume.DiskKey ?? throw new InvalidOperationException($"Volume {FileRestoreMounts.Title(volume)} belongs to no PVC of the restore point; choose the PVC to restore into.")
+                    : request.Target.Claim.Trim();
+                parentText = FileRestoreMounts.Describe(volume, volume.Id, paths[0].Parent!);
+            },
+            "file-restore-pvc-check").ConfigureAwait(false);
+
+        var parent = paths[0].Parent!;
+        string[] baseFolder;
+        string targetText;
+        if (string.IsNullOrWhiteSpace(request.Target.Folder))
+        {
+            baseFolder = [];
+            targetText = $"PVC {space.Namespace}/{claim}, original location {parent}";
+        }
+        else
+        {
+            var folder = SshTargetPaths.Normalize(request.Target.Folder) ?? throw new ArgumentException($"'{request.Target.Folder}' is not an absolute folder in the PVC; enter it as /restore.");
+            baseFolder = folder.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            targetText = $"PVC {space.Namespace}/{claim}, folder {folder}";
+        }
+
+        var keep = request.Mode == FileRestoreModeDto.Keep;
+        log.Info($"Restoring {Names(paths)} from {parentText} (restore point of {point.CreatedUtc.ToLocalTime():g}) into {targetText} through a mover pod. " +
+            ModeText(request.Mode) + (request.Target.RestorePermissions ? " Owner and group come from the backup." : " Owner and group are those of the folder each item goes into."));
+        var ledger = new DbArtifactLedger(dbFactory, connectionId, sessionId, null, time);
+        await using var cluster = await connections.OpenAsync(connectionId, cancellationToken).ConfigureAwait(false);
+        if (cluster is not Kubernetes.IKubernetesFileRestore files)
+        {
+            throw new InvalidOperationException($"The connection of the restore point of {space.Namespace} is not a Kubernetes cluster.");
+        }
+
+        await using var mover = await files.BeginFileRestoreAsync(
+            new Kubernetes.PvcFileRestoreRequest(space.Namespace, claim, keep, request.Target.RestorePermissions, sessionId), log, ledger, cancellationToken).ConfigureAwait(false);
+        await mover.Channel.Connected.WaitAsync(cancellationToken).ConfigureAwait(false);
+        log.Info($"The mover for {mover.Description} is connected; sending the files.");
+
+        FileRestoreResult? sent = null;
+        MoverFilesTarget? target = null;
+        try
+        {
+            await FileLevelWorkers.RunDedicated(
+                () =>
+                {
+                    using var image = GuestImage.Open(disks);
+                    var volume = ReadableVolume(image, request.Volume);
+                    var fs = image.OpenFileSystem(volume.Id);
+                    string Describe(GuestPath path) => FileRestoreMounts.Describe(volume, volume.Id, path);
+                    target = new MoverFilesTarget(mover.Channel, baseFolder, $"PVC {space.Namespace}/{claim}");
+                    sent = FileRestorePipeline.Run(
+                        fs,
+                        paths,
+                        target,
+                        new FileRestorePipelineOptions { Mode = keep ? FileRestoreMode.Keep : FileRestoreMode.Overwrite, Describe = Describe },
+                        progress,
+                        cancellationToken);
+                    target.Finish();
+                },
+                "file-restore-pvc").ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && !mover.Channel.IsUsable)
+        {
+            // The stream broke because the mover did (its pod failed, the connection dropped): its error is the cause.
+            await mover.Channel.Completion.ConfigureAwait(false);
+            throw;
+        }
+
+        log.Info($"{sent!.Files:N0} file(s) sent to {mover.Description}; waiting for the mover to put the last ones in place.");
+        var report = await mover.FinishAsync(cancellationToken).ConfigureAwait(false);
+        var failedDirectories = 0L;
+        foreach (var issue in report.Issues)
+        {
+            var entry = target!.Entry(issue.Index);
+            var where = entry is null ? $"{mover.Description} item {issue.Index}" : target.Display(entry);
+            switch (issue.Kind)
+            {
+                case MoverFileIssueKinds.Failed:
+                    failedDirectories += entry?.Kind == 'D' ? 1 : 0;
+                    progress.Problem(new FileRestoreProblem(FileRestoreProblemKind.Failed, where, null, issue.Text));
+                    break;
+                case MoverFileIssueKinds.Partial:
+                    progress.Problem(new FileRestoreProblem(FileRestoreProblemKind.Incomplete, where, null, $"restored, but {issue.Text}"));
+                    break;
+                case MoverFileIssueKinds.Renamed:
+                    progress.Renamed(where, target.Display(issue.Text));
+                    break;
+            }
+        }
+
+        var result = sent with
+        {
+            Files = report.Files,
+            Bytes = report.Bytes,
+            Directories = Math.Max(0, sent.Directories - failedDirectories),
+            Renamed = report.Renamed,
+            Failed = sent.Failed + report.Failed,
+            Incomplete = sent.Incomplete + report.Partial,
+        };
+        return (result, targetText, 0);
     }
 
     private async Task<(string User, LinuxSecret Secret)> LinuxLoginAsync(Guid? credentialId, CancellationToken cancellationToken)

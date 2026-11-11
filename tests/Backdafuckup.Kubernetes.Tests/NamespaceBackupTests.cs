@@ -267,6 +267,9 @@ public sealed class NamespaceBackupTests
 
     private sealed class FakeChannels : IMoverChannels
     {
+        public Task<IMoverFilesChannel> OpenFilesAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null) =>
+            throw new NotSupportedException();
+
         public List<FakeBackupChannel> Opened { get; } = [];
 
         public Task<IMoverBackupChannel> OpenBackupAsync(string description, long capacity, CancellationToken cancellationToken, TimeSpan? connectTimeout = null)

@@ -59,7 +59,7 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
   - API discovery with preferred versions; every namespaced object plus the cluster-scoped ones it uses (PVs, StorageClasses, CRDs).
   - One blob `k8s-resources` per restore point.
   - Restore order, metadata reset and existing-object policy follow Velero's documented behaviour; no code is taken over.
-- **Restore of PVC data:** a block PVC in `backdafuckup-system`, written by the mover, then bound as a Filesystem PV to the target PVC (spike S3).
+- **Restore of PVC data:** a block PVC in `backdafuckup-system`, written by the mover, then a snapshot of it; the target PVC is created from that snapshot (see "Restores as built"; the PV rebind of spike S3 does not hold on vSphere).
 - **Model:**
   - Provider kind `Kubernetes`; a connection is a cluster.
   - Job objects get a kind (VM or namespace) and options.
@@ -101,11 +101,13 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
 - **Restores as built (task 8, part 1, 2026-11-11):**
   - **The engine's VM restore carries a namespace:**
     - Each volume with data is a "disk", written by a mover in restore mode into a new block PVC in `backdafuckup-system` on the original StorageClass.
-    - The volume is then kept: its PV is set to Retain and its PVC is removed. Then the "VM" is created: the namespace's objects.
-  - **Rebinding (spike S3):**
-    1. The work PV object is removed; the volume stays.
-    2. A static Filesystem PV takes the volume. It gets the driver attributes, fsType, reclaim policy, mount options and node affinity of the backed-up PV, a `claimRef` to the target PVC, and `pv.kubernetes.io/provisioned-by`, so Delete still deletes the volume.
-    3. The PVC from the restore point is created with `volumeName`.
+    - Then the "VM" is created: the namespace's objects, with the PVCs from the written volumes.
+  - **From the written volume to the target PVC, through a snapshot:**
+    1. A VolumeSnapshot of the work PVC in `backdafuckup-system`.
+    2. Once the target namespace exists, the snapshot is exposed there: a static VolumeSnapshotContent on the same handle (`Retain`, `sourceVolumeMode: Block`, the volume-mode-change annotation) and a VolumeSnapshot on it.
+    3. The target PVC is created from it (`dataSource` VolumeSnapshot, Filesystem). On a StorageClass with WaitForFirstConsumer it gets `volume.kubernetes.io/selected-node` of the mover's node.
+    4. Once it is bound: the exposed snapshot and its content, the work snapshot and the work PVC are deleted.
+  - **Why not the rebind of spike S3:** on vSphere, deleting the work PV object, even with `Retain`, makes the CNS syncer unregister the volume; afterwards it can be neither attached nor deleted (seen on `rke2-test`, 2026-11-11; the CSI full sync removed the stuck PV later). The snapshot path costs one more full copy of the volume on its datastore, but uses only what the CSI driver supports.
   - **Order and cleaning:**
     - Velero's order: CRDs, namespace, StorageClasses, PVCs, Secrets, ConfigMaps, ServiceAccounts, quotas, roles, Services, custom resources, workloads, HPA, Ingress, pods.
     - Each object is restored without uid, resourceVersion, timestamps, owner references, status and managed fields. Services lose their cluster IPs and node ports, Jobs their generated selector, ServiceAccounts their token references; RoleBindings to ServiceAccounts follow a new namespace name.
@@ -116,8 +118,21 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
     - Single PVCs with their data, also under new names next to the originals.
   - **Where:** the original namespace or another one, created when missing.
   - **Existing objects:** left as they are, or replaced (updated) on request. A PVC with data that exists in the target stops the restore before anything is written: delete it first, restore elsewhere, or under a new name. An objects-only PVC comes back empty on its StorageClass, or bound to its static PV again (e.g. an NFS export) when that PV is gone or available.
-  - **A restore that does not complete takes back what it created:** a namespace it created with everything in it, else each object. Restored volumes that never reached their PVC go through their ledger entry: the PV is set back to Delete, so the cluster deletes the volume.
-  - **Still open in task 8:** files (browse, ZIP, back into a live PVC), the object explorer (compare with the live cluster), and replacing a PVC in place (scale the workload down, swap, scale up).
+  - **A restore that does not complete takes back what it created:** a namespace it created with everything in it, else each object. Work PVCs, snapshots and their contents are in the ledger, so a crash still removes them.
+- **Restores as built (task 8, part 2, 2026-11-11):**
+  - **Replacing a PVC in place** (typed confirmation):
+    - The controllers of the pods that mount it (Deployment, StatefulSet, ReplicaSet, ReplicationController) are scaled to 0, each with its replicas in the ledger (`k8s.ScaledWorkload`), so a crash still scales them back.
+    - When no pod uses the PVC any more, it is deleted and created again from the restored volume's snapshot; then the workloads are scaled back.
+    - A pod of a DaemonSet or Job, or one without a controller, stops the swap before anything changes.
+    - Verified on `rke2-test`: the Redis data came back, about 9 s without the pod.
+  - **Object explorer:** the restore point's objects compared with the live namespace (same, changed, deleted since, new since; the deployment revision annotation and a PVC's `volumeName` do not count as changes). Each object can be shown as stored and as it is now (Secrets with their keys, never their values). Picked objects come back exactly as stored, without what they need, existing ones replaced on request.
+  - **Files:**
+    - The file browser reads the PVC's image (ext4 or XFS on the whole device, no partition table); the ZIP download works as for VMs.
+    - **Back into the live PVC:** a mover pod in "files" mode in the PVC's own namespace mounts the PVC as a file system, on the node of the pods that use it (`nodeName`, tolerating that node's taints; ReadWriteMany anywhere), while the workload keeps running. A ReadWriteOncePod PVC in use is refused.
+    - **Stream** (`MoverFileWriter`, server to mover over a files channel with back-pressure): folders; files in chunks of at most 1 MiB, each with an end or an abort marker (a chunk the repository cannot read discards just that file); owner, mode and times; links; an end.
+    - **The mover** follows the SSH restore script: each file under a hidden temporary name, flushed, owner, mode and times set, then renamed over the old one (or to a free RESTORED- name); links after the files, folder times last; nothing written through a symbolic link or outside the volume. It reports what failed, was renamed or lacks owner, mode or times, per item.
+    - **Privileges:** root with CHOWN, DAC_OVERRIDE, FOWNER and FSETID (Pod Security "baseline"). A namespace that enforces "restricted" is refused before anything is created; the ZIP download remains.
+    - The token secret, a copy of the image pull secret and the pod are in the ledger.
 - **Agent path as a TCP tunnel:** exec (hooks) runs over the client's own WebSocket, which bypasses HTTP message handlers, so relaying HTTP requests is not enough.
   - The agent keeps a WebSocket to the server and carries TCP connections to the API server, as Rancher's remotedialer does.
   - The server gives each agent cluster a local port, so the same client code (HTTP, watch, exec, TLS and pinning) works unchanged on both paths.
@@ -134,7 +149,8 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
 - **Secrets in the repository:** the resource blob holds the namespace's Secrets, protected like disk images (repository permissions). Encryption at rest is a separate roadmap item, and the admin guide says so.
 - **vSphere CSI v3.3.1 on Kubernetes 1.32:** outside the supported range and EOL. RKE2 ≥ 1.32.9 ships v3.5.0; recommend the upgrade.
 - **Across volumes:** there are no group snapshots on vSphere, so the PVCs of an application are captured one after another. Hooks narrow the gap; the restore point says so.
-- **Restoring Filesystem PVCs from block images** needs the PV rebind (spike S3). If it fails, the fallback is a filesystem-level write through a mover that mounts the new PVC.
+- **Restoring Filesystem PVCs from block images:** resolved through a snapshot of the written volume (the rebind of spike S3 fails on vSphere CNS). It needs a VolumeSnapshotClass for the driver and costs one more copy.
+- **Files into a live PVC:** written while the workload runs, as with a restore into a running VM; a file the application holds open is replaced underneath it. Nodes with SELinux and per-pod MCS labels would deny the second pod access (not the case on our RKE2 nodes). Not yet verified on the test cluster.
 - **GitOps:** restoring objects that Fleet manages can race with Fleet. The restore names Fleet-/Helm-managed objects in its preview.
 
 ## Context

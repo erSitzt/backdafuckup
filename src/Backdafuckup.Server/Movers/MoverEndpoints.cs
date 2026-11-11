@@ -54,10 +54,11 @@ public static class MoverEndpoints
             }
         }).WithMetadata(new DisableRequestSizeLimitAttribute());
 
-        // Restore: the mover fetches the image.
+        // Restore: the mover fetches the image, or the files to put into its live volume.
         movers.MapGet("/{id:guid}/data", async (Guid id, MoverChannels channels, HttpContext http, CancellationToken ct) =>
         {
-            if (channels.Find(id, http.Request.Headers.Authorization) is not RestoreChannel channel)
+            var channel = channels.Find(id, http.Request.Headers.Authorization);
+            if (channel is not (RestoreChannel or FilesChannel))
             {
                 return NotOpen(id);
             }
@@ -71,7 +72,7 @@ public static class MoverEndpoints
             http.Response.ContentType = "application/octet-stream";
             try
             {
-                await channel.ServeAsync(http.Response.Body, ct);
+                await (channel is FilesChannel files ? files.ServeAsync(http.Response.Body, ct) : ((RestoreChannel)channel).ServeAsync(http.Response.Body, ct));
             }
             catch (Exception ex) when (ex is IOException or OperationCanceledException or InvalidDataException)
             {
