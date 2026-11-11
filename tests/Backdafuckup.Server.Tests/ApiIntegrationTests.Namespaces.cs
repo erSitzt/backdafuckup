@@ -169,6 +169,28 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal(["PersistentVolumeClaim/data-redis-test-0"], pod.Needs);
         Assert.Contains(details.Objects, o => o.Kind == "ConfigMap" && o.Name == "redis-config");
 
+        // The explorer: compared with the cluster after changes, one object shown both ways, a deleted one brought back exactly.
+        _cluster.Mutate(() => _cluster.Find("configmaps", "bdfu-spike", "redis-config")!["data"] = new JsonObject { ["maxmemory"] = "2gb" });
+        _cluster.Add("api/v1", "configmaps", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "added-later", ["namespace"] = "bdfu-spike" } });
+        var compared = (await client.GetFromJsonAsync<KubernetesComparisonDto>($"/api/restore-points/{point.Id}/kubernetes/compare", Ct))!;
+        var states = compared.Objects.ToDictionary(o => $"{o.Kind}/{o.Name}", o => o.State);
+        Assert.Equal(("changed", "new", "same"), (states["ConfigMap/redis-config"], states["ConfigMap/added-later"], states["PersistentVolumeClaim/data-redis-test-0"]));
+        var shown = (await client.GetFromJsonAsync<KubernetesObjectDetailDto>($"/api/restore-points/{point.Id}/kubernetes/object?kind=ConfigMap&name=redis-config&live=true", Ct))!;
+        Assert.DoesNotContain("2gb", shown.Backup, StringComparison.Ordinal);
+        Assert.Contains("2gb", shown.Live, StringComparison.Ordinal);
+        _cluster.Remove("configmaps", "bdfu-spike", "redis-config");
+        Assert.Equal("missing", (await client.GetFromJsonAsync<KubernetesComparisonDto>($"/api/restore-points/{point.Id}/kubernetes/compare", Ct))!
+            .Objects.Single(o => o.Name == "redis-config").State);
+        var picked = await Read<StartedDto>(client.PostAsJsonAsync("/api/restores", new RestoreRequestDto
+        {
+            RestorePointId = point.Id, TargetConnectionId = cluster.Id, Mode = RestoreModeDto.OriginalLocation,
+            Kubernetes = new KubernetesRestoreDto { Objects = ["ConfigMap/redis-config"], ExactObjects = true },
+        }, Ct));
+        var pickedSession = await WaitForSessionAsync(client, picked.SessionId);
+        Assert.Equal("Succeeded", pickedSession.Session.State);
+        Assert.NotNull(_cluster.Find("configmaps", "bdfu-spike", "redis-config"));
+        Assert.Empty(restoredDevices); // an exact pick of a ConfigMap writes no volume
+
         async Task<(SessionDetailDto Session, string Log)> RestoreAsync(KubernetesRestoreDto options)
         {
             var started = await Read<StartedDto>(client.PostAsJsonAsync("/api/restores", new RestoreRequestDto

@@ -98,6 +98,43 @@ public sealed class KubernetesObjectsTests
         Assert.True(KubernetesObjects.IsControlled(owned));
     }
 
+    [Fact]
+    public void A_restore_point_compared_with_the_cluster_tells_same_changed_deleted_and_new_and_never_shows_secret_values()
+    {
+        var config = Obj("ConfigMap", "redis-config");
+        config["data"] = new JsonObject { ["maxmemory"] = "1gb" };
+        var deployment = Obj("Deployment", "web", group: "apps/v1", spec: new JsonObject { ["replicas"] = 2 });
+        deployment["metadata"]!["annotations"] = new JsonObject { ["deployment.kubernetes.io/revision"] = "3" };
+        var secret = Obj("Secret", "redis-auth");
+        secret["data"] = new JsonObject { ["password"] = Convert.ToBase64String("s3cret-value"u8.ToArray()) };
+        var claim = Obj("PersistentVolumeClaim", "data", spec: new JsonObject { ["volumeName"] = "pvc-old" });
+        var backup = System.Text.Encoding.UTF8.GetBytes(string.Join('\n', new[] { config, deployment, secret, claim, Obj("Service", "gone") }.Select(o => o.ToJsonString())));
+
+        // Live: the ConfigMap changed, the Deployment only got a new revision, the PVC another volume, the Service is gone, a Job is new.
+        var liveConfig = (JsonObject)config.DeepClone();
+        liveConfig["data"]!["maxmemory"] = "2gb";
+        liveConfig["metadata"]!["resourceVersion"] = "99";
+        var liveDeployment = (JsonObject)deployment.DeepClone();
+        liveDeployment["metadata"]!["annotations"]!["deployment.kubernetes.io/revision"] = "4";
+        var liveClaim = (JsonObject)claim.DeepClone();
+        liveClaim["spec"]!["volumeName"] = "pvc-restored";
+        var states = KubernetesCompare.Compare(backup, [liveConfig, liveDeployment, (JsonObject)secret.DeepClone(), liveClaim, Obj("Job", "migrate", group: "batch/v1")])
+            .ToDictionary(c => $"{c.Kind}/{c.Name}", c => c.State);
+
+        Assert.Equal(KubernetesObjectStates.Changed, states["ConfigMap/redis-config"]);
+        Assert.Equal(KubernetesObjectStates.Same, states["Deployment/web"]);
+        Assert.Equal(KubernetesObjectStates.Same, states["Secret/redis-auth"]);
+        Assert.Equal(KubernetesObjectStates.Same, states["PersistentVolumeClaim/data"]);
+        Assert.Equal(KubernetesObjectStates.Missing, states["Service/gone"]);
+        Assert.Equal(KubernetesObjectStates.New, states["Job/migrate"]);
+
+        var shown = KubernetesCompare.Show(backup, "Secret", "redis-auth")!;
+        Assert.DoesNotContain(Convert.ToBase64String("s3cret-value"u8.ToArray()), shown, StringComparison.Ordinal);
+        Assert.Contains("\"password\": \"<hidden, about 12 bytes>\"", shown, StringComparison.Ordinal);
+        Assert.Contains("1gb", KubernetesCompare.Show(backup, "ConfigMap", "redis-config"), StringComparison.Ordinal);
+        Assert.Null(KubernetesCompare.Show(backup, "ConfigMap", "nope"));
+    }
+
     /// <summary>The app "cache": a StatefulSet with everything it uses; plus objects of another app.</summary>
     private static List<JsonObject> App()
     {
