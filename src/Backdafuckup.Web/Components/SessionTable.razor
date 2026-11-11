@@ -27,10 +27,11 @@
                 @* A day session of SQL Server backups spans the day's runs: its last run says more than its start, and a duration would mislead. *@
                 var when = day ? s.EndedUtc ?? s.StartedUtc ?? s.CreatedUtc : s.StartedUtc ?? s.CreatedUtc;
                 var whenText = day ? (s.State == "Running" ? "running now" : "last run") : null;
+                var kind = ObjectKindUi.Session(s);
                 <tr>
                     <td style="min-width:170px">
-                        <MudLink Href="@($"/sessions/{s.Id}")">@s.Name</MudLink>
-                        <span class="cell-sub">@Fmt.Kind(s.Kind)<span class="n-560"> · @Fmt.Time(when)</span></span>
+                        <span class="kind-name" title="@kind.Title">@AppIcons.Svg(kind.Icon, $"kind-icon {kind.Css}")<MudLink Href="@($"/sessions/{s.Id}")">@s.Name</MudLink></span>
+                        <span class="cell-sub kind-indent">@Fmt.Kind(s.Kind, s.ObjectKind)<span class="n-560"> · @Fmt.Time(when)</span></span>
                     </td>
                     <td><StateChip State="@s.State" /></td>
                     <td class="c-560 nowrap">

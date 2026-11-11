@@ -44,14 +44,16 @@ else
                     }
                     @foreach (var s in _data.RunningSessions)
                     {
+                        var kind = ObjectKindUi.Session(s);
                         <div class="mb-3">
                             <div class="d-flex align-center">
+                                <span title="@kind.Title" class="d-flex">@AppIcons.Svg(kind.Icon, $"kind-icon {kind.Css}")</span>
                                 <MudLink Href="@($"/sessions/{s.Id}")" Typo="Typo.body2" Style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@s.Name</MudLink>
                                 <MudSpacer />
                                 <MudText Typo="Typo.caption" Class="ml-2 nowrap">@(s.Kind == "SqlBackup" ? "running" : $"{s.Progress:0} %")</MudText>
                             </div>
                             <MudProgressLinear Color="Color.Primary" Value="@s.Progress" Indeterminate="@(s.Kind == "SqlBackup")" Rounded="true" Size="Size.Small" Class="mt-1" />
-                            <span class="cell-sub">@Fmt.Kind(s.Kind) · since @Fmt.Time(s.StartedUtc ?? s.CreatedUtc)</span>
+                            <span class="cell-sub">@Fmt.Kind(s.Kind, s.ObjectKind) · since @Fmt.Time(s.StartedUtc ?? s.CreatedUtc)</span>
                         </div>
                     }
                 </MudPaper>

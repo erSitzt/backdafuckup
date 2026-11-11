@@ -681,6 +681,13 @@ public sealed class SessionEntity
     /// <summary>Kind-specific parameters (e.g. the restore request) as JSON.</summary>
     public string? Parameters { get; set; }
 
+    /// <summary>
+    /// What the session works on, for the console's icons: <see cref="Contracts.RestorePointObjectKinds"/> for backups,
+    /// restores and file restores (a VM or a Kubernetes namespace); null for sessions of other kinds (SQL Server, Active
+    /// Directory, maintenance).
+    /// </summary>
+    public string? ObjectKind { get; set; }
+
     public List<SessionTaskEntity> Tasks { get; set; } = [];
 }
 

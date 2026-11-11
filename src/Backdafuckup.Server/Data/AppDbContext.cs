@@ -216,6 +216,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(32);
             e.Property(x => x.State).HasConversion<string>().HasMaxLength(16);
             e.Property(x => x.RunMode).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.ObjectKind).HasMaxLength(32);
             e.HasMany(x => x.Tasks).WithOne().HasForeignKey(x => x.SessionId).OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => x.CreatedUtc);
             e.HasIndex(x => new { x.JobId, x.State });

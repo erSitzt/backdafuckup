@@ -4,12 +4,13 @@ namespace Backdafuckup.Web.Components;
 
 /// <summary>A row of <c>Backups &amp; Restore</c>: a VM in a job (by job, <paramref name="Job"/> set), or the VM with all its jobs (by VM).</summary>
 /// <param name="Key">Unique on the page: the group and the VM.</param>
-public sealed record BackupRow(string Key, BackupVmDto Vm, BackupVmJobDto? Job)
+/// <param name="Kind">What it is (<see cref="RestorePointObjectKinds"/>), also without a restore point (from its job's connection).</param>
+public sealed record BackupRow(string Key, BackupVmDto Vm, BackupVmJobDto? Job, string? Kind = null)
 {
     public BackupVmPointDto? Latest => Job is null ? Vm.Latest : Job.Latest;
 
-    /// <summary>A namespace of a Kubernetes cluster rather than a VM (known from its restore points).</summary>
-    public bool IsNamespace => (Vm.Latest ?? Latest)?.ObjectKind == RestorePointObjectKinds.KubernetesNamespace;
+    /// <summary>A namespace of a Kubernetes cluster rather than a VM.</summary>
+    public bool IsNamespace => (Kind ?? (Vm.Latest ?? Latest)?.ObjectKind) == RestorePointObjectKinds.KubernetesNamespace;
 
     /// <summary>"3 VMs", "1 namespace", "2 VMs, 1 namespace".</summary>
     public static string Count(IReadOnlyCollection<BackupRow> rows)

@@ -1062,6 +1062,11 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("name");
 
+                    b.Property<string>("ObjectKind")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("object_kind");
+
                     b.Property<string>("Parameters")
                         .HasColumnType("text")
                         .HasColumnName("parameters");
