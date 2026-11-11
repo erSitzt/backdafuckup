@@ -284,6 +284,7 @@ public sealed class VolumeExportTests
     private static void AddClaim(FakeKubernetesApi api)
     {
         api.Add("api/v1", "namespaces", FakeKubernetesApi.Namespace("bdfu-spike"));
+        api.Add("api/v1", "namespaces", FakeKubernetesApi.Namespace(Work));
         api.Add("api/v1", "persistentvolumeclaims", new JsonObject
         {
             ["metadata"] = new JsonObject { ["name"] = "data-redis-test-0", ["namespace"] = "bdfu-spike" },

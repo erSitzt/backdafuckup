@@ -139,6 +139,7 @@ public sealed class NamespaceBackupTests
         var movers = channels = new FakeChannels();
         executor = new FakeExecutor(api);
         api.Add("api/v1", "namespaces", FakeKubernetesApi.Namespace(Ns));
+        api.Add("api/v1", "namespaces", FakeKubernetesApi.Namespace(KubernetesSetup.WorkNamespace));
         api.Add("api/v1", "configmaps", Object("redis-config", Ns));
         api.Add("api/v1", "secrets", Object("redis-auth", Ns));
         api.Add("apis/apps/v1", "statefulsets", Object("redis-test", Ns));

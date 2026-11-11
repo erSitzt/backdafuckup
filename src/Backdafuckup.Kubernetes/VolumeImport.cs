@@ -32,6 +32,8 @@ internal sealed class VolumeImport : IDiskWriter
     private IMoverRestoreChannel? _channel;
     private int _disposed;
     private bool _handedOver;
+    private string? _handle;
+    private string _driver = string.Empty;
 
     private VolumeImport(VolumeSnapshotFlow flow, string run, RestoreDiskTarget target, string targetNamespace, string? snapshotClass, string source)
     {
@@ -46,9 +48,10 @@ internal sealed class VolumeImport : IDiskWriter
 
     private static string Work => KubernetesSetup.WorkNamespace;
 
-    /// <summary>The VolumeSnapshot in the target namespace the target PVC is created from (once written).</summary>
-    public string DiskId => Snapshot ?? string.Empty;
+    /// <summary>The volume's import: the work PVC it is written to (also the name of its snapshots).</summary>
+    public string DiskId => _name;
 
+    /// <summary>The VolumeSnapshot in the target namespace the target PVC is created from (once exposed).</summary>
     public string? Snapshot { get; private set; }
 
     /// <summary>The node the mover ran on: a target PVC on a StorageClass with WaitForFirstConsumer is provisioned there.</summary>
@@ -145,11 +148,21 @@ internal sealed class VolumeImport : IDiskWriter
         var (contentName, _) = await _flow.WaitReadyAsync(Work, _name, $"the snapshot {Work}/{_name} of the restored volume", _flow.Timings.SnapshotReady, cancellationToken).ConfigureAwait(false);
         var content = VolumeSnapshotFlow.Element(await _flow.CallAsync($"reading the snapshot content {contentName}", () =>
             client.CustomObjects.GetClusterCustomObjectAsync(VolumeSnapshotFlow.Group, VolumeSnapshotFlow.Version, "volumesnapshotcontents", contentName, cancellationToken)).ConfigureAwait(false));
-        var handle = VolumeSnapshotFlow.Text(content, "status", "snapshotHandle")
+        _handle = VolumeSnapshotFlow.Text(content, "status", "snapshotHandle")
             ?? throw new KubernetesOperationException($"The snapshot content {contentName} of the restored volume has no snapshot handle (cluster {_flow.Cluster}).");
-        var driver = VolumeSnapshotFlow.Text(content, "spec", "driver") ?? string.Empty;
+        _driver = VolumeSnapshotFlow.Text(content, "spec", "driver") ?? string.Empty;
 
-        // … exposed in the target namespace, where a Filesystem PVC may come from it (the annotation allows the mode change).
+        // The snapshot, the work PVC and what follows stay until the target PVC is made from them (ReleaseAsync).
+        _handedOver = true;
+    }
+
+    /// <summary>
+    /// Exposes the snapshot of the written volume in the target namespace (which must exist by now), where a Filesystem PVC
+    /// may come from it: a static VolumeSnapshotContent with the volume-mode-change annotation, and a VolumeSnapshot on it.
+    /// </summary>
+    public async Task ExposeAsync(CancellationToken cancellationToken)
+    {
+        var client = _flow.Client;
         var exposed = $"{_name}-x";
         await CreateAsync(KubernetesArtifactKinds.VolumeSnapshotContent, null, exposed, () => client.CustomObjects.CreateClusterCustomObjectAsync(
             new JsonObject
@@ -160,8 +173,8 @@ internal sealed class VolumeImport : IDiskWriter
                 ["spec"] = new JsonObject
                 {
                     ["deletionPolicy"] = "Retain",
-                    ["driver"] = driver,
-                    ["source"] = new JsonObject { ["snapshotHandle"] = handle },
+                    ["driver"] = _driver,
+                    ["source"] = new JsonObject { ["snapshotHandle"] = _handle },
                     ["sourceVolumeMode"] = "Block",
                     ["volumeSnapshotClassName"] = _snapshotClass,
                     ["volumeSnapshotRef"] = new JsonObject { ["name"] = _name, ["namespace"] = _targetNamespace },
@@ -189,10 +202,7 @@ internal sealed class VolumeImport : IDiskWriter
             "volumesnapshots",
             cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
         await _flow.WaitReadyAsync(_targetNamespace, _name, $"the snapshot {_targetNamespace}/{_name} of the restored volume", _flow.Timings.SnapshotReady, cancellationToken).ConfigureAwait(false);
-
-        // The PVC, the snapshots and the work PVC stay until the target PVC is made from them (ReleaseAsync).
         Snapshot = _name;
-        _handedOver = true;
     }
 
     /// <summary>
