@@ -227,6 +227,8 @@ internal sealed class VolumeExport(VolumeSnapshotFlow flow, TakenSnapshot snapsh
                         new V1EnvVar { Name = "BDFU_MOVER_SERVER_PINS", Value = string.Join(',', endpoint.ServerPins) },
                         new V1EnvVar { Name = "BDFU_MOVER_DEVICE", Value = VolumeSnapshotFlow.DevicePath },
                         new V1EnvVar { Name = "BDFU_MOVER_BYTES", Value = size },
+                        // The root file system is read-only: no diagnostics socket in /tmp.
+                        new V1EnvVar { Name = "DOTNET_EnableDiagnostics", Value = "0" },
                         new V1EnvVar
                         {
                             Name = "BDFU_MOVER_TOKEN",
@@ -304,7 +306,7 @@ internal sealed class VolumeExport(VolumeSnapshotFlow flow, TakenSnapshot snapsh
                     return;
                 case "Running" when !running:
                     running = true;
-                    flow.Log.Info($"Mover pod {Work}/{PodName} running on node {pod.Spec?.NodeName} after {(DateTimeOffset.UtcNow - started).TotalSeconds:0} s.");
+                    flow.Log.Info($"Mover pod {Work}/{PodName} running{(pod.Spec?.NodeName is { Length: > 0 } node ? $" on node {node}" : string.Empty)} after {(DateTimeOffset.UtcNow - started).TotalSeconds:0} s.");
                     break;
                 case "Pending" when DateTimeOffset.UtcNow - reported >= flow.Timings.Progress:
                     reported = DateTimeOffset.UtcNow;

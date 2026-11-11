@@ -299,9 +299,17 @@ public static class OperationEndpoints
             errors["name"] = ["A job with this name already exists."];
         }
 
+        var connectionKind = await db.Connections.Where(c => c.Id == request.ConnectionId).Select(c => (HypervisorKind?)c.Kind).FirstOrDefaultAsync(ct);
+        var cluster = connectionKind == HypervisorKind.Kubernetes;
         if (request.Objects.Count == 0)
         {
-            errors["objects"] = ["Select at least one VM."];
+            errors["objects"] = [cluster ? "Select at least one namespace." : "Select at least one VM."];
+        }
+
+        // A namespace has no guest and no memory: its consistency comes from its hooks.
+        if (cluster && (request.GuestProcessing || request.Objects.Any(o => o.WithMemory)))
+        {
+            errors["guestProcessing"] = ["Namespaces of a Kubernetes cluster have no guest processing and no snapshots with memory; hooks in their pods make them application-consistent."];
         }
 
         if (request.RetentionPoints is < 1 or > 10_000)
@@ -309,9 +317,9 @@ public static class OperationEndpoints
             errors["retentionPoints"] = ["Keep between 1 and 10000 restore points."];
         }
 
-        if (!await db.Connections.AnyAsync(c => c.Id == request.ConnectionId, ct))
+        if (connectionKind is null)
         {
-            errors["connectionId"] = ["Unknown pool."];
+            errors["connectionId"] = ["Unknown pool or cluster."];
         }
 
         if (!await db.Repositories.AnyAsync(r => r.Id == request.RepositoryId, ct))

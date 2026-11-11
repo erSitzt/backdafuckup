@@ -93,5 +93,6 @@ internal static class ApiMapping
         r.MemoryImageBytes,
         SqlConsistentCount: r.SqlConsistentCount,
         ConsistencyWarning: r.ConsistencyWarning,
-        SqlUserDatabaseCount: r.SqlUserDatabaseCount);
+        SqlUserDatabaseCount: r.SqlUserDatabaseCount,
+        ObjectKind: r.ObjectKind);
 }

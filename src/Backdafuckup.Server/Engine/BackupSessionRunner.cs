@@ -39,13 +39,14 @@ public sealed class BackupSessionRunner(
                 ?? throw new InvalidOperationException("The job of this session no longer exists.");
         }
 
+        var objects = job.Connection.Kind == HypervisorKind.Kubernetes ? "namespace(s)" : "VM(s)";
         if (job.Objects.Count == 0)
         {
-            log.Warning("The job contains no VMs.");
-            return (SessionState.Warning, "No VMs in job.");
+            log.Warning($"The job contains no {objects.Replace("(s)", "s", StringComparison.Ordinal)}.");
+            return (SessionState.Warning, $"No {objects.Replace("(s)", "s", StringComparison.Ordinal)} in job.");
         }
 
-        log.Info($"Job started ({(session.RunMode == SessionRunMode.ActiveFull ? "active full" : "incremental")}), {job.Objects.Count} VM(s), repository {job.Repository.Name}.");
+        log.Info($"Job started ({(session.RunMode == SessionRunMode.ActiveFull ? "active full" : "incremental")}), {job.Objects.Count} {objects}, repository {job.Repository.Name}.");
         var repository = await repositories.GetAsync(job.RepositoryId, cancellationToken).ConfigureAwait(false);
         await using var hypervisor = await connections.OpenAsync(job.ConnectionId, cancellationToken).ConfigureAwait(false);
 
@@ -61,7 +62,7 @@ public sealed class BackupSessionRunner(
         {
             if (attempt > 0)
             {
-                log.Info($"Retrying {pending.Count} failed VM(s) in {job.RetryDelayMinutes} minute(s) (attempt {attempt + 1}).");
+                log.Info($"Retrying {pending.Count} failed {objects} in {job.RetryDelayMinutes} minute(s) (attempt {attempt + 1}).");
                 await Task.Delay(TimeSpan.FromMinutes(job.RetryDelayMinutes), time, cancellationToken).ConfigureAwait(false);
             }
 
@@ -178,6 +179,9 @@ internal sealed class VmBackupTask(
     /// <summary>The pool label of this task's metrics: the connection's name.</summary>
     private string Pool => job.Connection.DisplayName;
 
+    /// <summary>A namespace's disks are its volumes (PVCs).</summary>
+    private string DiskNoun => job.Connection.Kind == HypervisorKind.Kubernetes ? "Volume" : "Disk";
+
     public async Task<SessionState> RunAsync(CancellationToken cancellationToken)
     {
         var state = await RunCoreAsync(cancellationToken).ConfigureAwait(false);
@@ -256,7 +260,7 @@ internal sealed class VmBackupTask(
             await using var backup = started;
             var (consistency, consistencyReason, consistencyWarning) = CheckConsistency(guest, backup.GuestFreeze);
             var guestReason = consistencyReason;
-            consistencyReason = AcrossDisks(consistency, consistencyReason, backup);
+            consistencyReason = AcrossDisks(consistency, consistencyReason, backup, job.Connection.Kind == HypervisorKind.Kubernetes ? "volumes" : "disks");
 
             // Disks captured one after another are a warning too; a SQL Server snapshot's own note is not.
             var pointWarning = consistencyWarning || !string.Equals(consistencyReason, guestReason, StringComparison.Ordinal);
@@ -392,6 +396,7 @@ internal sealed class VmBackupTask(
                 Memory = memoryImage,
                 MemoryMetadata = memoryMetadata,
                 MemoryDiskIds = memoryImage is null ? null : backup.MemoryDiskIds,
+                Kubernetes = backup.Kubernetes,
             };
             var committed = await writer.CommitAsync(manifest, cancellationToken).ConfigureAwait(false);
 
@@ -470,7 +475,8 @@ internal sealed class VmBackupTask(
     /// </summary>
     private async Task<GuestPreparation?> PrepareGuestAsync(Guid restorePointId, CancellationToken cancellationToken)
     {
-        if (!job.GuestProcessing)
+        // A namespace has no guest: its consistency comes from its hooks.
+        if (!job.GuestProcessing || job.Connection.Kind == HypervisorKind.Kubernetes)
         {
             return null;
         }
@@ -503,7 +509,7 @@ internal sealed class VmBackupTask(
     /// consistent across its disks, not even like a power failure: the reason says so, with the measured gap, and the
     /// restore point shows the warning. The session's result does not change.
     /// </summary>
-    private static string? AcrossDisks(string consistency, string? reason, IVmBackupSession backup)
+    private static string? AcrossDisks(string consistency, string? reason, IVmBackupSession backup, string disks)
     {
         if (consistency == "application" || backup.Snapshot is not { DiskCount: >= 2 } facts || facts.Method == SnapshotMethods.Checkpoint)
         {
@@ -513,8 +519,8 @@ internal sealed class VmBackupTask(
 
         var gap = facts.DiskSkew is { } skew ? $" over {skew.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} s" : string.Empty;
         var scope = backup.GuestFreeze?.Sql is not null ? "Outside SQL Server, the" : "The";
-        var text = $"{scope} {facts.DiskCount} disks were captured one after another{gap}, not at one moment: data that spans disks " +
-                   "(a database and its log, a volume over several disks) may not match after a restore.";
+        var text = $"{scope} {facts.DiskCount} {disks} were captured one after another{gap}, not at one moment: data that spans {disks} " +
+                   $"({(disks == "disks" ? "a database and its log, a volume over several disks" : "an application whose data lies on several volumes")}) may not match after a restore.";
         return reason is null ? text : $"{reason} {text}";
     }
 
@@ -527,7 +533,13 @@ internal sealed class VmBackupTask(
     {
         if (guest is null)
         {
-            return ("crash", null, false);
+            // Without guest processing, a platform's own quiescing decides (a namespace's hooks): failed hooks are a warning.
+            return freeze switch
+            {
+                null => ("crash", null, false),
+                { ApplicationConsistent: true } => ("application", null, false),
+                _ => ("crash", freeze.Reason, true),
+            };
         }
 
         if (freeze is { ApplicationConsistent: true })
@@ -654,14 +666,14 @@ internal sealed class VmBackupTask(
             }
         }
 
-        if (changes.IsFull && baseline is not null && session.RunMode != SessionRunMode.ActiveFull)
+        if (changes.IsFull && baseline is not null && session.RunMode != SessionRunMode.ActiveFull && changes.FullReasonCode != FullReadReasons.NotTracked)
         {
-            _log.Warning($"Disk {disk.Name}: full backup because {changes.FullReason}.");
+            _log.Warning($"{DiskNoun} {disk.Name}: full backup because {changes.FullReason}.");
             warned = !string.IsNullOrEmpty(changes.FullReason);
         }
         else if (changes.IsFull)
         {
-            _log.Info($"Disk {disk.Name}: full backup ({changes.FullReason}).");
+            _log.Info($"{DiskNoun} {disk.Name}: full backup ({changes.FullReason}).");
         }
 
         var key = $"disk-{disk.Key}";
@@ -692,7 +704,7 @@ internal sealed class VmBackupTask(
         metrics.RecordDisk(Pool, disk.StorageName, result.Stats.Transport ?? reader.TransportName, result.Counters, disk.Key == SnapshotDisk.MemoryKey ? "memory" : "disk",
             !changes.IsFull ? null : session.RunMode == SessionRunMode.ActiveFull ? FullReadReasons.ActiveFull : changes.FullReasonCode ?? FullReadReasons.Other);
         UpdateDisk(disk.Key, d => d with { State = "Done", Mode = result.Stats.Mode.ToString(), FullReason = result.Stats.FullReason, Transport = result.Stats.Transport, Metrics = diskMetrics });
-        _log.Info($"Disk {disk.Name}: {result.Stats.Mode} via {result.Stats.Transport}: {MetricsText.Describe(diskMetrics)}.", key);
+        _log.Info($"{DiskNoun} {disk.Name}: {result.Stats.Mode} via {result.Stats.Transport}: {MetricsText.Describe(diskMetrics)}.", key);
 
         var indexRef = await writer.WriteDiskIndexAsync(disk.Key, result.Index, cancellationToken).ConfigureAwait(false);
         return (new ManifestDisk
@@ -752,6 +764,7 @@ internal sealed class VmBackupTask(
         entity.Consistency = manifest.Consistency;
         entity.ConsistencyReason = manifest.ConsistencyReason;
         entity.ConsistencyWarning = manifest.ConsistencyWarning ?? RestorePointConsistency.IsWarning(manifest.ConsistencyReason);
+        entity.ObjectKind = manifest.Kubernetes is null ? RestorePointObjectKinds.Vm : RestorePointObjectKinds.KubernetesNamespace;
         entity.SqlDatabaseCount = manifest.SqlDatabaseCount ?? (manifest.Guest is null ? 0 : null);
         entity.SqlUserDatabaseCount = manifest.SqlUserDatabaseCount ?? (manifest.Guest is null ? 0 : null);
         entity.SqlConsistentCount = manifest.SqlUserDatabaseCount is null ? entity.SqlUserDatabaseCount : manifest.SqlConsistentCount;
@@ -813,7 +826,7 @@ internal sealed class VmBackupTask(
         var counters = progress.Counters;
         UpdateDisk(disk.Key, d => d with { State = "Running", Metrics = ToMetrics(counters) });
         _log.Info(
-            $"Disk {disk.Name}: {fraction:P0} · read {Format(counters.ReadBytes)} at {MetricsText.Rate(counters.Elapsed.TotalSeconds > 0 ? counters.ReadBytes / counters.Elapsed.TotalSeconds : 0)} · stored {Format(counters.StoredBytes)}",
+            $"{DiskNoun} {disk.Name}: {fraction:P0} · read {Format(counters.ReadBytes)} at {MetricsText.Rate(counters.Elapsed.TotalSeconds > 0 ? counters.ReadBytes / counters.Elapsed.TotalSeconds : 0)} · stored {Format(counters.StoredBytes)}",
             key);
         lock (_metricsLock)
         {

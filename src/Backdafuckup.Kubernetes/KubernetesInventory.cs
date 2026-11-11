@@ -41,6 +41,10 @@ public static class DataPaths
     public const string ObjectsOnly = "objects-only";
 }
 
+/// <summary>A PVC of a namespace and how its data is backed up (<see cref="DataPaths"/>).</summary>
+internal sealed record NamespaceVolume(
+    string Claim, string DataPath, string? Reason, string? StorageClass, string Driver, string? SnapshotClass, long SizeBytes, string VolumeMode, string? VolumeName);
+
 internal static class KubernetesInventory
 {
     private const string SnapshotGroup = "snapshot.storage.k8s.io";
@@ -138,6 +142,40 @@ internal static class KubernetesInventory
             : (DataPaths.ObjectsOnly, candidates.Count == 0
                 ? $"no VolumeSnapshotClass for the CSI driver {driver}"
                 : $"{candidates.Count} VolumeSnapshotClasses for the CSI driver {driver} and none marked default ({DefaultSnapshotClassAnnotation})", null);
+    }
+
+    /// <summary>The PVCs of one namespace with their data path (as the inventory shows them), for its backup.</summary>
+    internal static async Task<IReadOnlyList<NamespaceVolume>> VolumesAsync(IKubernetes client, string ns, CancellationToken cancellationToken)
+    {
+        var claims = await client.CoreV1.ListNamespacedPersistentVolumeClaimAsync(ns, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var classes = (await client.StorageV1.ListStorageClassAsync(cancellationToken: cancellationToken).ConfigureAwait(false)).Items
+            .ToDictionary(c => c.Metadata.Name, StringComparer.Ordinal);
+        var snapshotClasses = await SnapshotClassesAsync(client, cancellationToken).ConfigureAwait(false);
+        var result = new List<NamespaceVolume>();
+        foreach (var claim in claims.Items.OrderBy(c => c.Metadata.Name, StringComparer.Ordinal))
+        {
+            V1PersistentVolume? volume = null;
+            if (claim.Spec.VolumeName is { Length: > 0 } pv)
+            {
+                try
+                {
+                    volume = await client.CoreV1.ReadPersistentVolumeAsync(pv, cancellationToken: cancellationToken).ConfigureAwait(false);
+                }
+                catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    // Not bound (any more).
+                }
+            }
+
+            var className = claim.Spec.StorageClassName ?? volume?.Spec.StorageClassName;
+            var driver = volume?.Spec.Csi?.Driver ?? (volume?.Spec.Nfs is not null ? "nfs" : className is null ? string.Empty : classes.GetValueOrDefault(className)?.Provisioner ?? string.Empty);
+            var (path, reason, snapshotClass) = DataPathOf(volume, driver, snapshotClasses);
+            var size = claim.Status?.Capacity?.TryGetValue("storage", out var capacity) == true ? capacity.ToInt64()
+                : claim.Spec.Resources?.Requests?.TryGetValue("storage", out var requested) == true ? requested.ToInt64() : 0;
+            result.Add(new NamespaceVolume(claim.Metadata.Name, path, reason, className, driver, snapshotClass, size, claim.Spec.VolumeMode ?? "Filesystem", volume?.Metadata.Name));
+        }
+
+        return result;
     }
 
     private static async Task<IReadOnlyList<(string Name, string Driver, bool IsDefault)>> SnapshotClassesAsync(IKubernetes client, CancellationToken cancellationToken)

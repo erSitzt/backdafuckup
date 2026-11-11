@@ -499,6 +499,9 @@ public sealed class RestorePointEntity
     /// </summary>
     public bool ConsistencyWarning { get; set; }
 
+    /// <summary><see cref="Contracts.RestorePointObjectKinds"/>: a VM, or a Kubernetes namespace (its objects and volumes).</summary>
+    public string ObjectKind { get; set; } = Contracts.RestorePointObjectKinds.Vm;
+
     /// <summary>SQL Server databases in the guest metadata; null until known (restore points from before it was recorded).</summary>
     public int? SqlDatabaseCount { get; set; }
 

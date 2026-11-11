@@ -294,7 +294,15 @@ public sealed record RestorePointDto(
     string? DomainControllerEvidence = null,
     int? SqlConsistentCount = null,
     bool ConsistencyWarning = false,
-    int? SqlUserDatabaseCount = null);
+    int? SqlUserDatabaseCount = null,
+    string ObjectKind = RestorePointObjectKinds.Vm);
+
+/// <summary>What a restore point holds: a VM, or a Kubernetes namespace (its objects and volumes).</summary>
+public static class RestorePointObjectKinds
+{
+    public const string Vm = "Vm";
+    public const string KubernetesNamespace = "KubernetesNamespace";
+}
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 
@@ -337,7 +345,8 @@ public sealed record BackupVmPointDto(
     long? MemoryImageBytes = null,
     int? SqlConsistentCount = null,
     bool ConsistencyWarning = false,
-    int? SqlUserDatabaseCount = null);
+    int? SqlUserDatabaseCount = null,
+    string ObjectKind = RestorePointObjectKinds.Vm);
 
 /// <summary>
 /// A VM in one job: its restore points there and its state. <see cref="JobId"/> is null (and <see cref="JobExists"/>

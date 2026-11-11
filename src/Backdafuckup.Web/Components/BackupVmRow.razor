@@ -6,6 +6,10 @@
     <td><span class="@(Open ? "row-chevron open" : "row-chevron")"></span></td>
     <td>
         <span style="font-weight:600">@Row.Vm.VmName</span>
+        @if (Latest?.ObjectKind == RestorePointObjectKinds.KubernetesNamespace)
+        {
+            <span class="mini-chip info" title="A namespace of a Kubernetes cluster: its objects and the data of its volumes">namespace</span>
+        }
         <span class="cell-sub n-560">@(Latest is null ? "no restore point" : Ago(Latest.CreatedUtc))@(Row.State == BackupVmStates.Stale ? " · missed a run" : string.Empty)</span>
     </td>
     <td class="c-560">

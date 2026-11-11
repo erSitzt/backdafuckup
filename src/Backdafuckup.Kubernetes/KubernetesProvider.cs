@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http;
 using System.Security.Authentication;
+using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Tls;
 using k8s.Autorest;
@@ -12,7 +13,13 @@ namespace Backdafuckup.Kubernetes;
 /// ServiceAccount token; the API server's certificate is pinned on first use, as for pools.
 /// </summary>
 /// <param name="transport">Tests only: answers every API request instead of the network.</param>
-public sealed class KubernetesProvider(Func<DelegatingHandler>? transport = null) : IHypervisorProvider
+/// <param name="channels">The server's mover channels (volume data); null: objects only.</param>
+/// <param name="images">The mover image in a registry the clusters can pull from.</param>
+/// <param name="timings">Tests only: shorter waits.</param>
+/// <param name="executor">Tests only: runs hooks instead of the cluster's exec.</param>
+public sealed class KubernetesProvider(
+    Func<DelegatingHandler>? transport = null, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
+    : IHypervisorProvider
 {
     public HypervisorKind Kind => HypervisorKind.Kubernetes;
 
@@ -71,7 +78,7 @@ public sealed class KubernetesProvider(Func<DelegatingHandler>? transport = null
     public Task<IHypervisorSession> OpenAsync(ConnectionSettings settings, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        IHypervisorSession session = new KubernetesSession(KubernetesClients.Create(settings, null, transport?.Invoke()), settings);
+        IHypervisorSession session = new KubernetesSession(KubernetesClients.Create(settings, null, transport?.Invoke()), settings, channels, images, timings, executor);
         return Task.FromResult(session);
     }
 

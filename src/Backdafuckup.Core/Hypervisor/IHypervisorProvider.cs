@@ -74,6 +74,9 @@ public interface IVmBackupSession : IAsyncDisposable
     /// <summary>How the snapshot went (duration, wait, disks, storages, disk-to-disk gap); null if the platform does not say.</summary>
     SnapshotFacts? Snapshot => null;
 
+    /// <summary>A Kubernetes namespace's cluster, volumes and hooks (the backup of a namespace); null for a VM.</summary>
+    Repository.KubernetesNamespaceDescriptor? Kubernetes => null;
+
     /// <summary>How long <see cref="CommitAsync"/> took to remove the snapshot data; null before the commit.</summary>
     TimeSpan? ReleaseDuration => null;
 
