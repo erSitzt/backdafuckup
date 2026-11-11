@@ -90,8 +90,8 @@ else
         {
             var (rpoValue, rpoDetail, rpoColor) = Rpo(day);
             <MudGrid Spacing="2" Class="mb-2">
-                <MudItem xs="12" sm="6" md="3"><StatTile Title="Log backups" Value="@day.LogBackups.ToString()" Detail="@($"every {day.LogIntervalMinutes} min · last run {LastRun()}")" Icon="@Icons.Material.Filled.History" Color="Color.Primary" /></MudItem>
-                <MudItem xs="12" sm="6" md="3"><StatTile Title="Full backups" Value="@((day.FullBackups + day.SystemFullBackups).ToString())" Detail="@($"databases {day.FullBackups} · system databases {day.SystemFullBackups}")" Icon="@Icons.Material.Filled.Inventory2" Color="Color.Primary" /></MudItem>
+                <MudItem xs="12" sm="6" md="3"><StatTile Title="Log backups" Value="@day.LogBackups.ToString()" Detail="@($"every {day.LogIntervalMinutes} min · last run {LastRun()}")" Icon="@AppIcons.LogBackup" Color="Color.Primary" /></MudItem>
+                <MudItem xs="12" sm="6" md="3"><StatTile Title="Full backups" Value="@((day.FullBackups + day.SystemFullBackups).ToString())" Detail="@($"databases {day.FullBackups} · system databases {day.SystemFullBackups}")" Icon="@AppIcons.Backups" Color="Color.Primary" /></MudItem>
                 <MudItem xs="12" sm="6" md="3"><StatTile Title="Backed up" Value="@Fmt.Bytes(day.Bytes)" Detail="@($"{Fmt.Bytes(day.NewStoredBytes)} new in the repository")" Icon="@Icons.Material.Filled.Save" Color="Color.Primary" /></MudItem>
                 @if (day.Current)
                 {
@@ -99,7 +99,7 @@ else
                 }
                 else
                 {
-                    <MudItem xs="12" sm="6" md="3"><StatTile Title="Databases" Value="@day.Databases.Count.ToString()" Detail="@($"{day.Databases.Count(d => d.ChainState == "Ok")} with an intact log chain now")" Icon="@Icons.Material.Filled.Storage" Color="Color.Primary" /></MudItem>
+                    <MudItem xs="12" sm="6" md="3"><StatTile Title="Databases" Value="@day.Databases.Count.ToString()" Detail="@($"{day.Databases.Count(d => d.ChainState == "Ok")} with an intact log chain now")" Icon="@AppIcons.Database" Color="Color.Primary" /></MudItem>
                 }
             </MudGrid>
 
@@ -209,8 +209,8 @@ else
     {
         <MudGrid Spacing="2" Class="mb-2">
             <MudItem xs="6" md="3"><StatTile Title="Duration" Value="@Fmt.Duration(_session.StartedUtc, _session.EndedUtc)" Detail="@($"{_tasks.Count} object(s)")" Icon="@Icons.Material.Filled.Timer" Color="Color.Primary" /></MudItem>
-            <MudItem xs="6" md="3"><StatTile Title="Restore rate" Value="@Fmt.Rate(m.ProcessingRate)" Detail="@(running ? $"current network rate {Fmt.Rate(m.CurrentBytesPerSecond)}" : $"network {Fmt.Rate(m.Seconds > 0 ? m.StoredBytes / m.Seconds : null)}")" Icon="@Icons.Material.Filled.Speed" Color="Color.Primary" /></MudItem>
-            <MudItem xs="6" md="3"><StatTile Title="Restored" Value="@Fmt.Bytes(m.ProcessedBytes)" Detail="@($"of {Fmt.Bytes(m.TotalBytes)} disk size")" Icon="@Icons.Material.Filled.Storage" Color="Color.Primary" /></MudItem>
+            <MudItem xs="6" md="3"><StatTile Title="Restore rate" Value="@Fmt.Rate(m.ProcessingRate)" Detail="@(running ? $"current network rate {Fmt.Rate(m.CurrentBytesPerSecond)}" : $"network {Fmt.Rate(m.Seconds > 0 ? m.StoredBytes / m.Seconds : null)}")" Icon="@AppIcons.Performance" Color="Color.Primary" /></MudItem>
+            <MudItem xs="6" md="3"><StatTile Title="Restored" Value="@Fmt.Bytes(m.ProcessedBytes)" Detail="@($"of {Fmt.Bytes(m.TotalBytes)} disk size")" Icon="@AppIcons.Disk" Color="Color.Primary" /></MudItem>
             <MudItem xs="6" md="3"><StatTile Title="Transferred" Value="@Fmt.Bytes(m.StoredBytes)" Detail="@($"sent to the host, {Fmt.Bytes(Math.Max(0, m.ProcessedBytes - m.StoredBytes))} empty blocks skipped")" Icon="@Icons.Material.Filled.Upload" Color="Color.Primary" /></MudItem>
         </MudGrid>
     }
@@ -218,8 +218,8 @@ else
     {
     <MudGrid Spacing="2" Class="mb-2">
         <MudItem xs="6" md="3"><StatTile Title="Duration" Value="@Fmt.Duration(_session.StartedUtc, _session.EndedUtc)" Detail="@($"{_tasks.Count} object(s)")" Icon="@Icons.Material.Filled.Timer" Color="Color.Primary" /></MudItem>
-        <MudItem xs="6" md="3"><StatTile Title="Processing rate" Value="@Fmt.Rate(m.ProcessingRate)" Detail="@(running ? $"current read rate {Fmt.Rate(m.CurrentBytesPerSecond)}" : $"read rate {Fmt.Rate(m.ReadRate)}")" Icon="@Icons.Material.Filled.Speed" Color="Color.Primary" /></MudItem>
-        <MudItem xs="6" md="3"><StatTile Title="Processed" Value="@Fmt.Bytes(m.ProcessedBytes)" Detail="@($"of {Fmt.Bytes(m.TotalBytes)} provisioned")" Icon="@Icons.Material.Filled.Storage" Color="Color.Primary" /></MudItem>
+        <MudItem xs="6" md="3"><StatTile Title="Processing rate" Value="@Fmt.Rate(m.ProcessingRate)" Detail="@(running ? $"current read rate {Fmt.Rate(m.CurrentBytesPerSecond)}" : $"read rate {Fmt.Rate(m.ReadRate)}")" Icon="@AppIcons.Performance" Color="Color.Primary" /></MudItem>
+        <MudItem xs="6" md="3"><StatTile Title="Processed" Value="@Fmt.Bytes(m.ProcessedBytes)" Detail="@($"of {Fmt.Bytes(m.TotalBytes)} provisioned")" Icon="@AppIcons.Disk" Color="Color.Primary" /></MudItem>
         <MudItem xs="6" md="3"><StatTile Title="Read" Value="@Fmt.Bytes(m.ReadBytes)" Detail="from the source" Icon="@Icons.Material.Filled.Download" Color="Color.Primary" /></MudItem>
         <MudItem xs="6" md="3"><StatTile Title="Transferred" Value="@Fmt.Bytes(m.StoredBytes)" Detail="@($"written to the repository, new data {Fmt.Bytes(m.NewDataBytes)}")" Icon="@Icons.Material.Filled.Save" Color="Color.Primary" /></MudItem>
         <MudItem xs="6" md="3"><StatTile Title="Dedupe" Value="@Fmt.Ratio(m.DedupeRatio)" Detail="@($"{Fmt.Bytes(m.DedupedBytes)} already stored")" Icon="@Icons.Material.Filled.ContentCopy" Color="Color.Primary" /></MudItem>

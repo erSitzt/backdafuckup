@@ -9,15 +9,15 @@
     <ChildContent>
         @if (_point is { } point)
         {
-            <MudMenuItem Icon="@Icons.Material.Filled.Computer" Href="@($"/restore/{point.Id}")">Entire VM</MudMenuItem>
-            <MudMenuItem Icon="@Icons.Material.Filled.FolderOpen" Href="@($"/files/{point.Id}")">Files and folders</MudMenuItem>
+            <MudMenuItem Icon="@AppIcons.Vm" Href="@($"/restore/{point.Id}")">Entire VM</MudMenuItem>
+            <MudMenuItem Icon="@AppIcons.Files" Href="@($"/files/{point.Id}")">Files and folders</MudMenuItem>
             @if (point.SqlDatabaseCount > 0)
             {
-                <MudMenuItem Icon="@Icons.Material.Filled.TableChart" Href="@($"/sql/{point.Id}")">SQL Server databases</MudMenuItem>
+                <MudMenuItem Icon="@AppIcons.Database" Href="@($"/sql/{point.Id}")">SQL Server databases</MudMenuItem>
             }
             @if (point.DomainController)
             {
-                <MudMenuItem Icon="@Icons.Material.Filled.Domain" Href="@($"/ad/{point.Id}")">Active Directory objects</MudMenuItem>
+                <MudMenuItem Icon="@AppIcons.ActiveDirectory" Href="@($"/ad/{point.Id}")">Active Directory objects</MudMenuItem>
             }
         }
     </ChildContent>
@@ -27,7 +27,7 @@
     <ChildContent>
         @if (_point is { } point)
         {
-            <MudMenuItem Icon="@Icons.Material.Filled.FactCheck" OnClick="@(() => VerifyAsync(point))">Verify all data</MudMenuItem>
+            <MudMenuItem Icon="@AppIcons.Verify" OnClick="@(() => VerifyAsync(point))">Verify all data</MudMenuItem>
             <MudDivider />
             <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => DeleteAsync(point))">Delete restore point</MudMenuItem>
         }
@@ -46,11 +46,11 @@
                     <td class="c-420">
                         @if (p.Consistency == "application")
                         {
-                            <span class="mini-chip success">application</span>
+                            <span class="mini-chip success"><MudIcon Icon="@AppIcons.ApplicationConsistent" Class="mini-chip-icon" />application</span>
                         }
                         else if (p.MemoryImageBytes is { } ram)
                         {
-                            <span class="mini-chip info" title="@($"Snapshot with memory ({Fmt.Bytes(ram)} RAM): the disks match each other; a restore can resume the VM where it was, or boot it like after a power failure.")">RAM</span>
+                            <span class="mini-chip info" title="@($"Snapshot with memory ({Fmt.Bytes(ram)} RAM): the disks match each other; a restore can resume the VM where it was, or boot it like after a power failure.")"><MudIcon Icon="@AppIcons.Memory" Class="mini-chip-icon" />RAM</span>
                         }
                         else
                         {
@@ -59,11 +59,11 @@
                         }
                         @if (p.SqlDatabaseCount > 0)
                         {
-                            <span class="mini-chip info" title="@($"{p.SqlDatabaseCount} SQL Server database(s) in this restore point")">SQL @p.SqlDatabaseCount</span>
+                            <span class="mini-chip info" title="@($"{p.SqlDatabaseCount} SQL Server database(s) in this restore point")"><MudIcon Icon="@AppIcons.Database" Class="mini-chip-icon" />SQL @p.SqlDatabaseCount</span>
                         }
                         @if (p.DomainController)
                         {
-                            <span class="mini-chip info" title="@(string.IsNullOrEmpty(p.AdDomain) ? "Domain controller: its Active Directory database is in this restore point" : $"Domain controller of {p.AdDomain}: its Active Directory database is in this restore point")">AD</span>
+                            <span class="mini-chip info" title="@(string.IsNullOrEmpty(p.AdDomain) ? "Domain controller: its Active Directory database is in this restore point" : $"Domain controller of {p.AdDomain}: its Active Directory database is in this restore point")"><MudIcon Icon="@AppIcons.ActiveDirectory" Class="mini-chip-icon" />AD</span>
                         }
                     </td>
                     <td class="c-760 num">@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))</td>

@@ -11,6 +11,7 @@ backdafuckup uses the following third-party components. Keep this list in sync w
 | Npgsql, Npgsql.EntityFrameworkCore.PostgreSQL | PostgreSQL License | Server (catalog database) |
 | EFCore.NamingConventions | Apache-2.0 | Server |
 | MudBlazor | MIT | Web (UI components) |
+| Material Design Icons (Pictogrammers, @mdi/svg 7.4.47): the paths of `database`, `database-cog`, `database-clock` and `harddisk` | Apache-2.0 | Web (`AppIcons`: database, SQL Server instance, log backups, disk) |
 | SMBLibrary (Tal Aloni) | LGPL-3.0 (used as unmodified library) | Smb (push installation of the guest agent over SMB 2/3) |
 | ISCSI and DiskAccessLibrary (Tal Aloni) | LGPL-3.0-or-later (used as unmodified libraries) | Guest agent (publishing restore points into a VM through a loopback iSCSI target) |
 | System.Text.Json, System.Management, System.ServiceProcess.ServiceController (Microsoft) | MIT | Guest agent |

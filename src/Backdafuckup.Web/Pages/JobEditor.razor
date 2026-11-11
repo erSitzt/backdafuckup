@@ -79,7 +79,7 @@ else
                         </MudSimpleTable>
                     </div>
                     <div class="form-note mt-3">
-                        <MudIcon Icon="@Icons.Material.Outlined.Memory" Size="Size.Small" />
+                        <MudIcon Icon="@AppIcons.Memory" Size="Size.Small" />
                         <span>
                             <b>With memory</b> (snapshot with RAM): the VM is paused while its RAM is written and all its disks are captured, so the disks match each other and a
                             restore can resume the VM where it was. It costs a pause of the RAM write plus every disk (about a minute for 16 GB and four disks on shared LVM),
@@ -104,7 +104,7 @@ else
                     <MudExpansionPanels MultiExpansion="true" Elevation="0" Class="form-sections">
                         <MudExpansionPanel>
                             <TitleContent>
-                                <SectionTitle Icon="@Icons.Material.Outlined.Tune" Title="Transport and performance" Summary="@TransportSummary()" />
+                                <SectionTitle Icon="@AppIcons.Performance" Title="Transport and performance" Summary="@TransportSummary()" />
                             </TitleContent>
                             <ChildContent>
                                 <div class="form-wide">
@@ -133,7 +133,7 @@ else
 
                         <MudExpansionPanel>
                             <TitleContent>
-                                <SectionTitle Icon="@Icons.Material.Outlined.VerifiedUser" Title="Guest processing" Summary="@GuestSummary()" On="_guest" />
+                                <SectionTitle Icon="@AppIcons.ApplicationConsistent" Title="Guest processing" Summary="@GuestSummary()" On="_guest" />
                             </TitleContent>
                             <ChildContent>
                                 <div class="form-wide">
@@ -225,7 +225,7 @@ else
 
                         <MudExpansionPanel>
                             <TitleContent>
-                                <SectionTitle Icon="@Icons.Material.Outlined.Storage" Title="SQL Server backups (log chain)" Summary="@SqlSummary()" On="_sqlBackup" />
+                                <SectionTitle Icon="@AppIcons.Database" Title="SQL Server backups (log chain)" Summary="@SqlSummary()" On="_sqlBackup" />
                             </TitleContent>
                             <ChildContent>
                                 <div class="form-wide">
@@ -339,7 +339,7 @@ else
                         @if (_scheduleKind == "None")
                         {
                             <div class="form-note">
-                                <MudIcon Icon="@Icons.Material.Outlined.TouchApp" Size="Size.Small" />
+                                <MudIcon Icon="@Icons.Material.Filled.TouchApp" Size="Size.Small" />
                                 <span>The job runs only when it is started under Backup Jobs or through the API.</span>
                             </div>
                         }
@@ -361,7 +361,7 @@ else
                 default:
                     <div class="summary-grid">
                         <section class="summary-card">
-                            <div class="summary-card-head"><MudIcon Icon="@Icons.Material.Outlined.Badge" Size="Size.Small" /> Job</div>
+                            <div class="summary-card-head"><MudIcon Icon="@AppIcons.Job" Size="Size.Small" /> Job</div>
                             <dl class="summary-list">
                                 <dt>Name</dt><dd>@_name</dd>
                                 @if (!string.IsNullOrWhiteSpace(_description))
@@ -372,7 +372,7 @@ else
                             </dl>
                         </section>
                         <section class="summary-card">
-                            <div class="summary-card-head"><MudIcon Icon="@Icons.Material.Outlined.Dns" Size="Size.Small" /> Virtual machines</div>
+                            <div class="summary-card-head"><MudIcon Icon="@AppIcons.Vm" Size="Size.Small" /> Virtual machines</div>
                             <dl class="summary-list">
                                 <dt>Pool</dt><dd>@_pools.FirstOrDefault(p => p.Id == _connectionId)?.DisplayName</dd>
                                 <dt>VMs (@_selected.Count)</dt>
@@ -385,7 +385,7 @@ else
                             </dl>
                         </section>
                         <section class="summary-card">
-                            <div class="summary-card-head"><MudIcon Icon="@Icons.Material.Outlined.Inventory2" Size="Size.Small" /> Storage</div>
+                            <div class="summary-card-head"><MudIcon Icon="@AppIcons.Repository" Size="Size.Small" /> Storage</div>
                             <dl class="summary-list">
                                 <dt>Repository</dt><dd>@_repositories.FirstOrDefault(r => r.Id == _repositoryId)?.Name</dd>
                                 <dt>Retention</dt><dd>@_retention restore points</dd>
@@ -395,7 +395,7 @@ else
                             </dl>
                         </section>
                         <section class="summary-card">
-                            <div class="summary-card-head"><MudIcon Icon="@Icons.Material.Outlined.VerifiedUser" Size="Size.Small" /> Consistency and SQL Server</div>
+                            <div class="summary-card-head"><MudIcon Icon="@AppIcons.ApplicationConsistent" Size="Size.Small" /> Consistency and SQL Server</div>
                             <dl class="summary-list">
                                 <dt>Guest processing</dt>
                                 <dd>@(_guest ? $"application-consistent ({(_guestMode == GuestProcessingModes.SqlSnapshot ? $"SQL Server snapshot ({(_sqlCopyOnly ? "copy-only" : "full backups")}), otherwise VSS" : "VSS")}); on failure: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with warning")}" + (_guestCredentialId is null ? "" : "; installs missing agents") : "off (crash-consistent)")</dd>
