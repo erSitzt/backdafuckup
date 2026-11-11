@@ -304,9 +304,10 @@ public sealed partial class ApiIntegrationTests
 
     /// <summary>
     /// bdfu-spike with a Redis pod (hooks), a ConfigMap and its PVC on a CSI driver with a snapshot class. The controllers
-    /// make snapshots ready, and a mover pod runs the real mover program with <paramref name="device"/> as its volume.
+    /// make snapshots ready, and a mover pod runs the real mover program with <paramref name="device"/> as its volume (of
+    /// <paramref name="bytes"/>); a file restore's mover pod in bdfu-spike puts the files into the folder <paramref name="live"/>.
     /// </summary>
-    private void SetUpCluster(string device, List<string> movers, List<string> restoredDevices)
+    private void SetUpCluster(string device, List<string> movers, List<string> restoredDevices, long bytes = 8L * 1024 * 1024, string? live = null)
     {
         var api = _cluster;
         api.Add("api/v1", "namespaces", Backdafuckup.Testing.Kubernetes.FakeKubernetesApi.Namespace("bdfu-spike"));
@@ -322,6 +323,7 @@ public sealed partial class ApiIntegrationTests
             },
             ["spec"] = new JsonObject
             {
+                ["nodeName"] = "node-1",
                 ["containers"] = new JsonArray(new JsonObject { ["name"] = "redis", ["image"] = "redis:7" }),
                 ["volumes"] = new JsonArray(new JsonObject { ["name"] = "data", ["persistentVolumeClaim"] = new JsonObject { ["claimName"] = "data-redis-test-0" } }),
             },
@@ -331,7 +333,7 @@ public sealed partial class ApiIntegrationTests
         {
             ["metadata"] = new JsonObject { ["name"] = "data-redis-test-0", ["namespace"] = "bdfu-spike" },
             ["spec"] = new JsonObject { ["volumeName"] = "pvc-1", ["storageClassName"] = "vsphere-csi", ["volumeMode"] = "Filesystem", ["accessModes"] = new JsonArray("ReadWriteOnce") },
-            ["status"] = new JsonObject { ["phase"] = "Bound", ["capacity"] = new JsonObject { ["storage"] = "8Mi" } },
+            ["status"] = new JsonObject { ["phase"] = "Bound", ["capacity"] = new JsonObject { ["storage"] = bytes.ToString(System.Globalization.CultureInfo.InvariantCulture) } },
         });
         api.Add("api/v1", "persistentvolumes", new JsonObject
         {
@@ -352,7 +354,7 @@ public sealed partial class ApiIntegrationTests
                     {
                         ["metadata"] = new JsonObject { ["name"] = $"snapcontent-{name}" },
                         ["spec"] = new JsonObject { ["driver"] = "csi.vsphere.vmware.com", ["deletionPolicy"] = "Delete" },
-                        ["status"] = new JsonObject { ["snapshotHandle"] = "fcd-1+snap-1", ["restoreSize"] = 8L * 1024 * 1024, ["readyToUse"] = true },
+                        ["status"] = new JsonObject { ["snapshotHandle"] = "fcd-1+snap-1", ["restoreSize"] = bytes, ["readyToUse"] = true },
                     });
                     api.Mutate(() => item["status"] = new JsonObject { ["readyToUse"] = true, ["boundVolumeSnapshotContentName"] = $"snapcontent-{name}" });
                     break;
@@ -381,6 +383,29 @@ public sealed partial class ApiIntegrationTests
                 case "persistentvolumeclaims":
                     api.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Bound" });
                     break;
+                case "pods" when ns == "bdfu-spike" && live is not null:
+                {
+                    // The kubelet on the node of the workload: the file restore's mover with the live PVC mounted.
+                    var filesEnv = item["spec"]!["containers"]![0]!["env"]!.AsArray().ToDictionary(e => (string)e!["name"]!, e => (string?)e!["value"]);
+                    var filesToken = (string)api.Find("secrets", ns, (string)item["spec"]!["containers"]![0]!["env"]!.AsArray()
+                        .Single(e => (string?)e!["name"] == "BDFU_MOVER_TOKEN")!["valueFrom"]!["secretKeyRef"]!["name"]!)!["stringData"]!["token"]!;
+                    var filesOptions = new MoverOptions(
+                        MoverMode.Files, new Uri(filesEnv["BDFU_MOVER_DATA_URL"]!), new Uri(filesEnv["BDFU_MOVER_RESULT_URL"]!), filesToken, [], string.Empty,
+                        Root: live, Keep: filesEnv["BDFU_MOVER_IF_EXISTS"] == "keep", Owners: filesEnv["BDFU_MOVER_OWNERS"] == "1");
+                    api.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Running" });
+                    lock (movers)
+                    {
+                        movers.Add(name);
+                    }
+
+                    _ = Task.Run(async () =>
+                    {
+                        var filesExit = await MoverRunner.RunAsync(filesOptions, _factory!.Server.CreateHandler(), new StringWriter(), CancellationToken.None);
+                        api.Mutate(() => item["status"] = new JsonObject { ["phase"] = filesExit == 0 ? "Succeeded" : "Failed" });
+                    });
+                    break;
+                }
+
                 case "pods" when ns == KubernetesSetup.WorkNamespace:
                     // The kubelet: the pod runs the mover with the volume's device.
                     var env = item["spec"]!["containers"]![0]!["env"]!.AsArray().ToDictionary(e => (string)e!["name"]!, e => (string?)e!["value"]);

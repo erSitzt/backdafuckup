@@ -18,7 +18,7 @@ public interface IKubernetesNamespaceReader
 
 internal sealed class KubernetesSession(
     IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
-    : IHypervisorSession, IKubernetesNamespaceReader
+    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore
 {
     private PlatformInfo? _platform;
 
@@ -76,6 +76,14 @@ internal sealed class KubernetesSession(
 
         IVmRestoreSession restore = new KubernetesNamespaceRestore(client, settings, plan, log, ledger, channels, images, timings ?? new KubernetesTimings());
         return Task.FromResult(restore);
+    }
+
+    /// <summary>Starts a mover pod next to a live PVC that puts restored files into it.</summary>
+    public async Task<IPvcFileRestore> BeginFileRestoreAsync(PvcFileRestoreRequest request, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var flow = new VolumeSnapshotFlow(client, settings.Address, log, ledger, timings ?? new KubernetesTimings()) { Channels = channels };
+        return await PvcFileImport.StartAsync(flow, channels, images, request, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Deletes a leftover object of a backup or restore (the ledger's id: <c>namespace/name</c>, or <c>name</c> when cluster-scoped).</summary>

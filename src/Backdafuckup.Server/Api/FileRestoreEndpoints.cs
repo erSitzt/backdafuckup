@@ -90,9 +90,47 @@ public static class FileRestoreEndpoints
                     await mounts.CheckSelectionAsync(mount, request.Volume, paths, ct);
                 }
 
+                var isNamespace = point.ObjectKind == RestorePointObjectKinds.KubernetesNamespace;
+                if (isNamespace && request.Target.Kind is FileRestoreTargetKindDto.Agent or FileRestoreTargetKindDto.Ssh)
+                {
+                    throw new ArgumentException($"{point.VmName} is a Kubernetes namespace, not a VM: restore its files into the PVC, to a share, or download them.");
+                }
+
                 string target;
                 switch (request.Target.Kind)
                 {
+                    case FileRestoreTargetKindDto.Pvc:
+                        if (!isNamespace)
+                        {
+                            throw new ArgumentException("Files go back into a PVC only from a restore point of a Kubernetes namespace.");
+                        }
+
+                        if (point.ConnectionId is null)
+                        {
+                            throw new InvalidOperationException($"The cluster of the restore point of {point.VmName} is no longer connected; download the files as ZIP.");
+                        }
+
+                        var pvcFolder = request.Target.Folder;
+                        if (!string.IsNullOrWhiteSpace(pvcFolder) && SshTargetPaths.Normalize(pvcFolder) is null)
+                        {
+                            throw new ArgumentException($"'{pvcFolder}' is not an absolute folder in the PVC; enter it as /restore.");
+                        }
+
+                        if (request.Target.Claim is { Length: > 0 } named && !System.Text.RegularExpressions.Regex.IsMatch(named, "^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$"))
+                        {
+                            throw new ArgumentException($"'{named}' is not the name of a PVC.");
+                        }
+
+                        var pvcVolume = mount?.Image.Volumes.FirstOrDefault(v => v.Id == request.Volume);
+                        if (pvcVolume is not null && pvcVolume.FileSystem is not ("ext" or "XFS"))
+                        {
+                            throw new ArgumentException($"Files go back into PVCs with ext or XFS file systems only; this volume is {pvcVolume.FileSystem}.");
+                        }
+
+                        var claimName = request.Target.Claim is { Length: > 0 } c ? c : pvcVolume?.DiskKey ?? "of the files";
+                        target = $"PVC {claimName} in namespace {point.VmName}" + (string.IsNullOrWhiteSpace(pvcFolder) ? ", original location" : $", folder {SshTargetPaths.Normalize(pvcFolder)}");
+                        break;
+
                     case FileRestoreTargetKindDto.Share:
                         var unc = UncPath.Parse(request.Target.SharePath ?? throw new ArgumentException("Enter the share as \\\\server\\share\\folder."));
                         if (!await db.Credentials.AnyAsync(c => c.Id == request.Target.CredentialId && c.Kind == CredentialKind.Windows, ct))

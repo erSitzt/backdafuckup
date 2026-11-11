@@ -7,10 +7,11 @@ namespace Backdafuckup.Core.DataMover;
 public sealed record MoverEndpoint(Uri DataUrl, Uri ResultUrl, string Token, IReadOnlyList<string> ServerPins);
 
 /// <summary>
-/// What a mover reports to <see cref="MoverEndpoint.ResultUrl"/>: after a restore the data bytes it wrote and flushed; an
-/// error whenever it fails (a backup mover that cannot read its device reports it here instead of sending data).
+/// What a mover reports to <see cref="MoverEndpoint.ResultUrl"/>: after a restore the data bytes it wrote and flushed
+/// (and after a file restore what it put in place, <see cref="Files"/>); an error whenever it fails (a backup mover that
+/// cannot read its device reports it here instead of sending data).
 /// </summary>
-public sealed record MoverResult(long DataBytes, string? Error = null);
+public sealed record MoverResult(long DataBytes, string? Error = null, MoverFileReport? Files = null);
 
 /// <summary>A backup channel: the mover sends the volume to <see cref="Endpoint"/>; the server reads it as a sequential disk.</summary>
 public interface IMoverBackupChannel : ISequentialDiskReader
@@ -33,6 +34,33 @@ public interface IMoverRestoreChannel : IAsyncDisposable
     void Abort(Exception error);
 }
 
+/// <summary>
+/// A file restore channel: the server writes files with <see cref="MoverFileWriter"/> to <see cref="Content"/>, the
+/// mover fetches them from <see cref="Endpoint"/>, puts them into its live volume and reports per item.
+/// </summary>
+public interface IMoverFilesChannel : IAsyncDisposable
+{
+    MoverEndpoint Endpoint { get; }
+
+    /// <summary>Completes when the mover has connected; fails with the channel's error.</summary>
+    Task Connected { get; }
+
+    /// <summary>
+    /// The stream to the mover: blocking writes from one thread, held back while the mover is behind; they fail once the
+    /// channel has failed. Disposing it ends the stream.
+    /// </summary>
+    Stream Content { get; }
+
+    /// <summary>False once the channel has failed (the mover's pod stopped, the connection broke off).</summary>
+    bool IsUsable { get; }
+
+    /// <summary>Completes with the mover's report once it has put everything in place; fails with its error.</summary>
+    Task<MoverFileReport> Completion { get; }
+
+    /// <summary>Fails the channel from outside, e.g. when the mover's pod cannot start.</summary>
+    void Abort(Exception error);
+}
+
 /// <summary>Opens the server's side of the channels mover pods connect to.</summary>
 public interface IMoverChannels
 {
@@ -44,6 +72,9 @@ public interface IMoverChannels
     /// <param name="progress">Gets the image position the server has sent up to.</param>
     Task<IMoverRestoreChannel> OpenRestoreAsync(
         string description, IDiskImageSource image, CancellationToken cancellationToken, TimeSpan? connectTimeout = null, IProgress<long>? progress = null);
+
+    /// <param name="description">For messages: the live volume the files go into (cluster, namespace, PVC).</param>
+    Task<IMoverFilesChannel> OpenFilesAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null);
 }
 
 /// <summary>What a cluster needs to start movers: the image, and the pull secret (its name, and its content when the server creates it).</summary>

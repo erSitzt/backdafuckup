@@ -138,8 +138,12 @@ else
     <DialogContent>
         <MudStack Spacing="3">
             <MudRadioGroup T="string" Value="_restoreTarget" ValueChanged="OnTargetChanged">
+                @if (IsNamespace)
+                {
+                    <MudRadio T="string" Value="@("pvc")" Color="Color.Primary" Disabled="@(_volume?.Family != "unix")">Back into the PVC @Claim (mover pod)</MudRadio>
+                }
                 <MudRadio T="string" Value="@("share")" Color="Color.Primary">Copy to a network share (SMB)</MudRadio>
-                @if (_mount?.ObjectKind != RestorePointObjectKinds.KubernetesNamespace)
+                @if (!IsNamespace)
                 {
                     <MudRadio T="string" Value="@("vm")" Color="Color.Primary">Back into the VM @_mount?.VmName @(_volume?.Family == "unix" ? "(SSH)" : "(guest agent)")</MudRadio>
                 }
@@ -161,6 +165,22 @@ else
                         }
                     </MudSelect>
                 }
+            }
+            else if (_restoreTarget == "pvc")
+            {
+                <MudText Typo="Typo.body2">
+                    A mover pod mounts the PVC @Claim in namespace @_mount?.VmName next to the workload (on the node of the pods that use it) and puts the files there while the workload keeps running.
+                </MudText>
+                <MudRadioGroup T="bool" Value="_toOriginal" ValueChanged="OnLocationChanged">
+                    <MudRadio T="bool" Value="true" Color="Color.Primary">Original location: @Claim:@PvcLocation</MudRadio>
+                    <MudRadio T="bool" Value="false" Color="Color.Primary">Another folder in the PVC</MudRadio>
+                </MudRadioGroup>
+                @if (!_toOriginal)
+                {
+                    <MudTextField T="string" @bind-Value="_guestFolder" Label="Folder in the PVC" Placeholder="/restore" Variant="Variant.Outlined"
+                                  HelperText="From the PVC's root. The selected items go directly into this folder. Missing folders are created." />
+                }
+                <MudCheckBox T="bool" @bind-Value="_restorePermissions" Color="Color.Primary" Label="Restore owner and group from the backup (otherwise those of the folder each item goes into)" />
             }
             else
             {
@@ -220,6 +240,13 @@ else
                         <span> Names that Windows does not allow (with \ : * ? " &lt; &gt; | or a trailing dot) are reported and left out.</span>
                     }
                 }
+                else if (_restoreTarget == "pvc")
+                {
+                    <span>
+                        The mover writes each file under a temporary name and replaces the old one only when it is complete, with owner, mode, times and symbolic links; nothing is written through links.
+                        It runs as root with the capabilities to set owners: namespaces with the Pod Security level "restricted" do not admit it; download the files there.
+                    </span>
+                }
                 else if (_volume?.Family == "unix")
                 {
                     <span>The files go to /var/tmp in the VM first and are then put in place as root (sudo): each replaces the old one only when complete, with mode, times and symbolic links; nothing is written through links.</span>
@@ -259,6 +286,7 @@ else
     private bool _restoreOpen;
     private bool _starting;
     private string _restoreTarget = "share";
+    private bool _namespaceDefaulted;
     private string? _sharePath;
     private Guid? _credentialId;
     private FileRestoreModeDto _restoreMode = FileRestoreModeDto.Overwrite;
@@ -488,10 +516,21 @@ else
         _ => null,
     };
 
-    private bool CanStart => _restoreTarget == "share"
-        ? !string.IsNullOrWhiteSpace(_sharePath) && _credentialId is not null
-        : (_volume?.Family == "unix" ? _linuxCredentialId is not null : AgentProblem is null)
-            && (_toOriginal ? OriginalLocation is not null : !string.IsNullOrWhiteSpace(_guestFolder));
+    private bool CanStart => _restoreTarget switch
+    {
+        "share" => !string.IsNullOrWhiteSpace(_sharePath) && _credentialId is not null,
+        "pvc" => _volume?.Family == "unix" && (_toOriginal || !string.IsNullOrWhiteSpace(_guestFolder)),
+        _ => (_volume?.Family == "unix" ? _linuxCredentialId is not null : AgentProblem is null)
+            && (_toOriginal ? OriginalLocation is not null : !string.IsNullOrWhiteSpace(_guestFolder)),
+    };
+
+    private bool IsNamespace => _mount?.ObjectKind == RestorePointObjectKinds.KubernetesNamespace;
+
+    /// <summary>The PVC the browsed volume is the image of.</summary>
+    private string? Claim => _volume?.DiskName;
+
+    /// <summary>The current folder in the PVC, from its root.</summary>
+    private string PvcLocation => "/" + string.Join('/', _path);
 
     private void OnTargetChanged(string target)
     {
@@ -500,6 +539,11 @@ else
         {
             _toOriginal = OriginalLocation is not null;
             _restorePermissions = _toOriginal;
+        }
+        else if (target == "pvc")
+        {
+            _toOriginal = true;
+            _restorePermissions = true;
         }
     }
 
@@ -527,6 +571,13 @@ else
             return;
         }
 
+        // A namespace's files go back into their PVC by default (ext and XFS volumes); a VM target does not exist there.
+        if (IsNamespace && (!_namespaceDefaulted || _restoreTarget == "vm" || (_restoreTarget == "pvc" && _volume?.Family != "unix")))
+        {
+            _namespaceDefaulted = true;
+            OnTargetChanged(_volume?.Family == "unix" ? "pvc" : "share");
+        }
+
         _restoreOpen = true;
     }
 
@@ -548,6 +599,8 @@ else
                 Mode = _restoreMode,
                 Target = _restoreTarget == "share"
                     ? new FileRestoreTargetDto { Kind = FileRestoreTargetKindDto.Share, SharePath = _sharePath?.Trim(), CredentialId = _credentialId }
+                    : _restoreTarget == "pvc"
+                    ? new FileRestoreTargetDto { Kind = FileRestoreTargetKindDto.Pvc, Claim = Claim, Folder = _toOriginal ? null : _guestFolder?.Trim(), RestorePermissions = _restorePermissions }
                     : _volume.Family == "unix"
                         ? new FileRestoreTargetDto
                         {
@@ -563,7 +616,12 @@ else
             };
             var started = await Api.PostAsync<StartedDto>("api/file-restore/restores", request);
             _restoreOpen = false;
-            var where = _restoreTarget == "share" ? request.Target.SharePath : _toOriginal ? $"the original location in {_mount.VmName}" : $"{request.Target.Folder} in {_mount.VmName}";
+            var where = _restoreTarget switch
+            {
+                "share" => request.Target.SharePath,
+                "pvc" => _toOriginal ? $"the original location in PVC {Claim}" : $"{request.Target.Folder} in PVC {Claim}",
+                _ => _toOriginal ? $"the original location in {_mount.VmName}" : $"{request.Target.Folder} in {_mount.VmName}",
+            };
             Snackbar.Add($"File restore started to {where}.", Severity.Success, options =>
             {
                 options.Action = "Show session";

@@ -9,12 +9,15 @@ internal enum MoverMode
 
     /// <summary>Fetch an image from the server and write it to the device (a new, empty volume).</summary>
     Restore,
+
+    /// <summary>Fetch files from the server and put them into the mounted, live volume (<see cref="MoverOptions.Root"/>).</summary>
+    Files,
 }
 
 /// <summary>
 /// The mover's settings, from the environment of its pod:
 /// <list type="bullet">
-/// <item><c>BDFU_MOVER_MODE</c>: <c>backup</c> or <c>restore</c>.</item>
+/// <item><c>BDFU_MOVER_MODE</c>: <c>backup</c>, <c>restore</c> or <c>files</c>.</item>
 /// <item><c>BDFU_MOVER_DATA_URL</c>, <c>BDFU_MOVER_RESULT_URL</c>: the channel on the backup server.</item>
 /// <item><c>BDFU_MOVER_TOKEN</c>: the channel's one-time token (from a Secret).</item>
 /// <item><c>BDFU_MOVER_SERVER_PINS</c>: SHA-256 SPKI pins of the server certificate, comma-separated; empty: the
@@ -23,12 +26,27 @@ internal enum MoverMode
 /// <item><c>BDFU_MOVER_BLOCK_BYTES</c>: the granularity of zero detection; default 64 KiB.</item>
 /// <item><c>BDFU_MOVER_BYTES</c>: backup only: the bytes to send, from the start of the device (a volume restored from a
 /// snapshot may be larger than the snapshot); default the whole device.</item>
+/// <item><c>BDFU_MOVER_ROOT</c>: files only: where the volume is mounted; default <see cref="DefaultRoot"/>.</item>
+/// <item><c>BDFU_MOVER_IF_EXISTS</c>: files only: <c>replace</c> (default) or <c>keep</c> (RESTORED-&lt;name&gt; next to it).</item>
+/// <item><c>BDFU_MOVER_OWNERS</c>: files only: <c>1</c> (default) owner and group from the backup, <c>0</c> those of
+/// the folder an item goes into.</item>
 /// </list>
 /// </summary>
 internal sealed record MoverOptions(
-    MoverMode Mode, Uri DataUrl, Uri ResultUrl, string Token, IReadOnlyList<string> ServerPins, string Device, int BlockBytes = MoverOptions.DefaultBlockBytes, long? Bytes = null)
+    MoverMode Mode,
+    Uri DataUrl,
+    Uri ResultUrl,
+    string Token,
+    IReadOnlyList<string> ServerPins,
+    string Device,
+    int BlockBytes = MoverOptions.DefaultBlockBytes,
+    long? Bytes = null,
+    string Root = MoverOptions.DefaultRoot,
+    bool Keep = false,
+    bool Owners = true)
 {
     public const string DefaultDevice = "/dev/bdfu-volume";
+    public const string DefaultRoot = "/bdfu-volume";
     public const int DefaultBlockBytes = 64 * 1024;
 
     public static MoverOptions FromEnvironment(Func<string, string?> get)
@@ -45,7 +63,8 @@ internal sealed record MoverOptions(
         {
             "backup" => MoverMode.Backup,
             "restore" => MoverMode.Restore,
-            var other => throw new ArgumentException($"BDFU_MOVER_MODE is '{other}', expected backup or restore."),
+            "files" => MoverMode.Files,
+            var other => throw new ArgumentException($"BDFU_MOVER_MODE is '{other}', expected backup, restore or files."),
         };
         var pins = (get("BDFU_MOVER_SERVER_PINS") ?? string.Empty)
             .Split([',', ' ', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -66,6 +85,22 @@ internal sealed record MoverOptions(
                 ? long.TryParse(bytes, NumberStyles.None, CultureInfo.InvariantCulture, out var count) && count > 0
                     ? count
                     : throw new ArgumentException($"BDFU_MOVER_BYTES is '{bytes}', expected a positive number of bytes.")
-                : null);
+                : null,
+            get("BDFU_MOVER_ROOT") is { Length: > 0 } root
+                ? root.StartsWith('/') ? root.TrimEnd('/') is { Length: > 0 } trimmed ? trimmed : throw new ArgumentException("BDFU_MOVER_ROOT is /, expected the folder the volume is mounted at.")
+                    : throw new ArgumentException($"BDFU_MOVER_ROOT is '{root}', expected an absolute folder.")
+                : DefaultRoot,
+            (get("BDFU_MOVER_IF_EXISTS") ?? "replace").ToLowerInvariant() switch
+            {
+                "" or "replace" => false,
+                "keep" => true,
+                var other => throw new ArgumentException($"BDFU_MOVER_IF_EXISTS is '{other}', expected replace or keep."),
+            },
+            (get("BDFU_MOVER_OWNERS") ?? "1").ToLowerInvariant() switch
+            {
+                "" or "1" or "true" => true,
+                "0" or "false" => false,
+                var other => throw new ArgumentException($"BDFU_MOVER_OWNERS is '{other}', expected 1 or 0."),
+            });
     }
 }
