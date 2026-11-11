@@ -59,11 +59,14 @@ else
                     <MudText Typo="Typo.subtitle1" Class="mt-4">Memory</MudText>
                     <MudRadioGroup T="bool" Value="_resume" ValueChanged="OnResumeChangedAsync">
                         <MudRadio T="bool" Value="false">Boot from the disks (cold start)</MudRadio>
-                        <MudRadio T="bool" Value="true" Disabled="@_point.DomainController">Resume with memory: the VM continues where it was at the backup</MudRadio>
+                        <MudRadio T="bool" Value="true" Disabled="@IsDomainController">Resume with memory: the VM continues where it was at the backup</MudRadio>
                     </MudRadioGroup>
-                    @if (_point.DomainController)
+                    @if (IsDomainController)
                     {
-                        <MudText Typo="Typo.caption">A domain controller does not resume: it would continue its directory from the backup without Windows noticing a restore (USN rollback).</MudText>
+                        <MudText Typo="Typo.caption">
+                            A domain controller does not resume: it would continue its directory from the backup without Windows noticing a restore (USN rollback).
+                            @(_point.DomainControllerEvidence is { } evidence ? $"This VM is one: {evidence}." : null)
+                        </MudText>
                     }
                     else if (_resume)
                     {
@@ -197,6 +200,9 @@ else
     private bool _regenerateMacs = true;
     private bool _powerOn;
     private bool _resume;
+
+    /// <summary>The restore point shows a DC, or (with memory, so without guest details) the VM's agent or another restore point does.</summary>
+    private bool IsDomainController => _point is { DomainController: true } or { DomainControllerEvidence: not null };
     private int _step;
     private bool _busy;
     private string? _error;

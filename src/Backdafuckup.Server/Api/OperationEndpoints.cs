@@ -215,7 +215,17 @@ public static class OperationEndpoints
           .WithDescription("Filters (all optional, repeatable where noted): q (part of the VM's or a job's name), jobId (repeatable; 00000000-0000-0000-0000-000000000000 = restore points without a job, i.e. of a deleted job), repositoryId, content (repeatable: ad, sql), consistency (application, crash, warning), state (repeatable: stale, nopoint, ok), olderThanDays. A VM keeps only the jobs that match. The restore points of a VM: GET /api/restore-points?vmId=…&jobId=….");
 
         points.MapGet("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>
-            await db.RestorePoints.Include(r => r.Disks).FirstOrDefaultAsync(r => r.Id == id, ct) is { } point ? Results.Ok(point.ToDto()) : Results.NotFound());
+        {
+            if (await db.RestorePoints.Include(r => r.Disks).FirstOrDefaultAsync(r => r.Id == id, ct) is not { } point)
+            {
+                return Results.NotFound();
+            }
+
+            // A restore point with memory has no guest details: the wizard must still know a DC, which never resumes.
+            return Results.Ok(point.MemoryImageBytes is > 0 && point.DomainController != true
+                ? point.ToDto() with { DomainControllerEvidence = await DomainControllerEvidence.FindAsync(db, point, ct) }
+                : point.ToDto());
+        });
 
         points.MapPost("/{id:guid}/verify", async (Guid id, bool? full, AppDbContext db, RepositoryManager repositories, CancellationToken ct) =>
         {

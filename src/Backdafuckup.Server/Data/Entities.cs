@@ -496,10 +496,13 @@ public sealed class RestorePointEntity
     /// <summary>SQL Server databases in the guest metadata; null until known (restore points from before it was recorded).</summary>
     public int? SqlDatabaseCount { get; set; }
 
-    /// <summary>The VM was a domain controller; null until known (older restore points are checked at start).</summary>
     /// <summary>Size of the RAM image of a snapshot with memory (a restore can resume the VM); null without memory.</summary>
     public long? MemoryImageBytes { get; set; }
 
+    /// <summary>
+    /// The VM was a domain controller; null until known (older restore points are checked at start). Restore points with memory
+    /// have no guest details: see <see cref="Engine.DomainControllerEvidence"/>.
+    /// </summary>
     public bool? DomainController { get; set; }
 
     /// <summary>The domain controller's DNS domain ("" if unknown).</summary>
