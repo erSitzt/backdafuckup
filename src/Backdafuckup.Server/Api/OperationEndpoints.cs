@@ -415,6 +415,19 @@ public static class OperationEndpoints
             errors["objects"] = [cluster ? "Select at least one namespace." : "Select at least one VM."];
         }
 
+        // Namespaces by labels: only on a cluster, and only a selector the cluster understands.
+        foreach (var selector in request.Objects.Where(o => KubernetesLabelSelector.IsJobObject(o.NativeId)))
+        {
+            if (!cluster)
+            {
+                errors["objects"] = ["Only namespaces of a Kubernetes cluster are chosen by labels."];
+            }
+            else if (KubernetesLabelSelector.Parse(KubernetesLabelSelector.Of(selector.NativeId)).Error is { } invalid)
+            {
+                errors["objects"] = [invalid];
+            }
+        }
+
         // A namespace has no guest and no memory: its consistency comes from its hooks.
         if (cluster && (request.GuestProcessing || request.Objects.Any(o => o.WithMemory)))
         {

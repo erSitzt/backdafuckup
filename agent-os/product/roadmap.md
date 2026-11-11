@@ -44,7 +44,7 @@
   - restore of a namespace (all or selected objects), a single PVC and files in the same cluster;
   - the server talks to the cluster API directly, or through an in-cluster agent that dials out.
 
-  Built and checked on the test cluster on 2026-11-11 (lab runbook K1–K8): connection, mover image, backup with hooks, restore of a namespace, apps and PVCs (also replacing a PVC in place), the object explorer, and files back into a live PVC, over the direct API path. The in-cluster agent (a tunnel for clusters the server cannot reach) is built; its lab run is open. Open in phase 1: a label selector for jobs, and metrics of their own.
+  Built and checked on the test cluster on 2026-11-11 (lab runbook K1–K8): connection, mover image, backup with hooks, restore of a namespace, apps and PVCs (also replacing a PVC in place), the object explorer, and files back into a live PVC, over the direct API path. The in-cluster agent (a tunnel for clusters the server cannot reach) is built; its lab run is open. Jobs choose namespaces by name or by labels. Open in phase 1: metrics of their own.
 
   Later: another cluster and whole-cluster DR, then NFS volumes at file level, changed block tracking (CSI SnapshotMetadata) and group snapshots; then Kubernetes clusters on XCP-ng, whose PVs could be read through XAPI with CBT.
 

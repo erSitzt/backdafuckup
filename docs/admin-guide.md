@@ -695,6 +695,13 @@ Volume data moves through mover pods: a small Linux container with the .NET move
 
 Create a job under *Backup Jobs → New* with the kind *Kubernetes namespaces*, a cluster and its namespaces. Schedule, retention and repository work as for VMs. Guest processing does not apply to clusters and is refused.
 
+**Namespaces by their labels:**
+- *And every namespace with these labels* takes a label selector as `kubectl -l` does: `key=value`, `key!=value`, `key in (a,b)`, `key notin (a,b)`, `key`, `!key`. Separate requirements with commas; all of them have to hold.
+- Each run asks the cluster which namespaces have the labels then, so a namespace that gets them later is backed up from its next run on. The work namespace is never included.
+- The editor shows which namespaces of the inventory have the labels now. The session log names the namespaces each selector matched.
+- A selector that matches no namespace gives a warning. A run with nothing left to back up ends with *Warning*.
+- *Backups & Restore* lists the namespaces with their restore points, not the selector.
+
 Each run makes one restore point per namespace:
 1. **Objects:**
    - What is read: every object of the namespace, in the API's preferred version. That covers the built-in kinds (core, apps, batch, networking, policy, RBAC, autoscaling) and every namespaced custom resource, in its storage version.
@@ -805,7 +812,7 @@ Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-r
 ### Limits
 
 - **Restores go into the same cluster.** Another cluster, with namespace and StorageClass mapping, and whole-cluster recovery are planned.
-- **Namespaces are chosen by name.** A label selector is planned.
+- **Namespaces are chosen by name or by labels**, one selector per job.
 - **No changed block tracking and no group snapshots** on vanilla vSphere CSI.
 - **NFS volumes** are backed up as objects only. Their data at file level is planned.
 - **GitOps:** Fleet or Argo CD may set restored objects back to the state in Git. Restore those from Git, and use backdafuckup for the data and for objects made by hand.

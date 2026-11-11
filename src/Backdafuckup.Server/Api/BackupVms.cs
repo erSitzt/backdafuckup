@@ -115,7 +115,8 @@ public static class BackupVms
         var names = entries.GroupBy(e => e.VmNativeId).ToDictionary(g => g.Key, g => g.MaxBy(e => e.Job.Latest?.CreatedUtc)!.VmName);
         foreach (var job in jobs.Values)
         {
-            foreach (var member in job.Objects.Where(o => !present.Contains((o.NativeId, job.Id))))
+            // A label selector is no namespace of its own: the namespaces it matched appear with their restore points.
+            foreach (var member in job.Objects.Where(o => !present.Contains((o.NativeId, job.Id)) && !KubernetesLabelSelector.IsJobObject(o.NativeId)))
             {
                 entries.Add(new Entry(member.NativeId, names.GetValueOrDefault(member.NativeId) ?? member.CachedName, job.ConnectionId,
                     Describe(job, job.Id, job.Name, 0, 0, [job.RepositoryId], null, now)));

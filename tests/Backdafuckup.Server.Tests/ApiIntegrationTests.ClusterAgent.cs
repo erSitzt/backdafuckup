@@ -192,6 +192,55 @@ public sealed partial class ApiIntegrationTests
         Assert.Contains("is not connected to this server yet", await rescan.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task A_job_backs_up_the_namespaces_that_have_its_labels_at_each_run()
+    {
+        var client = await SignedInClientAsync();
+        await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://localhost/", Ct);
+        await Ok(client.PutAsJsonAsync("/api/kubernetes/mover", new SaveMoverImageDto("registry.test:8443", "backdafuckup/mover", "bdfu-push", "secret-1", "None", null, null, null), Ct));
+        var device = Path.Combine(_root, "labelled-volume.img");
+        Directory.CreateDirectory(_root);
+        await File.WriteAllBytesAsync(device, new byte[8 * 1024 * 1024], Ct);
+        var movers = new List<string>();
+        SetUpCluster(device, movers, []);
+        _cluster.Mutate(() => _cluster.Find("namespaces", null, "bdfu-spike")!["metadata"]!["labels"] = new JsonObject { ["backup"] = "daily" });
+        _cluster.Add("api/v1", "namespaces", Backdafuckup.Testing.Kubernetes.FakeKubernetesApi.Namespace("scratch"));
+        using var caKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var caRequest = new CertificateRequest("CN=rke2-server-ca", caKey, HashAlgorithmName.SHA256);
+        caRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        using var ca = caRequest.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+        var cluster = await Read<ConnectionDto>(client.PostAsJsonAsync("/api/connections", new CreateConnectionDto
+        {
+            Kind = "Kubernetes", DisplayName = "rke2-test", Address = "10.26.1.10", Port = 6443, UserName = "backdafuckup", Password = "token-for-tests", CaCertificatePem = ca.ExportCertificatePem(),
+        }, Ct));
+        var inventory = await client.GetFromJsonAsync<List<InventoryItemDto>>($"/api/connections/{cluster.Id}/inventory", Ct);
+        Assert.Equal("backup=daily", inventory!.Single(i => i.Kind == "Namespace" && i.Name == "bdfu-spike").Properties["labels"]);
+
+        var repository = await Read<RepositoryDto>(client.PostAsJsonAsync("/api/repositories", new CreateRepositoryDto { Name = "Local", Path = Path.Combine(_root, "repo") }, Ct));
+        SaveJobDto Job(string selector) => new()
+        {
+            Name = "By labels", ConnectionId = cluster.Id, RepositoryId = repository.Id, Schedule = new ScheduleDto("None", "22:00", [], "Europe/Berlin"),
+            Objects = [new JobObjectDto(KubernetesLabelSelector.JobObject(selector), KubernetesLabelSelector.Describe(selector))], RetryCount = 0,
+        };
+        var invalid = await client.PostAsJsonAsync("/api/jobs", Job("backup in daily"), Ct);
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        var job = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", Job("backup=daily"), Ct));
+
+        var run = await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{job.Id}/run", new RunJobDto(), Ct));
+        var session = await WaitForSessionAsync(client, run.SessionId);
+        var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{run.SessionId}/log", Ct))!.Select(l => l.Message));
+        Assert.True(session.Session.State == "Succeeded", session.Session.Summary + "\n" + log);
+        Assert.Contains("Job started (incremental), 1 namespace(s)", log, StringComparison.Ordinal);
+        Assert.Contains("Namespaces with the labels backup=daily: bdfu-spike.", log, StringComparison.Ordinal);
+        var vms = await client.GetFromJsonAsync<List<BackupVmDto>>("/api/restore-points/vms", Ct);
+        Assert.Equal(["bdfu-spike"], vms!.Select(v => v.VmNativeId)); // the selector itself is no row
+
+        // Nobody has the labels any more: the run says so instead of backing up nothing silently.
+        _cluster.Mutate(() => _cluster.Find("namespaces", null, "bdfu-spike")!["metadata"]!["labels"] = new JsonObject());
+        var empty = await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{job.Id}/run", new RunJobDto(), Ct))).SessionId);
+        Assert.Equal(("Warning", "No namespace has the labels of the job now."), (empty.Session.State, empty.Session.Summary));
+    }
+
     private async Task<WebSocket> ConnectAgentSocketAsync(Uri uri, string token, CancellationToken cancellationToken)
     {
         var sockets = _factory!.Server.CreateWebSocketClient();

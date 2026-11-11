@@ -16,6 +16,13 @@ public interface IKubernetesNamespaceReader
     Task<IReadOnlyList<System.Text.Json.Nodes.JsonObject>> ReadObjectsAsync(string ns, CancellationToken cancellationToken);
 }
 
+/// <summary>The namespaces of a cluster with certain labels, for jobs that select them so.</summary>
+public interface IKubernetesNamespaceSelector
+{
+    /// <summary>The names of the namespaces whose labels match <paramref name="selector"/> (kubectl -l syntax), without the work namespace and those being deleted.</summary>
+    Task<IReadOnlyList<string>> SelectNamespacesAsync(string selector, CancellationToken cancellationToken);
+}
+
 /// <summary>The cluster's agent Deployment, kept at the server's mover image.</summary>
 public interface IKubernetesAgentUpdater
 {
@@ -28,7 +35,7 @@ public interface IKubernetesAgentUpdater
 
 internal sealed class KubernetesSession(
     IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
-    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater
+    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater, IKubernetesNamespaceSelector
 {
     private PlatformInfo? _platform;
 
@@ -86,6 +93,22 @@ internal sealed class KubernetesSession(
 
         IVmRestoreSession restore = new KubernetesNamespaceRestore(client, settings, plan, log, ledger, channels, images, timings ?? new KubernetesTimings());
         return Task.FromResult(restore);
+    }
+
+    public async Task<IReadOnlyList<string>> SelectNamespacesAsync(string selector, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var namespaces = await client.CoreV1.ListNamespaceAsync(labelSelector: selector, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return [.. namespaces.Items
+                .Where(n => n.Metadata.Name != KubernetesSetup.WorkNamespace && n.Status?.Phase != "Terminating")
+                .Select(n => n.Metadata.Name)
+                .Order(StringComparer.Ordinal)];
+        }
+        catch (k8s.Autorest.HttpOperationException ex)
+        {
+            throw new KubernetesOperationException($"Listing the namespaces with the labels {selector} in cluster {settings.ClusterName()} failed: {VolumeSnapshotFlow.Problem(ex)}", ex);
+        }
     }
 
     public async Task<string?> UpdateAgentImageAsync(string image, CancellationToken cancellationToken)
