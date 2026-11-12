@@ -115,6 +115,36 @@ public sealed partial class ApiIntegrationTests
             Assert.Equal("The mover's device for bdfu-spike/data-b has 8192 bytes, the volume 4096.", error.Message);
         }
 
+        // The mover stops in the middle (SIGTERM: its pod is deleted): the channel does not fail with the broken connection
+        // at once, but with the reason the watch of the pod finds a moment later.
+        var full = Path.Combine(_root, "full.img");
+        await File.WriteAllBytesAsync(full, Enumerable.Repeat((byte)0x5A, 16 * 1024 * 1024).ToArray(), Ct);
+        await using (var backup = await channels.OpenBackupAsync("bdfu-spike/data-d", 16 * 1024 * 1024, Ct))
+        {
+            // Stopped on the first record the server takes, outside the server's call (the cancellation aborts its request).
+            using var sigterm = new CancellationTokenSource();
+            var streaming = backup.StreamAsync(
+                (_, _, _) =>
+                {
+                    if (!sigterm.IsCancellationRequested)
+                    {
+                        _ = Task.Run(sigterm.Cancel, Ct);
+                    }
+
+                    return ValueTask.CompletedTask;
+                },
+                Ct);
+            var log = new StringWriter();
+            Assert.Equal(1, await MoverRunner.RunAsync(Options(MoverMode.Backup, backup.Endpoint, full), _factory!.Server.CreateHandler(), log, sigterm.Token).WaitAsync(TimeSpan.FromSeconds(30), Ct));
+            Assert.Contains("Stopped.", log.ToString(), StringComparison.Ordinal);
+
+            await Task.Delay(500, Ct);
+            Assert.False(streaming.IsCompleted);
+            backup.Abort(new IOException("The mover pod backdafuckup-system/bdfu-x-mover for bdfu-spike/data-d was deleted (cluster rke2-test)."));
+            var error = await Assert.ThrowsAsync<IOException>(() => streaming.WaitAsync(TimeSpan.FromSeconds(30), Ct));
+            Assert.Equal("The mover pod backdafuckup-system/bdfu-x-mover for bdfu-spike/data-d was deleted (cluster rke2-test).", error.Message);
+        }
+
         // No mover within the connect timeout: the backup fails and names the channel's address.
         channels.ConnectTimeout = TimeSpan.FromMilliseconds(200);
         try
