@@ -33,6 +33,15 @@ internal static class KubernetesObjects
         ?? Text(o["metadata"]?["annotations"]?["meta.helm.sh/release-name"])
         ?? Text(o["metadata"]?["labels"]?["app.kubernetes.io/name"]);
 
+    /// <summary>
+    /// Made by Rancher for its projects and users (RoleBindings and Roles with Rancher's labels): they point at Rancher's own
+    /// ClusterRoles and come back by themselves where Rancher manages the cluster, so they do not go into another cluster.
+    /// </summary>
+    public static bool IsRancherMade(JsonObject o) =>
+        Kind(o) is "RoleBinding" or "Role"
+        && o["metadata"]?["labels"] is JsonObject labels
+        && (labels.Any(kv => kv.Key.StartsWith("authz.cluster.cattle.io/", StringComparison.Ordinal)) || Text(labels["cattle.io/creator"]) == "norman");
+
     /// <summary>Objects the cluster makes itself, never restored: ServiceAccount tokens, the root CA ConfigMap, the default ServiceAccount.</summary>
     public static bool IsClusterMade(JsonObject o) => Kind(o) switch
     {
@@ -226,10 +235,13 @@ internal static class KubernetesObjects
     /// The object as it is created again: without what belongs to its old life in the cluster (uid, resourceVersion,
     /// timestamps, owners, status, managed fields) and with its namespace changed to <paramref name="targetNamespace"/>.
     /// Services lose their cluster IPs and node ports, ServiceAccounts their token secrets, Jobs their generated selector,
-    /// pods their node; RoleBindings to ServiceAccounts of the old namespace name the new one.
+    /// pods their node; RoleBindings to ServiceAccounts of the old namespace name the new one. <paramref name="rewrite"/>
+    /// maps StorageClasses (PVCs, StatefulSets' claim templates, PVs) and, for another cluster, leaves out what only the old
+    /// one means: finalizers of its controllers, Rancher's project fields, a Service's fixed external addresses.
     /// </summary>
-    public static JsonObject Prepare(JsonObject original, string sourceNamespace, string targetNamespace)
+    public static JsonObject Prepare(JsonObject original, string sourceNamespace, string targetNamespace, ObjectRewrite? rewrite = null)
     {
+        rewrite ??= ObjectRewrite.None;
         var o = (JsonObject)original.DeepClone();
         o.Remove("status");
         if (o["metadata"] is JsonObject metadata)
@@ -237,6 +249,19 @@ internal static class KubernetesObjects
             foreach (var field in new[] { "uid", "resourceVersion", "creationTimestamp", "deletionTimestamp", "deletionGracePeriodSeconds", "generation", "managedFields", "selfLink", "ownerReferences" })
             {
                 metadata.Remove(field);
+            }
+
+            if (rewrite.OtherCluster)
+            {
+                // Finalizers belong to controllers of the old cluster: the new one may have none to remove them.
+                metadata.Remove("finalizers");
+                foreach (var map in new[] { metadata["annotations"], metadata["labels"] }.OfType<JsonObject>())
+                {
+                    foreach (var key in map.Select(kv => kv.Key).Where(IsRancherField).ToList())
+                    {
+                        map.Remove(key);
+                    }
+                }
             }
 
             if (metadata["namespace"] is not null)
@@ -264,6 +289,27 @@ internal static class KubernetesObjects
                 foreach (var port in (spec["ports"] as JsonArray)?.OfType<JsonObject>() ?? [])
                 {
                     port.Remove("nodePort");
+                }
+
+                if (rewrite.OtherCluster)
+                {
+                    // Addresses of the old cluster's network.
+                    spec.Remove("loadBalancerIP");
+                    spec.Remove("externalIPs");
+                }
+
+                break;
+            case "StatefulSet" when o["spec"] is JsonObject setSpec && setSpec["volumeClaimTemplates"] is JsonArray templates:
+                foreach (var template in templates.OfType<JsonObject>())
+                {
+                    MapClass(template, rewrite);
+                }
+
+                break;
+            case "PersistentVolume" when o["spec"] is JsonObject spec:
+                if (spec["storageClassName"] is not null)
+                {
+                    spec["storageClassName"] = rewrite.MapClass((string?)spec["storageClassName"]);
                 }
 
                 break;
@@ -296,6 +342,7 @@ internal static class KubernetesObjects
             case "PersistentVolumeClaim" when o["spec"] is JsonObject spec:
                 spec.Remove("dataSource");
                 spec.Remove("dataSourceRef");
+                MapClass(o, rewrite);
                 if (o["metadata"]?["annotations"] is JsonObject annotations)
                 {
                     foreach (var key in annotations.Select(kv => kv.Key).Where(k => k.StartsWith("pv.kubernetes.io/", StringComparison.Ordinal)
@@ -311,11 +358,47 @@ internal static class KubernetesObjects
         return o;
     }
 
+    /// <summary>A PVC's (or claim template's) StorageClass, in its spec and in the legacy annotation, mapped to the target's.</summary>
+    private static void MapClass(JsonObject claim, ObjectRewrite rewrite)
+    {
+        if (claim["spec"] is JsonObject spec && spec["storageClassName"] is not null)
+        {
+            spec["storageClassName"] = rewrite.MapClass((string?)spec["storageClassName"]);
+        }
+
+        if (claim["metadata"]?["annotations"] is JsonObject annotations && annotations[LegacyClassAnnotation] is not null)
+        {
+            annotations[LegacyClassAnnotation] = rewrite.MapClass((string?)annotations[LegacyClassAnnotation]);
+        }
+    }
+
+    private const string LegacyClassAnnotation = "volume.beta.kubernetes.io/storage-class";
+
+    /// <summary>Rancher's fields of an object in a cluster it manages (project, lifecycle, creator), meaningless elsewhere.</summary>
+    private static bool IsRancherField(string key) =>
+        key.StartsWith("field.cattle.io/", StringComparison.Ordinal)
+        || key.StartsWith("lifecycle.cattle.io/", StringComparison.Ordinal)
+        || key.StartsWith("cattle.io/", StringComparison.Ordinal)
+        || key.StartsWith("authz.management.cattle.io/", StringComparison.Ordinal)
+        || key.StartsWith("management.cattle.io/", StringComparison.Ordinal);
+
     /// <summary>Whether a label selector (match labels) selects pods with <paramref name="labels"/>.</summary>
     private static bool Selects(JsonObject selector, IReadOnlyDictionary<string, string> labels) =>
         selector.All(kv => labels.TryGetValue(kv.Key, out var value) && value == Text(kv.Value));
 
     private static string? Text(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out var text) && text.Length > 0 ? text : null;
+}
+
+/// <summary>
+/// How objects change on their way into the target of a restore: StorageClasses of the restore point mapped to classes of
+/// the target (unmapped ones keep their name), and whether the target is another cluster than the restore point's.
+/// </summary>
+internal sealed record ObjectRewrite(IReadOnlyDictionary<string, string> StorageClasses, bool OtherCluster)
+{
+    public static readonly ObjectRewrite None = new(new Dictionary<string, string>(StringComparer.Ordinal), false);
+
+    public string? MapClass(string? storageClass) =>
+        storageClass is not null && StorageClasses.TryGetValue(storageClass, out var mapped) && !string.IsNullOrWhiteSpace(mapped) ? mapped : storageClass;
 }
 
 /// <summary>An object of a namespace's restore point as the console lists it.</summary>

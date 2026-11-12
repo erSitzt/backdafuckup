@@ -193,6 +193,67 @@ public sealed class KubernetesObjectsTests
         ];
     }
 
+    [Fact]
+    public void Into_another_cluster_classes_are_mapped_and_what_only_the_old_cluster_means_is_left_out()
+    {
+        var rewrite = new ObjectRewrite(new Dictionary<string, string> { ["vsphere-csi"] = "nfs-client" }, OtherCluster: true);
+
+        // A PVC and a StatefulSet's claim templates: the class in the spec and in the legacy annotation.
+        var claim = Obj("PersistentVolumeClaim", "data", spec: new JsonObject { ["storageClassName"] = "vsphere-csi" });
+        claim["metadata"]!["annotations"] = new JsonObject { ["volume.beta.kubernetes.io/storage-class"] = "vsphere-csi" };
+        claim["metadata"]!["finalizers"] = new JsonArray("kubernetes.io/pvc-protection");
+        var preparedClaim = KubernetesObjects.Prepare(claim, "shop", "shop", rewrite);
+        Assert.Equal("nfs-client", (string?)preparedClaim["spec"]!["storageClassName"]);
+        Assert.Equal("nfs-client", (string?)preparedClaim["metadata"]!["annotations"]!["volume.beta.kubernetes.io/storage-class"]);
+        Assert.Null(preparedClaim["metadata"]!["finalizers"]);
+
+        var set = Obj("StatefulSet", "redis", "apps/v1", new JsonObject
+        {
+            ["volumeClaimTemplates"] = new JsonArray(
+                new JsonObject { ["metadata"] = new JsonObject { ["name"] = "data" }, ["spec"] = new JsonObject { ["storageClassName"] = "vsphere-csi" } },
+                new JsonObject { ["metadata"] = new JsonObject { ["name"] = "logs" }, ["spec"] = new JsonObject { ["storageClassName"] = "fast" } }),
+        });
+        var preparedSet = KubernetesObjects.Prepare(set, "shop", "shop", rewrite);
+        Assert.Equal(["nfs-client", "fast"], preparedSet["spec"]!["volumeClaimTemplates"]!.AsArray().Select(t => (string?)t!["spec"]!["storageClassName"]));
+
+        // Rancher's project fields and a Service's addresses of the old network go; other labels stay.
+        var space = new JsonObject
+        {
+            ["apiVersion"] = "v1",
+            ["kind"] = "Namespace",
+            ["metadata"] = new JsonObject
+            {
+                ["name"] = "shop",
+                ["labels"] = new JsonObject { ["field.cattle.io/projectId"] = "p-abc", ["team"] = "web" },
+                ["annotations"] = new JsonObject { ["cattle.io/status"] = "{}", ["lifecycle.cattle.io/create.namespace-auth"] = "true", ["note"] = "keep" },
+                ["finalizers"] = new JsonArray("controller.cattle.io/namespace-auth"),
+            },
+        };
+        var preparedSpace = KubernetesObjects.Prepare(space, "shop", "shop", rewrite);
+        Assert.Equal(["team"], preparedSpace["metadata"]!["labels"]!.AsObject().Select(kv => kv.Key));
+        Assert.Equal(["note"], preparedSpace["metadata"]!["annotations"]!.AsObject().Select(kv => kv.Key));
+        Assert.Null(preparedSpace["metadata"]!["finalizers"]);
+
+        var balancer = KubernetesObjects.Prepare(
+            Obj("Service", "web", spec: new JsonObject { ["type"] = "LoadBalancer", ["loadBalancerIP"] = "10.26.0.50", ["externalIPs"] = new JsonArray("10.26.0.51") }), "shop", "shop", rewrite);
+        Assert.Null(balancer["spec"]!["loadBalancerIP"]);
+        Assert.Null(balancer["spec"]!["externalIPs"]);
+
+        // In the same cluster the finalizers and fields stay; an unmapped class keeps its name.
+        var same = KubernetesObjects.Prepare(space, "shop", "shop", rewrite with { OtherCluster = false });
+        Assert.NotNull(same["metadata"]!["finalizers"]);
+        Assert.Equal("fast", (string?)KubernetesObjects.Prepare(set, "shop", "shop", rewrite with { OtherCluster = false })["spec"]!["volumeClaimTemplates"]![1]!["spec"]!["storageClassName"]);
+
+        // Rancher's RoleBindings for its projects stay out of another cluster; one made by hand does not.
+        var projectBinding = Obj("RoleBinding", "rb-abc", "rbac.authorization.k8s.io/v1");
+        projectBinding["metadata"]!["labels"] = new JsonObject { ["authz.cluster.cattle.io/rtb-owner-updated"] = "p-abc" };
+        var creatorBinding = Obj("RoleBinding", "u-xyz-admin", "rbac.authorization.k8s.io/v1");
+        creatorBinding["metadata"]!["labels"] = new JsonObject { ["cattle.io/creator"] = "norman" };
+        Assert.True(KubernetesObjects.IsRancherMade(projectBinding));
+        Assert.True(KubernetesObjects.IsRancherMade(creatorBinding));
+        Assert.False(KubernetesObjects.IsRancherMade(Obj("RoleBinding", "redis", "rbac.authorization.k8s.io/v1")));
+    }
+
     private static JsonObject Obj(string kind, string name, string group = "v1", JsonObject? spec = null)
     {
         var o = new JsonObject
