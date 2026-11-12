@@ -55,7 +55,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         _run = (plan.SessionId == Guid.Empty ? Guid.NewGuid() : plan.SessionId).ToString("N")[..8];
         _flow = new VolumeSnapshotFlow(client, settings.ClusterName(), log, ledger, timings) { Channels = channels };
         _objects = [.. KubernetesResources.Read(plan.Metadata.Content)];
-        _rewrite = new ObjectRewrite(_options.StorageClassMap, _options.OtherCluster);
+        _rewrite = new ObjectRewrite(_options.StorageClassMap, _options.OtherCluster, KubernetesPlatformSet.Recorded(_descriptor.Platforms));
 
         var plurals = KubernetesApplier.BuiltInPlurals();
         foreach (var crd in _objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition"))
@@ -227,13 +227,28 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             : _objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && _selected.Contains(KubernetesObjects.Key(o)))
                 .Select(o => (string?)o["spec"]?["storageClassName"]).OfType<string>().Where(c => _rewrite.MapClass(c) == c).ToHashSet(StringComparer.Ordinal);
         var definitions = new List<JsonObject>();
+        var unserved = new Dictionary<string, (string Group, KubernetesPlatformProfile Platform)>(StringComparer.Ordinal);
+        var notServed = new List<JsonObject>();
         foreach (var definition in _objects.Where(o =>
                      (KubernetesObjects.Kind(o) == "CustomResourceDefinition" && kinds.Contains((string?)o["spec"]?["names"]?["kind"] ?? string.Empty))
                      || (KubernetesObjects.Kind(o) == "StorageClass" && classes.Contains(KubernetesObjects.Name(o)))))
         {
             var prepared = KubernetesObjects.Prepare(definition, Source, Target, _rewrite);
-            if (await _applier.ReadAsync(definition, cancellationToken).ConfigureAwait(false) is null
-                && await TryCreateAsync(prepared, restored, cancellationToken).ConfigureAwait(false)
+            var missing = await _applier.ReadAsync(definition, cancellationToken).ConfigureAwait(false) is null;
+
+            // A platform's CRDs come with the platform, never from a backup: without them here, their objects stay out.
+            if (KubernetesObjects.Kind(definition) == "CustomResourceDefinition" && (string?)definition["spec"]?["group"] is { } group
+                && _rewrite.Platforms.CrdGroupOf(group) is { } platform)
+            {
+                if (missing)
+                {
+                    unserved[(string)definition["spec"]!["names"]!["kind"]!] = (group, platform);
+                }
+
+                continue;
+            }
+
+            if (missing && await TryCreateAsync(prepared, restored, cancellationToken).ConfigureAwait(false)
                 && KubernetesObjects.Kind(definition) == "CustomResourceDefinition")
             {
                 definitions.Add(prepared);
@@ -267,6 +282,12 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                 continue;
             }
 
+            if (unserved.ContainsKey(KubernetesObjects.Kind(item)))
+            {
+                notServed.Add(item);
+                continue;
+            }
+
             if (KubernetesObjects.Kind(item) == "PersistentVolumeClaim")
             {
                 await RestoreClaimAsync(item, sourceToNewDiskId, volumes, fileVolumes, restored, cancellationToken).ConfigureAwait(false);
@@ -295,6 +316,13 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             {
                 existing.Add(KubernetesObjects.Key(item));
             }
+        }
+
+        foreach (var group in notServed.GroupBy(o => unserved[KubernetesObjects.Kind(o)].Group))
+        {
+            var platform = unserved[KubernetesObjects.Kind(group.First())].Platform.Name;
+            Warn($"{group.Count()} object(s) are not restored ({string.Join(", ", group.Select(KubernetesObjects.Key))}): their API {group.Key} comes with {platform}, " +
+                 $"which cluster {_settings.ClusterName()} does not have.");
         }
 
         await WaitBoundAsync(cancellationToken).ConfigureAwait(false);

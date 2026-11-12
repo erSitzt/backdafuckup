@@ -149,6 +149,12 @@ public sealed record KubernetesNamespaceDescriptor
 
     /// <summary>The hooks that ran in pods before and after the snapshots.</summary>
     public IReadOnlyList<KubernetesHookRecord> Hooks { get; init; } = [];
+
+    /// <summary>
+    /// The platforms of the cluster at backup time (ids of the platform catalog): what a restore leaves out as made by them.
+    /// Null in restore points from before platforms were detected.
+    /// </summary>
+    public IReadOnlyList<string>? Platforms { get; init; }
 }
 
 /// <param name="DataPath"><c>snapshot</c> (the data is the disk <paramref name="DiskKey"/>) or <c>objects-only</c> (see <paramref name="Reason"/>).</param>

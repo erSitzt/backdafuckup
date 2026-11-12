@@ -57,6 +57,7 @@ public sealed partial class RestoreSessionRunner
             }
 
             byte[] objects;
+            IReadOnlyList<string>? sourcePlatforms;
             var repository = await repositories.GetAsync(run.ClusterPoint.RepositoryId, cancellationToken).ConfigureAwait(false);
             using (repository.Pin(run.ClusterPoint.Id))
             await using (var reader = await repository.OpenRestorePointAsync(run.ClusterPoint.Id, cancellationToken).ConfigureAwait(false))
@@ -65,10 +66,11 @@ public sealed partial class RestoreSessionRunner
                 using var memory = new MemoryStream();
                 await blob.CopyToAsync(memory, cancellationToken).ConfigureAwait(false);
                 objects = memory.ToArray();
+                sourcePlatforms = reader.Manifest.Kubernetes?.Platforms;
             }
 
             log.Info($"Restoring the cluster-scoped objects of {run.ClusterPoint.CreatedUtc.ToLocalTime():g} ({run.ClusterPoint.VmName}), then {chosen.Count} namespace(s): {string.Join(", ", chosen.Select(c => c.Namespace))}.");
-            var result = await restorer.RestoreClusterScopeAsync(objects, options.StorageClassMap, options.ReplaceExisting, log, cancellationToken).ConfigureAwait(false);
+            var result = await restorer.RestoreClusterScopeAsync(objects, sourcePlatforms, options.StorageClassMap, options.ReplaceExisting, log, cancellationToken).ConfigureAwait(false);
             await FinishAsync(task.Id, result.Failed > 0 ? SessionState.Warning : SessionState.Succeeded, null, 0).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

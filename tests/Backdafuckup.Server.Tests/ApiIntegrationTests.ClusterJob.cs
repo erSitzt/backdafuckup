@@ -42,6 +42,19 @@ public sealed partial class ApiIntegrationTests
             },
         });
         _cluster.Add("apis/catalog.cattle.io/v1", "apps", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "site", ["namespace"] = "web" }, ["spec"] = new JsonObject() });
+
+        // A HelmChart of RKE2's helm controller: a user object of an API that comes with RKE2, not from a backup.
+        _cluster.Add("apis/apiextensions.k8s.io/v1", "customresourcedefinitions", new JsonObject
+        {
+            ["metadata"] = new JsonObject { ["name"] = "helmcharts.helm.cattle.io" },
+            ["spec"] = new JsonObject
+            {
+                ["group"] = "helm.cattle.io", ["scope"] = "Namespaced",
+                ["names"] = new JsonObject { ["kind"] = "HelmChart", ["plural"] = "helmcharts" },
+                ["versions"] = new JsonArray(new JsonObject { ["name"] = "v1", ["served"] = true, ["storage"] = true }),
+            },
+        });
+        _cluster.Add("apis/helm.cattle.io/v1", "helmcharts", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "site-chart", ["namespace"] = "web" }, ["spec"] = new JsonObject() });
         _cluster.Add("apis/apiextensions.k8s.io/v1", "customresourcedefinitions", new JsonObject
         {
             ["metadata"] = new JsonObject { ["name"] = "clusterissuers.cert-manager.io" },
@@ -81,6 +94,7 @@ public sealed partial class ApiIntegrationTests
         var backupSession = await WaitForSessionAsync(client, backup.SessionId);
         var backupLog = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{backup.SessionId}/log", Ct))!.Select(l => $"{l.Severity}: {l.Message}"));
         Assert.True(backupSession.Session.State == "Succeeded", backupLog);
+        Assert.True(backupLog.Contains("Platform: RKE2 · Rancher + vSphere CSI (detected: rke2 by version v1.32.13+rke2r1; rancher by namespace cattle-system; vsphere-csi by CSI driver csi.vsphere.vmware.com).", StringComparison.Ordinal), backupLog);
         Assert.True(backupLog.Contains("Whole cluster without kube-system, kube-public, kube-node-lease, cattle-*, fleet-*, cluster-fleet-*, local, backdafuckup-system: 2 namespace(s) (bdfu-spike, web)", StringComparison.Ordinal), backupLog);
         Assert.Contains("Cluster-scoped objects of", backupLog, StringComparison.Ordinal);
         var points = (await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!;
@@ -132,5 +146,10 @@ public sealed partial class ApiIntegrationTests
         // Rancher's records of its Helm releases stay out of another cluster, and so does their CRD.
         Assert.Null(nfs.Find("apps", "web", "site"));
         Assert.Null(nfs.Find("customresourcedefinitions", null, "apps.catalog.cattle.io"));
+
+        // The HelmChart needs RKE2's API, which the target lacks: it stays out, named, and its CRD is not created from the backup.
+        Assert.True(log.Contains("1 object(s) are not restored (HelmChart/site-chart): their API helm.cattle.io comes with RKE2, which cluster 10.26.4.10 does not have.", StringComparison.Ordinal), log);
+        Assert.Null(nfs.Find("customresourcedefinitions", null, "helmcharts.helm.cattle.io"));
+        Assert.Null(nfs.Find("helmcharts", "web", "site-chart"));
     }
 }

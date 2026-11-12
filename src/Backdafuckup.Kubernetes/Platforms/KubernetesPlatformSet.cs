@@ -25,6 +25,9 @@ public sealed class KubernetesPlatformSet
 
     public static KubernetesPlatformSet Legacy => Of(LegacyIds);
 
+    /// <summary>The set recorded in a restore point; the legacy rules for one from before platforms were recorded.</summary>
+    public static KubernetesPlatformSet Recorded(IReadOnlyList<string>? ids) => ids is null ? Legacy : Of(ids);
+
     /// <summary>In catalog order, the base first.</summary>
     public IReadOnlyList<KubernetesPlatformProfile> Profiles { get; }
 

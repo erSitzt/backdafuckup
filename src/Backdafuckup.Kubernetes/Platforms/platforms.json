@@ -62,7 +62,7 @@
       "namespaces": [ "cattle-*", "local" ],
       "crdGroups": [ "cattle.io", "*.cattle.io" ],
       "made": [
-        { "groups": [ "cattle.io", "*.cattle.io" ] },
+        { "groups": [ "cattle.io", "catalog.cattle.io", "cluster.cattle.io", "management.cattle.io", "project.cattle.io", "provisioning.cattle.io", "rke.cattle.io" ] },
         { "kinds": [ "Role", "RoleBinding" ], "labels": [ "authz.cluster.cattle.io/*", "cattle.io/creator=norman" ] },
         { "kinds": [ "ClusterRole", "ClusterRoleBinding" ], "names": [ "cattle-*", "rancher-*", "cluster-owner*", "project-owner*" ] },
         { "kinds": [ "ClusterRole", "ClusterRoleBinding" ], "labels": [ "*cattle.io*" ] },

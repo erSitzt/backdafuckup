@@ -66,9 +66,11 @@ internal sealed class KubernetesSession(
     public Task<string?> MissingRestoreRightsAsync(CancellationToken cancellationToken) => KubernetesClusterRestore.MissingRightsAsync(client, settings.ClusterName(), cancellationToken);
 
     public Task<KubernetesClusterRestoreResult> RestoreClusterScopeAsync(
-        byte[] objects, IReadOnlyDictionary<string, string> storageClassMap, bool replaceExisting, IOperationLog log, CancellationToken cancellationToken) =>
+        byte[] objects, IReadOnlyList<string>? sourcePlatforms, IReadOnlyDictionary<string, string> storageClassMap, bool replaceExisting, IOperationLog log,
+        CancellationToken cancellationToken) =>
         KubernetesClusterRestore.RestoreAsync(
-            client, settings.ClusterName(), [.. KubernetesResources.Read(objects)], storageClassMap, replaceExisting, log, timings ?? new KubernetesTimings(), cancellationToken);
+            client, settings.ClusterName(), [.. KubernetesResources.Read(objects)], KubernetesPlatformSet.Recorded(sourcePlatforms), storageClassMap, replaceExisting, log,
+            timings ?? new KubernetesTimings(), cancellationToken);
 
     public Task<KubernetesRestorePlan> PlanRestoreAsync(
         KubernetesNamespaceDescriptor descriptor, byte[] objects, string targetNamespace, IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster,
@@ -104,13 +106,15 @@ internal sealed class KubernetesSession(
             }
         }
 
+        // What the cluster's platforms make is recorded with each restore point (and left out of the cluster-scoped objects).
+        var platforms = (await GetPlatformsAsync(cancellationToken).ConfigureAwait(false)).Set;
         if (request.VmId == KubernetesClusterBackup.Member)
         {
-            return await KubernetesClusterBackup.StartAsync(client, settings, _platform.ProductVersion, request, log, cancellationToken).ConfigureAwait(false);
+            return await KubernetesClusterBackup.StartAsync(client, settings, _platform.ProductVersion, platforms, request, log, cancellationToken).ConfigureAwait(false);
         }
 
         return await KubernetesNamespaceBackup.StartAsync(
-            client, settings, _platform.ProductVersion, request, log, ledger, channels, images, executor ?? new ClientPodExecutor(client), timings ?? new KubernetesTimings(), cancellationToken)
+            client, settings, _platform.ProductVersion, platforms, request, log, ledger, channels, images, executor ?? new ClientPodExecutor(client), timings ?? new KubernetesTimings(), cancellationToken)
             .ConfigureAwait(false);
     }
 

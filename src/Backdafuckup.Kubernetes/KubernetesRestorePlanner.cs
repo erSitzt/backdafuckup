@@ -45,7 +45,7 @@ internal static class KubernetesRestorePlanner
         IKubernetes client, string cluster, KubernetesNamespaceDescriptor descriptor, IReadOnlyList<JsonObject> objects, string targetNamespace,
         IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster, CancellationToken cancellationToken)
     {
-        var rewrite = new ObjectRewrite(storageClassMap, otherCluster);
+        var rewrite = new ObjectRewrite(storageClassMap, otherCluster, KubernetesPlatformSet.Recorded(descriptor.Platforms));
         var storage = await KubernetesTargetStorage.ReadAsync(client, cancellationToken).ConfigureAwait(false);
         var warnings = new List<string>();
         var errors = new List<string>();
@@ -183,10 +183,26 @@ internal static class KubernetesRestorePlanner
         foreach (var definition in objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition" && !LeftOutKind(o, rewrite)))
         {
             var name = KubernetesObjects.Name(definition);
-            if (!await ExistsAsync(() => client.ApiextensionsV1.ReadCustomResourceDefinitionAsync(name, cancellationToken: cancellationToken)).ConfigureAwait(false))
+            if (await ExistsAsync(() => client.ApiextensionsV1.ReadCustomResourceDefinitionAsync(name, cancellationToken: cancellationToken)).ConfigureAwait(false))
             {
-                warnings.Add($"The CRD {name} is created in cluster {cluster} from the restore point; the operator or controller that acts on its objects is not part of it.");
+                continue;
             }
+
+            // A platform's CRDs come with the platform, never from a backup.
+            var group = (string?)definition["spec"]?["group"] ?? string.Empty;
+            if (rewrite.Platforms.CrdGroupOf(group) is { } platform)
+            {
+                var kind = (string?)definition["spec"]?["names"]?["kind"] ?? string.Empty;
+                var count = objects.Count(o => KubernetesObjects.Kind(o) == kind && KubernetesObjects.Namespace(o) is not null);
+                if (count > 0)
+                {
+                    warnings.Add($"{count} {kind} object(s) stay out: their API {group} comes with {platform.Name}, which cluster {cluster} does not have.");
+                }
+
+                continue;
+            }
+
+            warnings.Add($"The CRD {name} is created in cluster {cluster} from the restore point; the operator or controller that acts on its objects is not part of it.");
         }
     }
 

@@ -16,8 +16,10 @@ public interface IKubernetesClusterRestorer
     /// <summary>What the account lacks to restore roles and bindings with more rights than its own (bind, escalate); null if nothing.</summary>
     Task<string?> MissingRestoreRightsAsync(CancellationToken cancellationToken);
 
+    /// <param name="sourcePlatforms">The platforms recorded in the restore point (null: from before they were recorded).</param>
     Task<KubernetesClusterRestoreResult> RestoreClusterScopeAsync(
-        byte[] objects, IReadOnlyDictionary<string, string> storageClassMap, bool replaceExisting, IOperationLog log, CancellationToken cancellationToken);
+        byte[] objects, IReadOnlyList<string>? sourcePlatforms, IReadOnlyDictionary<string, string> storageClassMap, bool replaceExisting, IOperationLog log,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -63,8 +65,8 @@ internal static class KubernetesClusterRestore
     }
 
     public static async Task<KubernetesClusterRestoreResult> RestoreAsync(
-        IKubernetes client, string cluster, IReadOnlyList<JsonObject> objects, IReadOnlyDictionary<string, string> storageClassMap, bool replaceExisting,
-        IOperationLog log, KubernetesTimings timings, CancellationToken cancellationToken)
+        IKubernetes client, string cluster, IReadOnlyList<JsonObject> objects, KubernetesPlatformSet source, IReadOnlyDictionary<string, string> storageClassMap,
+        bool replaceExisting, IOperationLog log, KubernetesTimings timings, CancellationToken cancellationToken)
     {
         var plurals = KubernetesApplier.BuiltInPlurals();
         foreach (var crd in objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition"))
@@ -76,7 +78,7 @@ internal static class KubernetesClusterRestore
         }
 
         var applier = new KubernetesApplier(client, plurals);
-        var rewrite = new ObjectRewrite(new Dictionary<string, string>(StringComparer.Ordinal), OtherCluster: true, Source: KubernetesPlatformSet.Legacy);
+        var rewrite = new ObjectRewrite(new Dictionary<string, string>(StringComparer.Ordinal), OtherCluster: true, Source: source);
         var restored = 0;
         var existing = 0;
         var skipped = 0;

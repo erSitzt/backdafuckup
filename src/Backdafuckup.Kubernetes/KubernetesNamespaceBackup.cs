@@ -55,7 +55,7 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
     public KubernetesNamespaceDescriptor Kubernetes { get; }
 
     public static async Task<KubernetesNamespaceBackup> StartAsync(
-        IKubernetes client, ConnectionSettings settings, string kubernetesVersion, VmBackupRequest request, IOperationLog log, IArtifactLedger ledger,
+        IKubernetes client, ConnectionSettings settings, string kubernetesVersion, KubernetesPlatformSet platforms, VmBackupRequest request, IOperationLog log, IArtifactLedger ledger,
         IMoverChannels? channels, IMoverImageSource? images, IPodExecutor executor, KubernetesTimings timings, CancellationToken cancellationToken)
     {
         var cluster = settings.ClusterName();
@@ -177,6 +177,7 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
                 v.Claim, v.DataPath, v.Reason, v.StorageClass, v.Driver, v.SnapshotClass,
                 snapshots.TryGetValue(v.Claim, out var taken) ? taken.RestoreSize : v.SizeBytes, v.VolumeMode, snapshots.ContainsKey(v.Claim) ? v.Claim : null))],
             Hooks = hookRecords,
+            Platforms = platforms.Ids,
         };
         var vm = new VmDescriptor
         {

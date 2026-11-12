@@ -49,6 +49,19 @@ public sealed class BackupSessionRunner(
         var repository = await repositories.GetAsync(job.RepositoryId, cancellationToken).ConfigureAwait(false);
         await using var hypervisor = await connections.OpenAsync(job.ConnectionId, cancellationToken).ConfigureAwait(false);
 
+        // A cluster's platforms, recognised at every run: they decide what is left out as made by them, and are recorded
+        // with each restore point. The connection keeps them for the console.
+        if (hypervisor is Backdafuckup.Kubernetes.IKubernetesPlatforms platforms)
+        {
+            var selection = await platforms.GetPlatformsAsync(cancellationToken).ConfigureAwait(false);
+            log.Info(selection.Describe());
+            var detected = selection.Detected.ToList();
+            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await db.Connections.Where(c => c.Id == job.ConnectionId).ExecuteUpdateAsync(u => u
+                .SetProperty(c => c.DetectedPlatforms, detected)
+                .SetProperty(c => c.ProductName, selection.Set.Display), cancellationToken).ConfigureAwait(false);
+        }
+
         // Namespaces chosen by their labels: those that have them now, next to the ones chosen by name.
         var (members, selections) = await ExpandSelectorsAsync(job, hypervisor, cancellationToken).ConfigureAwait(false);
         log.Info($"Job started ({(session.RunMode == SessionRunMode.ActiveFull ? "active full" : "incremental")}), {members.Count} {objects}, repository {job.Repository.Name}.");
