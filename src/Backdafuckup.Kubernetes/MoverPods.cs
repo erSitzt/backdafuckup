@@ -130,6 +130,62 @@ internal static class MoverPods
     };
 
     /// <summary>
+    /// The mover pod that reads a volume file by file (spec 2026-11-12-1952-kubernetes-file-level-volumes): in the work
+    /// namespace, a read-only copy of the volume's PV mounted read-only, pinned to <paramref name="node"/> when the data is
+    /// on one node (hostPath, local). It runs as root and may read files of any owner (DAC_OVERRIDE, and SETUID/SETGID to read
+    /// as a file's owner on NFS exports that map root to nobody); all allowed by the Pod Security level "baseline".
+    /// </summary>
+    public static V1Pod BuildRead(string claim, V1ObjectMeta metadata, MoverDeployment mover, MoverEndpoint endpoint, string tokenSecret, string? node) => new()
+    {
+        Metadata = metadata,
+        Spec = new V1PodSpec
+        {
+            RestartPolicy = "Never",
+            AutomountServiceAccountToken = false,
+            NodeName = node,
+            Tolerations = node is null ? null : [new V1Toleration { OperatorProperty = "Exists" }],
+            ImagePullSecrets = mover.PullSecretName is { } pull ? [new V1LocalObjectReference { Name = pull }] : null,
+            SecurityContext = new V1PodSecurityContext { RunAsUser = 0, SeccompProfile = new V1SeccompProfile { Type = "RuntimeDefault" } },
+            Volumes = [new V1Volume { Name = "volume", PersistentVolumeClaim = new V1PersistentVolumeClaimVolumeSource { ClaimName = claim, ReadOnlyProperty = true } }],
+            Containers =
+            [
+                new V1Container
+                {
+                    Name = "mover",
+                    Image = mover.Image,
+                    ImagePullPolicy = "IfNotPresent",
+                    Env =
+                    [
+                        new V1EnvVar { Name = "BDFU_MOVER_MODE", Value = "tree" },
+                        new V1EnvVar { Name = "BDFU_MOVER_DATA_URL", Value = endpoint.DataUrl.ToString() },
+                        new V1EnvVar { Name = "BDFU_MOVER_RESULT_URL", Value = endpoint.ResultUrl.ToString() },
+                        new V1EnvVar { Name = "BDFU_MOVER_SERVER_PINS", Value = string.Join(',', endpoint.ServerPins) },
+                        new V1EnvVar { Name = "BDFU_MOVER_ROOT", Value = FilesRoot },
+                        new V1EnvVar { Name = "DOTNET_EnableDiagnostics", Value = "0" },
+                        new V1EnvVar
+                        {
+                            Name = "BDFU_MOVER_TOKEN",
+                            ValueFrom = new V1EnvVarSource { SecretKeyRef = new V1SecretKeySelector { Name = tokenSecret, Key = "token" } },
+                        },
+                    ],
+                    VolumeMounts = [new V1VolumeMount { Name = "volume", MountPath = FilesRoot, ReadOnlyProperty = true }],
+                    Resources = new V1ResourceRequirements
+                    {
+                        Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("100m"), ["memory"] = new("64Mi") },
+                        Limits = new Dictionary<string, ResourceQuantity> { ["memory"] = new("512Mi") },
+                    },
+                    SecurityContext = new V1SecurityContext
+                    {
+                        AllowPrivilegeEscalation = false,
+                        ReadOnlyRootFilesystem = true,
+                        Capabilities = new V1Capabilities { Drop = ["ALL"], Add = ["DAC_OVERRIDE", "SETUID", "SETGID"] },
+                    },
+                },
+            ],
+        },
+    };
+
+    /// <summary>
     /// Watches the mover pod while the channel waits: fails the channel at once when the pod cannot start or failed (with
     /// its reason and the end of its log), and writes a line now and then while the volume is still being copied.
     /// </summary>

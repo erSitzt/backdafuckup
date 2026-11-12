@@ -21,6 +21,9 @@ public static class KubernetesArtifactKinds
     public const string Pod = "k8s.Pod";
     public const string Secret = "k8s.Secret";
 
+    /// <summary>A read-only copy of a PV for reading its volume file by file (cluster-scoped; id: its name).</summary>
+    public const string PersistentVolume = "k8s.PersistentVolume";
+
     /// <summary>A workload scaled to 0 for a PVC swap (id <c>namespace/Kind/name</c>, data: its replicas); its cleanup scales it back.</summary>
     public const string ScaledWorkload = "k8s.ScaledWorkload";
 }
@@ -34,6 +37,9 @@ public sealed record KubernetesTimings
 
     /// <summary>The mover's volume is a full copy of the snapshot (vSphere: a new disk from it), which takes long for large volumes.</summary>
     public TimeSpan MoverConnect { get; init; } = TimeSpan.FromHours(4);
+
+    /// <summary>A mover that reads a volume file by file mounts an existing volume: no copy to wait for.</summary>
+    public TimeSpan FilesMoverConnect { get; init; } = TimeSpan.FromMinutes(15);
 
     public TimeSpan Deleted { get; init; } = TimeSpan.FromMinutes(5);
 
@@ -237,6 +243,20 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
                 case KubernetesArtifactKinds.Secret:
                     await client.CoreV1.DeleteNamespacedSecretAsync(name, ns, cancellationToken: cancellationToken).ConfigureAwait(false);
                     break;
+                case KubernetesArtifactKinds.PersistentVolume:
+                {
+                    // The only PVs the product deletes: its own read-only copies, which keep the data whatever happens to them.
+                    var pv = await client.CoreV1.ReadPersistentVolumeAsync(name, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    if (pv.Metadata.Labels is not { } labels || !labels.TryGetValue(ManagedByLabel, out var managedBy) || managedBy != "backdafuckup"
+                        || pv.Spec.PersistentVolumeReclaimPolicy != "Retain")
+                    {
+                        throw new KubernetesOperationException(
+                            $"{what} in cluster {cluster} is not left to delete: it is not backdafuckup's read-only copy of a volume (label {ManagedByLabel}, reclaim policy Retain).");
+                    }
+
+                    await client.CoreV1.DeletePersistentVolumeAsync(name, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    break;
+                }
                 default:
                     throw new KubernetesOperationException($"Unknown kind of object {what} in the artifact ledger of cluster {cluster}.");
             }

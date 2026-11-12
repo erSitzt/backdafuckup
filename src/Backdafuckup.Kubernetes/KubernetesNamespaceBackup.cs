@@ -22,22 +22,45 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
     private readonly string _run;
     private readonly Dictionary<string, TakenSnapshot> _snapshots;
     private readonly ConcurrentDictionary<string, bool> _deleted = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (NamespaceVolume Volume, string? Node)> _files;
+    private readonly DeferredHooks? _postHooks;
 
     private KubernetesNamespaceBackup(
         VolumeSnapshotFlow flow, IMoverChannels? channels, MoverDeployment? mover, string run, VmDescriptor vm, IReadOnlyList<SnapshotDisk> disks,
-        Dictionary<string, TakenSnapshot> snapshots, VmMetadataBlob metadata, GuestFreezeResult? freeze, SnapshotFacts? facts, KubernetesNamespaceDescriptor descriptor)
+        Dictionary<string, TakenSnapshot> snapshots, VmMetadataBlob metadata, GuestFreezeResult? freeze, SnapshotFacts? facts, KubernetesNamespaceDescriptor descriptor,
+        Dictionary<string, (NamespaceVolume Volume, string? Node)> files, DeferredHooks? postHooks)
     {
         _flow = flow;
         _channels = channels;
         _mover = mover;
         _run = run;
         _snapshots = snapshots;
+        _files = files;
+        _postHooks = postHooks;
         Vm = vm;
         Disks = disks;
         Metadata = metadata;
         GuestFreeze = freeze;
         Snapshot = facts;
         Kubernetes = descriptor;
+        FileTrees = [.. files.Values.Select(f => new FileTreeSource(
+            f.Volume.Claim, f.Volume.Claim, "pvc", "shadow-pv", f.Volume.SizeBytes, $"PVC {descriptor.Namespace}/{f.Volume.Claim} (cluster {descriptor.Cluster})"))];
+    }
+
+    public IReadOnlyList<FileTreeSource> FileTrees { get; }
+
+    /// <summary>Post-hooks held back until the volumes read file by file are read (Velero's order: their files are read before the post-hook).</summary>
+    internal sealed class DeferredHooks(IPodExecutor executor, string cluster, string ns, IReadOnlyList<PodHook> hooks, List<KubernetesHookRecord> records)
+    {
+        private int _ran;
+
+        public async Task RunAsync(IOperationLog log, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Exchange(ref _ran, 1) == 0)
+            {
+                records.AddRange(await KubernetesHooks.RunAsync(executor, cluster, ns, hooks, log, cancellationToken).ConfigureAwait(false));
+            }
+        }
     }
 
     public VmDescriptor Vm { get; }
@@ -77,15 +100,34 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         }
 
         var volumes = await flow.CallAsync($"listing the PVCs of {ns}", () => KubernetesInventory.VolumesAsync(client, ns, cancellationToken)).ConfigureAwait(false);
+        var pods = (await flow.CallAsync($"listing the pods of {ns}", () => client.CoreV1.ListNamespacedPodAsync(ns, cancellationToken: cancellationToken)).ConfigureAwait(false)).Items;
         var withData = volumes.Where(v => v.DataPath == DataPaths.Snapshot).ToList();
-        foreach (var volume in volumes.Where(v => v.DataPath != DataPaths.Snapshot))
+
+        // Volumes without snapshots, read file by file after the snapshots. A hostPath PV without node affinity has its data
+        // on the node of the pods that use it; with none running, that node is not known.
+        var files = new Dictionary<string, (NamespaceVolume Volume, string? Node)>(StringComparer.Ordinal);
+        foreach (var volume in volumes.Where(v => v.DataPath == DataPaths.Files))
+        {
+            var node = pods.Where(p => p.Spec.Volumes?.Any(v => v.PersistentVolumeClaim?.ClaimName == volume.Claim) == true)
+                .Select(p => p.Spec.NodeName).FirstOrDefault(n => !string.IsNullOrEmpty(n));
+            if (volume.OnNodeOfConsumer && node is null)
+            {
+                log.Info($"PVC {volume.Claim}: objects only, not its data – a hostPath volume without node affinity and no pod using it: the node of its data is not known.");
+                continue;
+            }
+
+            files[volume.Claim] = (volume, volume.OnNodeOfConsumer ? node : null);
+            log.Info($"PVC {volume.Claim}: {volume.Reason}.");
+        }
+
+        foreach (var volume in volumes.Where(v => v.DataPath == DataPaths.ObjectsOnly))
         {
             log.Info($"PVC {volume.Claim}: objects only, not its data – {volume.Reason}.");
         }
 
         // The mover image first: without it no volume can be read, so nothing is snapshotted in vain.
         MoverDeployment? mover = null;
-        if (withData.Count > 0)
+        if (withData.Count > 0 || files.Count > 0)
         {
             if (channels is null || images is null)
             {
@@ -98,8 +140,8 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         var objects = await KubernetesResources.CollectAsync(client, cluster, ns, volumes, log, cancellationToken).ConfigureAwait(false);
         log.Info($"Namespace {ns}: {objects.Count} objects ({string.Join(", ", objects.PerKind.OrderByDescending(k => k.Value).ThenBy(k => k.Key, StringComparer.Ordinal).Select(k => $"{k.Value} {k.Key}"))}).");
 
-        // Hooks around the snapshots: the post-hooks run even when a snapshot fails (they undo what the pre-hooks did).
-        var pods = (await flow.CallAsync($"listing the pods of {ns}", () => client.CoreV1.ListNamespacedPodAsync(ns, cancellationToken: cancellationToken)).ConfigureAwait(false)).Items;
+        // Hooks around the snapshots: the post-hooks run even when a snapshot fails (they undo what the pre-hooks did). With
+        // volumes read file by file they wait until those are read (Velero's order).
         var preHooks = KubernetesHooks.Find(pods, KubernetesHooks.Pre);
         var postHooks = KubernetesHooks.Find(pods, KubernetesHooks.Post);
         var hookRecords = new List<KubernetesHookRecord>();
@@ -110,6 +152,7 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         TimeSpan preTime = TimeSpan.Zero;
         TimeSpan heldTime = TimeSpan.Zero;
         var succeeded = false;
+        DeferredHooks? deferred = null;
         try
         {
             hookRecords.AddRange(await KubernetesHooks.RunAsync(executor, cluster, ns, preHooks, log, cancellationToken).ConfigureAwait(false));
@@ -135,13 +178,21 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         }
         finally
         {
-            try
+            if (succeeded && files.Count > 0 && postHooks.Count > 0)
             {
-                hookRecords.AddRange(await KubernetesHooks.RunAsync(executor, cluster, ns, postHooks, log, succeeded ? cancellationToken : CancellationToken.None).ConfigureAwait(false));
+                deferred = new DeferredHooks(executor, cluster, ns, postHooks, hookRecords);
+                log.Info($"The post-hooks of {ns} run after the files of {string.Join(", ", files.Keys)} are read.");
             }
-            catch (OperationCanceledException) when (!succeeded)
+            else
             {
-                // Stopped while unwinding: the snapshots go below.
+                try
+                {
+                    hookRecords.AddRange(await KubernetesHooks.RunAsync(executor, cluster, ns, postHooks, log, succeeded ? cancellationToken : CancellationToken.None).ConfigureAwait(false));
+                }
+                catch (OperationCanceledException) when (!succeeded)
+                {
+                    // Stopped while unwinding: the snapshots go below.
+                }
             }
 
             if (!succeeded)
@@ -175,7 +226,8 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
             ObjectCount = objects.Count,
             Volumes = [.. volumes.Select(v => new KubernetesVolumeRecord(
                 v.Claim, v.DataPath, v.Reason, v.StorageClass, v.Driver, v.SnapshotClass,
-                snapshots.TryGetValue(v.Claim, out var taken) ? taken.RestoreSize : v.SizeBytes, v.VolumeMode, snapshots.ContainsKey(v.Claim) ? v.Claim : null))],
+                snapshots.TryGetValue(v.Claim, out var taken) ? taken.RestoreSize : v.SizeBytes, v.VolumeMode, snapshots.ContainsKey(v.Claim) ? v.Claim : null,
+                files.ContainsKey(v.Claim) ? v.Claim : null) with { DataPath = files.ContainsKey(v.Claim) || v.DataPath != DataPaths.Files ? v.DataPath : DataPaths.ObjectsOnly })],
             Hooks = hookRecords,
             Platforms = platforms.Ids,
         };
@@ -183,10 +235,10 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         {
             VmId = ns,
             Name = ns,
-            Description = $"Kubernetes namespace {ns} in cluster {cluster}: {objects.Count} objects, {snapshots.Count} of {volumes.Count} PVCs with data.",
+            Description = $"Kubernetes namespace {ns} in cluster {cluster}: {objects.Count} objects, {snapshots.Count + files.Count} of {volumes.Count} PVCs with data.",
         };
         return new KubernetesNamespaceBackup(
-            flow, channels, mover, run, vm, disks, snapshots, new VmMetadataBlob(KubernetesResources.Format, objects.Content), freeze, facts, descriptor);
+            flow, channels, mover, run, vm, disks, snapshots, new VmMetadataBlob(KubernetesResources.Format, objects.Content), freeze, facts, descriptor, files, deferred);
     }
 
     public Task<ChangedExtents> GetChangedExtentsAsync(SnapshotDisk disk, ChangeToken? since, IOperationLog log, CancellationToken cancellationToken) =>
@@ -202,10 +254,40 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
 
     public ChangeToken? GetNewChangeToken(SnapshotDisk disk) => null;
 
+    public async Task<IFileTreeReader> OpenFileTreeAsync(FileTreeSource tree, CancellationToken cancellationToken)
+    {
+        var (volume, node) = _files[tree.Key];
+        return await ShadowVolume.StartAsync(_flow, Kubernetes.Namespace, volume.Claim, volume.VolumeName!, _run, node, _channels!, _mover!, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task FileTreesReadAsync(IOperationLog log, CancellationToken cancellationToken)
+    {
+        if (_postHooks is not null)
+        {
+            await _postHooks.RunAsync(log, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     /// <summary>Each snapshot was deleted after its volume was read; anything left goes now.</summary>
     public async Task CommitAsync(IOperationLog log, CancellationToken cancellationToken) => await DeleteRemainingAsync().ConfigureAwait(false);
 
-    public async ValueTask DisposeAsync() => await DeleteRemainingAsync().ConfigureAwait(false);
+    public async ValueTask DisposeAsync()
+    {
+        // Post-hooks held back for file reads that never came (the backup failed before): they undo what the pre-hooks did.
+        if (_postHooks is not null)
+        {
+            try
+            {
+                await _postHooks.RunAsync(_flow.Log, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is KubernetesOperationException or HttpOperationException or IOException)
+            {
+                _flow.Log.Warning($"The post-hooks of {Kubernetes.Namespace} failed: {ex.Message}");
+            }
+        }
+
+        await DeleteRemainingAsync().ConfigureAwait(false);
+    }
 
     private async Task DeleteRemainingAsync()
     {

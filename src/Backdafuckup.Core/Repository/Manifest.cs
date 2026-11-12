@@ -176,8 +176,16 @@ public sealed record KubernetesNamespaceDescriptor
 }
 
 /// <param name="DataPath"><c>snapshot</c> (the data is the disk <paramref name="DiskKey"/>) or <c>objects-only</c> (see <paramref name="Reason"/>).</param>
+/// <param name="DiskKey">The disk with the volume's data (read through a snapshot); null without.</param>
+/// <param name="TreeKey">The file tree with the volume's files (read file by file); null without.</param>
 public sealed record KubernetesVolumeRecord(
-    string Claim, string DataPath, string? Reason, string? StorageClass, string? Driver, string? SnapshotClass, long SizeBytes, string VolumeMode, string? DiskKey);
+    string Claim, string DataPath, string? Reason, string? StorageClass, string? Driver, string? SnapshotClass, long SizeBytes, string VolumeMode, string? DiskKey,
+    string? TreeKey = null)
+{
+    /// <summary>Whether the restore point holds the volume's data (as a disk or as files), not only its objects.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HasData => DiskKey is not null || TreeKey is not null;
+}
 
 /// <param name="Phase"><c>pre</c> (before the snapshots) or <c>post</c>.</param>
 public sealed record KubernetesHookRecord(string Phase, string Pod, string Container, string Command, int? ExitCode, string? Error, double Seconds);

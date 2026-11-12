@@ -43,11 +43,17 @@ public sealed class NamespaceBackupTests
             Assert.Equal(("data-redis-test-0", $"{Ns}/data-redis-test-0", 1073741824L, "vsphere-csi"), (disk.Key, disk.SourceDiskId, disk.CapacityBytes, disk.StorageName));
             var descriptor = backup.Kubernetes!;
             Assert.Equal(("10.26.1.10", Ns, "uid-bdfu-spike", "v1.32.13+rke2r1"), (descriptor.Cluster, descriptor.Namespace, descriptor.NamespaceUid, descriptor.KubernetesVersion));
-            Assert.Equal(["data-redis-test-0:snapshot:data-redis-test-0", "nfs-data:objects-only:"], descriptor.Volumes.Select(v => $"{v.Claim}:{v.DataPath}:{v.DiskKey}"));
+            // The NFS volume is read file by file (a file tree), after the snapshots.
+            Assert.Equal(["data-redis-test-0:snapshot:data-redis-test-0:", "nfs-data:files::nfs-data"], descriptor.Volumes.Select(v => $"{v.Claim}:{v.DataPath}:{v.DiskKey}:{v.TreeKey}"));
             Assert.Contains("NFS", descriptor.Volumes[1].Reason, StringComparison.Ordinal);
-            Assert.Contains(log.Lines, l => l.StartsWith("Info: PVC nfs-data: objects only", StringComparison.Ordinal));
+            Assert.Contains(log.Lines, l => l.StartsWith("Info: PVC nfs-data: NFS volume", StringComparison.Ordinal));
+            Assert.Equal(("nfs-data", "pvc", "shadow-pv"), (backup.FileTrees.Single().Key, backup.FileTrees.Single().Kind, backup.FileTrees.Single().Reader));
 
-            // Hooks around the snapshot: pre-hook, snapshot, post-hook; application-consistent.
+            // Velero's order: pre-hook, snapshot, and the post-hook only once the files of the NFS volume are read.
+            Assert.Equal(["pre redis-test-0/redis redis-cli save"], executor.Calls);
+            Assert.Contains(log.Lines, l => l == $"Info: The post-hooks of {Ns} run after the files of nfs-data are read.");
+            await backup.FileTreesReadAsync(log, Ct);
+            await backup.FileTreesReadAsync(log, Ct); // once only
             Assert.Equal(["pre redis-test-0/redis redis-cli save", "post redis-test-0/redis redis-cli config set appendonly yes"], executor.Calls);
             var order = api.Requests.Where(r => r.StartsWith("EXEC", StringComparison.Ordinal) || r.StartsWith($"POST /{Snapshots}/namespaces/{Ns}/volumesnapshots", StringComparison.Ordinal)).ToList();
             Assert.Equal(["EXEC pre", $"POST /{Snapshots}/namespaces/{Ns}/volumesnapshots", "EXEC post"], order);

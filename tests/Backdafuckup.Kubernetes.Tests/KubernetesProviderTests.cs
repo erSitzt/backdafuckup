@@ -115,8 +115,9 @@ public sealed class KubernetesProviderTests
              redis.Properties[KubernetesInventoryProperties.UsedBy], redis.ParentNativeId));
 
         var uploads = Item(inventory, InventoryKind.VolumeClaim, "portal/uploads");
-        Assert.Equal(DataPaths.ObjectsOnly, uploads.Properties[KubernetesInventoryProperties.DataPath]);
+        Assert.Equal(DataPaths.Files, uploads.Properties[KubernetesInventoryProperties.DataPath]);
         Assert.StartsWith("NFS volume", uploads.Properties[KubernetesInventoryProperties.DataPathReason], StringComparison.Ordinal);
+        Assert.EndsWith("read file by file through a read-only copy of its PV", uploads.Properties[KubernetesInventoryProperties.DataPathReason], StringComparison.Ordinal);
         Assert.Equal(("nfs", "Deployment web"), (uploads.Properties[KubernetesInventoryProperties.Driver], uploads.Properties[KubernetesInventoryProperties.UsedBy]));
 
         var legacy = Item(inventory, InventoryKind.VolumeClaim, "legacy/data");

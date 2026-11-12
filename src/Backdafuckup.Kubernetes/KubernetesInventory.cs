@@ -40,13 +40,18 @@ public static class DataPaths
     /// <summary>A CSI snapshot, copied into the repository.</summary>
     public const string Snapshot = "snapshot";
 
+    /// <summary>Read file by file (a volume without CSI snapshots: NFS, hostPath, local), into a file tree.</summary>
+    public const string Files = "files";
+
     /// <summary>Only the volume's objects (PVC, PV); its data is not backed up (yet).</summary>
     public const string ObjectsOnly = "objects-only";
 }
 
 /// <summary>A PVC of a namespace and how its data is backed up (<see cref="DataPaths"/>).</summary>
+/// <param name="OnNodeOfConsumer">A hostPath PV without node affinity: its data is on the node of the pods that use it.</param>
 internal sealed record NamespaceVolume(
-    string Claim, string DataPath, string? Reason, string? StorageClass, string Driver, string? SnapshotClass, long SizeBytes, string VolumeMode, string? VolumeName);
+    string Claim, string DataPath, string? Reason, string? StorageClass, string Driver, string? SnapshotClass, long SizeBytes, string VolumeMode, string? VolumeName,
+    bool OnNodeOfConsumer = false);
 
 internal static class KubernetesInventory
 {
@@ -131,7 +136,8 @@ internal static class KubernetesInventory
 
     /// <summary>
     /// A volume of a CSI driver with a VolumeSnapshotClass is backed up through a snapshot (the class marked default for the
-    /// driver, else the only one); anything else only by its objects, with the reason.
+    /// driver, else the only one); an NFS, hostPath or local volume file by file through a read-only copy of its PV; anything
+    /// else only by its objects, with the reason.
     /// </summary>
     internal static (string Path, string? Reason, string? SnapshotClass) DataPathOf(V1PersistentVolume? volume, string driver, IReadOnlyList<(string Name, string Driver, bool IsDefault)> snapshotClasses)
     {
@@ -142,7 +148,13 @@ internal static class KubernetesInventory
 
         if (volume.Spec.Csi is null)
         {
-            return (DataPaths.ObjectsOnly, volume.Spec.Nfs is not null ? "NFS volume: no CSI snapshots (file-level backup comes later)" : "not a CSI volume: no snapshots", null);
+            return volume.Spec switch
+            {
+                { Nfs: { } nfs } => (DataPaths.Files, $"NFS volume ({nfs.Server}:{nfs.Path}): read file by file through a read-only copy of its PV", null),
+                { HostPath: { } host } => (DataPaths.Files, $"hostPath volume ({host.Path}): read file by file through a read-only copy of its PV", null),
+                { Local: { } local } => (DataPaths.Files, $"local volume ({local.Path}): read file by file through a read-only copy of its PV", null),
+                _ => (DataPaths.ObjectsOnly, "not a CSI volume, and not NFS, hostPath or local: its data cannot be read", null),
+            };
         }
 
         var candidates = snapshotClasses.Where(c => string.Equals(c.Driver, driver, StringComparison.Ordinal)).ToList();
@@ -182,7 +194,9 @@ internal static class KubernetesInventory
             var (path, reason, snapshotClass) = DataPathOf(volume, driver, snapshotClasses);
             var size = claim.Status?.Capacity?.TryGetValue("storage", out var capacity) == true ? capacity.ToInt64()
                 : claim.Spec.Resources?.Requests?.TryGetValue("storage", out var requested) == true ? requested.ToInt64() : 0;
-            result.Add(new NamespaceVolume(claim.Metadata.Name, path, reason, className, driver, snapshotClass, size, claim.Spec.VolumeMode ?? "Filesystem", volume?.Metadata.Name));
+            result.Add(new NamespaceVolume(
+                claim.Metadata.Name, path, reason, className, driver, snapshotClass, size, claim.Spec.VolumeMode ?? "Filesystem", volume?.Metadata.Name,
+                volume?.Spec.HostPath is not null && volume.Spec.NodeAffinity is null));
         }
 
         return result;

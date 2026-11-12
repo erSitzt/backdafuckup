@@ -302,7 +302,7 @@ public sealed partial class ApiIntegrationTests
 
                 case "pods" when ns == KubernetesSetup.WorkNamespace:
                 {
-                    // The kubelet: the files mover with its PVC's folder on the export mounted.
+                    // The kubelet: the files mover (or the tree mover reading a volume) with its PVC's folder on the export mounted.
                     var env = item["spec"]!["containers"]![0]!["env"]!.AsArray().ToDictionary(e => (string)e!["name"]!, e => (string?)e!["value"]);
                     var token = (string)nfs.Find("secrets", ns, (string)item["spec"]!["containers"]![0]!["env"]!.AsArray()
                         .Single(e => (string?)e!["name"] == "BDFU_MOVER_TOKEN")!["valueFrom"]!["secretKeyRef"]!["name"]!)!["stringData"]!["token"]!;
@@ -310,8 +310,9 @@ public sealed partial class ApiIntegrationTests
                     var volume = (string)nfs.Find("persistentvolumeclaims", ns, claim)!["spec"]!["volumeName"]!;
                     var folder = (string)nfs.Find("persistentvolumes", null, volume)!["spec"]!["nfs"]!["path"]!;
                     var options = new Backdafuckup.Mover.MoverOptions(
-                        Backdafuckup.Mover.MoverMode.Files, new Uri(env["BDFU_MOVER_DATA_URL"]!), new Uri(env["BDFU_MOVER_RESULT_URL"]!), token, [], string.Empty,
-                        Root: folder, Keep: env["BDFU_MOVER_IF_EXISTS"] == "keep", Owners: env["BDFU_MOVER_OWNERS"] == "1");
+                        env["BDFU_MOVER_MODE"] == "tree" ? Backdafuckup.Mover.MoverMode.Tree : Backdafuckup.Mover.MoverMode.Files,
+                        new Uri(env["BDFU_MOVER_DATA_URL"]!), new Uri(env["BDFU_MOVER_RESULT_URL"]!), token, [], string.Empty,
+                        Root: folder, Keep: env.GetValueOrDefault("BDFU_MOVER_IF_EXISTS") == "keep", Owners: env.GetValueOrDefault("BDFU_MOVER_OWNERS") == "1");
                     nfs.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Running" });
                     _ = Task.Run(async () =>
                     {
