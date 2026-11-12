@@ -112,7 +112,7 @@ internal static class KubernetesRestorePlanner
         // out of any restore. One line per platform.
         var platforms = rewrite.Platforms;
         foreach (var group in objects
-                     .Where(o => KubernetesObjects.Kind(o) != "CustomResourceDefinition" && KubernetesObjects.Namespace(o) is not null)
+                     .Where(o => KubernetesObjects.Kind(o) != "CustomResourceDefinition" && KubernetesObjects.Namespace(o) is not null && !KubernetesObjects.IsControlled(o))
                      .Select(o => (Object: o, Made: platforms.MadeBy(o)))
                      .Where(m => m.Made is { } made && (otherCluster || made.Always))
                      .GroupBy(m => m.Made!.Profile))
