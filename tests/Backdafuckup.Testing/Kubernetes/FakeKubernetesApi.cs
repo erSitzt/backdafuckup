@@ -44,9 +44,10 @@ public sealed class FakeKubernetesApi
     /// <summary>The log of each pod by "namespace/name".</summary>
     public Dictionary<string, string> PodLogs { get; } = [];
 
-    public FakeKubernetesApi()
+    /// <param name="kubeSystemUid">The uid of kube-system, the cluster's platform id: another one for a second cluster.</param>
+    public FakeKubernetesApi(string kubeSystemUid = "uid-kube-system")
     {
-        Add("api/v1", "namespaces", Namespace("kube-system", "uid-kube-system"));
+        Add("api/v1", "namespaces", Namespace("kube-system", kubeSystemUid));
     }
 
     public DelegatingHandler CreateHandler() => new Handler(this);

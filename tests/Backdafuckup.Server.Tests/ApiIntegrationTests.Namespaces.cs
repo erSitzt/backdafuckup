@@ -307,9 +307,10 @@ public sealed partial class ApiIntegrationTests
     /// make snapshots ready, and a mover pod runs the real mover program with <paramref name="device"/> as its volume (of
     /// <paramref name="bytes"/>); a file restore's mover pod in bdfu-spike puts the files into the folder <paramref name="live"/>.
     /// </summary>
-    private void SetUpCluster(string device, List<string> movers, List<string> restoredDevices, long bytes = 8L * 1024 * 1024, string? live = null)
+    private void SetUpCluster(
+        string device, List<string> movers, List<string> restoredDevices, long bytes = 8L * 1024 * 1024, string? live = null, Backdafuckup.Testing.Kubernetes.FakeKubernetesApi? cluster = null)
     {
-        var api = _cluster;
+        var api = cluster ?? _cluster;
         api.Add("api/v1", "namespaces", Backdafuckup.Testing.Kubernetes.FakeKubernetesApi.Namespace("bdfu-spike"));
         api.Add("api/v1", "namespaces", Backdafuckup.Testing.Kubernetes.FakeKubernetesApi.Namespace(KubernetesSetup.WorkNamespace));
         api.Add("api/v1", "configmaps", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "redis-config", ["namespace"] = "bdfu-spike" } });
