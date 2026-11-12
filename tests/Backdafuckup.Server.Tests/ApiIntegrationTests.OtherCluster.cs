@@ -182,14 +182,68 @@ public sealed partial class ApiIntegrationTests
         var point = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>("/api/restore-points?vmId=bdfu-spike", Ct))!);
 
         // A cluster with only an NFS class (nfs-subdir): a folder on the export per PVC, PVs that can change their PVC.
-        var nfs = new FakeKubernetesApi("uid-kube-system-nfs");
+        var exports = Path.Combine(_root, "nfs-export");
+        var nfs = NfsCluster("uid-kube-system-nfs", exports);
+        _clusters["10.26.3.10"] = nfs;
+        var target = await AddClusterAsync(client, "rke2-nfs", "10.26.3.10");
+
+        var started = await Read<StartedDto>(client.PostAsJsonAsync("/api/restores", new RestoreRequestDto
+        {
+            RestorePointId = point.Id, TargetConnectionId = target.Id, Mode = RestoreModeDto.AlternateLocation,
+            Kubernetes = new KubernetesRestoreDto { StorageClassMap = new() { ["vsphere-csi"] = "nfs-client" } },
+        }, Ct));
+        var session = await WaitForSessionAsync(client, started.SessionId);
+        var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{started.SessionId}/log", Ct))!.Select(l => $"{l.Severity}: {l.Message}"));
+        Assert.True(session.Session.State is "Succeeded" or "Warning", log);
+        Assert.Contains("PVC data-redis-test-0: its data goes into the StorageClass nfs-client of cluster", log, StringComparison.Ordinal);
+        Assert.Contains("as files (StorageClass nfs-client of cluster.local/nfs-subdir-external-provisioner, which has no VolumeSnapshotClass)", log, StringComparison.Ordinal);
+
+        // The PVC is bound to the volume the files went into, which has its reclaim policy back; the work objects are gone.
+        var restoredClaim = nfs.Find("persistentvolumeclaims", "bdfu-spike", "data-redis-test-0")!;
+        Assert.Equal("nfs-client", (string?)restoredClaim["spec"]!["storageClassName"]);
+        var restoredVolume = nfs.Find("persistentvolumes", null, (string)restoredClaim["spec"]!["volumeName"]!)!;
+        Assert.Equal(("Bound", "Delete", "data-redis-test-0", "bdfu-spike"), (
+            (string?)restoredVolume["status"]!["phase"], (string?)restoredVolume["spec"]!["persistentVolumeReclaimPolicy"],
+            (string?)restoredVolume["spec"]!["claimRef"]!["name"], (string?)restoredVolume["spec"]!["claimRef"]!["namespace"]));
+        Assert.Contains("PVC bdfu-spike/data-redis-test-0: bound to its restored volume", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(nfs.All("persistentvolumeclaims"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
+        Assert.DoesNotContain(nfs.All("pods"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
+        Assert.DoesNotContain(nfs.All("secrets"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
+
+        // The files of the volume are in its folder on the export, without lost+found; the root has the backed-up mode.
+        var export = (string)restoredVolume["spec"]!["nfs"]!["path"]!;
+        var expected = FsFixtures.Manifest("ext4-gpt.p1").ToDictionary(l => l[7], l => l[1]);
+        Assert.Equal(expected["hello.txt"], Sha256(Path.Combine(export, "hello.txt")));
+        Assert.Equal(expected["pattern-3m.bin"], Sha256(Path.Combine(export, "pattern-3m.bin")));
+        Assert.Equal(expected["folder/sub/deep/nested.txt"], Sha256(Path.Combine(export, "folder/sub/deep/nested.txt")));
+        Assert.Equal("hello.txt", new FileInfo(Path.Combine(export, "link-to-hello")).LinkTarget);
+        Assert.False(Directory.Exists(Path.Combine(export, "lost+found")));
+        if (!Environment.IsPrivilegedProcess)
+        {
+            Assert.Contains("restored, but owners are not kept", log, StringComparison.Ordinal); // the test runs without root, like an export with root_squash
+        }
+
+        static string Sha256(string path)
+        {
+            using var stream = File.OpenRead(path);
+            return Convert.ToHexStringLower(SHA256.HashData(stream));
+        }
+    }
+
+    /// <summary>
+    /// A cluster with only the NFS class <c>nfs-client</c> (nfs-subdir, the default): a folder in <paramref name="exports"/>
+    /// per new PVC, PVs that change their PVC when reserved for another, a files mover pod that is the real mover program on
+    /// its PVC's folder, CRDs established at once.
+    /// </summary>
+    private FakeKubernetesApi NfsCluster(string kubeSystemUid, string exports)
+    {
+        var nfs = new FakeKubernetesApi(kubeSystemUid);
         nfs.Add("api/v1", "namespaces", FakeKubernetesApi.Namespace(KubernetesSetup.WorkNamespace));
         nfs.Add("apis/storage.k8s.io/v1", "storageclasses", new JsonObject
         {
             ["metadata"] = new JsonObject { ["name"] = "nfs-client", ["annotations"] = new JsonObject { ["storageclass.kubernetes.io/is-default-class"] = "true" } },
             ["provisioner"] = "cluster.local/nfs-subdir-external-provisioner",
         });
-        var exports = Path.Combine(_root, "nfs-export");
         Directory.CreateDirectory(exports);
         nfs.Created = (plural, item) =>
         {
@@ -197,6 +251,13 @@ public sealed partial class ApiIntegrationTests
             var name = (string)item["metadata"]!["name"]!;
             switch (plural)
             {
+                case "customresourcedefinitions":
+                    // The API server: a new CRD is established at once.
+                    nfs.Mutate(() => item["status"] = new JsonObject
+                    {
+                        ["conditions"] = new JsonArray(new JsonObject { ["type"] = "Established", ["status"] = "True" }),
+                    });
+                    break;
                 case "persistentvolumeclaims" when item["spec"] is JsonObject claimSpec && claimSpec["volumeName"] is null:
                 {
                     // The provisioner: a folder on the export.
@@ -275,50 +336,7 @@ public sealed partial class ApiIntegrationTests
                 nfs.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Available" });
             }
         };
-        _clusters["10.26.3.10"] = nfs;
-        var target = await AddClusterAsync(client, "rke2-nfs", "10.26.3.10");
-
-        var started = await Read<StartedDto>(client.PostAsJsonAsync("/api/restores", new RestoreRequestDto
-        {
-            RestorePointId = point.Id, TargetConnectionId = target.Id, Mode = RestoreModeDto.AlternateLocation,
-            Kubernetes = new KubernetesRestoreDto { StorageClassMap = new() { ["vsphere-csi"] = "nfs-client" } },
-        }, Ct));
-        var session = await WaitForSessionAsync(client, started.SessionId);
-        var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{started.SessionId}/log", Ct))!.Select(l => $"{l.Severity}: {l.Message}"));
-        Assert.True(session.Session.State is "Succeeded" or "Warning", log);
-        Assert.Contains("PVC data-redis-test-0: its data goes into the StorageClass nfs-client of cluster", log, StringComparison.Ordinal);
-        Assert.Contains("as files (StorageClass nfs-client of cluster.local/nfs-subdir-external-provisioner, which has no VolumeSnapshotClass)", log, StringComparison.Ordinal);
-
-        // The PVC is bound to the volume the files went into, which has its reclaim policy back; the work objects are gone.
-        var restoredClaim = nfs.Find("persistentvolumeclaims", "bdfu-spike", "data-redis-test-0")!;
-        Assert.Equal("nfs-client", (string?)restoredClaim["spec"]!["storageClassName"]);
-        var restoredVolume = nfs.Find("persistentvolumes", null, (string)restoredClaim["spec"]!["volumeName"]!)!;
-        Assert.Equal(("Bound", "Delete", "data-redis-test-0", "bdfu-spike"), (
-            (string?)restoredVolume["status"]!["phase"], (string?)restoredVolume["spec"]!["persistentVolumeReclaimPolicy"],
-            (string?)restoredVolume["spec"]!["claimRef"]!["name"], (string?)restoredVolume["spec"]!["claimRef"]!["namespace"]));
-        Assert.Contains("PVC bdfu-spike/data-redis-test-0: bound to its restored volume", log, StringComparison.Ordinal);
-        Assert.DoesNotContain(nfs.All("persistentvolumeclaims"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
-        Assert.DoesNotContain(nfs.All("pods"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
-        Assert.DoesNotContain(nfs.All("secrets"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
-
-        // The files of the volume are in its folder on the export, without lost+found; the root has the backed-up mode.
-        var export = (string)restoredVolume["spec"]!["nfs"]!["path"]!;
-        var expected = FsFixtures.Manifest("ext4-gpt.p1").ToDictionary(l => l[7], l => l[1]);
-        Assert.Equal(expected["hello.txt"], Sha256(Path.Combine(export, "hello.txt")));
-        Assert.Equal(expected["pattern-3m.bin"], Sha256(Path.Combine(export, "pattern-3m.bin")));
-        Assert.Equal(expected["folder/sub/deep/nested.txt"], Sha256(Path.Combine(export, "folder/sub/deep/nested.txt")));
-        Assert.Equal("hello.txt", new FileInfo(Path.Combine(export, "link-to-hello")).LinkTarget);
-        Assert.False(Directory.Exists(Path.Combine(export, "lost+found")));
-        if (!Environment.IsPrivilegedProcess)
-        {
-            Assert.Contains("restored, but owners are not kept", log, StringComparison.Ordinal); // the test runs without root, like an export with root_squash
-        }
-
-        static string Sha256(string path)
-        {
-            using var stream = File.OpenRead(path);
-            return Convert.ToHexStringLower(SHA256.HashData(stream));
-        }
+        return nfs;
     }
 
     /// <summary>Adds a Kubernetes cluster (through its CA) at <paramref name="address"/>; a fake in <see cref="_clusters"/> answers for it.</summary>

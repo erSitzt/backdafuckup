@@ -154,10 +154,10 @@ public sealed class BackupSessionRunner(
             IReadOnlyList<string> names;
             if (KubernetesClusterScope.IsJobObject(selector.NativeId))
             {
-                // Every namespace (each has the label kubernetes.io/metadata.name) but the excluded ones.
+                // Every namespace but the excluded ones.
                 var excludes = KubernetesClusterScope.Excludes(selector.NativeId);
                 text = KubernetesClusterScope.Describe(excludes);
-                names = [.. (await cluster.SelectNamespacesAsync("kubernetes.io/metadata.name", cancellationToken).ConfigureAwait(false))
+                names = [.. (await cluster.SelectNamespacesAsync(string.Empty, cancellationToken).ConfigureAwait(false))
                     .Where(n => !KubernetesClusterScope.IsExcluded(n, excludes))];
                 if (members.All(m => m.NativeId != KubernetesClusterScope.Member))
                 {

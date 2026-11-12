@@ -38,6 +38,9 @@ public sealed class FakeKubernetesApi
     /// <summary>Called after an object was deleted, with its plural and the object.</summary>
     public Action<string, JsonObject>? Deleted { get; set; }
 
+    /// <summary>What a SelfSubjectAccessReview answers for (verb, resource); everything by default.</summary>
+    public Func<string, string, bool> Allowed { get; set; } = (_, _) => true;
+
     /// <summary>When set, requests without <c>Authorization: Bearer</c> this token are answered with 401.</summary>
     public string? RequiredToken { get; set; }
 
@@ -283,6 +286,14 @@ public sealed class FakeKubernetesApi
     private HttpResponseMessage Create(string apiPath, string plural, string? ns, HttpRequestMessage request)
     {
         var item = JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!.AsObject();
+        if (plural == "selfsubjectaccessreviews")
+        {
+            // The authorizer: the account may do what Allowed says.
+            var attributes = item["spec"]?["resourceAttributes"];
+            item["status"] = new JsonObject { ["allowed"] = Allowed((string?)attributes?["verb"] ?? string.Empty, (string?)attributes?["resource"] ?? string.Empty) };
+            return Json(HttpStatusCode.Created, item);
+        }
+
         var metadata = item["metadata"]?.AsObject() ?? throw new InvalidOperationException("fake: an object without metadata");
         var name = (string?)metadata["name"];
         if (ns is not null)

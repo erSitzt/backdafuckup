@@ -20,7 +20,10 @@ public interface IKubernetesNamespaceReader
 /// <summary>The namespaces of a cluster with certain labels, for jobs that select them so.</summary>
 public interface IKubernetesNamespaceSelector
 {
-    /// <summary>The names of the namespaces whose labels match <paramref name="selector"/> (kubectl -l syntax), without the work namespace and those being deleted.</summary>
+    /// <summary>
+    /// The names of the namespaces whose labels match <paramref name="selector"/> (kubectl -l syntax; empty: every namespace),
+    /// without the work namespace and those being deleted.
+    /// </summary>
     Task<IReadOnlyList<string>> SelectNamespacesAsync(string selector, CancellationToken cancellationToken);
 }
 
@@ -36,11 +39,18 @@ public interface IKubernetesAgentUpdater
 
 internal sealed class KubernetesSession(
     IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
-    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater, IKubernetesNamespaceSelector, IKubernetesRestorePlanner
+    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater, IKubernetesNamespaceSelector, IKubernetesRestorePlanner, IKubernetesClusterRestorer
 {
     private PlatformInfo? _platform;
 
     public PlatformInfo Platform => _platform ?? new PlatformInfo(string.Empty, settings.ClusterName(), settings.Address, "Kubernetes", string.Empty);
+
+    public Task<string?> MissingRestoreRightsAsync(CancellationToken cancellationToken) => KubernetesClusterRestore.MissingRightsAsync(client, settings.ClusterName(), cancellationToken);
+
+    public Task<KubernetesClusterRestoreResult> RestoreClusterScopeAsync(
+        byte[] objects, IReadOnlyDictionary<string, string> storageClassMap, bool replaceExisting, IOperationLog log, CancellationToken cancellationToken) =>
+        KubernetesClusterRestore.RestoreAsync(
+            client, settings.ClusterName(), [.. KubernetesResources.Read(objects)], storageClassMap, replaceExisting, log, timings ?? new KubernetesTimings(), cancellationToken);
 
     public Task<KubernetesRestorePlan> PlanRestoreAsync(
         KubernetesNamespaceDescriptor descriptor, byte[] objects, string targetNamespace, IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster,
@@ -111,7 +121,7 @@ internal sealed class KubernetesSession(
     {
         try
         {
-            var namespaces = await client.CoreV1.ListNamespaceAsync(labelSelector: selector, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var namespaces = await client.CoreV1.ListNamespaceAsync(labelSelector: string.IsNullOrEmpty(selector) ? null : selector, cancellationToken: cancellationToken).ConfigureAwait(false);
             return [.. namespaces.Items
                 .Where(n => n.Metadata.Name != KubernetesSetup.WorkNamespace && n.Status?.Phase != "Terminating")
                 .Select(n => n.Metadata.Name)
@@ -119,7 +129,8 @@ internal sealed class KubernetesSession(
         }
         catch (k8s.Autorest.HttpOperationException ex)
         {
-            throw new KubernetesOperationException($"Listing the namespaces with the labels {selector} in cluster {settings.ClusterName()} failed: {VolumeSnapshotFlow.Problem(ex)}", ex);
+            throw new KubernetesOperationException(
+                $"Listing the namespaces{(string.IsNullOrEmpty(selector) ? string.Empty : $" with the labels {selector}")} in cluster {settings.ClusterName()} failed: {VolumeSnapshotFlow.Problem(ex)}", ex);
         }
     }
 

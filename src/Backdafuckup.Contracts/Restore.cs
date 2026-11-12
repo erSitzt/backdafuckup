@@ -42,7 +42,52 @@ public sealed record RestoreRequestDto
 
     /// <summary>A restore point of a Kubernetes namespace: where and what to restore. <see cref="TargetConnectionId"/> is the cluster.</summary>
     public KubernetesRestoreDto? Kubernetes { get; init; }
+
+    /// <summary>
+    /// A whole-cluster restore: <see cref="RestorePointId"/> is the restore point of a run's cluster-scoped objects; they
+    /// come back first, then the chosen namespaces of the same run, each as its own task.
+    /// </summary>
+    public KubernetesClusterRestoreDto? KubernetesCluster { get; init; }
 }
+
+/// <summary>What a whole-cluster restore brings back of a run (see <see cref="RestoreRequestDto.KubernetesCluster"/>).</summary>
+public sealed record KubernetesClusterRestoreDto
+{
+    /// <summary>The namespaces of the run to restore; null: all of them.</summary>
+    public List<string>? Namespaces { get; init; }
+
+    public Dictionary<string, string> StorageClassMap { get; init; } = [];
+
+    /// <summary>Objects that exist (namespaced and cluster-scoped) are replaced; otherwise left as they are.</summary>
+    public bool ReplaceExisting { get; init; }
+}
+
+/// <summary>
+/// The restore of a whole-cluster job's run into a cluster (<c>POST /api/kubernetes/cluster-restores</c>): its cluster-scoped
+/// objects, then its namespaces.
+/// </summary>
+public sealed record ClusterRestoreRequestDto
+{
+    /// <summary>The run: the backup session of the whole-cluster job.</summary>
+    public required Guid BackupSessionId { get; init; }
+
+    /// <summary>The target cluster; empty: the one backed up.</summary>
+    public Guid? TargetConnectionId { get; init; }
+
+    public List<string>? Namespaces { get; init; }
+
+    public Dictionary<string, string> StorageClassMap { get; init; } = [];
+
+    public bool ReplaceExisting { get; init; }
+}
+
+/// <summary>A run of a whole-cluster job, as the cluster restore offers it.</summary>
+public sealed record ClusterRunDto(
+    Guid BackupSessionId, string JobName, Guid? ConnectionId, string Cluster, DateTimeOffset CreatedUtc, Guid ClusterPointId, int ClusterObjects,
+    IReadOnlyList<ClusterRunNamespaceDto> Namespaces);
+
+/// <param name="PointId">The namespace's restore point of the run (or, when it failed in the run, its newest older one; see <paramref name="FromRun"/>).</param>
+public sealed record ClusterRunNamespaceDto(string Namespace, Guid PointId, bool FromRun, DateTimeOffset CreatedUtc, int Volumes, int VolumesWithData, IReadOnlyList<string> StorageClasses);
 
 /// <summary>
 /// The restore of a namespace: the whole namespace (into the original or another namespace), or single PVCs with their data

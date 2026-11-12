@@ -11,7 +11,7 @@ using Microsoft.EntityFrameworkCore;
 namespace Backdafuckup.Server.Engine;
 
 /// <summary>Restores a whole VM from a restore point to the original or an alternate location.</summary>
-public sealed class RestoreSessionRunner(
+public sealed partial class RestoreSessionRunner(
     IDbContextFactory<AppDbContext> dbFactory,
     ConnectionManager connections,
     RepositoryManager repositories,
@@ -25,6 +25,14 @@ public sealed class RestoreSessionRunner(
     {
         var request = JsonSerializer.Deserialize<RestoreRequestDto>(session.Parameters ?? "null")
             ?? throw new InvalidOperationException("The restore session has no parameters.");
+        return request.KubernetesCluster is { } cluster
+            ? await RunClusterAsync(session, request, cluster, cancellationToken).ConfigureAwait(false)
+            : await RestorePointAsync(session, request, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Restores one restore point (a VM or a namespace) as a task of the session.</summary>
+    private async Task<(SessionState State, string Summary)> RestorePointAsync(SessionEntity session, RestoreRequestDto request, CancellationToken cancellationToken)
+    {
         RestorePointEntity point;
         await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
         {
