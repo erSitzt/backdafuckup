@@ -25,7 +25,7 @@
             <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Close" aria-label="Close" OnClick="@(() => { _setup = null; _setupFor = null; })" />
         </div>
         <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
-            Apply it in the cluster yourself (kubectl apply -f @KubernetesSetupFile, or as a Fleet bundle). It creates the work namespace backdafuckup-system, a ServiceAccount
+            Apply it in the cluster yourself (kubectl apply -f @KubernetesSetupFile, or through a GitOps tool such as Fleet or Argo CD). It creates the work namespace backdafuckup-system, a ServiceAccount
             with a token, and the roles. Backup reads every object, Secrets included, takes and removes volume snapshots and runs hooks in pods.
             @if (_setupFor is null)
             {
@@ -74,7 +74,7 @@ else if (_clusters.Count > 0)
     <MudPaper Elevation="0" Outlined="true" Class="mb-4 cq">
         <MudSimpleTable Dense="true" Hover="true" Elevation="0">
             <thead>
-                <tr><th>Cluster</th><th>Connection</th><th class="c-560">Version</th><th class="c-760">Storage for volumes</th><th class="c-950">Namespaces</th><th>Volumes</th></tr>
+                <tr><th>Cluster</th><th>Connection</th><th class="c-560">Platform</th><th class="c-760">Storage for volumes</th><th class="c-950">Namespaces</th><th>Volumes</th></tr>
             </thead>
             <tbody>
                 @foreach (var cluster in _clusters)
@@ -94,7 +94,7 @@ else if (_clusters.Count > 0)
                                 <span class="cell-sub">direct API</span>
                             }
                         </td>
-                        <td class="c-560">@cluster.ProductVersion</td>
+                        <td class="c-560">@cluster.ProductName<span class="cell-sub">@cluster.ProductVersion@(cluster.Platforms?.Override is not null ? " · set by hand" : string.Empty)</span></td>
                         <td class="c-760">
                             @foreach (var (driver, snapshot) in summary.Drivers)
                             {
@@ -179,6 +179,71 @@ else if (_clusters.Count > 0)
                                 }
                             </tbody>
                         </MudSimpleTable>
+                    </div>
+                </MudTabPanel>
+                <MudTabPanel Text="Platform">
+                    <div class="pa-4">
+                        @if (selected.Platforms is { } platforms)
+                        {
+                            <MudText Typo="Typo.body2" Class="mb-2">
+                                <b>@platforms.Display</b> · @(platforms.Override is null ? "detected" : "set by hand")
+                            </MudText>
+                            <div class="mb-3">
+                                @foreach (var p in platforms.Effective)
+                                {
+                                    <span class="mini-chip" title="@(p.Notes ?? p.Category)">@p.Name@(p.Tested ? string.Empty : " · untested")</span>
+                                }
+                            </div>
+                            <MudText Typo="Typo.subtitle2">Detected</MudText>
+                            @if (platforms.Detected.Count == 0)
+                            {
+                                <div class="cell-sub mb-3">Nothing particular: only what every Kubernetes cluster has.</div>
+                            }
+                            else
+                            {
+                                <ul class="mb-3">
+                                    @foreach (var d in platforms.Detected)
+                                    {
+                                        <li>@d.Name <span class="cell-sub">by @d.Evidence@(d.Tested ? string.Empty : " · untested: its rules come from the platform's documentation")</span></li>
+                                    }
+                                </ul>
+                            }
+
+                            <MudText Typo="Typo.subtitle2">Left out by whole-cluster jobs with the platform's list</MudText>
+                            <div class="cell-sub mb-3">@string.Join("; ", platforms.Namespaces.Select(n => $"{n.Profile}: {string.Join(", ", n.Patterns)}"))</div>
+
+                            @foreach (var note in platforms.Effective.Where(p => p.Notes is not null))
+                            {
+                                <MudAlert Severity="Severity.Info" Dense="true" Class="mb-2">@note.Name: @note.Notes</MudAlert>
+                            }
+
+                            @if (_editingPlatforms == selected.Id && _catalog is not null)
+                            {
+                                <MudPaper Elevation="0" Outlined="true" Class="pa-3 mt-2">
+                                    <MudSwitch T="bool" @bind-Value="_platformsByHand" Color="Color.Primary" Label="Set by hand instead of detecting them" />
+                                    @if (_platformsByHand)
+                                    {
+                                        @foreach (var category in _catalog.GroupBy(p => p.Category))
+                                        {
+                                            <MudText Typo="Typo.caption" Class="mt-2 d-block">@category.Key</MudText>
+                                            @foreach (var p in category)
+                                            {
+                                                <MudCheckBox T="bool" Value="@_chosenPlatforms.Contains(p.Id)" ValueChanged="@(on => TogglePlatform(p.Id, on))" Dense="true" Color="Color.Primary"
+                                                             Label="@($"{p.Name}{(p.Tested ? string.Empty : " (untested)")}")" />
+                                            }
+                                        }
+                                    }
+                                    <div class="d-flex gap-2 mt-2">
+                                        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="@(() => SavePlatformsAsync(selected))">Save</MudButton>
+                                        <MudButton OnClick="@(() => _editingPlatforms = Guid.Empty)">Cancel</MudButton>
+                                    </div>
+                                </MudPaper>
+                            }
+                            else
+                            {
+                                <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Tune" OnClick="@(() => EditPlatformsAsync(selected))">Set platforms…</MudButton>
+                            }
+                        }
                     </div>
                 </MudTabPanel>
             </MudTabs>
@@ -321,6 +386,54 @@ else if (_clusters.Count > 0)
     {
         _adding = false;
         await LoadAsync();
+    }
+
+    private Guid _editingPlatforms;
+    private bool _platformsByHand;
+    private readonly HashSet<string> _chosenPlatforms = new(StringComparer.Ordinal);
+    private List<KubernetesPlatformDto>? _catalog;
+
+    private async Task EditPlatformsAsync(ConnectionDto cluster)
+    {
+        try
+        {
+            _catalog ??= await Api.GetAsync<List<KubernetesPlatformDto>>("api/kubernetes/platforms");
+            _chosenPlatforms.Clear();
+            _chosenPlatforms.UnionWith(cluster.Platforms?.Effective.Select(p => p.Id).Where(id => id != "kubernetes") ?? []);
+            _platformsByHand = cluster.Platforms?.Override is not null;
+            _editingPlatforms = cluster.Id;
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private void TogglePlatform(string id, bool on)
+    {
+        if (on)
+        {
+            _chosenPlatforms.Add(id);
+        }
+        else
+        {
+            _chosenPlatforms.Remove(id);
+        }
+    }
+
+    private async Task SavePlatformsAsync(ConnectionDto cluster)
+    {
+        try
+        {
+            await Api.PutAsync($"api/connections/{cluster.Id}/platforms", new SetConnectionPlatformsDto(_platformsByHand ? [.. _chosenPlatforms] : null));
+            _editingPlatforms = Guid.Empty;
+            Snackbar.Add(_platformsByHand ? $"Platforms of {cluster.DisplayName} set." : $"Platforms of {cluster.DisplayName} are detected again.", Severity.Success);
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
     }
 
     private async Task RescanAsync(ConnectionDto cluster)

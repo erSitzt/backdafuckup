@@ -88,9 +88,29 @@ else
                     }
                     @if (IsCluster && _wholeCluster)
                     {
+                        @if (_legacyExcludes)
+                        {
+                            <MudAlert Severity="Severity.Info" Dense="true" Class="mb-2">
+                                This job leaves out the fixed list of namespaces from before platforms were detected.
+                                <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Primary" OnClick="UsePlatformExcludes">Use the platform's list</MudButton>
+                            </MudAlert>
+                        }
+
+                        <MudSwitch T="bool" @bind-Value="_platformExcludes" Color="Color.Primary" Class="mb-1"
+                                   Label="@($"Leave out what the cluster's platforms make ({SelectedPlatforms?.Display ?? "detected at the first scan"})")" />
+                        @if (_platformExcludes && SelectedPlatforms is { } platforms)
+                        {
+                            <div class="cell-sub mb-2">
+                                @foreach (var group in platforms.Namespaces)
+                                {
+                                    <span class="mini-chip" title="Checked at every run against the platforms detected then">@group.Profile: @string.Join(", ", group.Patterns)</span>
+                                }
+                            </div>
+                        }
+
                         <MudTextField T="string" @bind-Value="_excludes" Immediate="true" DebounceInterval="250" Variant="Variant.Outlined" Margin="Margin.Dense"
-                                      Label="Leave out these namespaces" Error="@(ExcludesError is not null)" ErrorText="@ExcludesError"
-                                      HelperText="Names or patterns with *, separated by commas. By default what Kubernetes, RKE2, Rancher and Fleet make themselves; backdafuckup-system is always left out." />
+                                      Label="@(_platformExcludes ? "Also leave out" : "Leave out these namespaces")" Error="@(ExcludesError is not null)" ErrorText="@ExcludesError"
+                                      HelperText="Names or patterns with *, separated by commas. backdafuckup-system is always left out." />
                         <div class="cell-sub mt-1 mb-2">
                             Backed up now: @(WholeClusterNamespaces() is { Count: > 0 } now ? string.Join(", ", now) : "no namespace") and the cluster-scoped objects.
                         </div>
@@ -644,15 +664,36 @@ else
     /// <summary>Kubernetes: the whole cluster, without the namespaces of <see cref="_excludes"/>.</summary>
     private bool _wholeCluster;
 
-    private string _excludes = string.Join(", ", KubernetesClusterScope.DefaultExcludes);
+    /// <summary>Kubernetes: leave out what the cluster's platforms make (<see cref="KubernetesClusterScope.PlatformToken"/>), expanded at each run.</summary>
+    private bool _platformExcludes = true;
 
-    private IReadOnlyList<string> ExcludeList() => _excludes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    /// <summary>The job's own exclude patterns.</summary>
+    private string _excludes = string.Empty;
+
+    /// <summary>A job saved with the fixed list from before platforms were detected.</summary>
+    private bool _legacyExcludes;
+
+    private IReadOnlyList<string> ExcludeList() =>
+        [.. (_platformExcludes ? [KubernetesClusterScope.PlatformToken] : Array.Empty<string>()), .. _excludes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
 
     private string? ExcludesError => KubernetesClusterScope.Validate(ExcludeList());
 
+    /// <summary>The platforms of the chosen cluster, as last detected (or set by hand).</summary>
+    private KubernetesPlatformsDto? SelectedPlatforms => _pools?.FirstOrDefault(p => p.Id == _connectionId)?.Platforms;
+
     /// <summary>The namespaces of the inventory a whole-cluster run would back up now.</summary>
-    private List<string> WholeClusterNamespaces() =>
-        [.. _vms.Select(v => v.Name).Where(n => !KubernetesClusterScope.IsExcluded(n, ExcludeList())).Order(StringComparer.Ordinal)];
+    private List<string> WholeClusterNamespaces()
+    {
+        var excludes = KubernetesClusterScope.Expand(ExcludeList(), SelectedPlatforms?.Namespaces.SelectMany(n => n.Patterns) ?? []);
+        return [.. _vms.Select(v => v.Name).Where(n => !KubernetesClusterScope.IsExcluded(n, excludes)).Order(StringComparer.Ordinal)];
+    }
+
+    private void UsePlatformExcludes()
+    {
+        _platformExcludes = true;
+        _excludes = string.Empty;
+        _legacyExcludes = false;
+    }
 
     private string? SelectorError => string.IsNullOrWhiteSpace(_labelSelector) ? null : KubernetesLabelSelector.Parse(_labelSelector).Error;
 
@@ -774,7 +815,10 @@ else
                 if (KubernetesClusterScope.IsJobObject(o.NativeId))
                 {
                     _wholeCluster = true;
-                    _excludes = string.Join(", ", KubernetesClusterScope.Excludes(o.NativeId));
+                    var excludes = KubernetesClusterScope.Excludes(o.NativeId);
+                    _platformExcludes = excludes.Contains(KubernetesClusterScope.PlatformToken);
+                    _excludes = string.Join(", ", excludes.Where(e => e != KubernetesClusterScope.PlatformToken));
+                    _legacyExcludes = !_platformExcludes && excludes.ToHashSet(StringComparer.Ordinal).SetEquals(KubernetesClusterScope.LegacyDefaultExcludes);
                     continue;
                 }
 

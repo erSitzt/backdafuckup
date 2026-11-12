@@ -27,7 +27,7 @@
                 server's address (Guest agents → Settings) on port 9555, and the mover image has to be in a registry the cluster can pull from.
             </MudText>
             <div class="form-wide">
-                <MudTextField @bind-Value="_displayName" Label="Display name" Variant="Variant.Outlined" AutoFocus="true" HelperText="E.g. the cluster's name in Rancher." />
+                <MudTextField @bind-Value="_displayName" Label="Display name" Variant="Variant.Outlined" AutoFocus="true" HelperText="E.g. the cluster's name in your management tool (Rancher, OpenShift, a cloud console)." />
             </div>
         }
         else
@@ -63,7 +63,7 @@
             }
         </div>
         <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
-            Apply it in the cluster (kubectl apply -f backdafuckup-setup.yaml, or as a Fleet bundle). It holds the agent's connect token: keep it like a password.
+            Apply it in the cluster (kubectl apply -f backdafuckup-setup.yaml, or through a GitOps tool such as Fleet or Argo CD). It holds the agent's connect token: keep it like a password.
         </MudText>
         @if (_manifest is not null)
         {
