@@ -105,6 +105,14 @@ internal sealed class KubernetesApplier(IKubernetes client, IReadOnlyDictionary<
         ["HorizontalPodAutoscaler"] = "horizontalpodautoscalers",
         ["StorageClass"] = "storageclasses",
         ["CustomResourceDefinition"] = "customresourcedefinitions",
+        ["ClusterRole"] = "clusterroles",
+        ["ClusterRoleBinding"] = "clusterrolebindings",
+        ["PriorityClass"] = "priorityclasses",
+        ["IngressClass"] = "ingressclasses",
+        ["RuntimeClass"] = "runtimeclasses",
+        ["VolumeSnapshotClass"] = "volumesnapshotclasses",
+        ["ValidatingWebhookConfiguration"] = "validatingwebhookconfigurations",
+        ["MutatingWebhookConfiguration"] = "mutatingwebhookconfigurations",
     };
 
     /// <summary>The object as the cluster has it; null when it does not exist.</summary>
