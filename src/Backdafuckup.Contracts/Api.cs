@@ -290,7 +290,10 @@ public sealed record SessionDetailDto(SessionSummaryDto Session, IReadOnlyList<S
 public sealed record StartedDto(Guid SessionId);
 
 // ---- Restore points ----
-public sealed record RestorePointDiskDto(string Key, string Name, long CapacityBytes, string? StorageId, string? StorageName, string Mode, string? FullReason, long ReadBytes, long NewStoredBytes);
+/// <param name="Kind">"disk", or "files" for a volume backed up file by file (with <paramref name="FileCount"/> and <paramref name="IssueCount"/>).</param>
+public sealed record RestorePointDiskDto(
+    string Key, string Name, long CapacityBytes, string? StorageId, string? StorageName, string Mode, string? FullReason, long ReadBytes, long NewStoredBytes,
+    string Kind = "disk", long? FileCount = null, long? IssueCount = null);
 
 public sealed record RestorePointNicDto(string Device, string Mac, string NetworkId, string NetworkName);
 

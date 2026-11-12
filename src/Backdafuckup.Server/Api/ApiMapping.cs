@@ -80,7 +80,7 @@ internal static class ApiMapping
         r.Id, r.RepositoryId, r.JobId, r.JobName, r.ConnectionId, r.VmNativeId, r.VmName, r.CreatedUtc, r.Kind.ToString(), r.State.ToString(),
         r.LogicalBytes, r.NewStoredBytes,
         r.Disks.OrderBy(d => d.DiskKey, StringComparer.Ordinal).Select(d => new RestorePointDiskDto(
-            d.DiskKey, d.Name, d.CapacityBytes, d.StorageId, d.StorageName, d.Mode.ToString(), d.FullReason, d.ReadBytes, d.NewStoredBytes)).ToList(),
+            d.DiskKey, d.Name, d.CapacityBytes, d.StorageId, d.StorageName, d.Mode.ToString(), d.FullReason, d.ReadBytes, d.NewStoredBytes, d.Kind, d.FileCount, d.IssueCount)).ToList(),
         (r.Vm?.Nics ?? []).Select(n => new RestorePointNicDto(n.Device, n.Mac, n.NetworkId, n.NetworkName)).ToList(),
         r.Vm?.VCpus ?? 0,
         r.Vm?.MemoryBytes ?? 0,

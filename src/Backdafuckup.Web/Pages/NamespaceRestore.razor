@@ -22,7 +22,7 @@ else
     <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
         <MudText Typo="Typo.body2">
             Restore point from <b>@Fmt.Time(_point.CreatedUtc)</b> (job @_point.JobName) · cluster @_details.Cluster · Kubernetes @_details.KubernetesVersion ·
-            @_details.Objects.Count objects · @_details.Volumes.Count(v => v.DataPath == "snapshot") of @_details.Volumes.Count PVCs with data ·
+            @_details.Objects.Count objects · @_details.Volumes.Count(v => KubernetesDataPaths.HasData(v.DataPath)) of @_details.Volumes.Count PVCs with data ·
             <ConsistencyChip Consistency="@_point.Consistency" Reason="@_point.ConsistencyReason" Warning="@_point.ConsistencyWarning" Hooks="true" />
         </MudText>
     </MudPaper>
@@ -85,7 +85,7 @@ else
                         <tbody>
                             @foreach (var volume in _details.Volumes)
                             {
-                                var withData = volume.DataPath == "snapshot";
+                                var withData = KubernetesDataPaths.HasData(volume.DataPath);
                                 <tr class="@(_claims.ContainsKey(volume.Claim) ? "row-selected" : null)">
                                     <td><MudCheckBox T="bool" Value="@_claims.ContainsKey(volume.Claim)" ValueChanged="@(on => ToggleClaim(volume.Claim, on))" Dense="true" Color="Color.Primary" Disabled="@(!withData)" /></td>
                                     <td>@volume.Claim@if (!withData) {<span class="cell-sub">objects only: @volume.Reason</span>}</td>
@@ -302,7 +302,7 @@ else
         .Select(g => (g.Key, g.OrderBy(o => o.Kind, StringComparer.Ordinal).ThenBy(o => o.Name, StringComparer.Ordinal).ToList()));
 
     private bool HasData(string key) => key.StartsWith("PersistentVolumeClaim/", StringComparison.Ordinal)
-        && _details!.Volumes.Any(v => v.DataPath == "snapshot" && $"PersistentVolumeClaim/{v.Claim}" == key);
+        && _details!.Volumes.Any(v => KubernetesDataPaths.HasData(v.DataPath) && $"PersistentVolumeClaim/{v.Claim}" == key);
 
     private static string Key(KubernetesObjectDto o) => $"{o.Kind}/{o.Name}";
 

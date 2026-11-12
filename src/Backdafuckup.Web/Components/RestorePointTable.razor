@@ -59,7 +59,7 @@
                             <span class="@pill.Css" title="@pill.Title">@if (pill.Icon is not null) { @AppIcons.Svg(pill.Icon, "mini-chip-icon") }@pill.Text</span>
                         }
                     </td>
-                    <td class="c-760 num">@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))</td>
+                    <td class="c-760 num" title="@string.Join("\n", p.Disks.Select(d => d.Kind == "files" ? $"{d.Name}: {d.FileCount} file(s) read file by file, {Fmt.Bytes(d.CapacityBytes)}{(d.IssueCount > 0 ? $", {d.IssueCount} not read" : string.Empty)}" : $"{d.Name}: {Fmt.Bytes(d.CapacityBytes)}"))">@p.Disks.Count (@Fmt.Bytes(p.LogicalBytes))@if (p.Disks.Any(d => d.Kind == "files")) {<span class="cell-sub">@p.Disks.Count(d => d.Kind == "files") as files</span>}</td>
                     <td class="c-560 num">@Fmt.Bytes(p.NewStoredBytes)</td>
                     @if (ShowJob)
                     {

@@ -62,7 +62,7 @@ public static class OperationEndpoints
                 await using var reader = await repository.OpenRestorePointAsync(point.Id, ct);
                 var volumes = reader.Manifest.Kubernetes?.Volumes ?? [];
                 namespaces.Add(new ClusterRunNamespaceDto(
-                    name, point.Id, fromRun, point.CreatedUtc, volumes.Count, volumes.Count(v => v.DiskKey is not null),
+                    name, point.Id, fromRun, point.CreatedUtc, volumes.Count, volumes.Count(v => v.HasData),
                     [.. volumes.Select(v => v.StorageClass).OfType<string>().Where(c => c.Length > 0).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)]));
             }
 

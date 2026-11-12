@@ -96,13 +96,14 @@ else if (_clusters.Count > 0)
                         </td>
                         <td class="c-560">@cluster.ProductName<span class="cell-sub">@cluster.ProductVersion@(cluster.Platforms?.Override is not null ? " · set by hand" : string.Empty)</span></td>
                         <td class="c-760">
-                            @foreach (var (driver, snapshot) in summary.Drivers)
+                            @foreach (var (driver, path) in summary.Drivers)
                             {
-                                <span class="@(snapshot ? "mini-chip success" : "mini-chip")" title="@(snapshot ? "Volumes of this driver are backed up through a CSI snapshot." : "Volumes of this driver: objects only.")">@driver · @(snapshot ? "snapshots" : "objects only")</span>
+                                <span class="@(KubernetesDataPaths.HasData(path) ? "mini-chip success" : "mini-chip")"
+                                      title="@(path switch { KubernetesDataPaths.Snapshot => "Volumes of this driver are backed up through a CSI snapshot.", KubernetesDataPaths.Files => "Volumes of this driver are backed up file by file, through a read-only copy of their PV.", _ => "Volumes of this driver: objects only." })">@driver · @(path == KubernetesDataPaths.Snapshot ? "snapshots" : KubernetesDataPaths.Label(path))</span>
                             }
                         </td>
                         <td class="c-950 num">@summary.Namespaces</td>
-                        <td>@summary.Snapshot snapshot<span class="cell-sub">@summary.ObjectsOnly objects only</span></td>
+                        <td>@summary.Snapshot snapshot@(summary.Files > 0 ? $", {summary.Files} files" : string.Empty)<span class="cell-sub">@summary.ObjectsOnly objects only</span></td>
                     </tr>
                 }
             </tbody>
@@ -147,9 +148,14 @@ else if (_clusters.Count > 0)
                                         <td class="c-760">@(string.IsNullOrEmpty(p.GetValueOrDefault("storageClass")) ? "–" : p["storageClass"])<span class="cell-sub">@p.GetValueOrDefault("driver")</span></td>
                                         <td class="c-950">@p.GetValueOrDefault("usedBy")</td>
                                         <td>
-                                            @if (p.GetValueOrDefault("dataPath") == "snapshot")
+                                            @if (p.GetValueOrDefault("dataPath") == KubernetesDataPaths.Snapshot)
                                             {
                                                 <span class="mini-chip success" title="@($"VolumeSnapshotClass {p.GetValueOrDefault("snapshotClass")}")">snapshot</span>
+                                            }
+                                            else if (p.GetValueOrDefault("dataPath") == KubernetesDataPaths.Files)
+                                            {
+                                                <span class="mini-chip success" title="@p.GetValueOrDefault("dataPathReason")">files</span>
+                                                <span class="cell-sub">@p.GetValueOrDefault("dataPathReason")</span>
                                             }
                                             else
                                             {
@@ -166,14 +172,14 @@ else if (_clusters.Count > 0)
                 <MudTabPanel Text="Namespaces">
                     <div class="cq" style="overflow-x: auto">
                         <MudSimpleTable Dense="true" Hover="true" Elevation="0">
-                            <thead><tr><th>Namespace</th><th class="num">Volumes</th><th class="num">Through a snapshot</th><th class="c-560">Phase</th></tr></thead>
+                            <thead><tr><th>Namespace</th><th class="num">Volumes</th><th class="num">With data</th><th class="c-560">Phase</th></tr></thead>
                             <tbody>
                                 @foreach (var ns in items.Where(i => i.Kind == "Namespace").OrderBy(i => i.Name))
                                 {
                                     <tr>
                                         <td>@ns.Name</td>
                                         <td class="num">@ns.Properties.GetValueOrDefault("volumeClaims")</td>
-                                        <td class="num">@ns.Properties.GetValueOrDefault("snapshotVolumes")</td>
+                                        <td class="num" title="Through a snapshot, or file by file">@WithData(ns)</td>
                                         <td class="c-560">@ns.Properties.GetValueOrDefault("phase")</td>
                                     </tr>
                                 }
@@ -291,19 +297,28 @@ else if (_clusters.Count > 0)
         }
     }
 
-    /// <summary>Per cluster: the CSI drivers (and NFS) of its volumes and whether they go through a snapshot, and the counts.</summary>
-    private (IReadOnlyList<(string Driver, bool Snapshot)> Drivers, int Namespaces, int Snapshot, int ObjectsOnly) Summary(Guid clusterId)
+    /// <summary>
+    /// Per cluster: the CSI drivers (and NFS) of its volumes and how their data is backed up (the best of the driver's
+    /// volumes), and the counts.
+    /// </summary>
+    private (IReadOnlyList<(string Driver, string Path)> Drivers, int Namespaces, int Snapshot, int Files, int ObjectsOnly) Summary(Guid clusterId)
     {
         var items = _inventory.GetValueOrDefault(clusterId) ?? [];
         var volumes = items.Where(i => i.Kind == "VolumeClaim").ToList();
+        static int Rank(string? path) => path switch { KubernetesDataPaths.Snapshot => 2, KubernetesDataPaths.Files => 1, _ => 0 };
         var drivers = volumes
             .GroupBy(v => string.IsNullOrEmpty(v.Properties.GetValueOrDefault("driver")) ? "unbound" : v.Properties["driver"])
-            .Select(g => (g.Key, g.Any(v => v.Properties.GetValueOrDefault("dataPath") == "snapshot")))
-            .OrderByDescending(d => d.Item2).ThenBy(d => d.Key)
+            .Select(g => (g.Key, g.Select(v => v.Properties.GetValueOrDefault("dataPath")).MaxBy(Rank) ?? KubernetesDataPaths.ObjectsOnly))
+            .OrderByDescending(d => Rank(d.Item2)).ThenBy(d => d.Key)
             .ToList();
-        var snapshot = volumes.Count(v => v.Properties.GetValueOrDefault("dataPath") == "snapshot");
-        return (drivers, items.Count(i => i.Kind == "Namespace"), snapshot, volumes.Count - snapshot);
+        var snapshot = volumes.Count(v => v.Properties.GetValueOrDefault("dataPath") == KubernetesDataPaths.Snapshot);
+        var files = volumes.Count(v => v.Properties.GetValueOrDefault("dataPath") == KubernetesDataPaths.Files);
+        return (drivers, items.Count(i => i.Kind == "Namespace"), snapshot, files, volumes.Count - snapshot - files);
     }
+
+    /// <summary>A namespace's PVCs whose data is backed up (through a snapshot or file by file).</summary>
+    private static int WithData(InventoryItemDto ns) =>
+        (int.TryParse(ns.Properties.GetValueOrDefault("snapshotVolumes"), out var s) ? s : 0) + (int.TryParse(ns.Properties.GetValueOrDefault("fileVolumes"), out var f) ? f : 0);
 
     private async Task ToggleSetupAsync()
     {

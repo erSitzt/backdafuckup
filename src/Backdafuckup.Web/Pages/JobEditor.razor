@@ -43,7 +43,7 @@ else
                             @(Id is not null
                                 ? "A saved job keeps what it backs up; create a new job for the other kind."
                                 : IsCluster
-                                    ? "Namespaces of a Kubernetes cluster: their objects, and the data of their volumes whose storage takes CSI snapshots."
+                                    ? "Namespaces of a Kubernetes cluster: their objects, and the data of their volumes (through a CSI snapshot, or file by file for NFS, hostPath and local volumes)."
                                     : "VMs of a pool: their disks, with change tracking, and optionally application-consistent through the agent.")
                         </MudText>
                     </div>
@@ -133,7 +133,7 @@ else
                         </div>
                         <div class="table-box">
                             <MudSimpleTable Dense="true" Hover="true" Elevation="0" FixedHeader="true">
-                                <thead><tr><th style="width:48px"></th><th>Namespace</th><th class="num">PVCs</th><th class="num">With data (snapshot)</th><th>Phase</th></tr></thead>
+                                <thead><tr><th style="width:48px"></th><th>Namespace</th><th class="num">PVCs</th><th class="num" title="Through a snapshot, or file by file">With data</th><th>Phase</th></tr></thead>
                                 <tbody>
                                     @foreach (var ns in _vms.Where(v => string.IsNullOrWhiteSpace(_vmFilter) || v.Name.Contains(_vmFilter, StringComparison.OrdinalIgnoreCase)))
                                     {
@@ -147,7 +147,7 @@ else
                                                 }
                                             </td>
                                             <td class="num">@ns.Properties.GetValueOrDefault("volumeClaims")</td>
-                                            <td class="num">@ns.Properties.GetValueOrDefault("snapshotVolumes")</td>
+                                            <td class="num">@((int.TryParse(ns.Properties.GetValueOrDefault("snapshotVolumes"), out var sv) ? sv : 0) + (int.TryParse(ns.Properties.GetValueOrDefault("fileVolumes"), out var fv) ? fv : 0))</td>
                                             <td>@ns.Properties.GetValueOrDefault("phase")</td>
                                         </tr>
                                     }
@@ -158,9 +158,10 @@ else
                             <MudIcon Icon="@AppIcons.Kubernetes" Size="Size.Small" />
                             <span>
                                 Every object of a namespace is backed up, Secrets included. PVCs on a CSI driver with a VolumeSnapshotClass are backed up with their data
-                                (a snapshot, read by a mover pod, deleted right after); other PVCs, e.g. on NFS, only as objects. Pods with the annotation
+                                (a snapshot, read by a mover pod, deleted right after); PVCs on NFS, hostPath and local volumes file by file, through a read-only copy of
+                                their PV, while they are in use; other PVCs only as objects. Pods with the annotation
                                 <span class="mono nowrap">pre.hook.backup.velero.io/command</span> run it before the snapshots (application-consistent), and
-                                <span class="mono nowrap">post.hook.backup.velero.io/command</span> after them.
+                                <span class="mono nowrap">post.hook.backup.velero.io/command</span> after them (after the files are read, when there are such volumes).
                             </span>
                         </div>
                         break;
@@ -601,7 +602,7 @@ else
     [
         "How the job appears in lists, sessions and notifications.",
         IsCluster
-            ? "The namespaces this job backs up, all from one cluster: their objects, and the data of their PVCs whose storage takes CSI snapshots."
+            ? "The namespaces this job backs up, all from one cluster: their objects, and the data of their PVCs (through a CSI snapshot, or file by file for NFS, hostPath and local volumes)."
             : "The VMs this job backs up, all from one pool. With memory takes a snapshot with RAM of a VM.",
         IsCluster
             ? "Where the restore points go and how many are kept; how many namespaces and volumes are read at a time."

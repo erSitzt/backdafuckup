@@ -14,6 +14,9 @@ public static class KubernetesInventoryProperties
     public const string VolumeClaims = "volumeClaims";
     public const string SnapshotVolumes = "snapshotVolumes";
 
+    /// <summary>A namespace's PVCs whose data is read file by file (NFS, hostPath, local).</summary>
+    public const string FileVolumes = "fileVolumes";
+
     /// <summary>A namespace's labels, <c>key=value</c> joined with commas (jobs select namespaces by them).</summary>
     public const string Labels = "labels";
     public const string SizeBytes = "sizeBytes";
@@ -82,7 +85,7 @@ internal static class KubernetesInventory
         var usedBy = await UsedByAsync(client, cancellationToken).ConfigureAwait(false);
 
         var items = new List<InventoryItem>();
-        var perNamespace = new Dictionary<string, (int Claims, int Snapshot)>(StringComparer.Ordinal);
+        var perNamespace = new Dictionary<string, (int Claims, int Snapshot, int Files)>(StringComparer.Ordinal);
         foreach (var claim in claims.Items)
         {
             var ns = claim.Metadata.NamespaceProperty;
@@ -109,18 +112,19 @@ internal static class KubernetesInventory
             };
             items.Add(new InventoryItem(InventoryKind.VolumeClaim, $"{ns}/{claim.Metadata.Name}", claim.Metadata.Name, ns, properties));
             var counts = perNamespace.GetValueOrDefault(ns);
-            perNamespace[ns] = (counts.Claims + 1, counts.Snapshot + (path == DataPaths.Snapshot ? 1 : 0));
+            perNamespace[ns] = (counts.Claims + 1, counts.Snapshot + (path == DataPaths.Snapshot ? 1 : 0), counts.Files + (path == DataPaths.Files ? 1 : 0));
         }
 
         foreach (var ns in namespaces.Items)
         {
             var name = ns.Metadata.Name;
-            var (claimCount, snapshotCount) = perNamespace.GetValueOrDefault(name);
+            var (claimCount, snapshotCount, fileCount) = perNamespace.GetValueOrDefault(name);
             items.Add(new InventoryItem(InventoryKind.Namespace, name, name, platform.PlatformId, new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 [KubernetesInventoryProperties.Phase] = ns.Status?.Phase ?? string.Empty,
                 [KubernetesInventoryProperties.VolumeClaims] = claimCount.ToString(CultureInfo.InvariantCulture),
                 [KubernetesInventoryProperties.SnapshotVolumes] = snapshotCount.ToString(CultureInfo.InvariantCulture),
+                [KubernetesInventoryProperties.FileVolumes] = fileCount.ToString(CultureInfo.InvariantCulture),
                 [KubernetesInventoryProperties.Labels] = string.Join(',', (ns.Metadata.Labels ?? new Dictionary<string, string>()).OrderBy(l => l.Key, StringComparer.Ordinal).Select(l => $"{l.Key}={l.Value}")),
             }));
         }
