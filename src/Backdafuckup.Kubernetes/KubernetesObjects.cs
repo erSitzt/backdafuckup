@@ -33,21 +33,6 @@ internal static class KubernetesObjects
         ?? Text(o["metadata"]?["annotations"]?["meta.helm.sh/release-name"])
         ?? Text(o["metadata"]?["labels"]?["app.kubernetes.io/name"]);
 
-    /// <summary>
-    /// Made by Rancher: the RoleBindings and Roles of its projects and users (with Rancher's labels), which point at Rancher's
-    /// own ClusterRoles, and the objects of its API groups (<c>*.cattle.io</c>, e.g. the App records it keeps of the Helm
-    /// releases, whose release Secrets are restored). Rancher makes them again where it manages the cluster, so they do not
-    /// go into another cluster.
-    /// </summary>
-    public static bool IsRancherMade(JsonObject o) =>
-        IsRancherGroup(((string?)o["apiVersion"] ?? string.Empty).Split('/')[0])
-        || (Kind(o) is "RoleBinding" or "Role"
-            && o["metadata"]?["labels"] is JsonObject labels
-            && (labels.Any(kv => kv.Key.StartsWith("authz.cluster.cattle.io/", StringComparison.Ordinal)) || Text(labels["cattle.io/creator"]) == "norman"));
-
-    /// <summary>An API group of Rancher's (<c>cattle.io</c> or <c>*.cattle.io</c>).</summary>
-    public static bool IsRancherGroup(string group) => group == "cattle.io" || group.EndsWith(".cattle.io", StringComparison.Ordinal);
-
     /// <summary>Objects the cluster makes itself, never restored: ServiceAccount tokens, the root CA ConfigMap, the default ServiceAccount.</summary>
     public static bool IsClusterMade(JsonObject o) => Kind(o) switch
     {
@@ -261,9 +246,10 @@ internal static class KubernetesObjects
             {
                 // Finalizers belong to controllers of the old cluster: the new one may have none to remove them.
                 metadata.Remove("finalizers");
+                // Fields a platform of the old cluster set for itself (Rancher's project and lifecycle), meaningless elsewhere.
                 foreach (var map in new[] { metadata["annotations"], metadata["labels"] }.OfType<JsonObject>())
                 {
-                    foreach (var key in map.Select(kv => kv.Key).Where(IsRancherField).ToList())
+                    foreach (var key in map.Select(kv => kv.Key).Where(rewrite.Platforms.IsStripped).ToList())
                     {
                         map.Remove(key);
                     }
@@ -380,14 +366,6 @@ internal static class KubernetesObjects
 
     private const string LegacyClassAnnotation = "volume.beta.kubernetes.io/storage-class";
 
-    /// <summary>Rancher's fields of an object in a cluster it manages (project, lifecycle, creator), meaningless elsewhere.</summary>
-    private static bool IsRancherField(string key) =>
-        key.StartsWith("field.cattle.io/", StringComparison.Ordinal)
-        || key.StartsWith("lifecycle.cattle.io/", StringComparison.Ordinal)
-        || key.StartsWith("cattle.io/", StringComparison.Ordinal)
-        || key.StartsWith("authz.management.cattle.io/", StringComparison.Ordinal)
-        || key.StartsWith("management.cattle.io/", StringComparison.Ordinal);
-
     /// <summary>Whether a label selector (match labels) selects pods with <paramref name="labels"/>.</summary>
     private static bool Selects(JsonObject selector, IReadOnlyDictionary<string, string> labels) =>
         selector.All(kv => labels.TryGetValue(kv.Key, out var value) && value == Text(kv.Value));
@@ -397,11 +375,15 @@ internal static class KubernetesObjects
 
 /// <summary>
 /// How objects change on their way into the target of a restore: StorageClasses of the restore point mapped to classes of
-/// the target (unmapped ones keep their name), and whether the target is another cluster than the restore point's.
+/// the target (unmapped ones keep their name), whether the target is another cluster than the restore point's, and the
+/// platforms of the cluster the objects come from (what they made themselves, which fields they set for themselves).
 /// </summary>
-internal sealed record ObjectRewrite(IReadOnlyDictionary<string, string> StorageClasses, bool OtherCluster)
+internal sealed record ObjectRewrite(IReadOnlyDictionary<string, string> StorageClasses, bool OtherCluster, KubernetesPlatformSet? Source = null)
 {
     public static readonly ObjectRewrite None = new(new Dictionary<string, string>(StringComparer.Ordinal), false);
+
+    /// <summary>The source cluster's platforms; the rules from before detection when the restore point names none.</summary>
+    public KubernetesPlatformSet Platforms => Source ?? KubernetesPlatformSet.Legacy;
 
     public string? MapClass(string? storageClass) =>
         storageClass is not null && StorageClasses.TryGetValue(storageClass, out var mapped) && !string.IsNullOrWhiteSpace(mapped) ? mapped : storageClass;

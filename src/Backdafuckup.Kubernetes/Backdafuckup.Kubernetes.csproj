@@ -8,4 +8,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Backdafuckup.Kubernetes.Tests" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Platforms/platforms.json" LogicalName="Backdafuckup.Kubernetes.platforms.json" />
+  </ItemGroup>
 </Project>

@@ -106,14 +106,19 @@ internal static class KubernetesRestorePlanner
         }
 
         await CheckWorkloadsAsync(client, cluster, objects, otherCluster, warnings, cancellationToken).ConfigureAwait(false);
-        await CheckDefinitionsAsync(client, cluster, objects, otherCluster, warnings, cancellationToken).ConfigureAwait(false);
-        if (otherCluster)
+        await CheckDefinitionsAsync(client, cluster, objects, rewrite, warnings, cancellationToken).ConfigureAwait(false);
+
+        // What the source cluster's platforms made: left out of another cluster, and what they make in every namespace
+        // out of any restore. One line per platform.
+        var platforms = rewrite.Platforms;
+        foreach (var group in objects
+                     .Where(o => KubernetesObjects.Kind(o) != "CustomResourceDefinition" && KubernetesObjects.Namespace(o) is not null)
+                     .Select(o => (Object: o, Made: platforms.MadeBy(o)))
+                     .Where(m => m.Made is { } made && (otherCluster || made.Always))
+                     .GroupBy(m => m.Made!.Profile))
         {
-            var rancher = objects.Where(o => KubernetesObjects.Kind(o) != "CustomResourceDefinition" && KubernetesObjects.IsRancherMade(o)).ToList();
-            if (rancher.Count > 0)
-            {
-                warnings.Add($"{rancher.Count} object(s) of Rancher's stay out ({string.Join(", ", rancher.GroupBy(KubernetesObjects.Kind).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Count()} {g.Key}"))}): Rancher makes them where it manages the cluster.");
-            }
+            var kinds = string.Join(", ", group.GroupBy(m => KubernetesObjects.Kind(m.Object)).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Count()} {g.Key}"));
+            warnings.Add($"{group.Count()} object(s) made by {group.Key.Name} stay out ({kinds}): {group.Key.Name} makes them again{(otherCluster ? " where it runs" : string.Empty)}.");
         }
 
         return new KubernetesRestorePlan(cluster, targetNamespace, otherCluster, exists, storage.ClassNames, storage.DefaultClass, volumes, warnings, errors);
@@ -172,10 +177,10 @@ internal static class KubernetesRestorePlanner
 
     /// <summary>CRDs the restore point brings that the target lacks: their objects come back, their operators do not.</summary>
     private static async Task CheckDefinitionsAsync(
-        IKubernetes client, string cluster, IReadOnlyList<JsonObject> objects, bool otherCluster, List<string> warnings, CancellationToken cancellationToken)
+        IKubernetes client, string cluster, IReadOnlyList<JsonObject> objects, ObjectRewrite rewrite, List<string> warnings, CancellationToken cancellationToken)
     {
-        foreach (var definition in objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition"
-                                                      && !(otherCluster && KubernetesObjects.IsRancherGroup((string?)o["spec"]?["group"] ?? string.Empty))))
+        // CRDs whose objects all stay out (a platform's records, e.g. Rancher's) are not needed.
+        foreach (var definition in objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition" && !LeftOutKind(o, rewrite)))
         {
             var name = KubernetesObjects.Name(definition);
             if (!await ExistsAsync(() => client.ApiextensionsV1.ReadCustomResourceDefinitionAsync(name, cancellationToken: cancellationToken)).ConfigureAwait(false))
@@ -184,6 +189,11 @@ internal static class KubernetesRestorePlanner
             }
         }
     }
+
+    /// <summary>Whether every object of a CRD's kind stays out of this restore (made by a platform of the source cluster).</summary>
+    internal static bool LeftOutKind(JsonObject definition, ObjectRewrite rewrite) =>
+        (string?)definition["spec"]?["group"] is { } group && (string?)definition["spec"]?["names"]?["kind"] is { } kind
+        && rewrite.Platforms.MakesKind(group, "v1", kind) is { } made && (rewrite.OtherCluster || made.Always);
 
     /// <summary>The pod spec of a workload (its template) or pod.</summary>
     private static JsonObject? PodSpec(JsonObject item) => KubernetesObjects.Kind(item) switch

@@ -76,7 +76,7 @@ internal static class KubernetesClusterRestore
         }
 
         var applier = new KubernetesApplier(client, plurals);
-        var rewrite = new ObjectRewrite(new Dictionary<string, string>(StringComparer.Ordinal), OtherCluster: true);
+        var rewrite = new ObjectRewrite(new Dictionary<string, string>(StringComparer.Ordinal), OtherCluster: true, Source: KubernetesPlatformSet.Legacy);
         var restored = 0;
         var existing = 0;
         var skipped = 0;

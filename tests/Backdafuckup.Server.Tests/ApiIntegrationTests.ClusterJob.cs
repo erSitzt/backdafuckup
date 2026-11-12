@@ -109,7 +109,7 @@ public sealed partial class ApiIntegrationTests
         Assert.Contains("StorageClass vsphere-csi is not created: its volumes go into the StorageClass nfs-client of cluster", log, StringComparison.Ordinal);
         Assert.Contains("Webhook configurations are not restored", log, StringComparison.Ordinal);
         Assert.True(log.Contains("VolumeSnapshotClass vsphere-snapshots is not created: cluster 10.26.4.10 does not serve the snapshot API (snapshot.storage.k8s.io/v1)", StringComparison.Ordinal), log);
-        Assert.True(log.Contains("1 object(s) of Rancher's left out", StringComparison.Ordinal), log);
+        Assert.True(log.Contains("1 made by Rancher left out", StringComparison.Ordinal), log);
         Assert.Equal("Succeeded", session.Tasks.Single(t => t.ObjectNativeId == "@cluster").State);
         Assert.Contains("ValidatingWebhookConfiguration/cert-manager-webhook (calls cert-manager/cert-manager-webhook)", log, StringComparison.Ordinal);
 

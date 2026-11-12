@@ -1,0 +1,131 @@
+// What Kubernetes platforms make themselves (spec 2026-11-12-1952-kubernetes-platform-profiles).
+// Ids are recorded in restore points: never rename or reuse one. Order matters: it is the display order, and the first
+// profile whose rule matches an object is named as its maker. "tested": checked in the lab; others come from the public
+// documentation named in "sources". Globs: "*" for any characters, anchored to the whole text.
+{
+  "schema": 1,
+  "profiles": [
+    {
+      "id": "kubernetes",
+      "name": "Kubernetes",
+      "category": "base",
+      "tested": true,
+      "always": true,
+      "namespaces": [ "kube-system", "kube-public", "kube-node-lease" ],
+      "made": [
+        { "kinds": [ "ClusterRole", "ClusterRoleBinding" ], "names": [ "system:*", "admin", "edit", "view", "cluster-admin" ] },
+        { "kinds": [ "ClusterRole", "ClusterRoleBinding" ], "labels": [ "kubernetes.io/bootstrapping=rbac-defaults" ] },
+        { "kinds": [ "PriorityClass" ], "names": [ "system-*" ] },
+        { "labels": [ "addonmanager.kubernetes.io/mode" ] }
+      ],
+      "kubeletRootDir": "/var/lib/kubelet",
+      "containerRuntimeRoot": "/var/lib/containerd"
+    },
+    {
+      "id": "rke2",
+      "name": "RKE2",
+      "category": "distribution",
+      "tested": true,
+      "detect": [ { "gitVersion": "\\+rke2r[0-9]+" }, { "nodeAnnotation": "rke2.io/node-args" } ],
+      "crdGroups": [ "helm.cattle.io", "k3s.cattle.io" ],
+      "made": [
+        { "kinds": [ "ClusterRole", "ClusterRoleBinding", "ValidatingWebhookConfiguration", "MutatingWebhookConfiguration" ], "names": [ "rke2-*" ] }
+      ],
+      "kubeletRootDir": "/var/lib/kubelet",
+      "containerRuntimeRoot": "/var/lib/rancher/rke2/agent/containerd"
+    },
+    {
+      "id": "k3s",
+      "name": "k3s",
+      "category": "distribution",
+      "tested": false,
+      "sources": [ "https://docs.k3s.io/" ],
+      "detect": [ { "gitVersion": "\\+k3s[0-9]+" }, { "nodeAnnotation": "k3s.io/node-args" } ],
+      "crdGroups": [ "helm.cattle.io", "k3s.cattle.io" ],
+      "kubeletRootDir": "/var/lib/kubelet",
+      "containerRuntimeRoot": "/var/lib/rancher/k3s/agent/containerd"
+    },
+    {
+      "id": "kind",
+      "name": "kind",
+      "category": "distribution",
+      "tested": true,
+      "detect": [ { "nodeProviderId": "kind://" } ],
+      "namespaces": [ "local-path-storage" ]
+    },
+    {
+      "id": "rancher",
+      "name": "Rancher",
+      "category": "manager",
+      "tested": true,
+      "detect": [ { "namespace": "cattle-system" }, { "apiGroup": "management.cattle.io" } ],
+      "namespaces": [ "cattle-*", "local" ],
+      "crdGroups": [ "cattle.io", "*.cattle.io" ],
+      "made": [
+        { "groups": [ "cattle.io", "*.cattle.io" ] },
+        { "kinds": [ "Role", "RoleBinding" ], "labels": [ "authz.cluster.cattle.io/*", "cattle.io/creator=norman" ] },
+        { "kinds": [ "ClusterRole", "ClusterRoleBinding" ], "names": [ "cattle-*", "rancher-*", "cluster-owner*", "project-owner*" ] },
+        { "kinds": [ "ClusterRole", "ClusterRoleBinding" ], "labels": [ "*cattle.io*" ] },
+        { "kinds": [ "ClusterRole", "ClusterRoleBinding" ], "annotations": [ "*cattle.io*" ] },
+        { "kinds": [ "ValidatingWebhookConfiguration", "MutatingWebhookConfiguration" ], "names": [ "rancher.cattle.io*" ] }
+      ],
+      "strip": [ "field.cattle.io/*", "lifecycle.cattle.io/*", "cattle.io/*", "authz.management.cattle.io/*", "management.cattle.io/*" ]
+    },
+    {
+      "id": "fleet",
+      "name": "Fleet",
+      "category": "manager",
+      "tested": true,
+      "detect": [ { "namespace": "cattle-fleet-system" }, { "apiGroup": "fleet.cattle.io" } ],
+      "namespaces": [ "fleet-*", "cluster-fleet-*", "cattle-fleet-*" ],
+      "crdGroups": [ "fleet.cattle.io" ],
+      "made": [
+        { "kinds": [ "ClusterRole", "ClusterRoleBinding" ], "names": [ "fleet-*" ] }
+      ]
+    },
+    {
+      "id": "calico",
+      "name": "Calico / Canal",
+      "category": "addon",
+      "tested": true,
+      "detect": [ { "apiGroup": "crd.projectcalico.org" }, { "apiGroup": "operator.tigera.io" } ],
+      "namespaces": [ "calico-system", "calico-apiserver", "tigera-operator" ],
+      "crdGroups": [ "crd.projectcalico.org", "projectcalico.org", "operator.tigera.io" ],
+      "made": [
+        { "kinds": [ "ClusterRole", "ClusterRoleBinding" ], "names": [ "calico-*", "tigera-*" ] }
+      ]
+    },
+    {
+      "id": "cilium",
+      "name": "Cilium",
+      "category": "addon",
+      "tested": false,
+      "sources": [ "https://docs.cilium.io/" ],
+      "detect": [ { "apiGroup": "cilium.io" } ],
+      "namespaces": [ "cilium-secrets" ],
+      "crdGroups": [ "cilium.io" ],
+      "made": [
+        { "kinds": [ "CiliumEndpoint", "CiliumEndpointSlice" ], "always": true }
+      ]
+    },
+    {
+      "id": "vsphere-csi",
+      "name": "vSphere CSI",
+      "category": "addon",
+      "tested": true,
+      "detect": [ { "csiDriver": "csi.vsphere.vmware.com" }, { "apiGroup": "cns.vmware.com" } ],
+      "namespaces": [ "vmware-system-csi" ],
+      "crdGroups": [ "cns.vmware.com" ]
+    },
+    {
+      "id": "istio",
+      "name": "Istio",
+      "category": "addon",
+      "tested": true,
+      "detect": [ { "apiGroup": "networking.istio.io" } ],
+      "made": [
+        { "kinds": [ "ConfigMap" ], "names": [ "istio-ca-root-cert" ], "always": true }
+      ]
+    }
+  ]
+}

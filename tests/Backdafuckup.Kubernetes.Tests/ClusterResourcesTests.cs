@@ -39,7 +39,7 @@ public sealed class ClusterResourcesTests
         using var client = KubernetesClients.Create(Settings(), null, api.CreateHandler());
 
         var log = new Lines();
-        var collected = await KubernetesClusterResources.CollectAsync(client, "rke2-test", log, Ct);
+        var collected = await KubernetesClusterResources.CollectAsync(client, "rke2-test", KubernetesPlatformSet.Legacy, log, Ct);
 
         var keys = KubernetesResources.Read(collected.Content).Select(KubernetesObjects.Key).Order(StringComparer.Ordinal).ToList();
         Assert.Equal(
@@ -50,7 +50,8 @@ public sealed class ClusterResourcesTests
             ],
             keys);
         Assert.Contains(log.Written, l => l.StartsWith("Cluster-scoped objects of rke2-test: 9 (", StringComparison.Ordinal)
-                                          && l.Contains("11 of the cluster itself, Rancher, Fleet or RKE2 left out", StringComparison.Ordinal));
+                                          && l.Contains("11 left out, made by the cluster's platforms (RKE2 · k3s · Rancher · Fleet) or backdafuckup: ", StringComparison.Ordinal)
+                                          && l.EndsWith("6 Kubernetes, 3 Rancher, 1 backdafuckup, 1 vSphere CSI.", StringComparison.Ordinal));
     }
 
     [Fact]

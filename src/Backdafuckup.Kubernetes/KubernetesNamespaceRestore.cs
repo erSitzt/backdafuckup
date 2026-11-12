@@ -199,7 +199,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         var existing = new List<string>();
         var replaced = new List<string>();
         var controlled = 0;
-        var rancher = 0;
+        var platformMade = new Dictionary<string, int>(StringComparer.Ordinal);
 
         // The namespace first (as in the restore point, renamed when it goes elsewhere).
         if (await _applier.ReadAsync(new JsonObject { ["apiVersion"] = "v1", ["kind"] = "Namespace", ["metadata"] = new JsonObject { ["name"] = Target } }, cancellationToken).ConfigureAwait(false) is null)
@@ -220,7 +220,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
         // What the selected objects need from the cluster's scope, when missing: their CRDs, and in the same cluster the
         // StorageClasses they keep (another cluster has its own classes: the map names them).
-        var kinds = _objects.Where(o => _selected.Contains(KubernetesObjects.Key(o)) && !(_options.OtherCluster && KubernetesObjects.IsRancherMade(o)))
+        var kinds = _objects.Where(o => _selected.Contains(KubernetesObjects.Key(o)) && LeftOut(o) is null)
             .Select(KubernetesObjects.Kind).ToHashSet(StringComparer.Ordinal);
         var classes = _options.OtherCluster
             ? []
@@ -261,9 +261,9 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                 continue;
             }
 
-            if (_options.OtherCluster && KubernetesObjects.IsRancherMade(item))
+            if (LeftOut(item) is { } made)
             {
-                rancher++;
+                platformMade[made.Profile.Name] = platformMade.GetValueOrDefault(made.Profile.Name) + 1;
                 continue;
             }
 
@@ -303,9 +303,17 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                  (replaced.Count > 0 ? $"; {replaced.Count} replaced ({Summary(replaced)})" : string.Empty) +
                  (existing.Count > 0 ? $"; {existing.Count} existed and were left as they are ({Summary(existing)})" : string.Empty) +
                  (controlled > 0 ? $"; {controlled} made by their controllers (they make them again)" : string.Empty) +
-                 (rancher > 0 ? $"; {rancher} object(s) of Rancher's left out (Rancher makes them where it manages the cluster)" : string.Empty) + ".");
+                 (platformMade.Count > 0
+                     ? $"; {string.Join(", ", platformMade.Select(kv => $"{kv.Value} made by {kv.Key}"))} left out (the platform makes them again)"
+                     : string.Empty) + ".");
         return new RestoredVm(Target, Target, Warnings: _warnings);
     }
+
+    /// <summary>
+    /// An object the source cluster's platform made, left out: in another cluster all of them (its platform makes its own
+    /// there), in the same cluster those it makes in every namespace.
+    /// </summary>
+    private PlatformMade? LeftOut(JsonObject o) => _rewrite.Platforms.MadeBy(o) is { } made && (_options.OtherCluster || made.Always) ? made : null;
 
     public Task<RestoredVm> CompleteAsync(CancellationToken cancellationToken)
     {

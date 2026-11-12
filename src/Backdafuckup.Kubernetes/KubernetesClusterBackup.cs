@@ -42,7 +42,7 @@ internal sealed class KubernetesClusterBackup : IVmBackupSession
         IKubernetes client, ConnectionSettings settings, string kubernetesVersion, VmBackupRequest request, IOperationLog log, CancellationToken cancellationToken)
     {
         var cluster = settings.ClusterName();
-        var objects = await KubernetesClusterResources.CollectAsync(client, cluster, log, cancellationToken).ConfigureAwait(false);
+        var objects = await KubernetesClusterResources.CollectAsync(client, cluster, KubernetesPlatformSet.Legacy, log, cancellationToken).ConfigureAwait(false);
         var descriptor = new KubernetesNamespaceDescriptor
         {
             Cluster = cluster,
