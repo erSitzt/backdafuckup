@@ -474,6 +474,26 @@ public static class OperationEndpoints
             }
         }
 
+        // The whole cluster: only on a cluster, once, with valid exclude patterns, and not as a namespace name.
+        var wholes = request.Objects.Where(o => KubernetesClusterScope.IsJobObject(o.NativeId)).ToList();
+        if (wholes.Count > 0 && !cluster)
+        {
+            errors["objects"] = ["Only a Kubernetes cluster is backed up as a whole."];
+        }
+        else if (wholes.Count > 1)
+        {
+            errors["objects"] = ["A job backs up its cluster as a whole once."];
+        }
+        else if (wholes.Count == 1 && KubernetesClusterScope.Validate(KubernetesClusterScope.Excludes(wholes[0].NativeId)) is { } badPattern)
+        {
+            errors["objects"] = [badPattern];
+        }
+
+        if (request.Objects.Any(o => o.NativeId == KubernetesClusterScope.Member))
+        {
+            errors["objects"] = ["The cluster-scoped objects come with a whole-cluster object of the job."];
+        }
+
         // A namespace has no guest and no memory: its consistency comes from its hooks.
         if (cluster && (request.GuestProcessing || request.Objects.Any(o => o.WithMemory)))
         {

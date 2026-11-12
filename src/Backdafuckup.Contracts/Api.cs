@@ -315,6 +315,9 @@ public static class RestorePointObjectKinds
 {
     public const string Vm = "Vm";
     public const string KubernetesNamespace = "KubernetesNamespace";
+
+    /// <summary>The cluster-scoped objects of a whole-cluster job's run (CRDs, ClusterRoles and their bindings, classes).</summary>
+    public const string KubernetesCluster = "KubernetesCluster";
 }
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);

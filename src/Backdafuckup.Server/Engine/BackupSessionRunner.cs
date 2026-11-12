@@ -52,9 +52,13 @@ public sealed class BackupSessionRunner(
         // Namespaces chosen by their labels: those that have them now, next to the ones chosen by name.
         var (members, selections) = await ExpandSelectorsAsync(job, hypervisor, cancellationToken).ConfigureAwait(false);
         log.Info($"Job started ({(session.RunMode == SessionRunMode.ActiveFull ? "active full" : "incremental")}), {members.Count} {objects}, repository {job.Repository.Name}.");
-        foreach (var (selector, names) in selections)
+        foreach (var (selector, names, whole) in selections)
         {
-            if (names.Count == 0)
+            if (whole)
+            {
+                log.Info($"{selector}: {names.Count} namespace(s) ({string.Join(", ", names)}) and the cluster-scoped objects.");
+            }
+            else if (names.Count == 0)
             {
                 log.Warning($"No namespace has the labels {selector} now.");
             }
@@ -123,14 +127,16 @@ public sealed class BackupSessionRunner(
 
     /// <summary>
     /// The job's members for this run: its VMs or namespaces by name, plus the namespaces whose labels match its label
-    /// selectors now (each once); and per selector the namespaces it matched.
+    /// selectors now (each once); and per selector the namespaces it matched. A whole-cluster object stands for every
+    /// namespace but its excludes, and the cluster-scoped objects (<see cref="KubernetesClusterScope.Member"/>, first).
     /// </summary>
-    private static async Task<(List<BackupJobObject> Members, List<(string Selector, IReadOnlyList<string> Names)> Selections)> ExpandSelectorsAsync(
+    private static async Task<(List<BackupJobObject> Members, List<(string Selector, IReadOnlyList<string> Names, bool Whole)> Selections)> ExpandSelectorsAsync(
         BackupJob job, IHypervisorSession hypervisor, CancellationToken cancellationToken)
     {
-        var members = job.Objects.Where(o => !KubernetesLabelSelector.IsJobObject(o.NativeId)).OrderBy(o => o.Order).ToList();
-        var selections = new List<(string Selector, IReadOnlyList<string> Names)>();
-        var selectors = job.Objects.Where(o => KubernetesLabelSelector.IsJobObject(o.NativeId)).OrderBy(o => o.Order).ToList();
+        static bool Expands(string id) => KubernetesLabelSelector.IsJobObject(id) || KubernetesClusterScope.IsJobObject(id);
+        var members = job.Objects.Where(o => !Expands(o.NativeId)).OrderBy(o => o.Order).ToList();
+        var selections = new List<(string Selector, IReadOnlyList<string> Names, bool Whole)>();
+        var selectors = job.Objects.Where(o => Expands(o.NativeId)).OrderBy(o => o.Order).ToList();
         if (selectors.Count == 0)
         {
             return (members, selections);
@@ -138,15 +144,36 @@ public sealed class BackupSessionRunner(
 
         if (hypervisor is not Kubernetes.IKubernetesNamespaceSelector cluster)
         {
-            throw new InvalidOperationException("Only namespaces of Kubernetes clusters are chosen by labels.");
+            throw new InvalidOperationException("Only namespaces of Kubernetes clusters are chosen by labels or as a whole cluster.");
         }
 
         var order = members.Count == 0 ? 0 : members.Max(m => m.Order) + 1;
         foreach (var selector in selectors)
         {
-            var text = KubernetesLabelSelector.Of(selector.NativeId);
-            var names = await cluster.SelectNamespacesAsync(text, cancellationToken).ConfigureAwait(false);
-            selections.Add((text, names));
+            string text;
+            IReadOnlyList<string> names;
+            if (KubernetesClusterScope.IsJobObject(selector.NativeId))
+            {
+                // Every namespace (each has the label kubernetes.io/metadata.name) but the excluded ones.
+                var excludes = KubernetesClusterScope.Excludes(selector.NativeId);
+                text = KubernetesClusterScope.Describe(excludes);
+                names = [.. (await cluster.SelectNamespacesAsync("kubernetes.io/metadata.name", cancellationToken).ConfigureAwait(false))
+                    .Where(n => !KubernetesClusterScope.IsExcluded(n, excludes))];
+                if (members.All(m => m.NativeId != KubernetesClusterScope.Member))
+                {
+                    members.Insert(0, new BackupJobObject
+                    {
+                        JobId = job.Id, NativeId = KubernetesClusterScope.Member, CachedName = "Cluster-scoped objects", Order = members.Count == 0 ? 0 : members.Min(m => m.Order) - 1,
+                    });
+                }
+            }
+            else
+            {
+                text = KubernetesLabelSelector.Of(selector.NativeId);
+                names = await cluster.SelectNamespacesAsync(text, cancellationToken).ConfigureAwait(false);
+            }
+
+            selections.Add((text, names, KubernetesClusterScope.IsJobObject(selector.NativeId)));
             foreach (var name in names.Where(n => members.All(m => m.NativeId != n)))
             {
                 members.Add(new BackupJobObject { JobId = job.Id, NativeId = name, CachedName = name, Order = order++ });
@@ -818,7 +845,12 @@ internal sealed class VmBackupTask(
         entity.Consistency = manifest.Consistency;
         entity.ConsistencyReason = manifest.ConsistencyReason;
         entity.ConsistencyWarning = manifest.ConsistencyWarning ?? RestorePointConsistency.IsWarning(manifest.ConsistencyReason);
-        entity.ObjectKind = manifest.Kubernetes is null ? RestorePointObjectKinds.Vm : RestorePointObjectKinds.KubernetesNamespace;
+        entity.ObjectKind = manifest.Kubernetes switch
+        {
+            null => RestorePointObjectKinds.Vm,
+            { ClusterScope: true } => RestorePointObjectKinds.KubernetesCluster,
+            _ => RestorePointObjectKinds.KubernetesNamespace,
+        };
         if (string.IsNullOrEmpty(entity.PlatformId) && !string.IsNullOrEmpty(manifest.Source.PlatformId))
         {
             // A cluster's session learns its platform id (kube-system's uid) only when the backup begins.

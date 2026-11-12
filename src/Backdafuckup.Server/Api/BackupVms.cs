@@ -120,8 +120,9 @@ public static class BackupVms
         foreach (var job in jobs.Values)
         {
             var scope = clusters.GetValueOrDefault(job.ConnectionId);
-            // A label selector is no namespace of its own: the namespaces it matched appear with their restore points.
-            foreach (var member in job.Objects.Where(o => !present.Contains((o.NativeId, scope, job.Id)) && !KubernetesLabelSelector.IsJobObject(o.NativeId)))
+            // A label selector or the whole cluster is no namespace of its own: the namespaces it matched appear with their restore points.
+            foreach (var member in job.Objects.Where(o => !present.Contains((o.NativeId, scope, job.Id))
+                         && !KubernetesLabelSelector.IsJobObject(o.NativeId) && !KubernetesClusterScope.IsJobObject(o.NativeId)))
             {
                 entries.Add(new Entry(member.NativeId, scope, names.GetValueOrDefault((member.NativeId, scope)) ?? member.CachedName, job.ConnectionId,
                     Describe(job, job.Id, job.Name, 0, 0, [job.RepositoryId], null, now)));

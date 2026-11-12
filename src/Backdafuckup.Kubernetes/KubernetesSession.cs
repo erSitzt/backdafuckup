@@ -76,6 +76,11 @@ internal sealed class KubernetesSession(
             }
         }
 
+        if (request.VmId == KubernetesClusterBackup.Member)
+        {
+            return await KubernetesClusterBackup.StartAsync(client, settings, _platform.ProductVersion, request, log, cancellationToken).ConfigureAwait(false);
+        }
+
         return await KubernetesNamespaceBackup.StartAsync(
             client, settings, _platform.ProductVersion, request, log, ledger, channels, images, executor ?? new ClientPodExecutor(client), timings ?? new KubernetesTimings(), cancellationToken)
             .ConfigureAwait(false);

@@ -131,6 +131,12 @@ public sealed record KubernetesNamespaceDescriptor
 
     public required string Namespace { get; init; }
 
+    /// <summary>
+    /// The cluster-scoped objects of a whole-cluster job's run, not a namespace (<see cref="Namespace"/> is then
+    /// <c>@cluster</c>): restored by a cluster restore before the run's namespaces.
+    /// </summary>
+    public bool ClusterScope { get; init; }
+
     public string? NamespaceUid { get; init; }
 
     public string? KubernetesVersion { get; init; }
