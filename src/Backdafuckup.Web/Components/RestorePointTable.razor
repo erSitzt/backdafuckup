@@ -7,7 +7,11 @@
 <MudMenu @ref="_restore" PositionAtCursor="true" Dense="true">
     <ActivatorContent><span></span></ActivatorContent>
     <ChildContent>
-        @if (_point is { ObjectKind: RestorePointObjectKinds.KubernetesNamespace })
+        @if (_point is { ObjectKind: RestorePointObjectKinds.KubernetesCluster, SessionId: { } run })
+        {
+            <MudMenuItem Icon="@AppIcons.Kubernetes" Href="@($"/restore-cluster/{run}")">Whole cluster from this run</MudMenuItem>
+        }
+        else if (_point is { ObjectKind: RestorePointObjectKinds.KubernetesNamespace })
         {
             <MudMenuItem Icon="@AppIcons.Kubernetes" Href="@($"/restore-namespace/{_point.Id}")">Namespace, apps or PVCs</MudMenuItem>
             <MudMenuItem Icon="@AppIcons.Files" Href="@($"/files/{_point.Id}")">Files and folders of a PVC</MudMenuItem>
