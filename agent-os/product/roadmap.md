@@ -46,7 +46,13 @@
 
   Built and checked on the test cluster on 2026-11-11 and 2026-11-12 (lab runbook K1–K11): connection, mover image, backup with hooks, restore of a namespace, apps and PVCs (also replacing a PVC in place), picked objects through the object explorer, files back into a live PVC (refused in namespaces with Pod Security `restricted`), and a mover pod deleted while it copies, over the direct API path and through the in-cluster agent (a tunnel for clusters the server cannot reach; the server keeps the agent's image at its own version). Jobs choose namespaces by name or by labels; `bdfu_k8s_*` metrics and two alerts cover snapshots, mover pods, hooks and agents.
 
-  Phase 2, planned 2026-11-12: restore into another cluster (StorageClass mapping; a files data path for clusters without CSI snapshots, e.g. NFS) and whole-cluster DR (a cluster job with an exclude list, cluster-scoped objects, a cluster restore). Later: NFS volumes at file level, changed block tracking (CSI SnapshotMetadata) and group snapshots; then Kubernetes clusters on XCP-ng, whose PVs could be read through XAPI with CBT.
+  Phase 2, built and checked 2026-11-12 (lab runbook K12–K14): restore into another cluster (StorageClass mapping; a files data path for clusters without CSI snapshots, e.g. NFS) and whole-cluster DR (a cluster job with an exclude list, cluster-scoped objects, a cluster restore).
+
+  Next, planned 2026-11-12:
+  - **Platform profiles** (spec `2026-11-12-1952-kubernetes-platform-profiles`): what a platform makes itself (namespaces, CRD groups, objects, fields) as data, detected per cluster, instead of Rancher/RKE2 rules in code; tested on RKE2 and kind, other platforms from their public docs.
+  - **File-level backup of volumes without snapshots** (spec `2026-11-12-1952-kubernetes-file-level-volumes`): NFS, hostPath and local PVs through a read-only shadow PV; opt-in pod volumes without a PVC and RWO CSI volumes without snapshots through an optional node agent; usage numbers to warn about data that is not backed up; restores as files.
+
+  Later: changed block tracking (CSI SnapshotMetadata) and group snapshots; then Kubernetes clusters on XCP-ng, whose PVs could be read through XAPI with CBT.
 
 ## Phase 2: Post-Launch
 
