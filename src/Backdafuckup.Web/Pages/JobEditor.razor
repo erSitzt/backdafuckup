@@ -114,6 +114,7 @@ else
                         <div class="cell-sub mt-1 mb-2">
                             Backed up now: @(WholeClusterNamespaces() is { Count: > 0 } now ? string.Join(", ", now) : "no namespace") and the cluster-scoped objects.
                         </div>
+                        break;
                     }
                     else if (IsCluster)
                     {
@@ -496,13 +497,21 @@ else
                             <div class="summary-card-head"><MudIcon Icon="@(IsCluster ? AppIcons.Kubernetes : AppIcons.Vm)" Size="Size.Small" /> @(IsCluster ? "Namespaces" : "Virtual machines")</div>
                             <dl class="summary-list">
                                 <dt>@(IsCluster ? "Cluster" : "Pool")</dt><dd>@_pools.FirstOrDefault(p => p.Id == _connectionId)?.DisplayName</dd>
-                                <dt>@(IsCluster ? "Namespaces" : "VMs") (@_selected.Count)</dt>
-                                <dd>
-                                    @foreach (var (nativeId, vmName) in _selected.OrderBy(kv => kv.Value, StringComparer.OrdinalIgnoreCase))
-                                    {
-                                        <span class="mini-chip">@vmName@(_withMemory.Contains(nativeId) ? " · RAM" : null)</span>
-                                    }
-                                </dd>
+                                @if (IsCluster && _wholeCluster)
+                                {
+                                    <dt>Namespaces</dt>
+                                    <dd>@KubernetesClusterScope.Describe(ExcludeList()) <span class="cell-sub">now @WholeClusterNamespaces().Count namespace(s) and the cluster-scoped objects</span></dd>
+                                }
+                                else
+                                {
+                                    <dt>@(IsCluster ? "Namespaces" : "VMs") (@_selected.Count)</dt>
+                                    <dd>
+                                        @foreach (var (nativeId, vmName) in _selected.OrderBy(kv => kv.Value, StringComparer.OrdinalIgnoreCase))
+                                        {
+                                            <span class="mini-chip">@vmName@(!IsCluster && _withMemory.Contains(nativeId) ? " · RAM" : null)</span>
+                                        }
+                                    </dd>
+                                }
                                 @if (IsCluster && !string.IsNullOrWhiteSpace(_labelSelector))
                                 {
                                     <dt>By labels</dt>

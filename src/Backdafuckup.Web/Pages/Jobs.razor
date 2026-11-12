@@ -20,15 +20,18 @@ else
     <div class="cq">
     <MudTable Items="_jobs" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
         <HeaderContent>
-            <MudTh>Name</MudTh><MudTh Class="c-760 num">Backs up</MudTh><MudTh Class="c-950">Repository</MudTh><MudTh Class="c-560">Schedule</MudTh><MudTh>Last result</MudTh><MudTh Class="c-760">Last run</MudTh><MudTh Class="c-560">Next run</MudTh><MudTh></MudTh>
+            <MudTh>Name</MudTh><MudTh Class="c-760">Backs up</MudTh><MudTh Class="c-950">Repository</MudTh><MudTh Class="c-560">Schedule</MudTh><MudTh>Last result</MudTh><MudTh Class="c-760">Last run</MudTh><MudTh Class="c-560">Next run</MudTh><MudTh></MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd>
+                <span class="kind-icon @(IsCluster(context) ? ObjectKindUi.KubernetesCss : ObjectKindUi.VmCss)" title="@(IsCluster(context) ? "Kubernetes namespaces" : "VMs")">
+                    <MudIcon Icon="@(IsCluster(context) ? AppIcons.Kubernetes : AppIcons.Vm)" Size="Size.Small" Style="vertical-align: middle" />
+                </span>
                 <MudLink Href="@($"/jobs/{context.Id}")">@context.Name</MudLink>
                 @if (!context.Enabled) { <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Icon="@Icons.Material.Filled.PauseCircle">disabled</MudChip> }
                 <span class="cell-sub n-560">@Describe(context.Schedule) · next @Fmt.Time(context.NextRunUtc)</span>
             </MudTd>
-            <MudTd Class="c-760 num">@context.Objects.Count @(_clusters.Contains(context.ConnectionId) ? (context.Objects.Count == 1 ? "namespace" : "namespaces") : (context.Objects.Count == 1 ? "VM" : "VMs"))</MudTd>
+            <MudTd Class="c-760">@BacksUp(context)<span class="cell-sub">@(IsCluster(context) ? "cluster" : "pool") @context.ConnectionName</span></MudTd>
             <MudTd Class="c-950">@context.RepositoryName</MudTd>
             <MudTd Class="c-560 nowrap">@Describe(context.Schedule)</MudTd>
             <MudTd>
@@ -85,6 +88,26 @@ else
     }
 
     private HashSet<Guid> _clusters = [];
+
+    private bool IsCluster(JobDto job) => _clusters.Contains(job.ConnectionId);
+
+    /// <summary>What a job backs up: the whole cluster, its namespaces (and those chosen by labels), or its VMs.</summary>
+    private string BacksUp(JobDto job)
+    {
+        if (!IsCluster(job))
+        {
+            return $"{job.Objects.Count} {(job.Objects.Count == 1 ? "VM" : "VMs")}";
+        }
+
+        if (job.Objects.Any(o => KubernetesClusterScope.IsJobObject(o.NativeId)))
+        {
+            return "Whole cluster";
+        }
+
+        var named = job.Objects.Count(o => !KubernetesLabelSelector.IsJobObject(o.NativeId));
+        var byLabels = job.Objects.Any(o => KubernetesLabelSelector.IsJobObject(o.NativeId)) ? " + by labels" : string.Empty;
+        return $"{named} {(named == 1 ? "namespace" : "namespaces")}{byLabels}";
+    }
 
     private async Task LoadAsync()
     {
