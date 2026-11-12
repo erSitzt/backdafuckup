@@ -565,8 +565,8 @@ public sealed class FileRestoreSessionRunner(
         var failedDirectories = 0L;
         foreach (var issue in report.Issues)
         {
-            var entry = target!.Entry(issue.Index);
-            var where = entry is null ? $"{mover.Description} item {issue.Index}" : target.Display(entry);
+            var entry = issue.Index >= 0 ? target!.Entry(issue.Index) : null;
+            var where = entry is not null ? target!.Display(entry) : issue.Index < 0 ? mover.Description : $"{mover.Description} item {issue.Index}";
             switch (issue.Kind)
             {
                 case MoverFileIssueKinds.Failed:
@@ -577,7 +577,7 @@ public sealed class FileRestoreSessionRunner(
                     progress.Problem(new FileRestoreProblem(FileRestoreProblemKind.Incomplete, where, null, $"restored, but {issue.Text}"));
                     break;
                 case MoverFileIssueKinds.Renamed:
-                    progress.Renamed(where, target.Display(issue.Text));
+                    progress.Renamed(where, target!.Display(issue.Text));
                     break;
             }
         }
