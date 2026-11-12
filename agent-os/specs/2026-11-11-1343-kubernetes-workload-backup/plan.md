@@ -164,7 +164,7 @@ Spec folder: `agent-os/specs/2026-11-11-1343-kubernetes-workload-backup/`
 - **Backup:** a job object `cluster:` with an exclude list per job.
   - Default exclude list: `kube-system`, `kube-public`, `kube-node-lease`, `cattle-*`, `fleet-*`, `cluster-fleet-*`, `local`, `backdafuckup-system`.
   - It backs up every other namespace as its own restore point, plus one restore point of kind `KubernetesCluster` per run with the cluster-scoped objects:
-    - CRDs, without `*.cattle.io`, snapshot and CNI groups;
+    - CRDs, without `*.cattle.io`, snapshot, CNI and vSphere CSI (`cns.vmware.com`) groups;
     - ClusterRoles and Bindings that are neither system, defaults, RKE2, Rancher nor Fleet ones;
     - StorageClasses, PriorityClasses, IngressClasses, VolumeSnapshotClasses, RuntimeClasses;
     - cluster-scoped CRs;

@@ -741,7 +741,7 @@ Only running pods run hooks, through `pods/exec`.
 - Each run backs up every namespace of the cluster at that time, except those of *Leave out these namespaces*: names, or patterns with `*`. The default leaves out what Kubernetes, RKE2, Rancher and Fleet make themselves: `kube-system`, `kube-public`, `kube-node-lease`, `cattle-*`, `fleet-*`, `cluster-fleet-*`, `local`. `backdafuckup-system` is always left out.
 - Each run also makes a restore point *Cluster-scoped objects* (`@cluster`):
   - **Included:** the CRDs and their cluster-scoped objects (for example cert-manager's ClusterIssuers), the ClusterRoles and ClusterRoleBindings people made, and the StorageClasses, VolumeSnapshotClasses, IngressClasses, PriorityClasses and RuntimeClasses. The webhook configurations are included for the record.
-  - **Left out:** system and default roles, the roles and CRDs of RKE2, Rancher and Fleet, the CRDs of the CNI and of the snapshot API, nodes, APIServices.
+  - **Left out:** system and default roles, the roles and CRDs of RKE2, Rancher and Fleet, the CRDs of the CNI, of the snapshot API and of the vSphere CSI driver (`cns.vmware.com`), nodes, APIServices.
 - The session log names the namespaces of each run.
 
 **Secrets:** the restore point holds the namespace's Secrets with their values.
@@ -803,7 +803,7 @@ Only running pods run hooks, through `pods/exec`.
     What the files path loses: hard links become copies, sparse files are written in full, extended attributes and ACLs stay behind. On an NFS export that maps root to nobody (`root_squash`), owners cannot be set. The session then notes that once, and the files belong to the export's user.
 - **Left out in another cluster:**
   - finalizers;
-  - Rancher's project fields and Rancher's RoleBindings;
+  - Rancher's project fields, Rancher's RoleBindings, and the objects of Rancher's API groups (`*.cattle.io`, such as the App records of Helm releases; Rancher makes them again from the restored release Secrets) with their CRDs;
   - a Service's `loadBalancerIP` and `externalIPs`;
   - static PVs, for example of an NFS export. Their PVCs get new volumes, because both clusters would otherwise share the data.
 - **StorageClasses** of the backup are not created in another cluster.
@@ -820,6 +820,7 @@ Only running pods run hooks, through `pods/exec`.
   - objects that exist (unless you replace them);
   - a StorageClass the map replaces;
   - a second default StorageClass, IngressClass or VolumeSnapshotClass, or a second global default PriorityClass;
+  - VolumeSnapshotClasses, when the target does not serve the snapshot API (its volumes then come back as files);
   - webhook configurations: with a stale CA and `failurePolicy: Fail` they would block the whole cluster. They are listed with the services they call; their operators make them again once their namespaces are back.
 - **A namespace whose backup failed in the run** comes from its newest older restore point, with a warning.
 - **When the cluster-scoped objects fail,** the namespaces are not restored.

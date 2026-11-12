@@ -33,6 +33,17 @@ public sealed partial class ApiIntegrationTests
         _cluster.Add("api/v1", "namespaces", Backdafuckup.Testing.Kubernetes.FakeKubernetesApi.Namespace("cattle-system"));
         _cluster.Add("apis/apiextensions.k8s.io/v1", "customresourcedefinitions", new JsonObject
         {
+            ["metadata"] = new JsonObject { ["name"] = "apps.catalog.cattle.io" },
+            ["spec"] = new JsonObject
+            {
+                ["group"] = "catalog.cattle.io", ["scope"] = "Namespaced",
+                ["names"] = new JsonObject { ["kind"] = "App", ["plural"] = "apps" },
+                ["versions"] = new JsonArray(new JsonObject { ["name"] = "v1", ["served"] = true, ["storage"] = true }),
+            },
+        });
+        _cluster.Add("apis/catalog.cattle.io/v1", "apps", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "site", ["namespace"] = "web" }, ["spec"] = new JsonObject() });
+        _cluster.Add("apis/apiextensions.k8s.io/v1", "customresourcedefinitions", new JsonObject
+        {
             ["metadata"] = new JsonObject { ["name"] = "clusterissuers.cert-manager.io" },
             ["spec"] = new JsonObject
             {
@@ -97,6 +108,9 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal(["@cluster", "bdfu-spike", "web"], session.Tasks.OrderBy(t => t.StartedUtc).Select(t => t.ObjectNativeId));
         Assert.Contains("StorageClass vsphere-csi is not created: its volumes go into the StorageClass nfs-client of cluster", log, StringComparison.Ordinal);
         Assert.Contains("Webhook configurations are not restored", log, StringComparison.Ordinal);
+        Assert.True(log.Contains("VolumeSnapshotClass vsphere-snapshots is not created: cluster 10.26.4.10 does not serve the snapshot API (snapshot.storage.k8s.io/v1)", StringComparison.Ordinal), log);
+        Assert.True(log.Contains("1 object(s) of Rancher's left out", StringComparison.Ordinal), log);
+        Assert.Equal("Succeeded", session.Tasks.Single(t => t.ObjectNativeId == "@cluster").State);
         Assert.Contains("ValidatingWebhookConfiguration/cert-manager-webhook (calls cert-manager/cert-manager-webhook)", log, StringComparison.Ordinal);
 
         // Cluster-scoped first: the CRD and its object, the role, the class; never the webhook, the system role or the mapped class.
@@ -114,5 +128,9 @@ public sealed partial class ApiIntegrationTests
         var export = (string)nfs.Find("persistentvolumes", null, (string)claim["spec"]!["volumeName"]!)!["spec"]!["nfs"]!["path"]!;
         Assert.True(File.Exists(Path.Combine(export, "hello.txt")));
         Assert.Null(nfs.Find("namespaces", null, "cattle-system"));
+
+        // Rancher's records of its Helm releases stay out of another cluster, and so does their CRD.
+        Assert.Null(nfs.Find("apps", "web", "site"));
+        Assert.Null(nfs.Find("customresourcedefinitions", null, "apps.catalog.cattle.io"));
     }
 }

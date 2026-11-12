@@ -83,6 +83,7 @@ internal static class KubernetesClusterRestore
         var failed = 0;
         var webhooks = new List<string>();
         var defaults = await DefaultsAsync(client, cancellationToken).ConfigureAwait(false);
+        var servesSnapshots = !objects.Any(o => KubernetesObjects.Kind(o) == "VolumeSnapshotClass") || await ServesSnapshotsAsync(client, cancellationToken).ConfigureAwait(false);
 
         async Task<bool> PutAsync(JsonObject original)
         {
@@ -144,6 +145,13 @@ internal static class KubernetesClusterRestore
                     continue;
                 }
 
+                if (kind == "VolumeSnapshotClass" && !servesSnapshots)
+                {
+                    skipped++;
+                    log.Info($"VolumeSnapshotClass {name} is not created: cluster {cluster} does not serve the snapshot API ({VolumeSnapshotFlow.Group}/v1), so its volumes are restored as files.");
+                    continue;
+                }
+
                 if (SecondDefault(item, defaults) is { } other)
                 {
                     skipped++;
@@ -181,6 +189,24 @@ internal static class KubernetesClusterRestore
 
         log.Info($"Cluster-scoped objects in cluster {cluster}: {restored} restored, {existing} existed and were left as they are, {skipped} not created, {failed} failed.");
         return new KubernetesClusterRestoreResult(restored, existing, skipped, failed, webhooks);
+    }
+
+    /// <summary>Whether the target serves the snapshot API (its CRDs come with the snapshot controller, never from a backup).</summary>
+    private static async Task<bool> ServesSnapshotsAsync(IKubernetes client, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await client.CustomObjects.ListClusterCustomObjectAsync(VolumeSnapshotFlow.Group, "v1", "volumesnapshotclasses", limit: 1, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (HttpOperationException ex) when (ex.Response?.StatusCode == HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+        catch (HttpOperationException)
+        {
+            return true; // Served, but not to be listed: creating the class says what is wrong.
+        }
     }
 
     /// <summary>The default classes the target has: storage, ingress, priority (global default), snapshot per driver.</summary>

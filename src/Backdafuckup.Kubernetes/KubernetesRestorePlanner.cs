@@ -106,13 +106,13 @@ internal static class KubernetesRestorePlanner
         }
 
         await CheckWorkloadsAsync(client, cluster, objects, otherCluster, warnings, cancellationToken).ConfigureAwait(false);
-        await CheckDefinitionsAsync(client, cluster, objects, warnings, cancellationToken).ConfigureAwait(false);
+        await CheckDefinitionsAsync(client, cluster, objects, otherCluster, warnings, cancellationToken).ConfigureAwait(false);
         if (otherCluster)
         {
-            var rancher = objects.Count(KubernetesObjects.IsRancherMade);
-            if (rancher > 0)
+            var rancher = objects.Where(o => KubernetesObjects.Kind(o) != "CustomResourceDefinition" && KubernetesObjects.IsRancherMade(o)).ToList();
+            if (rancher.Count > 0)
             {
-                warnings.Add($"{rancher} RoleBinding(s) or Role(s) of Rancher's projects stay out: Rancher makes them where it manages the cluster.");
+                warnings.Add($"{rancher.Count} object(s) of Rancher's stay out ({string.Join(", ", rancher.GroupBy(KubernetesObjects.Kind).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Count()} {g.Key}"))}): Rancher makes them where it manages the cluster.");
             }
         }
 
@@ -171,9 +171,11 @@ internal static class KubernetesRestorePlanner
     }
 
     /// <summary>CRDs the restore point brings that the target lacks: their objects come back, their operators do not.</summary>
-    private static async Task CheckDefinitionsAsync(IKubernetes client, string cluster, IReadOnlyList<JsonObject> objects, List<string> warnings, CancellationToken cancellationToken)
+    private static async Task CheckDefinitionsAsync(
+        IKubernetes client, string cluster, IReadOnlyList<JsonObject> objects, bool otherCluster, List<string> warnings, CancellationToken cancellationToken)
     {
-        foreach (var definition in objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition"))
+        foreach (var definition in objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition"
+                                                      && !(otherCluster && KubernetesObjects.IsRancherGroup((string?)o["spec"]?["group"] ?? string.Empty))))
         {
             var name = KubernetesObjects.Name(definition);
             if (!await ExistsAsync(() => client.ApiextensionsV1.ReadCustomResourceDefinitionAsync(name, cancellationToken: cancellationToken)).ConfigureAwait(false))

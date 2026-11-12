@@ -333,7 +333,7 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
         return code switch
         {
             HttpStatusCode.Forbidden => $"403 Forbidden: the ServiceAccount lacks a permission (apply the current setup manifest). {message}",
-            { } c => $"{(int)c} {c}: {message}",
+            { } c => $"{(int)c} {c}: {message?.Trim()}",
             null => ex.Message,
         };
     }

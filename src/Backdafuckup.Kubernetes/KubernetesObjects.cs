@@ -34,13 +34,19 @@ internal static class KubernetesObjects
         ?? Text(o["metadata"]?["labels"]?["app.kubernetes.io/name"]);
 
     /// <summary>
-    /// Made by Rancher for its projects and users (RoleBindings and Roles with Rancher's labels): they point at Rancher's own
-    /// ClusterRoles and come back by themselves where Rancher manages the cluster, so they do not go into another cluster.
+    /// Made by Rancher: the RoleBindings and Roles of its projects and users (with Rancher's labels), which point at Rancher's
+    /// own ClusterRoles, and the objects of its API groups (<c>*.cattle.io</c>, e.g. the App records it keeps of the Helm
+    /// releases, whose release Secrets are restored). Rancher makes them again where it manages the cluster, so they do not
+    /// go into another cluster.
     /// </summary>
     public static bool IsRancherMade(JsonObject o) =>
-        Kind(o) is "RoleBinding" or "Role"
-        && o["metadata"]?["labels"] is JsonObject labels
-        && (labels.Any(kv => kv.Key.StartsWith("authz.cluster.cattle.io/", StringComparison.Ordinal)) || Text(labels["cattle.io/creator"]) == "norman");
+        IsRancherGroup(((string?)o["apiVersion"] ?? string.Empty).Split('/')[0])
+        || (Kind(o) is "RoleBinding" or "Role"
+            && o["metadata"]?["labels"] is JsonObject labels
+            && (labels.Any(kv => kv.Key.StartsWith("authz.cluster.cattle.io/", StringComparison.Ordinal)) || Text(labels["cattle.io/creator"]) == "norman"));
+
+    /// <summary>An API group of Rancher's (<c>cattle.io</c> or <c>*.cattle.io</c>).</summary>
+    public static bool IsRancherGroup(string group) => group == "cattle.io" || group.EndsWith(".cattle.io", StringComparison.Ordinal);
 
     /// <summary>Objects the cluster makes itself, never restored: ServiceAccount tokens, the root CA ConfigMap, the default ServiceAccount.</summary>
     public static bool IsClusterMade(JsonObject o) => Kind(o) switch

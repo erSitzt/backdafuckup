@@ -252,6 +252,12 @@ public sealed class KubernetesObjectsTests
         Assert.True(KubernetesObjects.IsRancherMade(projectBinding));
         Assert.True(KubernetesObjects.IsRancherMade(creatorBinding));
         Assert.False(KubernetesObjects.IsRancherMade(Obj("RoleBinding", "redis", "rbac.authorization.k8s.io/v1")));
+
+        // So do the objects of Rancher's API groups (the App records of its Helm releases); others' groups that end alike do not.
+        Assert.True(KubernetesObjects.IsRancherMade(Obj("App", "redis", "catalog.cattle.io/v1")));
+        Assert.True(KubernetesObjects.IsRancherMade(Obj("Setting", "x", "cattle.io/v1")));
+        Assert.False(KubernetesObjects.IsRancherMade(Obj("Thing", "x", "notcattle.io/v1")));
+        Assert.False(KubernetesObjects.IsRancherMade(Obj("Certificate", "x", "cert-manager.io/v1")));
     }
 
     private static JsonObject Obj(string kind, string name, string group = "v1", JsonObject? spec = null)

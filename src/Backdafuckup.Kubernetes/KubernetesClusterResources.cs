@@ -16,9 +16,12 @@ namespace Backdafuckup.Kubernetes;
 /// </summary>
 internal static class KubernetesClusterResources
 {
-    /// <summary>CRD groups that belong to the cluster's own machinery.</summary>
+    /// <summary>
+    /// CRD groups that belong to the cluster's own machinery: the snapshot API, the CNI's, and the vSphere CSI driver's
+    /// bookkeeping (its objects describe the nodes and volumes of the cluster backed up, the driver makes them again).
+    /// </summary>
     private static readonly string[] SkippedCrdGroups =
-        [VolumeSnapshotFlow.Group, "crd.projectcalico.org", "projectcalico.org", "operator.tigera.io", "cilium.io", "k3s.cattle.io"];
+        [VolumeSnapshotFlow.Group, "crd.projectcalico.org", "projectcalico.org", "operator.tigera.io", "cilium.io", "k3s.cattle.io", "cns.vmware.com"];
 
     /// <summary>The default ClusterRoles of Kubernetes that are not system:-prefixed.</summary>
     private static readonly HashSet<string> DefaultRoles = new(StringComparer.Ordinal) { "admin", "edit", "view", "cluster-admin" };

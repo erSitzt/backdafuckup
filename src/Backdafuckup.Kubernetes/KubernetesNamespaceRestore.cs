@@ -220,7 +220,8 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
         // What the selected objects need from the cluster's scope, when missing: their CRDs, and in the same cluster the
         // StorageClasses they keep (another cluster has its own classes: the map names them).
-        var kinds = _objects.Where(o => _selected.Contains(KubernetesObjects.Key(o))).Select(KubernetesObjects.Kind).ToHashSet(StringComparer.Ordinal);
+        var kinds = _objects.Where(o => _selected.Contains(KubernetesObjects.Key(o)) && !(_options.OtherCluster && KubernetesObjects.IsRancherMade(o)))
+            .Select(KubernetesObjects.Kind).ToHashSet(StringComparer.Ordinal);
         var classes = _options.OtherCluster
             ? []
             : _objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && _selected.Contains(KubernetesObjects.Key(o)))
@@ -302,7 +303,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                  (replaced.Count > 0 ? $"; {replaced.Count} replaced ({Summary(replaced)})" : string.Empty) +
                  (existing.Count > 0 ? $"; {existing.Count} existed and were left as they are ({Summary(existing)})" : string.Empty) +
                  (controlled > 0 ? $"; {controlled} made by their controllers (they make them again)" : string.Empty) +
-                 (rancher > 0 ? $"; {rancher} of Rancher's projects left out (Rancher makes them where it manages the cluster)" : string.Empty) + ".");
+                 (rancher > 0 ? $"; {rancher} object(s) of Rancher's left out (Rancher makes them where it manages the cluster)" : string.Empty) + ".");
         return new RestoredVm(Target, Target, Warnings: _warnings);
     }
 

@@ -19,6 +19,8 @@ public sealed class ClusterResourcesTests
         Crd(api, "clusterissuers.cert-manager.io", "cert-manager.io", "ClusterIssuer", "clusterissuers", "Cluster");
         Crd(api, "clusters.management.cattle.io", "management.cattle.io", "Cluster", "clusters", "Cluster");
         Crd(api, "volumesnapshots.snapshot.storage.k8s.io", "snapshot.storage.k8s.io", "VolumeSnapshot", "volumesnapshots", "Namespaced");
+        Crd(api, "csinodetopologies.cns.vmware.com", "cns.vmware.com", "CSINodeTopology", "csinodetopologies", "Cluster");
+        api.Add("apis/cns.vmware.com/v1", "csinodetopologies", Named("rke2-test-agent-1"));
         api.Add("apis/cert-manager.io/v1", "clusterissuers", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "letsencrypt" }, ["spec"] = new JsonObject { ["acme"] = new JsonObject() } });
         api.Add(Rbac, "clusterroles", Named("system:controller:job-controller"));
         api.Add(Rbac, "clusterroles", Named("admin"));
@@ -48,7 +50,7 @@ public sealed class ClusterResourcesTests
             ],
             keys);
         Assert.Contains(log.Written, l => l.StartsWith("Cluster-scoped objects of rke2-test: 9 (", StringComparison.Ordinal)
-                                          && l.Contains("10 of the cluster itself, Rancher, Fleet or RKE2 left out", StringComparison.Ordinal));
+                                          && l.Contains("11 of the cluster itself, Rancher, Fleet or RKE2 left out", StringComparison.Ordinal));
     }
 
     [Fact]
