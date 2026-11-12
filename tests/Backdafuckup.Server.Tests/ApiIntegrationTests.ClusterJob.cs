@@ -95,7 +95,7 @@ public sealed partial class ApiIntegrationTests
         var backupLog = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{backup.SessionId}/log", Ct))!.Select(l => $"{l.Severity}: {l.Message}"));
         Assert.True(backupSession.Session.State == "Succeeded", backupLog);
         Assert.True(backupLog.Contains("Platform: RKE2 · Rancher + vSphere CSI (detected: rke2 by version v1.32.13+rke2r1; rancher by namespace cattle-system; vsphere-csi by CSI driver csi.vsphere.vmware.com).", StringComparison.Ordinal), backupLog);
-        Assert.True(backupLog.Contains("Whole cluster without kube-system, kube-public, kube-node-lease, cattle-*, fleet-*, cluster-fleet-*, local, backdafuckup-system: 2 namespace(s) (bdfu-spike, web)", StringComparison.Ordinal), backupLog);
+        Assert.True(backupLog.Contains("Whole cluster without the platform's namespaces (Kubernetes: kube-system; Rancher: cattle-system): 2 namespace(s) (bdfu-spike, web)", StringComparison.Ordinal), backupLog);
         Assert.Contains("Cluster-scoped objects of", backupLog, StringComparison.Ordinal);
         var points = (await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!;
         Assert.Equal(["@cluster", "bdfu-spike", "web"], points.Select(p => p.VmNativeId).Order(StringComparer.Ordinal));

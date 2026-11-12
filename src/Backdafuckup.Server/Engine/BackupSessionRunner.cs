@@ -167,11 +167,28 @@ public sealed class BackupSessionRunner(
             IReadOnlyList<string> names;
             if (KubernetesClusterScope.IsJobObject(selector.NativeId))
             {
-                // Every namespace but the excluded ones.
+                // Every namespace but the excluded ones; @platform: those the cluster's platforms make, as detected now.
                 var excludes = KubernetesClusterScope.Excludes(selector.NativeId);
+                var all = await cluster.SelectNamespacesAsync(string.Empty, cancellationToken).ConfigureAwait(false);
                 text = KubernetesClusterScope.Describe(excludes);
-                names = [.. (await cluster.SelectNamespacesAsync(string.Empty, cancellationToken).ConfigureAwait(false))
-                    .Where(n => !KubernetesClusterScope.IsExcluded(n, excludes))];
+                if (excludes.Contains(KubernetesClusterScope.PlatformToken))
+                {
+                    var platform = hypervisor is Backdafuckup.Kubernetes.IKubernetesPlatforms platforms
+                        ? (await platforms.GetPlatformsAsync(cancellationToken).ConfigureAwait(false)).Set
+                        : Backdafuckup.Kubernetes.KubernetesPlatformSet.Base;
+                    var patterns = platform.NamespacePatterns;
+                    var byPlatform = all
+                        .Select(n => (Namespace: n, Profile: patterns.FirstOrDefault(p => KubernetesClusterScope.IsExcluded(n, [p.Pattern]) && n != "backdafuckup-system").Profile))
+                        .Where(n => n.Profile is not null)
+                        .GroupBy(n => n.Profile!)
+                        .OrderBy(g => platform.Profiles.ToList().IndexOf(g.Key))
+                        .Select(g => $"{g.Key.Name}: {string.Join(", ", g.Select(n => n.Namespace))}")
+                        .ToList();
+                    text += byPlatform.Count > 0 ? $" ({string.Join("; ", byPlatform)})" : " (none here)";
+                    excludes = KubernetesClusterScope.Expand(excludes, patterns.Select(p => p.Pattern));
+                }
+
+                names = [.. all.Where(n => !KubernetesClusterScope.IsExcluded(n, excludes))];
                 if (members.All(m => m.NativeId != KubernetesClusterScope.Member))
                 {
                     members.Insert(0, new BackupJobObject
