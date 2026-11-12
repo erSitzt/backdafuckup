@@ -646,6 +646,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("current_master_address");
 
+                    b.Property<string>("DetectedPlatforms")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("detected_platforms");
+
                     b.Property<string>("DisplayName")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -673,6 +677,10 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<string>("PlatformName")
                         .HasColumnType("text")
                         .HasColumnName("platform_name");
+
+                    b.Property<string>("PlatformOverride")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("platform_override");
 
                     b.Property<int>("Port")
                         .HasColumnType("integer")

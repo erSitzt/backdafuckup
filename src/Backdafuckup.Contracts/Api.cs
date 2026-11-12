@@ -104,7 +104,29 @@ public sealed record ConnectionDto(
     string UserName,
     bool AllowInsecureNbd,
     IReadOnlyList<ConnectionHostDto> Hosts,
-    ConnectionAgentDto? Agent = null);
+    ConnectionAgentDto? Agent = null,
+    KubernetesPlatformsDto? Platforms = null);
+
+/// <summary>
+/// A Kubernetes cluster's platforms (spec 2026-11-12-1952-kubernetes-platform-profiles): what was detected (with evidence),
+/// what was set by hand, those in effect, and the namespaces a whole-cluster job with <c>@platform</c> leaves out.
+/// </summary>
+public sealed record KubernetesPlatformsDto(
+    IReadOnlyList<DetectedPlatformDto> Detected,
+    IReadOnlyList<string>? Override,
+    IReadOnlyList<KubernetesPlatformDto> Effective,
+    string Display,
+    IReadOnlyList<PlatformNamespacesDto> Namespaces);
+
+public sealed record DetectedPlatformDto(string Id, string Name, bool Tested, string Evidence);
+
+/// <summary>A platform of the catalog. <see cref="Tested"/>: checked in the lab; otherwise its rules come from <see cref="Sources"/>.</summary>
+public sealed record KubernetesPlatformDto(string Id, string Name, string Category, bool Tested, IReadOnlyList<string> Namespaces, string? Notes, IReadOnlyList<string> Sources);
+
+public sealed record PlatformNamespacesDto(string Profile, IReadOnlyList<string> Patterns);
+
+/// <summary>The platforms of a cluster set by hand (catalog ids), or null to detect them again.</summary>
+public sealed record SetConnectionPlatformsDto(IReadOnlyList<string>? Override);
 
 /// <summary>The agent of a Kubernetes cluster reached through it (<see cref="CreateConnectionDto.Access"/> "Agent").</summary>
 /// <param name="Online">Its control connection to the server is open.</param>

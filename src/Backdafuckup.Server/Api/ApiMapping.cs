@@ -12,7 +12,8 @@ internal static class ApiMapping
     public static ConnectionDto ToDto(this HypervisorConnection c) => new(
         c.Id, c.Kind.ToString(), c.DisplayName, c.Address, c.Port, c.CurrentMasterAddress, c.PlatformName, c.ProductName, c.ProductVersion,
         c.Status.ToString(), c.LastConnectedUtc, c.LastError, c.Credential?.Username ?? string.Empty, c.AllowInsecureNbd,
-        c.Hosts.OrderBy(h => h.Address).Select(h => new ConnectionHostDto(h.Address, h.SpkiSha256, h.TrustedUtc)).ToList());
+        c.Hosts.OrderBy(h => h.Address).Select(h => new ConnectionHostDto(h.Address, h.SpkiSha256, h.TrustedUtc)).ToList(),
+        Platforms: KubernetesPlatformMapping.Platforms(c));
 
     public static InventoryItemDto ToDto(this InventoryEntry e) => new(e.Kind.ToString(), e.NativeId, e.Name, e.ParentNativeId, e.Properties);
 

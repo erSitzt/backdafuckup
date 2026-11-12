@@ -212,6 +212,32 @@ public static class InfrastructureEndpoints
             "Reaches a Kubernetes cluster through its agent from now on (jobs and restore points stay): the stored token and pins are replaced by a connect token, " +
             "which the cluster's setup manifest with the agent (GET /api/kubernetes/setup.yaml?connectionId=…) holds. Going back to direct access means adding the token again.");
 
+        // The platforms of a cluster set by hand, or (null) detected again; the product name follows at once.
+        connections.MapPut("/{id:guid}/platforms", async (Guid id, SetConnectionPlatformsDto request, AppDbContext db, Clusters.ClusterAgents agents, CancellationToken ct) =>
+        {
+            var connection = await db.Connections.Include(c => c.Credential).Include(c => c.Hosts).FirstOrDefaultAsync(c => c.Id == id, ct);
+            if (connection is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (connection.Kind != HypervisorKind.Kubernetes)
+            {
+                return Results.Problem("Only Kubernetes clusters have platforms.", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            var ids = request.Override?.Select(i => i.Trim()).Where(i => i.Length > 0 && i != "kubernetes").Distinct(StringComparer.Ordinal).ToList();
+            if (ids is not null && KubernetesPlatformMapping.Check(ids) is { } problem)
+            {
+                return Results.Problem(problem, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            connection.PlatformOverride = ids;
+            connection.ProductName = Backdafuckup.Kubernetes.KubernetesPlatformSet.Of(ids ?? connection.DetectedPlatforms?.Select(d => d.Id)).Display;
+            await db.SaveChangesAsync(ct);
+            return Results.Ok(WithAgent(connection, agents));
+        });
+
         connections.MapPost("/{id:guid}/rescan", async (Guid id, AppDbContext db, ConnectionManager manager, TimeProvider time, CancellationToken ct) =>
         {
             return await TryRefreshInventoryAsync(id, db, manager, time, ct) is { } error
@@ -221,6 +247,9 @@ public static class InfrastructureEndpoints
 
         connections.MapGet("/{id:guid}/inventory", async (Guid id, AppDbContext db, CancellationToken ct) =>
             (await db.Inventory.Where(i => i.ConnectionId == id).OrderBy(i => i.Kind).ThenBy(i => i.Name).ToListAsync(ct)).Select(i => i.ToDto()));
+
+        // The platform catalog, for setting a cluster's platforms by hand.
+        app.MapGet("/api/kubernetes/platforms", () => Backdafuckup.Kubernetes.KubernetesPlatformCatalog.Builtin.Profiles.Where(p => !p.Always).Select(KubernetesPlatformMapping.ToDto));
 
         app.MapGet("/api/kubernetes/setup.yaml", async (
                 bool? restore, bool? download, Guid? connectionId, AppDbContext db, CredentialProtector protector, Agents.AgentSettingsStore settings,
@@ -538,6 +567,15 @@ public static class InfrastructureEndpoints
         }
 
         await db.SaveChangesAsync(ct);
+
+        // A cluster's platforms and the product name they give it ("RKE2 · Rancher"), at every scan.
+        if (inventory.Platforms is { } detected)
+        {
+            var list = detected.ToList();
+            await db.Connections.Where(c => c.Id == connectionId).ExecuteUpdateAsync(u => u
+                .SetProperty(c => c.DetectedPlatforms, list)
+                .SetProperty(c => c.ProductName, platform.ProductName), ct);
+        }
 
         // Status fields only, without the row version: background services touch the same row.
         await db.Connections.Where(c => c.Id == connectionId).ExecuteUpdateAsync(u => u

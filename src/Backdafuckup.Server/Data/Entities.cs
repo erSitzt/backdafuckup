@@ -84,6 +84,12 @@ public sealed class HypervisorConnection
 
     public string? ProductVersion { get; set; }
 
+    /// <summary>Kubernetes: the platforms recognised at the last scan or backup run, with their evidence.</summary>
+    public List<Backdafuckup.Core.Hypervisor.DetectedPlatform>? DetectedPlatforms { get; set; }
+
+    /// <summary>Kubernetes: the platforms set by hand (catalog ids), used instead of the detected ones; null: detected.</summary>
+    public List<string>? PlatformOverride { get; set; }
+
     public Guid CredentialId { get; set; }
 
     public Credential Credential { get; set; } = null!;

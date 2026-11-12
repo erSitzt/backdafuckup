@@ -87,7 +87,7 @@ public sealed class ClusterAgents : IAsyncDisposable
             new NetworkCredential("agent", session.ApiToken),
             TlsTrustMode.Pinned,
             session.Authorities,
-            new Dictionary<string, string> { [KubernetesConnectionOptions.TlsName] = session.TlsName, [KubernetesConnectionOptions.ClusterName] = connection.DisplayName });
+            Engine.ConnectionManager.Options(connection, new Dictionary<string, string> { [KubernetesConnectionOptions.TlsName] = session.TlsName, [KubernetesConnectionOptions.ClusterName] = connection.DisplayName }));
     }
 
     /// <summary>The connection whose connect token the request carries, or null.</summary>
