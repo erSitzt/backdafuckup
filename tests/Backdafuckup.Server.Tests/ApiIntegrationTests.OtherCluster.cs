@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using Backdafuckup.Contracts;
 using Backdafuckup.Kubernetes;
 using Backdafuckup.Server.Agents;
+using Backdafuckup.Testing;
 using Backdafuckup.Testing.Kubernetes;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -101,16 +102,13 @@ public sealed partial class ApiIntegrationTests
         Assert.DoesNotContain(other.All("pods"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
         Assert.DoesNotContain(other.All("volumesnapshots"), v => (string?)v["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
 
-        // Into a class without a snapshot class: no block path (the files path comes with phase 2's files restore).
+        // Into a new namespace name, the PVC and objects are the restore point's; the original cluster is untouched.
+        Assert.Null(_cluster.Find("namespaces", null, "bdfu-spike-copy"));
         other.Remove("namespaces", null, "bdfu-spike");
         foreach (var item in other.All("persistentvolumeclaims").Where(p => (string?)p["metadata"]!["namespace"] == "bdfu-spike").ToList())
         {
             other.Remove("persistentvolumeclaims", "bdfu-spike", (string)item["metadata"]!["name"]!);
         }
-
-        (state, log) = await RestoreAsync(new KubernetesRestoreDto { StorageClassMap = new() { ["vsphere-csi"] = "nfs-client" } });
-        Assert.True(state == "Failed", log);
-        Assert.Contains("StorageClass nfs-client of cluster.local/nfs-subdir-external-provisioner, which has no VolumeSnapshotClass", log, StringComparison.Ordinal);
 
         // The same namespace name in both clusters: two rows in the overview, each with its own restore points.
         var targetJob = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", new SaveJobDto
@@ -134,6 +132,175 @@ public sealed partial class ApiIntegrationTests
         }, Ct);
         Assert.Equal(System.Net.HttpStatusCode.BadRequest, refused.StatusCode);
         Assert.Contains("only be restored into a Kubernetes cluster", await refused.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_volume_goes_into_a_cluster_without_snapshots_as_files_and_is_handed_over_to_its_pvc()
+    {
+        var client = await SignedInClientAsync();
+        await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://localhost/", Ct);
+        await Ok(client.PutAsJsonAsync("/api/kubernetes/mover", new SaveMoverImageDto("registry.test:8443", "backdafuckup/mover", "bdfu-push", "secret-1", "None", null, null, null), Ct));
+
+        // The PVC's volume in the source cluster: an ext4 file system on the whole device.
+        Directory.CreateDirectory(_root);
+        var device = Path.Combine(_root, "ext4-volume.img");
+        using (var image = File.OpenRead(FsFixtures.Image("ext4-gpt")))
+        using (var copy = File.Create(device))
+        {
+            image.Position = 2048 * 512; // partition 1 starts at sector 2048
+            image.CopyTo(copy);
+        }
+
+        SetUpCluster(device, [], [], new FileInfo(device).Length);
+        var source = await AddClusterAsync(client, "rke2-test", "10.26.1.10");
+        var repository = await Read<RepositoryDto>(client.PostAsJsonAsync("/api/repositories", new CreateRepositoryDto { Name = "Local", Path = Path.Combine(_root, "repo") }, Ct));
+        var job = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", new SaveJobDto
+        {
+            Name = "Namespaces", ConnectionId = source.Id, RepositoryId = repository.Id, Schedule = new ScheduleDto("None", "22:00", [], "Europe/Berlin"),
+            Objects = [new JobObjectDto("bdfu-spike", "bdfu-spike")], RetryCount = 0,
+        }, Ct));
+        var backup = await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{job.Id}/run", new RunJobDto(), Ct));
+        Assert.Equal("Succeeded", (await WaitForSessionAsync(client, backup.SessionId)).Session.State);
+        var point = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>("/api/restore-points?vmId=bdfu-spike", Ct))!);
+
+        // A cluster with only an NFS class (nfs-subdir): a folder on the export per PVC, PVs that can change their PVC.
+        var nfs = new FakeKubernetesApi("uid-kube-system-nfs");
+        nfs.Add("api/v1", "namespaces", FakeKubernetesApi.Namespace(KubernetesSetup.WorkNamespace));
+        nfs.Add("apis/storage.k8s.io/v1", "storageclasses", new JsonObject
+        {
+            ["metadata"] = new JsonObject { ["name"] = "nfs-client", ["annotations"] = new JsonObject { ["storageclass.kubernetes.io/is-default-class"] = "true" } },
+            ["provisioner"] = "cluster.local/nfs-subdir-external-provisioner",
+        });
+        var exports = Path.Combine(_root, "nfs-export");
+        Directory.CreateDirectory(exports);
+        nfs.Created = (plural, item) =>
+        {
+            var ns = (string?)item["metadata"]!["namespace"];
+            var name = (string)item["metadata"]!["name"]!;
+            switch (plural)
+            {
+                case "persistentvolumeclaims" when item["spec"] is JsonObject claimSpec && claimSpec["volumeName"] is null:
+                {
+                    // The provisioner: a folder on the export.
+                    var folder = Path.Combine(exports, $"{ns}-{name}");
+                    Directory.CreateDirectory(folder);
+                    nfs.Add("api/v1", "persistentvolumes", new JsonObject
+                    {
+                        ["metadata"] = new JsonObject { ["name"] = $"pv-{name}", ["annotations"] = new JsonObject { ["pv.kubernetes.io/provisioned-by"] = "cluster.local/nfs-subdir-external-provisioner" } },
+                        ["spec"] = new JsonObject
+                        {
+                            ["nfs"] = new JsonObject { ["server"] = "10.26.9.9", ["path"] = folder },
+                            ["storageClassName"] = (string?)item["spec"]!["storageClassName"],
+                            ["persistentVolumeReclaimPolicy"] = "Delete",
+                            ["claimRef"] = new JsonObject { ["namespace"] = ns, ["name"] = name, ["uid"] = $"uid-{name}" },
+                        },
+                        ["status"] = new JsonObject { ["phase"] = "Bound" },
+                    });
+                    nfs.Mutate(() =>
+                    {
+                        item["spec"]!["volumeName"] = $"pv-{name}";
+                        item["status"] = new JsonObject { ["phase"] = "Bound" };
+                    });
+                    break;
+                }
+
+                case "persistentvolumeclaims":
+                {
+                    // A PVC naming its PV: bound once the PV is reserved for it.
+                    var pv = nfs.Find("persistentvolumes", null, (string)item["spec"]!["volumeName"]!)!;
+                    if ((string?)pv["spec"]!["claimRef"]?["name"] == name && (string?)pv["spec"]!["claimRef"]?["namespace"] == ns)
+                    {
+                        nfs.Mutate(() =>
+                        {
+                            pv["spec"]!["claimRef"]!["uid"] = $"uid-{ns}-{name}";
+                            pv["status"] = new JsonObject { ["phase"] = "Bound" };
+                            item["status"] = new JsonObject { ["phase"] = "Bound" };
+                        });
+                    }
+
+                    break;
+                }
+
+                case "pods" when ns == KubernetesSetup.WorkNamespace:
+                {
+                    // The kubelet: the files mover with its PVC's folder on the export mounted.
+                    var env = item["spec"]!["containers"]![0]!["env"]!.AsArray().ToDictionary(e => (string)e!["name"]!, e => (string?)e!["value"]);
+                    var token = (string)nfs.Find("secrets", ns, (string)item["spec"]!["containers"]![0]!["env"]!.AsArray()
+                        .Single(e => (string?)e!["name"] == "BDFU_MOVER_TOKEN")!["valueFrom"]!["secretKeyRef"]!["name"]!)!["stringData"]!["token"]!;
+                    var claim = (string)item["spec"]!["volumes"]![0]!["persistentVolumeClaim"]!["claimName"]!;
+                    var volume = (string)nfs.Find("persistentvolumeclaims", ns, claim)!["spec"]!["volumeName"]!;
+                    var folder = (string)nfs.Find("persistentvolumes", null, volume)!["spec"]!["nfs"]!["path"]!;
+                    var options = new Backdafuckup.Mover.MoverOptions(
+                        Backdafuckup.Mover.MoverMode.Files, new Uri(env["BDFU_MOVER_DATA_URL"]!), new Uri(env["BDFU_MOVER_RESULT_URL"]!), token, [], string.Empty,
+                        Root: folder, Keep: env["BDFU_MOVER_IF_EXISTS"] == "keep", Owners: env["BDFU_MOVER_OWNERS"] == "1");
+                    nfs.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Running" });
+                    _ = Task.Run(async () =>
+                    {
+                        var exit = await Backdafuckup.Mover.MoverRunner.RunAsync(options, _factory!.Server.CreateHandler(), new StringWriter(), CancellationToken.None);
+                        nfs.Mutate(() => item["status"] = new JsonObject { ["phase"] = exit == 0 ? "Succeeded" : "Failed" });
+                    });
+                    break;
+                }
+            }
+        };
+        nfs.Deleted = (plural, item) =>
+        {
+            if (plural == "persistentvolumeclaims" && (string?)item["spec"]?["volumeName"] is { } volume && nfs.Find("persistentvolumes", null, volume) is { } pv)
+            {
+                nfs.Mutate(() => pv["status"] = new JsonObject { ["phase"] = "Released" });
+            }
+        };
+        nfs.Patched = (plural, item) =>
+        {
+            if (plural == "persistentvolumes" && item["spec"]?["claimRef"] is JsonObject claimRef && claimRef["uid"] is null && (string?)item["status"]?["phase"] == "Released")
+            {
+                nfs.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Available" });
+            }
+        };
+        _clusters["10.26.3.10"] = nfs;
+        var target = await AddClusterAsync(client, "rke2-nfs", "10.26.3.10");
+
+        var started = await Read<StartedDto>(client.PostAsJsonAsync("/api/restores", new RestoreRequestDto
+        {
+            RestorePointId = point.Id, TargetConnectionId = target.Id, Mode = RestoreModeDto.AlternateLocation,
+            Kubernetes = new KubernetesRestoreDto { StorageClassMap = new() { ["vsphere-csi"] = "nfs-client" } },
+        }, Ct));
+        var session = await WaitForSessionAsync(client, started.SessionId);
+        var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{started.SessionId}/log", Ct))!.Select(l => $"{l.Severity}: {l.Message}"));
+        Assert.True(session.Session.State is "Succeeded" or "Warning", log);
+        Assert.Contains("PVC data-redis-test-0: its data goes into the StorageClass nfs-client of cluster", log, StringComparison.Ordinal);
+        Assert.Contains("as files (StorageClass nfs-client of cluster.local/nfs-subdir-external-provisioner, which has no VolumeSnapshotClass)", log, StringComparison.Ordinal);
+
+        // The PVC is bound to the volume the files went into, which has its reclaim policy back; the work objects are gone.
+        var restoredClaim = nfs.Find("persistentvolumeclaims", "bdfu-spike", "data-redis-test-0")!;
+        Assert.Equal("nfs-client", (string?)restoredClaim["spec"]!["storageClassName"]);
+        var restoredVolume = nfs.Find("persistentvolumes", null, (string)restoredClaim["spec"]!["volumeName"]!)!;
+        Assert.Equal(("Bound", "Delete", "data-redis-test-0", "bdfu-spike"), (
+            (string?)restoredVolume["status"]!["phase"], (string?)restoredVolume["spec"]!["persistentVolumeReclaimPolicy"],
+            (string?)restoredVolume["spec"]!["claimRef"]!["name"], (string?)restoredVolume["spec"]!["claimRef"]!["namespace"]));
+        Assert.Contains("PVC bdfu-spike/data-redis-test-0: bound to its restored volume", log, StringComparison.Ordinal);
+        Assert.DoesNotContain(nfs.All("persistentvolumeclaims"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
+        Assert.DoesNotContain(nfs.All("pods"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
+        Assert.DoesNotContain(nfs.All("secrets"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
+
+        // The files of the volume are in its folder on the export, without lost+found; the root has the backed-up mode.
+        var export = (string)restoredVolume["spec"]!["nfs"]!["path"]!;
+        var expected = FsFixtures.Manifest("ext4-gpt.p1").ToDictionary(l => l[7], l => l[1]);
+        Assert.Equal(expected["hello.txt"], Sha256(Path.Combine(export, "hello.txt")));
+        Assert.Equal(expected["pattern-3m.bin"], Sha256(Path.Combine(export, "pattern-3m.bin")));
+        Assert.Equal(expected["folder/sub/deep/nested.txt"], Sha256(Path.Combine(export, "folder/sub/deep/nested.txt")));
+        Assert.Equal("hello.txt", new FileInfo(Path.Combine(export, "link-to-hello")).LinkTarget);
+        Assert.False(Directory.Exists(Path.Combine(export, "lost+found")));
+        if (!Environment.IsPrivilegedProcess)
+        {
+            Assert.Contains("restored, but owners are not kept", log, StringComparison.Ordinal); // the test runs without root, like an export with root_squash
+        }
+
+        static string Sha256(string path)
+        {
+            using var stream = File.OpenRead(path);
+            return Convert.ToHexStringLower(SHA256.HashData(stream));
+        }
     }
 
     /// <summary>Adds a Kubernetes cluster (through its CA) at <paramref name="address"/>; a fake in <see cref="_clusters"/> answers for it.</summary>

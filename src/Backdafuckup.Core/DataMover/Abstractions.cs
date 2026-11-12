@@ -114,3 +114,20 @@ public interface IDiskWriter : IAsyncDisposable
     /// <summary>Writes the whole image; <paramref name="processed"/> receives the image bytes done so far.</summary>
     Task WriteAsync(IDiskImageSource image, IProgress<long>? processed, CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// A disk written as files instead of blocks, e.g. a Kubernetes volume into a StorageClass without snapshots: the restore
+/// reads the file system of the image and streams its files to <see cref="OpenFilesAsync"/>'s channel (in the format of
+/// <see cref="MoverFileWriter"/>); <see cref="FinishFilesAsync"/> waits for what the mover put in place.
+/// </summary>
+public interface IFileLevelDiskWriter : IDiskWriter
+{
+    /// <summary>For messages, e.g. <c>PVC shop/data-redis-0 (cluster …)</c>.</summary>
+    string Description { get; }
+
+    /// <summary>Starts the mover on the new volume; the channel is ready to write once it is connected.</summary>
+    Task<IMoverFilesChannel> OpenFilesAsync(CancellationToken cancellationToken);
+
+    /// <summary>Waits for the mover's report of what it put in place, then stops it (the volume stays).</summary>
+    Task<MoverFileReport> FinishFilesAsync(CancellationToken cancellationToken);
+}

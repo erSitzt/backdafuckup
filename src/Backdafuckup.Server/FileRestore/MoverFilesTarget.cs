@@ -86,6 +86,17 @@ public sealed class MoverFilesTarget : IFileRestoreTarget, ILinkRestoreTarget
         _writer.Link(Add('L', path, 0), Relative(path), linkTarget, meta.UserId, meta.GroupId);
     }
 
+    /// <summary>
+    /// Owner, mode and times of the folder the paths are below (the PVC's root without a base folder), sent last: a whole
+    /// volume restored into a new one keeps its root's (e.g. a database's data folder that is the mount root, 0700).
+    /// </summary>
+    public void BaseMeta(RestoredItemMeta meta)
+    {
+        ArgumentNullException.ThrowIfNull(meta);
+        _pendingFile = null;
+        _writer.Meta(Add('M', [], 0), Relative([]), folder: true, new MoverFileMeta(meta.UnixMode, meta.UserId, meta.GroupId, meta.ModifiedUtc, meta.AccessedUtc));
+    }
+
     /// <summary>Ends the stream: the mover puts the links and folder times in place and reports.</summary>
     public void Finish()
     {

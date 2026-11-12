@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Backdafuckup.Contracts;
+using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Operations;
 using Backdafuckup.Core.Repository;
@@ -17,7 +18,8 @@ public sealed class RestoreSessionRunner(
     SessionEventWriter events,
     SessionTracker tracker,
     Telemetry.BackupMetrics metrics,
-    TimeProvider time)
+    TimeProvider time,
+    Backdafuckup.FileLevel.ChunkCache cache)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -181,7 +183,16 @@ public sealed class RestoreSessionRunner(
                         _ = PushProgressAsync(task.Id, session.Id, Math.Round((start + bytes) * 100.0 / total, 1), start + bytes, metrics);
                     }
                 });
-                await writer.WriteAsync(image, progress, cancellationToken).ConfigureAwait(false);
+                if (writer is IFileLevelDiskWriter files)
+                {
+                    // A volume into a StorageClass without snapshots: its files, read from the image's file system.
+                    await FileRestore.VolumeFileSender.SendAsync(reader, cache, target.DiskKey, files, log, progress, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await writer.WriteAsync(image, progress, cancellationToken).ConfigureAwait(false);
+                }
+
                 done += target.CapacityBytes;
                 transferred += writer.TransferredBytes;
                 log.Info($"{label}: restored ({BackupFormat(target.CapacityBytes)}, {BackupFormat(writer.TransferredBytes)} transferred).", $"disk-{target.DiskKey}");

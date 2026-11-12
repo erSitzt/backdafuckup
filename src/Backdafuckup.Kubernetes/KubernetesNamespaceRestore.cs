@@ -34,6 +34,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
     private readonly ObjectRewrite _rewrite;
     private readonly Dictionary<string, TargetVolume> _targets = new(StringComparer.Ordinal);
     private readonly List<VolumeImport> _imports = [];
+    private readonly List<VolumeFilesImport> _fileImports = [];
     private readonly List<JsonObject> _created = [];
     private readonly List<string> _warnings = [];
     private readonly Dictionary<string, IReadOnlyList<(string Kind, string Name)>> _swaps = new(StringComparer.Ordinal);
@@ -172,6 +173,16 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
     {
         var volume = DataVolumes.First(v => v.DiskKey == target.DiskKey);
         var way = _targets.GetValueOrDefault(volume.Claim) ?? throw new InvalidOperationException($"The volume of PVC {volume.Claim} was not validated.");
+        if (way.Path == VolumeDataPath.Files)
+        {
+            var modes = (_objects.FirstOrDefault(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && KubernetesObjects.Name(o) == volume.Claim)?["spec"]?["accessModes"] as JsonArray)
+                ?.Select(m => (string?)m).OfType<string>().ToList() ?? [];
+            var files = await VolumeFilesImport.CreateAsync(_flow, _run, target, way.StorageClass, modes, $"{Target}/{_options.ClaimName(volume.Claim)}", cancellationToken)
+                .ConfigureAwait(false);
+            _fileImports.Add(files);
+            return files;
+        }
+
         var import = await VolumeImport.CreateAsync(
             _flow, _run, target, way.StorageClass, way.SnapshotClass, Target, $"{Target}/{_options.ClaimName(volume.Claim)}", cancellationToken).ConfigureAwait(false);
         _imports.Add(import);
@@ -232,6 +243,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
         // The namespaced objects in order; PVCs with data take their restored volumes.
         var volumes = _imports.ToDictionary(i => i.DiskId, StringComparer.Ordinal);
+        var fileVolumes = _fileImports.ToDictionary(i => i.DiskId, StringComparer.Ordinal);
         foreach (var item in _objects
                      .Where(o => KubernetesObjects.Namespace(o) is not null && _selected.Contains(KubernetesObjects.Key(o)))
                      .OrderBy(o => KubernetesObjects.Rank(KubernetesObjects.Kind(o))).ThenBy(KubernetesObjects.Key, StringComparer.Ordinal))
@@ -256,7 +268,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
             if (KubernetesObjects.Kind(item) == "PersistentVolumeClaim")
             {
-                await RestoreClaimAsync(item, sourceToNewDiskId, volumes, restored, cancellationToken).ConfigureAwait(false);
+                await RestoreClaimAsync(item, sourceToNewDiskId, volumes, fileVolumes, restored, cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
@@ -308,6 +320,11 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             await import.DisposeAsync().ConfigureAwait(false);
         }
 
+        foreach (var files in _fileImports)
+        {
+            await files.DisposeAsync().ConfigureAwait(false);
+        }
+
         if (!_completed)
         {
             using var timeout = new CancellationTokenSource(_flow.Timings.Deleted);
@@ -339,6 +356,20 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             }
         }
 
+        // Volumes written as files that never reached their PVC (a completed restore handed them over).
+        foreach (var files in _fileImports)
+        {
+            using var timeout = new CancellationTokenSource(_flow.Timings.Deleted);
+            try
+            {
+                await files.ReleaseAsync(timeout.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is KubernetesOperationException or OperationCanceledException or HttpRequestException)
+            {
+                Log.Warning($"A restored volume of {files.Description} could not be removed (retried later): {ex.Message}");
+            }
+        }
+
         // The snapshots and work volumes of the restored volumes (a completed restore released them already).
         foreach (var import in _imports)
         {
@@ -359,7 +390,8 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
     /// bound again to its static PV (e.g. an NFS export).
     /// </summary>
     private async Task RestoreClaimAsync(
-        JsonObject claim, IReadOnlyDictionary<string, string> sourceToNewDiskId, Dictionary<string, VolumeImport> volumes, List<string> restored, CancellationToken cancellationToken)
+        JsonObject claim, IReadOnlyDictionary<string, string> sourceToNewDiskId, Dictionary<string, VolumeImport> volumes, Dictionary<string, VolumeFilesImport> fileVolumes,
+        List<string> restored, CancellationToken cancellationToken)
     {
         var originalName = KubernetesObjects.Name(claim);
         var name = _options.ClaimName(originalName);
@@ -367,6 +399,23 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         prepared["metadata"]!["name"] = name;
         var spec = (JsonObject)prepared["spec"]!;
         var backupVolume = (string?)claim["spec"]?["volumeName"] is { } pvName ? _objects.FirstOrDefault(o => KubernetesObjects.Kind(o) == "PersistentVolume" && KubernetesObjects.Name(o) == pvName) : null;
+
+        if (sourceToNewDiskId.TryGetValue($"{Source}/{originalName}", out var fileDiskId) && fileVolumes.TryGetValue(fileDiskId, out var files))
+        {
+            // The volume written as files: handed over to the PVC, which names it as its volume.
+            if (_swaps.TryGetValue(name, out var swapped))
+            {
+                await SwapOutAsync(name, swapped, cancellationToken).ConfigureAwait(false);
+            }
+
+            spec["volumeName"] = await files.HandOverAsync(Target, name, cancellationToken).ConfigureAwait(false);
+            spec["storageClassName"] = files.StorageClass;
+            await CallAsync($"creating the PVC {Target}/{name}", () => _applier.CreateAsync(prepared, cancellationToken)).ConfigureAwait(false);
+            _created.Add(prepared);
+            restored.Add($"PersistentVolumeClaim/{name}");
+            await files.CompleteHandOverAsync(Target, name, cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
         if (sourceToNewDiskId.TryGetValue($"{Source}/{originalName}", out var diskId) && volumes.TryGetValue(diskId, out var import) && import.Snapshot is { } snapshot)
         {
@@ -568,14 +617,11 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                 continue;
             }
 
-            if (way.Path == VolumeDataPath.Files)
-            {
-                errors.Add($"PVC {name}: its data cannot go into cluster {_settings.ClusterName()} as a block volume ({way.Reason}); restoring a volume as files is not available yet.");
-                continue;
-            }
-
             _targets[name] = way;
-            Log.Info($"PVC {name}: its data goes into the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()} as a block volume ({way.Reason}).");
+            Log.Info(way.Path == VolumeDataPath.Block
+                ? $"PVC {name}: its data goes into the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()} as a block volume ({way.Reason})."
+                : $"PVC {name}: its data goes into the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()} as files ({way.Reason}): read from the file system " +
+                  "of its image (ext or XFS) with owners, modes and times; hard links become copies, sparse files are written in full, extended attributes and ACLs stay behind.");
         }
     }
 
