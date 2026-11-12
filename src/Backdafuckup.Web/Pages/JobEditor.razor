@@ -74,7 +74,10 @@ else
                         <MudTextField @bind-Value="_vmFilter" Placeholder="@(IsCluster ? "Filter namespaces" : "Filter VMs")" Variant="Variant.Outlined" Margin="Margin.Dense" Adornment="Adornment.Start"
                                       AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Clearable="true" />
                         <div class="field-toolbar-end">
-                            <span class="mini-chip @(_selected.Count > 0 ? "success" : null)">@_selected.Count selected</span>
+                            @if (!(IsCluster && _wholeCluster))
+                            {
+                                <span class="mini-chip @(_selected.Count > 0 ? "success" : null)">@_selected.Count selected</span>
+                            }
                             @if (_withMemory.Count > 0)
                             {
                                 <span class="mini-chip info">@_withMemory.Count with memory</span>
