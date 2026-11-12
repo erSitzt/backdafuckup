@@ -57,6 +57,7 @@ internal static class KubernetesRestorePlanner
 
         var available = storage.ClassNames.Count > 0 ? string.Join(", ", storage.ClassNames) : "none";
         var volumes = new List<KubernetesVolumePlan>();
+        bool imagesAsFiles = false, treesAsFiles = false;
         foreach (var claim in objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && KubernetesObjects.Namespace(o) is not null))
         {
             var name = KubernetesObjects.Name(claim);
@@ -94,6 +95,20 @@ internal static class KubernetesRestorePlanner
 
             volumes.Add(new KubernetesVolumePlan(name, source, way.StorageClass, way.Path == VolumeDataPath.Block ? "block" : "files", way.Reason, size));
             var targetClass = storage.Find(way.StorageClass);
+            if (way.Path == VolumeDataPath.Files)
+            {
+                imagesAsFiles |= record.TreeKey is null;
+                treesAsFiles |= record.TreeKey is not null;
+                var modes = (claim["spec"]?["accessModes"] as JsonArray)?.Select(m => (string?)m).OfType<string>().ToList() ?? [];
+                var sourceProvisioner = objects.FirstOrDefault(o => KubernetesObjects.Kind(o) == "StorageClass" && KubernetesObjects.Name(o) == source)?["provisioner"]?.GetValue<string>();
+                var otherProvisioner = sourceProvisioner is null ? way.StorageClass != source : sourceProvisioner != targetClass?.Provisioner;
+                if (otherProvisioner && modes.FirstOrDefault(m => m is "ReadWriteMany" or "ReadOnlyMany") is { } shared)
+                {
+                    warnings.Add($"PVC {name} is {shared}: should the StorageClass {way.StorageClass}{(targetClass?.Provisioner is { } p ? $" ({p})" : string.Empty)} not provide that, " +
+                                 "its volume is made ReadWriteOnce and the PVC restored that way (pods on different nodes cannot mount it at the same time).");
+                }
+            }
+
             if (way.Path == VolumeDataPath.Files && targetClass?.Provisioner?.Contains("nfs", StringComparison.OrdinalIgnoreCase) == true)
             {
                 warnings.Add($"PVC {name} goes onto NFS ({targetClass.Provisioner}): owners are kept only if the export lets root give files to other users (no root_squash); otherwise the files belong to the export's user, and a workload running as another user may not read them.");
@@ -106,9 +121,14 @@ internal static class KubernetesRestorePlanner
             }
         }
 
-        if (volumes.Any(v => v.Path == "files"))
+        if (imagesAsFiles)
         {
             warnings.Add("Volumes that go in as files are read from their file system (ext or XFS only): hard links become copies, sparse files are written in full, extended attributes and ACLs stay behind.");
+        }
+
+        if (treesAsFiles)
+        {
+            warnings.Add("Volumes backed up file by file go back as files: hard links become copies, sparse files are written in full; FIFOs, sockets and devices are left out, extended attributes and ACLs were not backed up.");
         }
 
         await CheckWorkloadsAsync(client, cluster, objects, otherCluster, warnings, cancellationToken).ConfigureAwait(false);

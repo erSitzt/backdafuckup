@@ -191,14 +191,24 @@ internal static class MoverPods
     /// </summary>
     /// <param name="ns">The pod's namespace (default: the work namespace).</param>
     /// <param name="pending">What a pending pod waits for, for the log (default: the copy of a snapshot).</param>
+    /// <param name="claim">
+    /// The PVC (in the pod's namespace) whose volume the pending pod waits for: each new warning about it (a provisioner that
+    /// cannot make the volume, a volume that cannot be attached) is logged at once, not only after minutes of waiting.
+    /// </param>
+    /// <param name="claimProblem">
+    /// Sees each new warning about <paramref name="claim"/> first: true takes it over (it is not logged) and stops the watch,
+    /// for the caller to deal with the cause.
+    /// </param>
     public static async Task WatchAsync(
-        VolumeSnapshotFlow flow, string podName, string source, Action<Exception> abort, CancellationToken cancellationToken, string? ns = null, string? pending = null, string mode = "backup")
+        VolumeSnapshotFlow flow, string podName, string source, Action<Exception> abort, CancellationToken cancellationToken, string? ns = null, string? pending = null, string mode = "backup",
+        string? claim = null, Func<Corev1Event, bool>? claimProblem = null)
     {
         var space = ns ?? KubernetesSetup.WorkNamespace;
         var client = flow.Client;
         var started = DateTimeOffset.UtcNow;
         var reported = started;
         var running = false;
+        var warned = new HashSet<string>(StringComparer.Ordinal);
         while (!cancellationToken.IsCancellationRequested)
         {
             await Task.Delay(flow.Timings.Poll, cancellationToken).ConfigureAwait(false);
@@ -216,6 +226,24 @@ internal static class MoverPods
             {
                 flow.Log.Warning($"The mover pod {space}/{podName} could not be read (cluster {flow.Cluster}): {VolumeSnapshotFlow.Problem(ex)}");
                 continue;
+            }
+
+            if (claim is not null && pod.Status?.Phase is null or "Pending")
+            {
+                foreach (var warning in await ClaimWarningsAsync(flow, space, claim, cancellationToken).ConfigureAwait(false))
+                {
+                    if (!warned.Add($"{warning.Reason}\n{warning.Message}"))
+                    {
+                        continue;
+                    }
+
+                    if (claimProblem?.Invoke(warning) == true)
+                    {
+                        return;
+                    }
+
+                    flow.Log.Warning($"PVC {space}/{claim} of the mover pod for {source} (cluster {flow.Cluster}): {warning.Reason}: {warning.Message}");
+                }
             }
 
             // Being deleted: Kubernetes has sent the mover SIGTERM, which ends its transfer at once. The server deletes its
@@ -255,6 +283,21 @@ internal static class MoverPods
                         : $"Mover pod {space}/{podName} {pending ?? $"waiting for its volume, a copy of the snapshot of {source}"} ({(DateTimeOffset.UtcNow - started).TotalMinutes:0} min).");
                     break;
             }
+        }
+    }
+
+    /// <summary>The warnings about a PVC (events of type Warning), oldest first; none when they cannot be read.</summary>
+    private static async Task<IReadOnlyList<Corev1Event>> ClaimWarningsAsync(VolumeSnapshotFlow flow, string ns, string claim, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var events = await flow.Client.CoreV1.ListNamespacedEventAsync(
+                ns, fieldSelector: $"involvedObject.kind=PersistentVolumeClaim,involvedObject.name={claim},type=Warning", cancellationToken: cancellationToken).ConfigureAwait(false);
+            return [.. events.Items.OrderBy(e => e.LastTimestamp ?? e.EventTime ?? e.Metadata?.CreationTimestamp ?? DateTime.MinValue)];
+        }
+        catch (HttpOperationException)
+        {
+            return []; // Events are a help for the log, never a reason to stop.
         }
     }
 

@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Net;
 using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Hypervisor;
@@ -15,7 +14,8 @@ namespace Backdafuckup.Kubernetes;
 /// that puts the files the server reads from the volume's image into it, with owners, modes and times. The volume is then
 /// handed over to the target PVC: its PV is kept (Retain) while the work PVC is deleted, bound to the target PVC by its
 /// claim reference, and given its reclaim policy back. Not used for drivers with snapshots: on vSphere a rebound volume
-/// is lost to CNS (see <see cref="VolumeImport"/>).
+/// is lost to CNS (see <see cref="VolumeImport"/>). A class whose provisioner cannot make a volume the PVC's shared access
+/// modes (ReadWriteMany on local-path) gets a second work PVC as ReadWriteOnce, and the PVC is restored that way.
 /// </summary>
 internal sealed class VolumeFilesImport : IFileLevelDiskWriter
 {
@@ -28,6 +28,9 @@ internal sealed class VolumeFilesImport : IFileLevelDiskWriter
     private readonly CancellationTokenSource _stopWatching = new();
     private Task _watching = Task.CompletedTask;
     private IMoverFilesChannel? _channel;
+    private string _claim;
+    private List<string> _modes = ["ReadWriteOnce"];
+    private string? _reducedFrom;
     private string? _volume;
     private string? _reclaimPolicy;
     private bool _bound;
@@ -41,6 +44,7 @@ internal sealed class VolumeFilesImport : IFileLevelDiskWriter
         _source = source;
         StorageClass = storageClass;
         _name = VolumeSnapshotFlow.ObjectName(run, $"f-{VolumeSnapshotFlow.Hash(source)}");
+        _claim = _name;
         Description = $"PVC {source} (cluster {flow.Cluster})";
     }
 
@@ -60,7 +64,12 @@ internal sealed class VolumeFilesImport : IFileLevelDiskWriter
 
     public long TransferredBytes { get; private set; }
 
-    private string PodName => $"{_name}-mover";
+    /// <summary>The access modes of the volume the files went into, for the restored PVC: the backed-up PVC's, or fewer (see the class).</summary>
+    public IReadOnlyList<string> AccessModes => _modes;
+
+    private string PodName => $"{_claim}-mover";
+
+    private string TokenSecret => $"{_name}-token";
 
     /// <summary>Creates the empty Filesystem PVC the files go into.</summary>
     /// <param name="accessModes">Those of the backed-up PVC (the volume is handed over to its restored copy).</param>
@@ -68,23 +77,42 @@ internal sealed class VolumeFilesImport : IFileLevelDiskWriter
         VolumeSnapshotFlow flow, string run, RestoreDiskTarget target, string storageClass, IReadOnlyList<string> accessModes, string source, CancellationToken cancellationToken)
     {
         var import = new VolumeFilesImport(flow, run, target, storageClass, source);
-        var size = target.CapacityBytes.ToString(CultureInfo.InvariantCulture);
-        await import.CreateAsync(KubernetesArtifactKinds.PersistentVolumeClaim, import._name, () => flow.Client.CoreV1.CreateNamespacedPersistentVolumeClaimAsync(
+        if (accessModes.Count > 0)
+        {
+            import._modes = [.. accessModes];
+        }
+
+        await import.CreateClaimAsync(cancellationToken).ConfigureAwait(false);
+        return import;
+    }
+
+    /// <summary>
+    /// Whether a provisioner's warning says it cannot make a volume of the requested access modes (local-path: "NodePath only
+    /// supports ReadWriteOnce and ReadWriteOncePod (1.22+) access modes"; a CSI driver: an unsupported volume capability).
+    /// </summary>
+    internal static bool RefusesAccessModes(string? message) =>
+        message is not null
+        && (message.Contains("access mode", StringComparison.OrdinalIgnoreCase) || message.Contains("accessmode", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("ReadWriteMany", StringComparison.Ordinal) || message.Contains("ReadOnlyMany", StringComparison.Ordinal)
+            || message.Contains("MULTI_NODE", StringComparison.Ordinal) || message.Contains("volume capabilit", StringComparison.OrdinalIgnoreCase));
+
+    private static bool Shared(IEnumerable<string> modes) => modes.Any(m => m is "ReadWriteMany" or "ReadOnlyMany");
+
+    private Task CreateClaimAsync(CancellationToken cancellationToken) =>
+        CreateAsync(KubernetesArtifactKinds.PersistentVolumeClaim, _claim, () => _flow.Client.CoreV1.CreateNamespacedPersistentVolumeClaimAsync(
             new V1PersistentVolumeClaim
             {
-                Metadata = import.Meta(import._name),
+                Metadata = Meta(_claim),
                 Spec = new V1PersistentVolumeClaimSpec
                 {
-                    AccessModes = accessModes.Count > 0 ? [.. accessModes] : ["ReadWriteOnce"],
+                    AccessModes = [.. _modes],
                     VolumeMode = "Filesystem",
-                    StorageClassName = storageClass,
-                    Resources = new V1VolumeResourceRequirements { Requests = new Dictionary<string, ResourceQuantity> { ["storage"] = new(size) } },
+                    StorageClassName = StorageClass,
+                    Resources = new V1VolumeResourceRequirements { Requests = new Dictionary<string, ResourceQuantity> { ["storage"] = VolumeSnapshotFlow.Quantity(_target.CapacityBytes) } },
                 },
             },
             Work,
-            cancellationToken: cancellationToken)).ConfigureAwait(false);
-        return import;
-    }
+            cancellationToken: cancellationToken));
 
     public Task WriteAsync(IDiskImageSource image, IProgress<long>? processed, CancellationToken cancellationToken) =>
         throw new NotSupportedException($"{Description} is restored as files: the restore streams them through OpenFilesAsync.");
@@ -100,18 +128,86 @@ internal sealed class VolumeFilesImport : IFileLevelDiskWriter
         await _flow.EnsurePullSecretAsync(mover, cancellationToken).ConfigureAwait(false);
         _channel = await channels.OpenFilesAsync(Description, cancellationToken, _flow.Timings.MoverConnect).ConfigureAwait(false);
         var endpoint = _channel.Endpoint;
-        var tokenSecret = $"{_name}-token";
-        await CreateAsync(KubernetesArtifactKinds.Secret, tokenSecret, () => client.CoreV1.CreateNamespacedSecretAsync(
-            new V1Secret { Metadata = Meta(tokenSecret), Type = "Opaque", StringData = new Dictionary<string, string> { ["token"] = endpoint.Token } },
+        await CreateAsync(KubernetesArtifactKinds.Secret, TokenSecret, () => client.CoreV1.CreateNamespacedSecretAsync(
+            new V1Secret { Metadata = Meta(TokenSecret), Type = "Opaque", StringData = new Dictionary<string, string> { ["token"] = endpoint.Token } },
             Work,
             cancellationToken: cancellationToken)).ConfigureAwait(false);
-        await CreateAsync(KubernetesArtifactKinds.Pod, PodName, () => client.CoreV1.CreateNamespacedPodAsync(
-            MoverPods.BuildFiles(_name, Meta(PodName), mover, endpoint, tokenSecret, node: null, keep: false, owners: true),
-            Work,
-            cancellationToken: cancellationToken)).ConfigureAwait(false);
-        _flow.Log.Info($"Mover pod {Work}/{PodName} started for {Description}: a new volume of the StorageClass {StorageClass}, written as files; image {mover.Image}.");
-        _watching = MoverPods.WatchAsync(_flow, PodName, _source, _channel.Abort, _stopWatching.Token, pending: $"waiting for its new volume of the StorageClass {StorageClass}", mode: "restore");
+        await CreatePodAsync(cancellationToken).ConfigureAwait(false);
+        _watching = SuperviseAsync(_channel, _stopWatching.Token);
         return _channel;
+    }
+
+    private async Task CreatePodAsync(CancellationToken cancellationToken)
+    {
+        var mover = _flow.Mover!;
+        var endpoint = _channel!.Endpoint;
+        await CreateAsync(KubernetesArtifactKinds.Pod, PodName, () => _flow.Client.CoreV1.CreateNamespacedPodAsync(
+            MoverPods.BuildFiles(_claim, Meta(PodName), mover, endpoint, TokenSecret, node: null, keep: false, owners: true),
+            Work,
+            cancellationToken: cancellationToken)).ConfigureAwait(false);
+        _flow.Log.Info($"Mover pod {Work}/{PodName} started for {Description}: a new volume of the StorageClass {StorageClass} ({string.Join(", ", _modes)}), written as files; image {mover.Image}.");
+    }
+
+    /// <summary>
+    /// Watches the mover pod; when the class's provisioner refuses the volume's shared access modes, the work PVC and its pod
+    /// are made again as ReadWriteOnce (once), and watched again.
+    /// </summary>
+    private async Task SuperviseAsync(IMoverFilesChannel channel, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            string? refused = null;
+            await MoverPods.WatchAsync(
+                _flow, PodName, _source, channel.Abort, cancellationToken, pending: $"waiting for its new volume of the StorageClass {StorageClass}", mode: "restore", claim: _claim,
+                claimProblem: warning =>
+                {
+                    if (_reducedFrom is not null || !Shared(_modes) || !RefusesAccessModes(warning.Message))
+                    {
+                        return false;
+                    }
+
+                    refused = warning.Message;
+                    return true;
+                }).ConfigureAwait(false);
+            if (refused is null)
+            {
+                return;
+            }
+
+            try
+            {
+                await ReduceAccessModesAsync(refused, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is KubernetesOperationException or HttpOperationException or HttpRequestException)
+            {
+                channel.Abort(new KubernetesOperationException(
+                    $"{Description}: the StorageClass {StorageClass} cannot make a volume that is {_reducedFrom} ({refused}), and a ReadWriteOnce volume could not be started instead: {ex.Message}",
+                    ex));
+                return;
+            }
+        }
+    }
+
+    /// <summary>The work PVC (never bound: its volume was refused) and its pod go; a ReadWriteOnce PVC and a new pod take their place.</summary>
+    private async Task ReduceAccessModesAsync(string refused, CancellationToken cancellationToken)
+    {
+        _reducedFrom = string.Join(", ", _modes);
+        foreach (var (kind, name, ledgerId) in _created.Where(c => c.Kind is KubernetesArtifactKinds.Pod or KubernetesArtifactKinds.PersistentVolumeClaim)
+                     .OrderBy(c => c.Kind == KubernetesArtifactKinds.Pod ? 0 : 1).ToList())
+        {
+            await _flow.DeleteAsync(kind, Work, name, cancellationToken).ConfigureAwait(false);
+            await _flow.Ledger.UpdateAsync(ledgerId, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);
+            _created.RemoveAll(c => c.LedgerId == ledgerId);
+        }
+
+        var single = _modes.Where(m => !Shared([m])).ToList();
+        _modes = single.Count > 0 ? single : ["ReadWriteOnce"];
+        _claim = $"{_name}-o"; // a new name: the old PVC and pod may still be on their way out
+        _flow.Log.Warning(
+            $"{Description}: the StorageClass {StorageClass} cannot make a volume that is {_reducedFrom} ({refused}); the volume is made {string.Join(", ", _modes)} instead, " +
+            "and the PVC is restored that way: pods on different nodes cannot mount it at the same time.");
+        await CreateClaimAsync(cancellationToken).ConfigureAwait(false);
+        await CreatePodAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<MoverFileReport> FinishFilesAsync(CancellationToken cancellationToken)
@@ -142,32 +238,32 @@ internal sealed class VolumeFilesImport : IFileLevelDiskWriter
     public async Task<string> HandOverAsync(string targetNamespace, string claim, CancellationToken cancellationToken)
     {
         var client = _flow.Client;
-        var work = await _flow.CallAsync($"reading the PVC {Work}/{_name}", () => client.CoreV1.ReadNamespacedPersistentVolumeClaimAsync(_name, Work, cancellationToken: cancellationToken))
+        var work = await _flow.CallAsync($"reading the PVC {Work}/{_claim}", () => client.CoreV1.ReadNamespacedPersistentVolumeClaimAsync(_claim, Work, cancellationToken: cancellationToken))
             .ConfigureAwait(false);
         var volume = work.Spec?.VolumeName is { Length: > 0 } bound
             ? bound
-            : throw new KubernetesOperationException($"The PVC {Work}/{_name} the files of {_source} were written to is not bound to a volume (cluster {_flow.Cluster}).");
+            : throw new KubernetesOperationException($"The PVC {Work}/{_claim} the files of {_source} were written to is not bound to a volume (cluster {_flow.Cluster}).");
         var pv = await _flow.CallAsync($"reading the PV {volume}", () => client.CoreV1.ReadPersistentVolumeAsync(volume, cancellationToken: cancellationToken)).ConfigureAwait(false);
         _reclaimPolicy = pv.Spec?.PersistentVolumeReclaimPolicy ?? "Delete";
         _volume = volume;
         await PatchVolumeAsync($"keeping the PV {volume} (Retain) while it changes its PVC", ReclaimPolicy("Retain"), cancellationToken).ConfigureAwait(false);
 
         var ledger = _created.Single(c => c.Kind == KubernetesArtifactKinds.PersistentVolumeClaim);
-        await _flow.DeleteAsync(KubernetesArtifactKinds.PersistentVolumeClaim, Work, _name, cancellationToken).ConfigureAwait(false);
+        await _flow.DeleteAsync(KubernetesArtifactKinds.PersistentVolumeClaim, Work, _claim, cancellationToken).ConfigureAwait(false);
         await _flow.Ledger.UpdateAsync(ledger.LedgerId, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);
         _created.Remove(ledger);
         var started = DateTimeOffset.UtcNow;
         while (true)
         {
             var current = await _flow.CallAsync($"reading the PV {volume}", () => client.CoreV1.ReadPersistentVolumeAsync(volume, cancellationToken: cancellationToken)).ConfigureAwait(false);
-            if (current.Status?.Phase is "Released" or "Available" || current.Spec?.ClaimRef?.Name != _name)
+            if (current.Status?.Phase is "Released" or "Available" || current.Spec?.ClaimRef?.Name != _claim)
             {
                 break;
             }
 
             if (DateTimeOffset.UtcNow - started > _flow.Timings.Deleted)
             {
-                throw new KubernetesOperationException($"The PV {volume} is still bound to {Work}/{_name} {_flow.Timings.Deleted.TotalMinutes:0} minutes after the PVC was deleted (cluster {_flow.Cluster}).");
+                throw new KubernetesOperationException($"The PV {volume} is still bound to {Work}/{_claim} {_flow.Timings.Deleted.TotalMinutes:0} minutes after the PVC was deleted (cluster {_flow.Cluster}).");
             }
 
             await Task.Delay(_flow.Timings.Poll, cancellationToken).ConfigureAwait(false);

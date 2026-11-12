@@ -776,6 +776,11 @@ internal sealed class VmBackupTask(
         foreach (var tree in backup.FileTrees)
         {
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            lock (_metricsLock)
+            {
+                _transferStarted ??= time.GetUtcNow();
+            }
+
             await using var reader = await backup.OpenFileTreeAsync(tree, cancellationToken).ConfigureAwait(false);
             var builder = new FileTreeBuilder(writer, repository.Info.ChunkSize);
             FileTreeBuilder.Result? result = null;
@@ -784,8 +789,29 @@ internal sealed class VmBackupTask(
             var index = await writer.WriteFileTreeIndexAsync(tree.Key, built.Root, cancellationToken).ConfigureAwait(false);
             Interlocked.Add(ref _storedBytes, built.Stats.NewStoredBytes);
             var stats = built.Stats;
+            var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            lock (_metricsLock)
+            {
+                // The tree in the run's figures (the summary line, the task's metrics): read in full, nothing taken as unchanged.
+                _diskMetrics.Add(new DiskMetricsDto
+                {
+                    Key = tree.Key,
+                    Name = tree.Name,
+                    CapacityBytes = stats.Bytes,
+                    State = "Done",
+                    Mode = "Files",
+                    Transport = reader.TransportName,
+                    Metrics = new TransferMetricsDto
+                    {
+                        TotalBytes = stats.Bytes, ProcessedBytes = stats.Bytes, ReadBytes = stats.ReadBytes, DedupedBytes = built.DedupedBytes, NewDataBytes = built.NewBytes,
+                        StoredBytes = stats.NewStoredBytes, Seconds = Math.Round(elapsed.TotalSeconds, 3),
+                    },
+                });
+                _transferEnded = time.GetUtcNow();
+            }
+
             _log.Info($"Volume {tree.Name}: {stats.Files} file(s) in {stats.Directories} folder(s), {Format(stats.Bytes)}, read file by file through {reader.TransportName} " +
-                      $"in {System.Diagnostics.Stopwatch.GetElapsedTime(started):hh\\:mm\\:ss}; {Format(stats.NewStoredBytes)} new in the repository.");
+                      $"in {elapsed:hh\\:mm\\:ss}; {Format(stats.NewStoredBytes)} new in the repository.");
             if (stats.ChangedWhileRead > 0)
             {
                 _log.Warning($"Volume {tree.Name}: {stats.ChangedWhileRead} file(s) changed while they were read; their copies may be torn (the next run reads them again).");

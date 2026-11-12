@@ -447,6 +447,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
             spec["volumeName"] = await files.HandOverAsync(Target, name, cancellationToken).ConfigureAwait(false);
             spec["storageClassName"] = files.StorageClass;
+            spec["accessModes"] = new JsonArray([.. files.AccessModes.Select(m => (JsonNode)m)]); // the volume's: fewer when the class could not share it
             await CallAsync($"creating the PVC {Target}/{name}", () => _applier.CreateAsync(prepared, cancellationToken)).ConfigureAwait(false);
             _created.Add(prepared);
             restored.Add($"PersistentVolumeClaim/{name}");

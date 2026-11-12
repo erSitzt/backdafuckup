@@ -391,6 +391,12 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
 
     internal static string Hash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..8];
 
+    /// <summary>A size as Kubernetes shows it best: whole GiB or MiB as <c>Gi</c>/<c>Mi</c>, any other in bytes.</summary>
+    internal static ResourceQuantity Quantity(long bytes) => new(
+        bytes > 0 && bytes % (1L << 30) == 0 ? $"{bytes >> 30}Gi"
+        : bytes > 0 && bytes % (1L << 20) == 0 ? $"{bytes >> 20}Mi"
+        : bytes.ToString(CultureInfo.InvariantCulture));
+
     internal static JsonElement Element(object value) => value is JsonElement element ? element : JsonSerializer.SerializeToElement(value);
 
     internal static string? Text(JsonElement element, params string[] path)

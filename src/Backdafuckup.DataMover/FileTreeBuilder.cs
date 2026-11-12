@@ -24,6 +24,8 @@ public sealed class FileTreeBuilder(IRepositoryWriter writer, int chunkSize)
     private long _issueCount;
     private long _changed;
     private long _stored;
+    private long _new;
+    private long _deduped;
 
     /// <summary>The last heartbeat of the mover (entries, bytes, the path being read), for progress and stall messages.</summary>
     public TreeHeartbeat? LastHeartbeat { get; private set; }
@@ -31,7 +33,9 @@ public sealed class FileTreeBuilder(IRepositoryWriter writer, int chunkSize)
     /// <summary>Content bytes received so far.</summary>
     public long Bytes => Interlocked.Read(ref _bytes);
 
-    public sealed record Result(ChunkIndex Root, FileTreeRootMeta RootMeta, FileTreeStats Stats, IReadOnlyList<string> Issues);
+    /// <param name="NewBytes">Data of the chunks the repository did not have yet (before compression).</param>
+    /// <param name="DedupedBytes">Data of the chunks it had already.</param>
+    public sealed record Result(ChunkIndex Root, FileTreeRootMeta RootMeta, FileTreeStats Stats, IReadOnlyList<string> Issues, long NewBytes = 0, long DedupedBytes = 0);
 
     public async Task<Result> BuildAsync(Stream stream, CancellationToken cancellationToken)
     {
@@ -244,7 +248,9 @@ public sealed class FileTreeBuilder(IRepositoryWriter writer, int chunkSize)
                 Files = _files, Directories = _directories, Bytes = folder.Bytes, Issues = _issueCount, ChangedWhileRead = _changed, ReadBytes = Bytes,
                 NewStoredBytes = Interlocked.Read(ref _stored),
             },
-            _issues);
+            _issues,
+            Interlocked.Read(ref _new),
+            Interlocked.Read(ref _deduped));
     }
 
     /// <summary>Stores a chunk, counting what was new in the repository.</summary>
@@ -254,6 +260,11 @@ public sealed class FileTreeBuilder(IRepositoryWriter writer, int chunkSize)
         if (result.Outcome == ChunkPutOutcome.Stored)
         {
             Interlocked.Add(ref _stored, result.StoredBytes);
+            Interlocked.Add(ref _new, data.Length);
+        }
+        else
+        {
+            Interlocked.Add(ref _deduped, data.Length);
         }
     }
 

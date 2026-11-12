@@ -44,7 +44,7 @@ public sealed partial class RestoreSessionRunner(
         var targetConnection = request.TargetConnectionId ?? point.ConnectionId
             ?? throw new InvalidOperationException("No target pool selected.");
         var task = await tracker.AddTaskAsync(session.Id, point.VmNativeId, point.VmName, cancellationToken).ConfigureAwait(false);
-        var log = events.CreateLog(session.Id, task.Id, point.VmName);
+        var log = new WarningTrackingLog(events.CreateLog(session.Id, task.Id, point.VmName));
         await tracker.UpdateTaskAsync(task.Id, t => { t.State = SessionState.Running; t.StartedUtc = time.GetUtcNow(); }, CancellationToken.None).ConfigureAwait(false);
 
         try
@@ -150,12 +150,9 @@ public sealed partial class RestoreSessionRunner(
             // A namespace restore of selected objects restores only their volumes.
             var disks = manifest.Disks.Where(d => restore.RestoresDisk(d.Key)).ToList();
 
-            // Volumes backed up file by file go into new volumes as files; their size: the PVC's, and at least 20 % (and
-            // 1 GiB) more than their files (an NFS PV's capacity often says little about what is on it).
+            // Volumes backed up file by file go into new volumes as files (see TreeVolumeCapacity).
             var trees = manifest.FileTrees.Where(t => restore.RestoresDisk(t.Key))
-                .Select(t => (Tree: t, Capacity: Math.Max(
-                    manifest.Kubernetes?.Volumes.FirstOrDefault(v => v.TreeKey == t.Key)?.SizeBytes ?? 0,
-                    (long)(t.Stats.Bytes * 1.2) + (1L << 30))))
+                .Select(t => (Tree: t, Capacity: TreeVolumeCapacity(manifest.Kubernetes?.Volumes.FirstOrDefault(v => v.TreeKey == t.Key)?.SizeBytes ?? 0, t.Stats.Bytes)))
                 .ToList();
             var noun = plan.Kubernetes is null ? "Disk" : "Volume";
             var total = Math.Max(1, disks.Sum(d => d.CapacityBytes) + trees.Sum(t => t.Capacity) + (resume ? manifest.Memory!.CapacityBytes : 0));
@@ -271,7 +268,9 @@ public sealed partial class RestoreSessionRunner(
             log.Info(
                 $"Restore finished: {(plan.Kubernetes is null ? $"VM '{restored.Name}' ({restored.VmId})" : $"namespace {restored.Name}")}, {VmBackupTask.Format(done)} restored in {MetricsText.Duration(final.Seconds)} " +
                 $"({MetricsText.Rate(final.ProcessingRate)}), {VmBackupTask.Format(transferred)} transferred ({MetricsText.Rate(transferred / Math.Max(0.001, final.Seconds))}).");
-            await FinishAsync(task.Id, SessionState.Succeeded, null, done, final).ConfigureAwait(false);
+            // Whatever was warned about on the way (a file that could not be put in place, a volume made ReadWriteOnce …).
+            warnings |= log.Warned;
+            await FinishAsync(task.Id, warnings ? SessionState.Warning : SessionState.Succeeded, null, done, final).ConfigureAwait(false);
             return (warnings ? SessionState.Warning : SessionState.Succeeded, plan.Kubernetes is null ? $"Restored as '{restored.Name}'." : $"Restored into namespace {restored.Name}.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -426,7 +425,7 @@ public sealed partial class RestoreSessionRunner(
                 t.Metrics = running with { CurrentBytesPerSecond = 0 };
             }
 
-            if (state == SessionState.Succeeded)
+            if (state is SessionState.Succeeded or SessionState.Warning)
             {
                 t.Progress = 100;
                 t.TransferredBytes = bytes;
@@ -435,6 +434,17 @@ public sealed partial class RestoreSessionRunner(
         }, CancellationToken.None);
 
     private static string BackupFormat(long bytes) => VmBackupTask.Format(bytes);
+
+    /// <summary>
+    /// The size of the new volume a file tree goes into: the PVC's, unless its files need more (an NFS PV's capacity often
+    /// says little about what is on it) — then the files plus an eighth and 256 MiB for the file system's own needs, in whole GiB.
+    /// </summary>
+    internal static long TreeVolumeCapacity(long requested, long fileBytes)
+    {
+        const long GiB = 1L << 30;
+        var needed = fileBytes + (fileBytes / 8) + (256L << 20);
+        return requested >= needed ? requested : (needed + GiB - 1) / GiB * GiB;
+    }
 
     /// <summary>
     /// A domain controller's VM comes back with a new VM generation id, so Windows restores AD non-authoritatively at its

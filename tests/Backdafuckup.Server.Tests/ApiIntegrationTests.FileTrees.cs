@@ -99,7 +99,7 @@ public sealed partial class ApiIntegrationTests
         }, Ct));
         var restoreSession = await WaitForSessionAsync(client, restored.SessionId);
         var restoreLog = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{restored.SessionId}/log", Ct))!.Select(l => $"{l.Severity}: {l.Message}"));
-        Assert.True(restoreSession.Session.State == "Succeeded", restoreLog);
+        Assert.True(restoreSession.Session.State == (Environment.IsPrivilegedProcess ? "Succeeded" : "Warning"), restoreLog); // without root: owners not kept
         Assert.Contains("PVC data-web: its files go into a new volume of the StorageClass nfs-client", restoreLog, StringComparison.Ordinal);
         var claim = nfs.Find("persistentvolumeclaims", "web-restore", "data-web")!;
         var target = (string)nfs.Find("persistentvolumes", null, (string)claim["spec"]!["volumeName"]!)!["spec"]!["nfs"]!["path"]!;
@@ -114,5 +114,73 @@ public sealed partial class ApiIntegrationTests
         var source = nfs.Find("persistentvolumes", null, "pv-data-web")!;
         Assert.Equal(("Delete", "cluster.local/nfs-subdir-external-provisioner"),
             ((string?)source["spec"]!["persistentVolumeReclaimPolicy"], (string?)source["metadata"]!["annotations"]!["pv.kubernetes.io/provisioned-by"]));
+
+        // Into a class that cannot share a volume (local-path refuses ReadWriteMany with a warning on the PVC, as the real one
+        // does): the preview says so; the restore makes the volume ReadWriteOnce instead, and the PVC is restored that way.
+        RefuseSharedVolumes(nfs, "local-path");
+        var plan = await Read<KubernetesRestorePlanDto>(client.PostAsJsonAsync($"/api/restore-points/{point.Id}/kubernetes/restore-plan", new KubernetesRestorePlanRequestDto
+        {
+            TargetNamespace = "web-local", StorageClassMap = new Dictionary<string, string> { ["nfs-client"] = "local-path" },
+        }, Ct));
+        Assert.Contains(plan.Warnings, w => w.StartsWith("PVC data-web is ReadWriteMany: should the StorageClass local-path (rancher.io/local-path) not provide that", StringComparison.Ordinal));
+        Assert.Contains(plan.Warnings, w => w.StartsWith("Volumes backed up file by file go back as files", StringComparison.Ordinal));
+        Assert.DoesNotContain(plan.Warnings, w => w.Contains("ext or XFS only", StringComparison.Ordinal));
+        var local = await Read<StartedDto>(client.PostAsJsonAsync("/api/restores", new RestoreRequestDto
+        {
+            RestorePointId = point.Id, Mode = RestoreModeDto.OriginalLocation,
+            Kubernetes = new KubernetesRestoreDto { TargetNamespace = "web-local", StorageClassMap = new Dictionary<string, string> { ["nfs-client"] = "local-path" } },
+        }, Ct));
+        var localSession = await WaitForSessionAsync(client, local.SessionId);
+        var localLog = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{local.SessionId}/log", Ct))!.Select(l => $"{l.Severity}: {l.Message}"));
+        Assert.True(localSession.Session.State == "Warning", localLog);
+        Assert.True(localLog.Contains("Warning: web: PVC web-local/data-web (cluster 10.26.6.10): the StorageClass local-path cannot make a volume that is ReadWriteMany (failed to provision volume", StringComparison.Ordinal), localLog);
+        Assert.Contains("the volume is made ReadWriteOnce instead", localLog, StringComparison.Ordinal);
+        var localClaim = nfs.Find("persistentvolumeclaims", "web-local", "data-web")!;
+        Assert.Equal(["ReadWriteOnce"], localClaim["spec"]!["accessModes"]!.AsArray().Select(m => (string?)m));
+        var localFolder = (string)nfs.Find("persistentvolumes", null, (string)localClaim["spec"]!["volumeName"]!)!["spec"]!["nfs"]!["path"]!;
+        Assert.Equal(page, await File.ReadAllBytesAsync(Path.Combine(localFolder, "site", "index.bin"), Ct));
+        Assert.Empty(nfs.All("pods"));
+        Assert.DoesNotContain(nfs.All("persistentvolumeclaims"), c => (string?)c["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
+    }
+
+    /// <summary>
+    /// Adds the class <paramref name="storageClass"/> (rancher.io/local-path) to an <see cref="NfsCluster"/>: a PVC of it that
+    /// asks for ReadWriteMany is never provisioned, only warned about (ProvisioningFailed), and a pod on it stays pending;
+    /// a ReadWriteOnce PVC gets a folder on the export like any other.
+    /// </summary>
+    private static void RefuseSharedVolumes(FakeKubernetesApi cluster, string storageClass)
+    {
+        cluster.Add("apis/storage.k8s.io/v1", "storageclasses", new JsonObject
+        {
+            ["metadata"] = new JsonObject { ["name"] = storageClass }, ["provisioner"] = "rancher.io/local-path", ["volumeBindingMode"] = "WaitForFirstConsumer",
+        });
+        var provision = cluster.Created!;
+        cluster.Created = (plural, item) =>
+        {
+            var ns = (string?)item["metadata"]!["namespace"];
+            var name = (string)item["metadata"]!["name"]!;
+            if (plural == "persistentvolumeclaims" && (string?)item["spec"]?["storageClassName"] == storageClass
+                && item["spec"]?["accessModes"]?.AsArray().Any(m => (string?)m == "ReadWriteMany") == true)
+            {
+                cluster.Add("api/v1", "events", new JsonObject
+                {
+                    ["metadata"] = new JsonObject { ["name"] = $"{name}.provisioning", ["namespace"] = ns },
+                    ["involvedObject"] = new JsonObject { ["kind"] = "PersistentVolumeClaim", ["name"] = name, ["namespace"] = ns },
+                    ["type"] = "Warning",
+                    ["reason"] = "ProvisioningFailed",
+                    ["message"] = $"failed to provision volume with StorageClass \"{storageClass}\": NodePath only supports ReadWriteOnce and ReadWriteOncePod (1.22+) access modes",
+                });
+                return;
+            }
+
+            if (plural == "pods" && item["spec"]?["volumes"]?[0]?["persistentVolumeClaim"]?["claimName"] is { } claim
+                && cluster.Find("persistentvolumeclaims", ns, (string)claim!) is { } bound && bound["spec"]?["volumeName"] is null)
+            {
+                cluster.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Pending" });
+                return;
+            }
+
+            provision(plural, item);
+        };
     }
 }

@@ -25,6 +25,24 @@ public static class OperationLogExtensions
     public static void Error(this IOperationLog log, string message, string? key = null) => log.Write(LogSeverity.Error, message, key);
 }
 
+/// <summary>Passes every line on and remembers whether a warning or error was among them (for the state an operation ends in).</summary>
+public sealed class WarningTrackingLog(IOperationLog inner) : IOperationLog
+{
+    private int _warned;
+
+    public bool Warned => Volatile.Read(ref _warned) != 0;
+
+    public void Write(LogSeverity severity, string message, string? key = null)
+    {
+        if (severity >= LogSeverity.Warning)
+        {
+            Interlocked.Exchange(ref _warned, 1);
+        }
+
+        inner.Write(severity, message, key);
+    }
+}
+
 public sealed class NullOperationLog : IOperationLog
 {
     public static readonly NullOperationLog Instance = new();
