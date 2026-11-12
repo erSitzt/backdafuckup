@@ -86,6 +86,9 @@ public interface IRestorePointReader : IAsyncDisposable
 
     Task<ChunkIndex> ReadDiskIndexAsync(string diskKey, CancellationToken cancellationToken);
 
+    /// <summary>The root listing's chunks of file tree <paramref name="key"/> (see <see cref="RestorePointManifest.FileTrees"/>).</summary>
+    Task<ChunkIndex> ReadFileTreeIndexAsync(string key, CancellationToken cancellationToken);
+
     Task<Stream> OpenBlobAsync(ManifestBlob blob, CancellationToken cancellationToken);
 }
 
@@ -100,6 +103,9 @@ public interface IRepositoryWriter : IAsyncDisposable
     ValueTask<ChunkPutResult> PutChunkAsync(ChunkId id, ReadOnlyMemory<byte> plaintext, CancellationToken cancellationToken);
 
     Task<ManifestIndexRef> WriteDiskIndexAsync(string diskKey, ChunkIndex index, CancellationToken cancellationToken);
+
+    /// <summary>Writes the root listing's chunks of a file tree (its chunks are put before).</summary>
+    Task<ManifestIndexRef> WriteFileTreeIndexAsync(string key, ChunkIndex root, CancellationToken cancellationToken);
 
     Task<ManifestBlob> WriteBlobAsync(string name, string format, Stream content, CancellationToken cancellationToken);
 

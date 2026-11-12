@@ -22,9 +22,20 @@ public enum DiskBackupMode
 /// </summary>
 public sealed record RestorePointManifest
 {
-    public const int CurrentFormatVersion = 1;
+    /// <summary>The newest format this version reads.</summary>
+    public const int CurrentFormatVersion = FileTreeFormatVersion;
 
-    public int FormatVersion { get; init; } = CurrentFormatVersion;
+    /// <summary>Restore points without file trees: readable by every version.</summary>
+    public const int BaseFormatVersion = 1;
+
+    /// <summary>
+    /// Restore points with file trees (<see cref="FileTrees"/>). Older versions refuse them, so their garbage collection
+    /// and verification never miss the trees' chunks.
+    /// </summary>
+    public const int FileTreeFormatVersion = 2;
+
+    /// <summary>Set at commit: <see cref="FileTreeFormatVersion"/> with file trees, else <see cref="BaseFormatVersion"/>.</summary>
+    public int FormatVersion { get; init; } = BaseFormatVersion;
 
     public required Guid RestorePointId { get; init; }
 
@@ -114,6 +125,13 @@ public sealed record RestorePointManifest
 
     /// <summary>For a Kubernetes namespace (the "VM" of the restore point): the cluster, its volumes and the hooks; null for VMs.</summary>
     public KubernetesNamespaceDescriptor? Kubernetes { get; init; }
+
+    /// <summary>
+    /// Volumes backed up file by file (spec 2026-11-12-1952-kubernetes-file-level-volumes): Kubernetes volumes without CSI
+    /// snapshots, and pod volumes without a PVC. Their chunks are referenced through their listings, not through
+    /// <see cref="AllImages"/>.
+    /// </summary>
+    public IReadOnlyList<ManifestFileTree> FileTrees { get; init; } = [];
 
     /// <summary>The disks and, with memory, the RAM image: everything whose chunks the restore point references.</summary>
     [JsonIgnore]
@@ -211,6 +229,56 @@ public sealed record ManifestDisk
 }
 
 public sealed record ManifestIndexRef(string File, string Sha256, long ChunkCount);
+
+/// <summary>A volume backed up file by file: its root listing (<c>tree-&lt;key&gt;.idx</c>), the root folder's own meta, and counts.</summary>
+public sealed record ManifestFileTree
+{
+    /// <summary>The volume: a PVC's name, or <c>pod/&lt;pod&gt;/&lt;volume&gt;</c> for a pod volume without a PVC.</summary>
+    public required string Key { get; init; }
+
+    public required string Name { get; init; }
+
+    /// <summary>"pvc" or "pod-volume".</summary>
+    public string Kind { get; init; } = "pvc";
+
+    /// <summary>How it was read: "shadow-pv" (a read-only copy of its PV) or "node-agent".</summary>
+    public string Reader { get; init; } = "shadow-pv";
+
+    /// <summary>The root listing's chunks (its length is the index's size).</summary>
+    public required ManifestIndexRef Index { get; init; }
+
+    public required long RootLength { get; init; }
+
+    public FileTreeRootMeta Root { get; init; } = new(0755, 0, 0, 0);
+
+    public FileTreeStats Stats { get; init; } = new();
+
+    /// <summary>The restore point whose tree unchanged files were taken from (their chunks, not the restore point itself).</summary>
+    public Guid? BaseRestorePointId { get; init; }
+}
+
+/// <summary>The root folder of a file tree: mode, owner and modification time (nanoseconds since 1970).</summary>
+public sealed record FileTreeRootMeta(int Mode, long Uid, long Gid, long MtimeNs);
+
+public sealed record FileTreeStats
+{
+    public long Files { get; init; }
+
+    public long Directories { get; init; }
+
+    public long Bytes { get; init; }
+
+    /// <summary>Entries not read (permission denied, vanished, …).</summary>
+    public long Issues { get; init; }
+
+    public long ChangedWhileRead { get; init; }
+
+    /// <summary>Files taken from the base tree without reading them (unchanged).</summary>
+    public long UnchangedFiles { get; init; }
+
+    /// <summary>Bytes of file content read in this run.</summary>
+    public long ReadBytes { get; init; }
+}
 
 public sealed record DiskBackupStats
 {
