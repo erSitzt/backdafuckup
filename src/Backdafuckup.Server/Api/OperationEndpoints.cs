@@ -297,7 +297,7 @@ public static class OperationEndpoints
             return Results.Ok(new KubernetesObjectDetailDto(kind, name, Backdafuckup.Kubernetes.KubernetesCompare.Show(content!, kind, name), current));
         }).WithDescription("An object of a namespace's restore point as stored and (live=true) as the cluster has it now; Secrets show their keys, never their values.");
 
-        points.MapGet("/", async (AppDbContext db, Guid? jobId, string? vmId, CancellationToken ct) =>
+        points.MapGet("/", async (AppDbContext db, Guid? jobId, string? vmId, string? platformId, CancellationToken ct) =>
         {
             var query = db.RestorePoints.Include(r => r.Disks).Where(r => r.State == RestorePointState.Available);
             if (jobId is { } job)
@@ -308,6 +308,12 @@ public static class OperationEndpoints
             if (!string.IsNullOrEmpty(vmId))
             {
                 query = query.Where(r => r.VmNativeId == vmId);
+            }
+
+            // Namespaces of the same name in two clusters: the cluster's platform id (BackupVmDto.PlatformId) tells them apart.
+            if (!string.IsNullOrEmpty(platformId))
+            {
+                query = query.Where(r => r.PlatformId == platformId);
             }
 
             return (await query.OrderBy(r => r.VmName).ThenByDescending(r => r.CreatedUtc).ToListAsync(ct)).Select(r => r.ToDto());
@@ -321,7 +327,7 @@ public static class OperationEndpoints
                 ? Results.Problem(problem, statusCode: StatusCodes.Status400BadRequest)
                 : Results.Ok(await BackupVms.ListAsync(db, filter, time.GetUtcNow(), ct));
         }).WithSummary("One row per VM: its jobs, the newest restore point in each and whether it missed a scheduled run")
-          .WithDescription("Filters (all optional, repeatable where noted): q (part of the VM's or a job's name), jobId (repeatable; 00000000-0000-0000-0000-000000000000 = restore points without a job, i.e. of a deleted job), repositoryId, content (repeatable: ad, sql), consistency (application, crash, warning), state (repeatable: stale, nopoint, ok), olderThanDays. A VM keeps only the jobs that match. The restore points of a VM: GET /api/restore-points?vmId=…&jobId=….");
+          .WithDescription("Filters (all optional, repeatable where noted): q (part of the VM's or a job's name), jobId (repeatable; 00000000-0000-0000-0000-000000000000 = restore points without a job, i.e. of a deleted job), repositoryId, content (repeatable: ad, sql), consistency (application, crash, warning), state (repeatable: stale, nopoint, ok), olderThanDays. A VM keeps only the jobs that match. The restore points of a VM: GET /api/restore-points?vmId=…&jobId=… (for a namespace also &platformId=… of its row).");
 
         points.MapGet("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>
         {

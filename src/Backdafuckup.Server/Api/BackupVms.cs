@@ -63,13 +63,15 @@ public static class BackupVms
 
     public static async Task<List<BackupVmDto>> ListAsync(AppDbContext db, Filter filter, DateTimeOffset now, CancellationToken ct)
     {
-        // One row per VM, job and repository (a job's repository can change), each with its newest restore point.
+        // One row per VM, job and repository (a job's repository can change), each with its newest restore point. Namespaces
+        // are only unique within their cluster: theirs are told apart by the cluster's platform id (a VM's id is unique).
         var groups = await db.RestorePoints.AsNoTracking()
             .Where(r => r.State == RestorePointState.Available)
-            .GroupBy(r => new { r.VmNativeId, r.JobId, r.RepositoryId })
+            .GroupBy(r => new { r.VmNativeId, Scope = r.ObjectKind != RestorePointObjectKinds.Vm ? r.PlatformId : null, r.JobId, r.RepositoryId })
             .Select(g => new
             {
                 g.Key.VmNativeId,
+                g.Key.Scope,
                 g.Key.JobId,
                 g.Key.RepositoryId,
                 Count = g.Count(),
@@ -97,35 +99,38 @@ public static class BackupVms
             })
             .ToListAsync(ct);
         var jobs = (await db.Jobs.AsNoTracking().Include(j => j.Objects).ToListAsync(ct)).ToDictionary(j => j.Id);
+        var clusters = await db.Connections.AsNoTracking().Where(c => c.Kind == Core.Hypervisor.HypervisorKind.Kubernetes)
+            .ToDictionaryAsync(c => c.Id, c => c.PlatformId, ct);
 
         var entries = new List<Entry>();
-        foreach (var vmJob in groups.GroupBy(g => (g.VmNativeId, g.JobId)))
+        foreach (var vmJob in groups.GroupBy(g => (g.VmNativeId, g.Scope, g.JobId)))
         {
             var newest = vmJob.MaxBy(g => g.Latest.CreatedUtc)!;
             var l = newest.Latest;
             var latest = new BackupVmPointDto(l.Id, vmJob.Key.JobId, l.CreatedUtc, l.Kind.ToString(), l.Consistency, l.ConsistencyReason, l.LogicalBytes,
                 l.SqlDatabaseCount ?? 0, l.DomainController == true, l.AdDomain, l.MemoryImageBytes, l.SqlConsistentCount, l.ConsistencyWarning, l.SqlUserDatabaseCount, l.ObjectKind);
             var job = vmJob.Key.JobId is { } id ? jobs.GetValueOrDefault(id) : null;
-            entries.Add(new Entry(vmJob.Key.VmNativeId, l.VmName, l.ConnectionId ?? job?.ConnectionId, Describe(job, vmJob.Key.JobId, job?.Name ?? l.JobName,
+            entries.Add(new Entry(vmJob.Key.VmNativeId, vmJob.Key.Scope, l.VmName, l.ConnectionId ?? job?.ConnectionId, Describe(job, vmJob.Key.JobId, job?.Name ?? l.JobName,
                 vmJob.Sum(g => g.Count), vmJob.Sum(g => g.Stored), [.. vmJob.Select(g => g.RepositoryId).Distinct()], latest, now)));
         }
 
         // Job members without a restore point of that job.
-        var present = entries.Where(e => e.Job.JobId is not null).Select(e => (e.VmNativeId, e.Job.JobId!.Value)).ToHashSet();
-        var names = entries.GroupBy(e => e.VmNativeId).ToDictionary(g => g.Key, g => g.MaxBy(e => e.Job.Latest?.CreatedUtc)!.VmName);
+        var present = entries.Where(e => e.Job.JobId is not null).Select(e => (e.VmNativeId, e.Scope, e.Job.JobId!.Value)).ToHashSet();
+        var names = entries.GroupBy(e => (e.VmNativeId, e.Scope)).ToDictionary(g => g.Key, g => g.MaxBy(e => e.Job.Latest?.CreatedUtc)!.VmName);
         foreach (var job in jobs.Values)
         {
+            var scope = clusters.GetValueOrDefault(job.ConnectionId);
             // A label selector is no namespace of its own: the namespaces it matched appear with their restore points.
-            foreach (var member in job.Objects.Where(o => !present.Contains((o.NativeId, job.Id)) && !KubernetesLabelSelector.IsJobObject(o.NativeId)))
+            foreach (var member in job.Objects.Where(o => !present.Contains((o.NativeId, scope, job.Id)) && !KubernetesLabelSelector.IsJobObject(o.NativeId)))
             {
-                entries.Add(new Entry(member.NativeId, names.GetValueOrDefault(member.NativeId) ?? member.CachedName, job.ConnectionId,
+                entries.Add(new Entry(member.NativeId, scope, names.GetValueOrDefault((member.NativeId, scope)) ?? member.CachedName, job.ConnectionId,
                     Describe(job, job.Id, job.Name, 0, 0, [job.RepositoryId], null, now)));
             }
         }
 
         return entries
             .Where(e => Matches(e, filter, now))
-            .GroupBy(e => e.VmNativeId)
+            .GroupBy(e => (e.VmNativeId, e.Scope))
             .Select(g =>
             {
                 var vmJobs = g.Select(e => e.Job).OrderBy(j => j.JobName, StringComparer.OrdinalIgnoreCase).ToList();
@@ -133,7 +138,7 @@ public static class BackupVms
                 var newest = g.MaxBy(e => e.Job.Latest?.CreatedUtc)!;
                 var points = vmJobs.Sum(j => j.PointCount);
                 var state = vmJobs.Any(j => j.State == BackupVmStates.Stale) ? BackupVmStates.Stale : points == 0 ? BackupVmStates.NoPoint : BackupVmStates.Ok;
-                return new BackupVmDto(g.Key, newest.VmName, newest.ConnectionId, vmJobs, points, vmJobs.Sum(j => j.StoredBytes), latest, state);
+                return new BackupVmDto(g.Key.VmNativeId, newest.VmName, newest.ConnectionId, vmJobs, points, vmJobs.Sum(j => j.StoredBytes), latest, state, g.Key.Scope);
             })
             .OrderBy(v => v.VmName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(v => v.VmNativeId, StringComparer.Ordinal)
@@ -217,5 +222,6 @@ public static class BackupVms
         : point.Consistency == "application" ? "application"
         : point.ConsistencyWarning ? "warning" : "crash";
 
-    private sealed record Entry(string VmNativeId, string VmName, Guid? ConnectionId, BackupVmJobDto Job);
+    /// <param name="Scope">The cluster's platform id for a namespace; null for a VM.</param>
+    private sealed record Entry(string VmNativeId, string? Scope, string VmName, Guid? ConnectionId, BackupVmJobDto Job);
 }
