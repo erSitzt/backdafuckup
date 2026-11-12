@@ -170,6 +170,34 @@ public sealed class VolumeExportTests
     }
 
     [Fact]
+    public async Task A_mover_pod_being_deleted_fails_the_channel_as_deleted()
+    {
+        // Deleted while it copies: the pod is still there, terminating, while its mover already stopped on SIGTERM.
+        var (api, channels) = Cluster(pod =>
+        {
+            pod.Api.Mutate(() =>
+            {
+                pod.Object["metadata"]!["deletionTimestamp"] = "2026-11-12T08:53:10Z";
+                pod.Object["status"] = new JsonObject { ["phase"] = "Running" };
+            });
+            return Task.CompletedTask;
+        });
+        using var client = Client(api);
+        var flow = new VolumeSnapshotFlow(client, "rke2-test", new ListLog(), new InMemoryArtifactLedger(), Fast);
+        var snapshot = await flow.TakeAsync("bdfu-spike", "data-redis-test-0", "vsphere-snapshots", "1a2b3c4d", Ct);
+
+        await using (var export = await flow.ExportAsync(snapshot, "1a2b3c4d", channels, new MoverDeployment(Image, null, null), Ct))
+        {
+            var error = await Assert.ThrowsAsync<KubernetesOperationException>(() => export.Channel.StreamAsync((_, _, _) => ValueTask.CompletedTask, Ct));
+            Assert.Equal(
+                $"The mover pod {Work}/{export.PodName} for bdfu-spike/data-redis-test-0 was deleted (cluster rke2-test): by someone, an eviction or the drain of its node.",
+                error.Message);
+        }
+
+        Assert.Empty(api.All("pods"));
+    }
+
+    [Fact]
     public async Task A_snapshot_error_of_the_driver_is_reported_with_the_snapshot_and_the_cluster()
     {
         var api = new FakeKubernetesApi();

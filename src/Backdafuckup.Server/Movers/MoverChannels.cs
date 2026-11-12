@@ -157,6 +157,8 @@ internal abstract class MoverChannel(MoverChannels owner, Guid id, MoverEndpoint
 internal sealed class BackupChannel(MoverChannels owner, Guid id, MoverEndpoint endpoint, string description, long capacity)
     : MoverChannel(owner, id, endpoint, description), IMoverBackupChannel
 {
+    private static readonly TimeSpan ReportGrace = TimeSpan.FromSeconds(30);
+
     private readonly TaskCompletionSource<(DiskDataSink Sink, CancellationToken Token)> _reader = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<long> _done = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _streaming;
@@ -196,13 +198,28 @@ internal sealed class BackupChannel(MoverChannels owner, Guid id, MoverEndpoint 
         }
         catch (Exception ex)
         {
-            Fail(ex is OperationCanceledException && requestAborted.IsCancellationRequested && !streamToken.IsCancellationRequested
-                ? new IOException($"The connection of the mover for {Description} broke off.", ex)
-                : ex is EndOfStreamException or IOException
-                    ? new IOException($"Receiving {Description} from its mover failed: {ex.Message}", ex)
-                    : ex);
+            var brokeOff = ex is OperationCanceledException && requestAborted.IsCancellationRequested && !streamToken.IsCancellationRequested;
+            if (brokeOff || ex is EndOfStreamException or IOException)
+            {
+                // A mover that stops sending was usually stopped (its pod deleted or failed): the watch of the pod or the
+                // mover's report says why, and comes first.
+                _ = FailUnlessReportedAsync(brokeOff
+                    ? new IOException($"The connection of the mover for {Description} broke off.", ex)
+                    : new IOException($"Receiving {Description} from its mover failed: {ex.Message}", ex));
+            }
+            else
+            {
+                Fail(ex);
+            }
+
             throw;
         }
+    }
+
+    private async Task FailUnlessReportedAsync(Exception error)
+    {
+        await Task.WhenAny(_done.Task, Task.Delay(ReportGrace)).ConfigureAwait(false);
+        Fail(error);
     }
 
     internal override void Report(MoverResult result)

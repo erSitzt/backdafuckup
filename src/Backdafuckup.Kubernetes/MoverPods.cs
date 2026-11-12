@@ -153,13 +153,21 @@ internal static class MoverPods
             }
             catch (HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
-                abort(new KubernetesOperationException($"The mover pod {space}/{podName} for {source} was deleted (cluster {flow.Cluster})."));
+                abort(Deleted(flow, space, podName, source));
                 return;
             }
             catch (HttpOperationException ex)
             {
                 flow.Log.Warning($"The mover pod {space}/{podName} could not be read (cluster {flow.Cluster}): {VolumeSnapshotFlow.Problem(ex)}");
                 continue;
+            }
+
+            // Being deleted: Kubernetes has sent the mover SIGTERM, which ends its transfer at once. The server deletes its
+            // pods only after it stopped watching them.
+            if (pod.Metadata?.DeletionTimestamp is not null)
+            {
+                abort(Deleted(flow, space, podName, source));
+                return;
             }
 
             var container = pod.Status?.ContainerStatuses?.FirstOrDefault();
@@ -193,6 +201,9 @@ internal static class MoverPods
             }
         }
     }
+
+    private static KubernetesOperationException Deleted(VolumeSnapshotFlow flow, string ns, string podName, string source) => new(
+        $"The mover pod {ns}/{podName} for {source} was deleted (cluster {flow.Cluster}): by someone, an eviction or the drain of its node.");
 
     private static async Task<string> LogTailAsync(VolumeSnapshotFlow flow, string ns, string podName, CancellationToken cancellationToken)
     {
