@@ -72,7 +72,8 @@ public sealed partial class RestoreSessionRunner(
             var originalLocation = request.Mode == RestoreModeDto.OriginalLocation;
             // A namespace's volumes go to the StorageClasses the restore maps them to; only a class chosen for a disk is fixed here.
             var storage = manifest.Kubernetes is not null
-                ? manifest.Disks.ToDictionary(d => d.Key, d => request.DiskStorage.GetValueOrDefault(d.Key) ?? string.Empty)
+                ? manifest.Disks.Select(d => d.Key).Concat(manifest.FileTrees.Select(t => t.Key)).Distinct(StringComparer.Ordinal)
+                    .ToDictionary(k => k, k => request.DiskStorage.GetValueOrDefault(k) ?? string.Empty)
                 : DiskStorage(manifest, request.DiskStorage, originalLocation: request.Mode == RestoreModeDto.OriginalLocation);
             if (resume)
             {
@@ -148,8 +149,16 @@ public sealed partial class RestoreSessionRunner(
 
             // A namespace restore of selected objects restores only their volumes.
             var disks = manifest.Disks.Where(d => restore.RestoresDisk(d.Key)).ToList();
+
+            // Volumes backed up file by file go into new volumes as files; their size: the PVC's, and at least 20 % (and
+            // 1 GiB) more than their files (an NFS PV's capacity often says little about what is on it).
+            var trees = manifest.FileTrees.Where(t => restore.RestoresDisk(t.Key))
+                .Select(t => (Tree: t, Capacity: Math.Max(
+                    manifest.Kubernetes?.Volumes.FirstOrDefault(v => v.TreeKey == t.Key)?.SizeBytes ?? 0,
+                    (long)(t.Stats.Bytes * 1.2) + (1L << 30))))
+                .ToList();
             var noun = plan.Kubernetes is null ? "Disk" : "Volume";
-            var total = Math.Max(1, disks.Sum(d => d.CapacityBytes) + (resume ? manifest.Memory!.CapacityBytes : 0));
+            var total = Math.Max(1, disks.Sum(d => d.CapacityBytes) + trees.Sum(t => t.Capacity) + (resume ? manifest.Memory!.CapacityBytes : 0));
             long done = 0;
             long transferred = 0;
             var transferStarted = time.GetUtcNow();
@@ -175,7 +184,6 @@ public sealed partial class RestoreSessionRunner(
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 await using var writer = await restore.CreateDiskAsync(target, cancellationToken).ConfigureAwait(false);
-                var image = await RestorePointDiskImage.OpenAsync(reader, target.DiskKey, cancellationToken).ConfigureAwait(false);
                 var start = done;
                 var sentBefore = transferred;
                 var lastUpdate = DateTimeOffset.MinValue;
@@ -196,8 +204,13 @@ public sealed partial class RestoreSessionRunner(
                     // A volume into a StorageClass without snapshots: its files, read from the image's file system.
                     await FileRestore.VolumeFileSender.SendAsync(reader, cache, target.DiskKey, files, log, progress, cancellationToken).ConfigureAwait(false);
                 }
+                else if (manifest.FileTrees.Any(t => t.Key == target.DiskKey))
+                {
+                    throw new InvalidOperationException($"{label} was backed up file by file: it goes back as files only.");
+                }
                 else
                 {
+                    var image = await RestorePointDiskImage.OpenAsync(reader, target.DiskKey, cancellationToken).ConfigureAwait(false);
                     await writer.WriteAsync(image, progress, cancellationToken).ConfigureAwait(false);
                 }
 
@@ -211,6 +224,13 @@ public sealed partial class RestoreSessionRunner(
             {
                 mapping[MetadataId(disk.Key, disk.SourceDiskId)] = await RestoreImageAsync(
                     new RestoreDiskTarget(disk.Key, disk.SourceDiskId, disk.Name, disk.CapacityBytes, plan.DiskStorage[disk.Key]), $"{noun} {disk.Name}").ConfigureAwait(false);
+            }
+
+            foreach (var (tree, capacity) in trees)
+            {
+                var source = $"{manifest.Kubernetes!.Namespace}/{tree.Key}";
+                mapping[source] = await RestoreImageAsync(new RestoreDiskTarget(tree.Key, source, tree.Name, capacity, plan.DiskStorage.GetValueOrDefault(tree.Key) ?? string.Empty), $"{noun} {tree.Name}")
+                    .ConfigureAwait(false);
             }
 
             foreach (var disk in manifest.ExcludedDisks)

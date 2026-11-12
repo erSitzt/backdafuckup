@@ -81,11 +81,11 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
     private string Source => _descriptor.Namespace;
 
-    /// <summary>The PVCs with data in the restore point that this restore brings back (claim names).</summary>
+    /// <summary>The PVCs with data in the restore point (a disk, or a file tree) that this restore brings back.</summary>
     private IEnumerable<KubernetesVolumeRecord> DataVolumes =>
-        _descriptor.Volumes.Where(v => v.DiskKey is not null && _selected.Contains($"PersistentVolumeClaim/{v.Claim}"));
+        _descriptor.Volumes.Where(v => v.HasData && _selected.Contains($"PersistentVolumeClaim/{v.Claim}"));
 
-    public bool RestoresDisk(string diskKey) => DataVolumes.Any(v => v.DiskKey == diskKey);
+    public bool RestoresDisk(string diskKey) => DataVolumes.Any(v => v.DiskKey == diskKey || v.TreeKey == diskKey);
 
     public async Task<RestoreValidation> ValidateAsync(CancellationToken cancellationToken)
     {
@@ -140,7 +140,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                          (workloads.Count > 0 ? $"; {string.Join(", ", workloads.Select(w => $"{w.Kind} {w.Name}"))} is scaled to 0 for the swap and back afterwards." : "."));
         }
 
-        foreach (var volume in _descriptor.Volumes.Where(v => v.DiskKey is null && _selected.Contains($"PersistentVolumeClaim/{v.Claim}")))
+        foreach (var volume in _descriptor.Volumes.Where(v => !v.HasData && _selected.Contains($"PersistentVolumeClaim/{v.Claim}")))
         {
             warnings.Add($"PVC {volume.Claim}: only its object is restored; its data is not in the restore point ({volume.Reason}).");
         }
@@ -171,7 +171,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
     public async Task<IDiskWriter> CreateDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken)
     {
-        var volume = DataVolumes.First(v => v.DiskKey == target.DiskKey);
+        var volume = DataVolumes.First(v => v.DiskKey == target.DiskKey || v.TreeKey == target.DiskKey);
         var way = _targets.GetValueOrDefault(volume.Claim) ?? throw new InvalidOperationException($"The volume of PVC {volume.Claim} was not validated.");
         if (way.Path == VolumeDataPath.Files)
         {
@@ -632,7 +632,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             var name = KubernetesObjects.Name(claim);
             var source = (string?)claim["spec"]?["storageClassName"];
             var volume = DataVolumes.FirstOrDefault(v => v.Claim == name);
-            var chosen = volume?.DiskKey is { } key && _plan.DiskStorage.GetValueOrDefault(key) is { Length: > 0 } picked ? picked : null;
+            var chosen = (volume?.DiskKey ?? volume?.TreeKey) is { } key && _plan.DiskStorage.GetValueOrDefault(key) is { Length: > 0 } picked ? picked : null;
             var target = chosen ?? _rewrite.MapClass(source);
             if (volume is null)
             {
@@ -654,8 +654,16 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                 continue;
             }
 
+            // A volume backed up file by file goes back as files, into whatever class (a snapshot class does not matter).
+            if (volume.TreeKey is not null)
+            {
+                way = way with { Path = VolumeDataPath.Files, SnapshotClass = null, Reason = "it was backed up file by file" };
+            }
+
             _targets[name] = way;
-            Log.Info(way.Path == VolumeDataPath.Block
+            Log.Info(volume.TreeKey is not null
+                ? $"PVC {name}: its files go into a new volume of the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()}, from its file tree with owners, modes and times; hard links become copies, sparse files are written in full."
+                : way.Path == VolumeDataPath.Block
                 ? $"PVC {name}: its data goes into the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()} as a block volume ({way.Reason})."
                 : $"PVC {name}: its data goes into the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()} as files ({way.Reason}): read from the file system " +
                   "of its image (ext or XFS) with owners, modes and times; hard links become copies, sparse files are written in full, extended attributes and ACLs stay behind.");

@@ -92,6 +92,21 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal(page, download);
         (await client.DeleteAsync($"/api/file-restore/mounts/{mount.Id}", Ct)).EnsureSuccessStatusCode();
 
+        // The namespace restored into a new one: the PVC gets a new volume (the provisioner's), filled with its files.
+        var restored = await Read<StartedDto>(client.PostAsJsonAsync("/api/restores", new RestoreRequestDto
+        {
+            RestorePointId = point.Id, Mode = RestoreModeDto.OriginalLocation, Kubernetes = new KubernetesRestoreDto { TargetNamespace = "web-restore" },
+        }, Ct));
+        var restoreSession = await WaitForSessionAsync(client, restored.SessionId);
+        var restoreLog = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{restored.SessionId}/log", Ct))!.Select(l => $"{l.Severity}: {l.Message}"));
+        Assert.True(restoreSession.Session.State == "Succeeded", restoreLog);
+        Assert.Contains("PVC data-web: its files go into a new volume of the StorageClass nfs-client", restoreLog, StringComparison.Ordinal);
+        var claim = nfs.Find("persistentvolumeclaims", "web-restore", "data-web")!;
+        var target = (string)nfs.Find("persistentvolumes", null, (string)claim["spec"]!["volumeName"]!)!["spec"]!["nfs"]!["path"]!;
+        Assert.NotEqual(folder, target);
+        Assert.Equal(page, await File.ReadAllBytesAsync(Path.Combine(target, "site", "index.bin"), Ct));
+        Assert.Equal("port=8080", await File.ReadAllTextAsync(Path.Combine(target, "config.txt"), Ct));
+
         // Nothing left in the cluster; the export's PV untouched (its policy and the provisioner's annotation).
         Assert.DoesNotContain(nfs.All("persistentvolumes"), p => p["metadata"]?["labels"]?["backdafuckup.io/shadow-of"] is not null);
         Assert.Empty(nfs.All("pods"));

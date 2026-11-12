@@ -64,7 +64,7 @@ internal static class KubernetesRestorePlanner
             var target = rewrite.MapClass(source);
             var record = descriptor.Volumes.FirstOrDefault(v => v.Claim == name);
             var size = record?.SizeBytes ?? 0;
-            if (record?.DiskKey is null)
+            if (record is not { HasData: true })
             {
                 var missing = !string.IsNullOrEmpty(target) && !storage.Has(target)
                     && (otherCluster || target != source || !objects.Any(o => KubernetesObjects.Kind(o) == "StorageClass" && KubernetesObjects.Name(o) == target));
@@ -84,6 +84,12 @@ internal static class KubernetesRestorePlanner
                     : $"PVC {name}: the StorageClass {target} does not exist in cluster {cluster} (it has {available}); map {source} to one of them.");
                 volumes.Add(new KubernetesVolumePlan(name, source, target, "missing", $"no StorageClass {target} in cluster {cluster}", size));
                 continue;
+            }
+
+            if (record.TreeKey is not null)
+            {
+                // Backed up file by file: its files go back as files, whatever the target class can do.
+                way = way with { Path = VolumeDataPath.Files, SnapshotClass = null, Reason = "it was backed up file by file" };
             }
 
             volumes.Add(new KubernetesVolumePlan(name, source, way.StorageClass, way.Path == VolumeDataPath.Block ? "block" : "files", way.Reason, size));
