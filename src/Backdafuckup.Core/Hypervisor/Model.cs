@@ -81,7 +81,14 @@ public sealed record InventoryItem(
     string? ParentNativeId,
     IReadOnlyDictionary<string, string> Properties);
 
-public sealed record Inventory(PlatformInfo Platform, IReadOnlyList<InventoryItem> Items);
+public sealed record Inventory(PlatformInfo Platform, IReadOnlyList<InventoryItem> Items)
+{
+    /// <summary>The platforms recognised in the cluster (Kubernetes: ids of the platform catalog), with what gave each away.</summary>
+    public IReadOnlyList<DetectedPlatform>? Platforms { get; init; }
+}
+
+/// <summary>A platform recognised in a cluster and what gave it away, e.g. <c>("rke2", "version v1.32.13+rke2r1")</c>.</summary>
+public sealed record DetectedPlatform(string Id, string Evidence);
 
 /// <summary>Opaque token that allows asking "what changed since" for a disk (Xen: uuid of the cbt_metadata VDI).</summary>
 public sealed record ChangeToken(string Kind, string Value);

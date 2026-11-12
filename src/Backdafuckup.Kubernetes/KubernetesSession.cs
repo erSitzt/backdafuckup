@@ -17,6 +17,12 @@ public interface IKubernetesNamespaceReader
     Task<IReadOnlyList<System.Text.Json.Nodes.JsonObject>> ReadObjectsAsync(string ns, CancellationToken cancellationToken);
 }
 
+/// <summary>A cluster's platforms (spec 2026-11-12-1952-kubernetes-platform-profiles), detected once per session.</summary>
+public interface IKubernetesPlatforms
+{
+    Task<KubernetesPlatformSelection> GetPlatformsAsync(CancellationToken cancellationToken);
+}
+
 /// <summary>The namespaces of a cluster with certain labels, for jobs that select them so.</summary>
 public interface IKubernetesNamespaceSelector
 {
@@ -39,9 +45,21 @@ public interface IKubernetesAgentUpdater
 
 internal sealed class KubernetesSession(
     IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
-    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater, IKubernetesNamespaceSelector, IKubernetesRestorePlanner, IKubernetesClusterRestorer
+    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater, IKubernetesNamespaceSelector, IKubernetesRestorePlanner, IKubernetesClusterRestorer, IKubernetesPlatforms
 {
     private PlatformInfo? _platform;
+    private KubernetesPlatformSelection? _platforms;
+
+    public async Task<KubernetesPlatformSelection> GetPlatformsAsync(CancellationToken cancellationToken)
+    {
+        if (_platforms is null)
+        {
+            var facts = await KubernetesPlatformDetection.ReadFactsAsync(client, cancellationToken: cancellationToken).ConfigureAwait(false);
+            _platforms = KubernetesPlatformDetection.Select(KubernetesPlatformDetection.Detect(facts), settings);
+        }
+
+        return _platforms;
+    }
 
     public PlatformInfo Platform => _platform ?? new PlatformInfo(string.Empty, settings.ClusterName(), settings.Address, "Kubernetes", string.Empty);
 

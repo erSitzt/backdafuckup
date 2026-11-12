@@ -1,0 +1,14 @@
+{
+  "source": "A k3s server with its defaults (Traefik, local-path, Flannel), after https://docs.k3s.io/ (version suffix +k3sN, the k3s.io node annotations, the helm.cattle.io and k3s.cattle.io groups).",
+  "tested": false,
+  "facts": {
+    "gitVersion": "v1.32.5+k3s1",
+    "apiGroups": [ "admissionregistration.k8s.io", "apiextensions.k8s.io", "apps", "batch", "helm.cattle.io", "k3s.cattle.io", "metrics.k8s.io", "networking.k8s.io", "policy", "rbac.authorization.k8s.io", "storage.k8s.io", "traefik.io" ],
+    "namespaces": [ "default", "kube-node-lease", "kube-public", "kube-system" ],
+    "nodes": [
+      { "name": "node-1", "providerId": "k3s://", "labels": { "kubernetes.io/arch": "amd64", "kubernetes.io/os": "linux", "node-role.kubernetes.io/control-plane": "true", "node.kubernetes.io/instance-type": "k3s" }, "annotations": { "k3s.io/hostname": "x", "k3s.io/node-args": "x", "k3s.io/internal-ip": "x" } }
+    ],
+    "csiDrivers": [ "rancher.io/local-path" ]
+  },
+  "expect": [ "k3s" ]
+}

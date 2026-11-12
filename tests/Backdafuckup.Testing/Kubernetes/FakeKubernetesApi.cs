@@ -20,6 +20,9 @@ public sealed class FakeKubernetesApi
 
     public string GitVersion { get; set; } = "v1.32.13+rke2r1";
 
+    /// <summary>API groups served without objects of them (e.g. an aggregated API), for discovery.</summary>
+    public HashSet<string> ExtraApiGroups { get; } = new(StringComparer.Ordinal);
+
     /// <summary>When set, every request is answered with this status (e.g. 401 for a refused token).</summary>
     public HttpStatusCode? FailWith { get; set; }
 
@@ -140,6 +143,31 @@ public sealed class FakeKubernetesApi
         if (path == "version")
         {
             return Json(HttpStatusCode.OK, new JsonObject { ["major"] = "1", ["minor"] = "32", ["gitVersion"] = GitVersion });
+        }
+
+        if (path == "apis")
+        {
+            // Discovery: the built-in groups, the groups of the objects added, and those served without objects.
+            List<string> versions;
+            lock (_lock)
+            {
+                versions = [.. BuiltInApis.Concat(_objects.Select(o => o.ApiPath)).Concat(ExtraApiGroups.Select(g => $"apis/{g}/v1"))
+                    .Where(a => a.StartsWith("apis/", StringComparison.Ordinal)).Distinct(StringComparer.Ordinal)];
+            }
+
+            var groups = new JsonArray();
+            foreach (var group in versions.Select(a => a.Split('/')).GroupBy(a => a[1], StringComparer.Ordinal))
+            {
+                var preferred = new JsonObject { ["groupVersion"] = $"{group.Key}/{group.First()[2]}", ["version"] = group.First()[2] };
+                groups.Add(new JsonObject
+                {
+                    ["name"] = group.Key,
+                    ["versions"] = new JsonArray([.. group.Select(a => (JsonNode)new JsonObject { ["groupVersion"] = $"{a[1]}/{a[2]}", ["version"] = a[2] })]),
+                    ["preferredVersion"] = preferred,
+                });
+            }
+
+            return Json(HttpStatusCode.OK, new JsonObject { ["kind"] = "APIGroupList", ["apiVersion"] = "v1", ["groups"] = groups });
         }
 
         var parts = path.Split('/');

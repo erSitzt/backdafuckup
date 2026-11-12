@@ -120,7 +120,13 @@ internal static class KubernetesInventory
             }));
         }
 
-        return new Inventory(platform, items);
+        // The cluster's platforms (from what was read already, plus API groups, nodes and CSI drivers); the product name
+        // says which they are, e.g. "RKE2 · Rancher · Fleet".
+        var facts = await KubernetesPlatformDetection.ReadFactsAsync(
+            client, platform.ProductVersion, [.. namespaces.Items.Select(n => n.Metadata.Name)], [.. classes.Values.Select(c => c.Provisioner)], cancellationToken).ConfigureAwait(false);
+        var detected = KubernetesPlatformDetection.Detect(facts);
+        var selection = KubernetesPlatformDetection.Select(detected, settings);
+        return new Inventory(platform with { ProductName = selection.Set.Display }, items) { Platforms = detected };
     }
 
     /// <summary>

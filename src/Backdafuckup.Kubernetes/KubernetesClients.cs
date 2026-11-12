@@ -24,6 +24,12 @@ public static class KubernetesConnectionOptions
 
     /// <summary>The cluster's name in messages and restore points when its address says nothing (a cluster behind its agent).</summary>
     public const string ClusterName = "kubernetes.clusterName";
+
+    /// <summary>
+    /// The platforms of the cluster set by hand (ids of the platform catalog, comma-separated), instead of the detected ones.
+    /// Absent: detected.
+    /// </summary>
+    public const string Platforms = "kubernetes.platforms";
 }
 
 public static class KubernetesSettings
