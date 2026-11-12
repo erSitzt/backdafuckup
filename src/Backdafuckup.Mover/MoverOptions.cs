@@ -12,12 +12,15 @@ internal enum MoverMode
 
     /// <summary>Fetch files from the server and put them into the mounted, live volume (<see cref="MoverOptions.Root"/>).</summary>
     Files,
+
+    /// <summary>Read the mounted volume (<see cref="MoverOptions.Root"/>) file by file and send the tree to the server.</summary>
+    Tree,
 }
 
 /// <summary>
 /// The mover's settings, from the environment of its pod:
 /// <list type="bullet">
-/// <item><c>BDFU_MOVER_MODE</c>: <c>backup</c>, <c>restore</c> or <c>files</c>.</item>
+/// <item><c>BDFU_MOVER_MODE</c>: <c>backup</c>, <c>restore</c>, <c>files</c> or <c>tree</c>.</item>
 /// <item><c>BDFU_MOVER_DATA_URL</c>, <c>BDFU_MOVER_RESULT_URL</c>: the channel on the backup server.</item>
 /// <item><c>BDFU_MOVER_TOKEN</c>: the channel's one-time token (from a Secret).</item>
 /// <item><c>BDFU_MOVER_SERVER_PINS</c>: SHA-256 SPKI pins of the server certificate, comma-separated; empty: the
@@ -26,7 +29,7 @@ internal enum MoverMode
 /// <item><c>BDFU_MOVER_BLOCK_BYTES</c>: the granularity of zero detection; default 64 KiB.</item>
 /// <item><c>BDFU_MOVER_BYTES</c>: backup only: the bytes to send, from the start of the device (a volume restored from a
 /// snapshot may be larger than the snapshot); default the whole device.</item>
-/// <item><c>BDFU_MOVER_ROOT</c>: files only: where the volume is mounted; default <see cref="DefaultRoot"/>.</item>
+/// <item><c>BDFU_MOVER_ROOT</c>: files and tree: where the volume is mounted; default <see cref="DefaultRoot"/>.</item>
 /// <item><c>BDFU_MOVER_IF_EXISTS</c>: files only: <c>replace</c> (default) or <c>keep</c> (RESTORED-&lt;name&gt; next to it).</item>
 /// <item><c>BDFU_MOVER_OWNERS</c>: files only: <c>1</c> (default) owner and group from the backup, <c>0</c> those of
 /// the folder an item goes into.</item>
@@ -64,7 +67,8 @@ internal sealed record MoverOptions(
             "backup" => MoverMode.Backup,
             "restore" => MoverMode.Restore,
             "files" => MoverMode.Files,
-            var other => throw new ArgumentException($"BDFU_MOVER_MODE is '{other}', expected backup, restore or files."),
+            "tree" => MoverMode.Tree,
+            var other => throw new ArgumentException($"BDFU_MOVER_MODE is '{other}', expected backup, restore, files or tree."),
         };
         var pins = (get("BDFU_MOVER_SERVER_PINS") ?? string.Empty)
             .Split([',', ' ', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);

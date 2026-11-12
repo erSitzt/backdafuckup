@@ -18,7 +18,13 @@ public static class MoverEndpoints
         // Backup: the mover sends its volume.
         movers.MapPut("/{id:guid}/data", async (Guid id, MoverChannels channels, HttpContext http, CancellationToken ct) =>
         {
-            if (channels.Find(id, http.Request.Headers.Authorization) is not BackupChannel channel)
+            var found = channels.Find(id, http.Request.Headers.Authorization);
+            if (found is TreeBackupChannel tree)
+            {
+                return await ReceiveTreeAsync(tree, channels, http, ct);
+            }
+
+            if (found is not BackupChannel channel)
             {
                 return NotOpen(id);
             }
@@ -135,6 +141,40 @@ public static class MoverEndpoints
                 return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway);
             }
         }).WithDescription("Pushes the mover image this server ships to the registry (blobs it lacks, then the manifest).");
+    }
+
+    /// <summary>A mover sends its volume file by file: the stream goes to the channel's consumer.</summary>
+    private static async Task<IResult> ReceiveTreeAsync(TreeBackupChannel channel, MoverChannels channels, HttpContext http, CancellationToken ct)
+    {
+        if (!channel.TryClaim())
+        {
+            return Results.Problem($"The mover channel {channel.Id} for {channel.Description} is already connected.", statusCode: StatusCodes.Status409Conflict);
+        }
+
+        // A file that is slow to read (a busy NFS server) sends nothing for a while; heartbeats keep the connection.
+        if (http.Features.Get<IHttpMinRequestBodyDataRateFeature>() is { } rate)
+        {
+            rate.MinDataRate = null;
+        }
+
+        channels.Logger.LogInformation("Mover for {Volume} connected from {Remote} to send its files.", channel.Description, http.Connection.RemoteIpAddress);
+        try
+        {
+            await channel.ReceiveAsync(http.Request.Body, ct);
+            return Results.Json(new MoverResult(0));
+        }
+        catch (InvalidDataException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status422UnprocessableEntity);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return Results.Problem($"The backup of {channel.Description} stopped on the server.", statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+        catch (IOException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status500InternalServerError);
+        }
     }
 
     private static IResult NotOpen(Guid id) =>

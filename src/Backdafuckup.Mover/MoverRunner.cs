@@ -40,6 +40,9 @@ internal static partial class MoverRunner
                 case MoverMode.Files:
                     await FilesAsync(http, options, log, cancellationToken).ConfigureAwait(false);
                     break;
+                case MoverMode.Tree:
+                    await TreeAsync(http, options, log, cancellationToken).ConfigureAwait(false);
+                    break;
                 default:
                     await RestoreAsync(http, options, log, cancellationToken).ConfigureAwait(false);
                     break;
@@ -172,6 +175,69 @@ internal static partial class MoverRunner
         var report = await new VolumeFiles(options.Root, options.Keep, options.Owners, log).ApplyAsync(stream, cancellationToken).ConfigureAwait(false);
         await ReportAsync(http, options, new MoverResult(report.Bytes, null, report), cancellationToken).ConfigureAwait(false);
         log.WriteLine($"Done in {Stopwatch.GetElapsedTime(started):hh\\:mm\\:ss}: {report.Files} file(s), {Size(report.Bytes)}; {report.Renamed} as RESTORED- copies, {report.Failed} failed, {report.Partial} without all of owner, mode or times.");
+    }
+
+    /// <summary>
+    /// Reads the mounted volume file by file (<see cref="VolumeTree"/>, on a thread of its own) and sends the tree as the
+    /// request body: the walk waits while the server is behind (the pipe pauses it), a heartbeat keeps the request alive
+    /// while a slow file is read.
+    /// </summary>
+    private static async Task TreeAsync(HttpClient http, MoverOptions options, TextWriter log, CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            throw new PlatformNotSupportedException("The mover reads volumes file by file on Linux only.");
+        }
+
+        log.WriteLine($"Reading {options.Root} file by file to {options.DataUrl.Authority}.");
+        var started = Stopwatch.GetTimestamp();
+        var pipe = new System.IO.Pipelines.Pipe(new System.IO.Pipelines.PipeOptions(pauseWriterThreshold: 8 * 1024 * 1024, resumeWriterThreshold: 4 * 1024 * 1024));
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var walk = Task.Factory.StartNew(
+            () =>
+            {
+                try
+                {
+                    using var output = pipe.Writer.AsStream();
+                    var summary = VolumeTree.Read(options.Root, output, HeartbeatInterval, stop.Token);
+                    pipe.Writer.Complete();
+                    return summary;
+                }
+                catch (Exception ex)
+                {
+                    pipe.Writer.Complete(ex);
+                    throw;
+                }
+            },
+            stop.Token,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+
+        using var content = new StreamContent(pipe.Reader.AsStream());
+        using var request = new HttpRequestMessage(HttpMethod.Put, options.DataUrl) { Content = content };
+        HttpResponseMessage response;
+        try
+        {
+            response = await SendAsync(http, request, options.DataUrl, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await stop.CancelAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        using (response)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                await stop.CancelAsync().ConfigureAwait(false);
+                throw new HttpRequestException($"The backup server {options.DataUrl.Authority} refused the files: {(int)response.StatusCode} {Detail(body)}");
+            }
+        }
+
+        var done = await walk.ConfigureAwait(false);
+        log.WriteLine($"Done in {Stopwatch.GetElapsedTime(started):hh\\:mm\\:ss}: {done.Entries} entries, {Size(done.Bytes)} of file content, {done.Issues} not read.");
     }
 
     private static async Task ReportAsync(HttpClient http, MoverOptions options, MoverResult result, CancellationToken cancellationToken)

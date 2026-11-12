@@ -45,6 +45,12 @@ public sealed class MoverChannels(AgentSettingsStore settings, ILogger<MoverChan
         return Register(new FilesChannel(this, id, endpoint, description), connectTimeout);
     }
 
+    public async Task<IMoverTreeChannel> OpenTreeBackupAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null)
+    {
+        var (id, endpoint) = await NewEndpointAsync(cancellationToken).ConfigureAwait(false);
+        return Register(new TreeBackupChannel(this, id, endpoint, description), connectTimeout);
+    }
+
     /// <summary>The open channel with this id, if the request carries its token; null for anything else.</summary>
     internal MoverChannel? Find(Guid id, string? authorization)
     {
@@ -206,6 +212,78 @@ internal sealed class BackupChannel(MoverChannels owner, Guid id, MoverEndpoint 
                 _ = FailUnlessReportedAsync(brokeOff
                     ? new IOException($"The connection of the mover for {Description} broke off.", ex)
                     : new IOException($"Receiving {Description} from its mover failed: {ex.Message}", ex));
+            }
+            else
+            {
+                Fail(ex);
+            }
+
+            throw;
+        }
+    }
+
+    private async Task FailUnlessReportedAsync(Exception error)
+    {
+        await Task.WhenAny(_done.Task, Task.Delay(ReportGrace)).ConfigureAwait(false);
+        Fail(error);
+    }
+
+    internal override void Report(MoverResult result)
+    {
+        if (result.Error is { } error)
+        {
+            Fail(new IOException($"The mover for {Description} failed: {error}"));
+        }
+    }
+
+    protected override void Fail(Exception error) => _done.TrySetException(error);
+
+    protected override void Cancel() => _done.TrySetCanceled();
+}
+
+/// <summary>Takes the file tree a mover sends (PUT) and hands it to its consumer (the file tree builder).</summary>
+internal sealed class TreeBackupChannel(MoverChannels owner, Guid id, MoverEndpoint endpoint, string description)
+    : MoverChannel(owner, id, endpoint, description), IMoverTreeChannel
+{
+    private static readonly TimeSpan ReportGrace = TimeSpan.FromSeconds(30);
+
+    private readonly TaskCompletionSource<(Func<Stream, CancellationToken, Task> Consume, CancellationToken Token)> _consumer =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private readonly TaskCompletionSource _done = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _consuming;
+
+    public async Task ConsumeAsync(Func<Stream, CancellationToken, Task> consume, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(consume);
+        if (Interlocked.Exchange(ref _consuming, 1) != 0)
+        {
+            throw new InvalidOperationException($"The file tree of {Description} is consumed once.");
+        }
+
+        _consumer.TrySetResult((consume, cancellationToken));
+        await _done.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Hands the mover's request body to the consumer.</summary>
+    internal async Task ReceiveAsync(Stream body, CancellationToken requestAborted)
+    {
+        var (consume, consumerToken) = await _consumer.Task.WaitAsync(requestAborted).ConfigureAwait(false);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(requestAborted, consumerToken);
+        try
+        {
+            await consume(body, linked.Token).ConfigureAwait(false);
+            _done.TrySetResult();
+        }
+        catch (Exception ex)
+        {
+            var brokeOff = ex is OperationCanceledException && requestAborted.IsCancellationRequested && !consumerToken.IsCancellationRequested;
+            if (brokeOff || ex is EndOfStreamException or IOException)
+            {
+                // A mover that stops sending was usually stopped: the watch of its pod or its report says why, and comes first.
+                _ = FailUnlessReportedAsync(brokeOff
+                    ? new IOException($"The connection of the mover for {Description} broke off.", ex)
+                    : new IOException($"Receiving the files of {Description} from its mover failed: {ex.Message}", ex));
             }
             else
             {

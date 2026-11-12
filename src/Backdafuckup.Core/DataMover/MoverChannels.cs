@@ -75,6 +75,25 @@ public interface IMoverChannels
 
     /// <param name="description">For messages: the live volume the files go into (cluster, namespace, PVC).</param>
     Task<IMoverFilesChannel> OpenFilesAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null);
+
+    /// <param name="description">For messages: the volume read file by file (cluster, namespace, PVC or pod volume).</param>
+    Task<IMoverTreeChannel> OpenTreeBackupAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null) =>
+        throw new NotSupportedException("This server takes no volumes file by file.");
+}
+
+/// <summary>
+/// A file tree backup channel (spec 2026-11-12-1952-kubernetes-file-level-volumes): the mover reads its volume file by file
+/// and sends the <see cref="MoverTree"/> stream to <see cref="Endpoint"/>; the server consumes it once.
+/// </summary>
+public interface IMoverTreeChannel : IAsyncDisposable
+{
+    MoverEndpoint Endpoint { get; }
+
+    /// <summary>Hands the mover's stream to <paramref name="consume"/> when it connects; completes when it has consumed it.</summary>
+    Task ConsumeAsync(Func<Stream, CancellationToken, Task> consume, CancellationToken cancellationToken);
+
+    /// <summary>Fails the channel from outside, e.g. when the mover's pod cannot start.</summary>
+    void Abort(Exception error);
 }
 
 /// <summary>What a cluster needs to start movers: the image, and the pull secret (its name, and its content when the server creates it).</summary>

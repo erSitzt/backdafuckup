@@ -139,7 +139,7 @@ public sealed class ChunkStreamRef
 }
 
 /// <summary>One entry of a directory listing.</summary>
-public sealed class FileTreeEntry
+public sealed record FileTreeEntry
 {
     /// <summary>The name as the file system has it (bytes, not necessarily UTF-8).</summary>
     public required byte[] Name { get; init; }
