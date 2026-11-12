@@ -2,11 +2,12 @@
 @inject ApiClient Api
 @inject NavigationManager Navigation
 
-@* The restore of a Kubernetes namespace's restore point into its cluster: the whole namespace, apps and workloads with what
-   they need, or single PVCs (also under new names); into the original namespace or another one. *@
+@* The restore of a Kubernetes namespace's restore point into a cluster (its own or another, with StorageClasses mapped): the
+   whole namespace, apps and workloads with what they need, or single PVCs (also under new names); into the original namespace
+   or another one. A preview shows each volume's way into the target and what to look at before anything is written. *@
 <PageTitle>Restore namespace – backdafuckup</PageTitle>
 <PageHeader Title="@($"Restore namespace {_details?.Namespace}")" Back="/backups"
-            Description="Objects and the data of volumes come back into the cluster they were backed up from. PVCs with data are written to new volumes; objects that exist are left as they are unless you replace them." />
+            Description="Objects and the data of volumes come back into the cluster they were backed up from or into another one, with its StorageClasses. PVCs with data are written to new volumes; objects that exist are left as they are unless you replace them." />
 
 @if (_error is not null && _details is null)
 {
@@ -128,19 +129,99 @@ else
     <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
         <MudText Typo="Typo.subtitle1" Class="section-title mb-2">Where</MudText>
         <div class="form-narrow">
-            <MudTextField @bind-Value="_target" Label="Target namespace" Variant="Variant.Outlined" Disabled="@(_what == WhatClaims && _replaceClaims)"
-                          HelperText="@(_target.Trim() == _details.Namespace ? "The original namespace." : "Created when it does not exist; RoleBindings to its ServiceAccounts follow the new name.")" />
+            <MudSelect T="Guid" Value="_cluster" ValueChanged="OnClusterChanged" Label="Cluster" Variant="Variant.Outlined" Class="mb-3"
+                       HelperText="@(_cluster == _point.ConnectionId ? "The cluster the namespace was backed up from." : "Another cluster: its StorageClasses take the volumes (below); what only the old cluster means is left out.")">
+                @foreach (var cluster in _clusters)
+                {
+                    <MudSelectItem T="Guid" Value="@cluster.Id">@cluster.DisplayName@(cluster.Id == _point.ConnectionId ? " (backed up here)" : string.Empty)</MudSelectItem>
+                }
+            </MudSelect>
+            <MudTextField T="string" Value="_target" ValueChanged="OnTargetChanged" Label="Target namespace" Variant="Variant.Outlined" Disabled="@(_what == WhatClaims && _replaceClaims)"
+                          DebounceInterval="400" HelperText="@(_target.Trim() == _details.Namespace ? "The original namespace." : "Created when it does not exist; RoleBindings to its ServiceAccounts follow the new name.")" />
             @if (_what != WhatClaims)
             {
                 <MudSwitch T="bool" @bind-Value="_replace" Color="Color.Primary" Class="mt-3"
                            Label="Replace objects that exist with their state in the restore point (otherwise they are left as they are)" />
             }
         </div>
-        @if (_what != WhatClaims && _target.Trim() == _details.Namespace && Selected().Any())
+        @if (_what != WhatClaims && _target.Trim() == _details.Namespace && Selected().Any() && _plan?.NamespaceExists == true)
         {
             <MudAlert Severity="Severity.Info" Dense="true" Class="mt-3">
                 PVCs with data must not exist in the target namespace: delete them (and stop their workloads) first, restore into another namespace, or restore single PVCs under new names.
             </MudAlert>
+        }
+    </MudPaper>
+
+    <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
+        <MudText Typo="Typo.subtitle1" Class="section-title mb-2">Volumes in the target</MudText>
+        @if (SourceClasses().Any())
+        {
+            <div class="table-box mb-3">
+                <MudSimpleTable Dense="true" Elevation="0">
+                    <thead><tr><th>StorageClass of the backup</th><th>Goes into</th></tr></thead>
+                    <tbody>
+                        @foreach (var source in SourceClasses())
+                        {
+                            <tr>
+                                <td class="nowrap">@source</td>
+                                <td>
+                                    <MudSelect T="string" Value="@(_map.GetValueOrDefault(source) ?? source)" ValueChanged="@(v => OnMapChanged(source, v))" Variant="Variant.Outlined"
+                                               Margin="Margin.Dense" Dense="true" Style="max-width: 320px">
+                                        @if (_plan is null || !_plan.StorageClasses.Contains(source))
+                                        {
+                                            <MudSelectItem T="string" Value="@source">@source (not in this cluster)</MudSelectItem>
+                                        }
+                                        @foreach (var name in _plan?.StorageClasses ?? [])
+                                        {
+                                            <MudSelectItem T="string" Value="@name">@name@(name == _plan?.DefaultStorageClass ? " (default)" : string.Empty)</MudSelectItem>
+                                        }
+                                    </MudSelect>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </MudSimpleTable>
+            </div>
+        }
+
+        @if (_planning)
+        {
+            <MudProgressLinear Indeterminate="true" Class="mb-2" />
+        }
+        else if (_planError is not null)
+        {
+            <MudAlert Severity="Severity.Error" Dense="true">@_planError</MudAlert>
+        }
+        else if (_plan is not null)
+        {
+            <div class="table-box">
+                <MudSimpleTable Dense="true" Elevation="0">
+                    <thead><tr><th>PVC</th><th class="num">Size</th><th>StorageClass</th><th>Data</th></tr></thead>
+                    <tbody>
+                        @foreach (var volume in _plan.Volumes.Where(v => _what != WhatClaims || _claims.ContainsKey(v.Claim)))
+                        {
+                            <tr>
+                                <td>@volume.Claim</td>
+                                <td class="num">@Fmt.Bytes(volume.SizeBytes)</td>
+                                <td>@volume.TargetStorageClass</td>
+                                <td>
+                                    <span class="@PathChip(volume.Path)">@PathText(volume.Path)</span>
+                                    <span class="cell-sub">@volume.Reason</span>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </MudSimpleTable>
+            </div>
+            @foreach (var problem in _plan.Errors)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mt-2">@problem</MudAlert>
+            }
+
+            @foreach (var warning in _plan.Warnings)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">@warning</MudAlert>
+            }
         }
     </MudPaper>
 
@@ -152,7 +233,7 @@ else
     <div class="d-flex gap-2">
         <MudButton Href="/backups">Cancel</MudButton>
         <MudSpacer />
-        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" Disabled="@(_busy || !Ready)" OnClick="StartAsync">Start restore</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" Disabled="@(_busy || !Ready || _planning || _plan?.Errors.Count > 0)" OnClick="StartAsync">Start restore</MudButton>
     </div>
 }
 
@@ -165,6 +246,12 @@ else
 
     private RestorePointDto? _point;
     private KubernetesRestorePointDto? _details;
+    private List<ConnectionDto> _clusters = [];
+    private Guid _cluster;
+    private readonly Dictionary<string, string> _map = new(StringComparer.Ordinal);
+    private KubernetesRestorePlanDto? _plan;
+    private bool _planning;
+    private string? _planError;
     private string _what = WhatNamespace;
     private string _target = string.Empty;
     private bool _replace;
@@ -182,6 +269,9 @@ else
             _details = await Api.GetAsync<KubernetesRestorePointDto>($"api/restore-points/{Id}/kubernetes");
             _point = await Api.GetAsync<RestorePointDto>($"api/restore-points/{Id}");
             _target = _details.Namespace;
+            _clusters = [.. (await Api.GetAsync<List<ConnectionDto>>("api/connections")).Where(c => c.Kind == "Kubernetes").OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)];
+            _cluster = _point.ConnectionId ?? _clusters.FirstOrDefault()?.Id ?? Guid.Empty;
+            await LoadPlanAsync();
         }
         catch (ApiException ex)
         {
@@ -265,6 +355,92 @@ else
         }
     }
 
+    /// <summary>The StorageClasses the restore point's PVCs come from.</summary>
+    private IEnumerable<string> SourceClasses() => _details!.Volumes.Select(v => v.StorageClass).OfType<string>().Where(c => c.Length > 0).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+
+    private static string PathChip(string path) => path switch
+    {
+        "block" or "files" => "mini-chip info",
+        "missing" => "mini-chip error",
+        _ => "mini-chip",
+    };
+
+    private static string PathText(string path) => path switch
+    {
+        "block" => "as a block volume",
+        "files" => "as files",
+        "missing" => "no such class",
+        _ => "objects only",
+    };
+
+    /// <summary>Another cluster: classes it lacks go into its default class until chosen otherwise.</summary>
+    private async Task OnClusterChanged(Guid cluster)
+    {
+        _cluster = cluster;
+        _map.Clear();
+        await LoadPlanAsync();
+        if (_plan is { } plan && cluster != _point!.ConnectionId)
+        {
+            var fallback = plan.DefaultStorageClass ?? plan.StorageClasses.FirstOrDefault();
+            foreach (var source in SourceClasses().Where(c => fallback is not null && !plan.StorageClasses.Contains(c)))
+            {
+                _map[source] = fallback!;
+            }
+
+            if (_map.Count > 0)
+            {
+                await LoadPlanAsync();
+            }
+        }
+    }
+
+    private async Task OnMapChanged(string source, string target)
+    {
+        if (target == source)
+        {
+            _map.Remove(source);
+        }
+        else
+        {
+            _map[source] = target;
+        }
+
+        await LoadPlanAsync();
+    }
+
+    private async Task OnTargetChanged(string target)
+    {
+        _target = target;
+        await LoadPlanAsync();
+    }
+
+    private async Task LoadPlanAsync()
+    {
+        if (_cluster == Guid.Empty || string.IsNullOrWhiteSpace(_target))
+        {
+            return;
+        }
+
+        _planning = true;
+        _planError = null;
+        try
+        {
+            _plan = await Api.PostAsync<KubernetesRestorePlanDto>($"api/restore-points/{Id}/kubernetes/restore-plan", new KubernetesRestorePlanRequestDto
+            {
+                TargetConnectionId = _cluster, TargetNamespace = _target.Trim(), StorageClassMap = new Dictionary<string, string>(_map),
+            });
+        }
+        catch (ApiException ex)
+        {
+            _plan = null;
+            _planError = ex.Message;
+        }
+        finally
+        {
+            _planning = false;
+        }
+    }
+
     private async Task StartAsync()
     {
         _busy = true;
@@ -279,12 +455,13 @@ else
                 OnlyClaims = _what == WhatClaims ? [.. _claims.Keys] : null,
                 ReplaceClaims = _what == WhatClaims && _replaceClaims,
                 ClaimNames = _what == WhatClaims && !_replaceClaims ? _claims.ToDictionary(kv => kv.Key, kv => kv.Value.Trim()) : [],
+                StorageClassMap = new Dictionary<string, string>(_map),
             };
             var started = await Api.PostAsync<StartedDto>("api/restores", new RestoreRequestDto
             {
                 RestorePointId = Id,
-                TargetConnectionId = _point!.ConnectionId,
-                Mode = RestoreModeDto.OriginalLocation,
+                TargetConnectionId = _cluster,
+                Mode = _cluster == _point!.ConnectionId ? RestoreModeDto.OriginalLocation : RestoreModeDto.AlternateLocation,
                 Kubernetes = options,
             });
             Navigation.NavigateTo($"/sessions/{started.SessionId}");
