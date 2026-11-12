@@ -117,6 +117,33 @@ public sealed class PlatformCatalogTests
         Assert.Null(set.MadeBy(Obj("v1", "ConfigMap", "site")));
     }
 
+    [Fact]
+    public void OpenShift_makes_its_per_namespace_objects_and_keeps_routes_and_uid_ranges_as_people_made_them()
+    {
+        var openshift = KubernetesPlatformSet.Of(["openshift"]);
+
+        // In every namespace, made again by OpenShift: left out of every restore.
+        foreach (var made in new[]
+                 {
+                     Obj("rbac.authorization.k8s.io/v1", "RoleBinding", "system:image-pullers"), Obj("v1", "ServiceAccount", "builder"),
+                     Obj("v1", "Secret", "default-dockercfg-x7k2p"), Obj("v1", "ConfigMap", "openshift-service-ca.crt"),
+                 })
+        {
+            Assert.Equal(new PlatformMade(KubernetesPlatformCatalog.Builtin.Find("openshift")!, true), openshift.MadeBy(made));
+        }
+
+        // Objects of the release payload are OpenShift's; routes and people's role bindings are not (routes go only where route.openshift.io is served).
+        Assert.Equal("openshift", openshift.MadeBy(Obj("rbac.authorization.k8s.io/v1", "ClusterRole", "x", annotations: new() { ["include.release.openshift.io/self-managed-high-availability"] = "true" }))?.Profile.Id);
+        Assert.Null(openshift.MadeBy(Obj("route.openshift.io/v1", "Route", "web")));
+        Assert.Null(openshift.MadeBy(Obj("rbac.authorization.k8s.io/v1", "RoleBinding", "admins")));
+        Assert.True(openshift.IsCrdGroup("route.openshift.io"));
+
+        // A namespace's UID range is kept (restored volume data keeps owners its pods can read).
+        Assert.False(openshift.IsStripped("openshift.io/sa.scc.uid-range"));
+        Assert.Equal(("/var/lib/kubelet", "/var/lib/containers/storage"), (openshift.KubeletRootDir, openshift.ContainerRuntimeRoot));
+        Assert.Equal("/var/snap/microk8s/common/var/lib/kubelet", KubernetesPlatformSet.Of(["microk8s"]).KubeletRootDir);
+    }
+
     private static JsonObject Obj(string apiVersion, string kind, string name, Dictionary<string, string>? labels = null, Dictionary<string, string>? annotations = null)
     {
         static JsonObject? Map(Dictionary<string, string>? map) =>

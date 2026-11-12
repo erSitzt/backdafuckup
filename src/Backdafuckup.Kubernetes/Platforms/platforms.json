@@ -54,6 +54,90 @@
       "namespaces": [ "local-path-storage" ]
     },
     {
+      "id": "openshift",
+      "name": "OpenShift",
+      "category": "distribution",
+      "tested": false,
+      "sources": [
+        "https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html/images/using-pull-secret_using-image-pull-secrets",
+        "https://docs.redhat.com/en/documentation/openshift_container_platform/4.2/html/authentication/using-service-accounts"
+      ],
+      "notes": "Mover pods run as root: the backdafuckup ServiceAccount needs an SCC that allows it (for example anyuid), which the setup manifest does not create. A namespace's UID range (openshift.io/sa.scc.*) is kept in another cluster, so restored volume data keeps owners its pods can read.",
+      "detect": [ { "apiGroup": "config.openshift.io" }, { "namespace": "openshift-config" } ],
+      "namespaces": [ "openshift", "openshift-*" ],
+      "crdGroups": [ "*.openshift.io" ],
+      "made": [
+        { "annotations": [ "include.release.openshift.io/*" ] },
+        { "kinds": [ "RoleBinding" ], "names": [ "system:image-pullers", "system:image-builders", "system:deployers" ], "always": true },
+        { "kinds": [ "ServiceAccount" ], "names": [ "builder", "deployer" ], "always": true },
+        { "kinds": [ "Secret" ], "names": [ "*-dockercfg-*" ], "always": true },
+        { "kinds": [ "ConfigMap" ], "names": [ "openshift-service-ca.crt" ], "always": true }
+      ],
+      "kubeletRootDir": "/var/lib/kubelet",
+      "containerRuntimeRoot": "/var/lib/containers/storage"
+    },
+    {
+      "id": "gke",
+      "name": "GKE",
+      "category": "distribution",
+      "tested": false,
+      "sources": [ "https://cloud.google.com/kubernetes-engine/docs", "https://cloud.google.com/anthos-config-management/docs/how-to/policy-controller-exclude-namespaces" ],
+      "notes": "GKE Autopilot does not allow hostPath or privileged pods: the optional node agent cannot run there.",
+      "detect": [ { "gitVersion": "-gke\\." }, { "nodeProviderId": "gce://" }, { "nodeLabel": "cloud.google.com/gke-nodepool" } ],
+      "namespaces": [ "gke-managed-*", "gke-system", "gmp-system", "gmp-public" ],
+      "crdGroups": [ "*.gke.io", "monitoring.googleapis.com" ]
+    },
+    {
+      "id": "eks",
+      "name": "EKS",
+      "category": "distribution",
+      "tested": false,
+      "sources": [ "https://docs.aws.amazon.com/eks/latest/userguide/" ],
+      "notes": "Pods on Fargate have no node to run the optional node agent on.",
+      "detect": [ { "gitVersion": "-eks-" }, { "nodeLabel": "eks.amazonaws.com/nodegroup" } ],
+      "namespaces": [ "amazon-cloudwatch", "amazon-guardduty" ],
+      "crdGroups": [ "crd.k8s.amazonaws.com", "vpcresources.k8s.aws" ]
+    },
+    {
+      "id": "aks",
+      "name": "AKS",
+      "category": "distribution",
+      "tested": false,
+      "sources": [ "https://learn.microsoft.com/azure/aks/" ],
+      "detect": [ { "nodeLabel": "kubernetes.azure.com/cluster" }, { "nodeProviderId": "azure://" } ],
+      "namespaces": [ "gatekeeper-system", "app-routing-system" ]
+    },
+    {
+      "id": "microk8s",
+      "name": "MicroK8s",
+      "category": "distribution",
+      "tested": false,
+      "sources": [ "https://microk8s.io/docs", "https://canonical.com/microk8s/docs/ref-launch-config" ],
+      "detect": [ { "nodeLabel": "microk8s.io/cluster=true" } ],
+      "kubeletRootDir": "/var/snap/microk8s/common/var/lib/kubelet",
+      "containerRuntimeRoot": "/var/snap/microk8s/common/var/lib/containerd"
+    },
+    {
+      "id": "k0s",
+      "name": "k0s",
+      "category": "distribution",
+      "tested": false,
+      "sources": [ "https://docs.k0sproject.io/main/directories/" ],
+      "detect": [ { "gitVersion": "\\+k0s" } ],
+      "kubeletRootDir": "/var/lib/k0s/kubelet",
+      "containerRuntimeRoot": "/var/lib/k0s/containerd"
+    },
+    {
+      "id": "tanzu",
+      "name": "Tanzu Kubernetes Grid",
+      "category": "distribution",
+      "tested": false,
+      "sources": [ "https://techdocs.broadcom.com/us/en/vmware-tanzu/standalone-components/tanzu-kubernetes-grid/" ],
+      "detect": [ { "gitVersion": "\\+vmware\\." }, { "namespace": "tkg-system" } ],
+      "namespaces": [ "tkg-system", "vmware-system-*" ],
+      "crdGroups": [ "*.tanzu.vmware.com" ]
+    },
+    {
       "id": "rancher",
       "name": "Rancher",
       "category": "manager",
@@ -126,6 +210,26 @@
       "made": [
         { "kinds": [ "ConfigMap" ], "names": [ "istio-ca-root-cert" ], "always": true }
       ]
+    },
+    {
+      "id": "antrea",
+      "name": "Antrea",
+      "category": "addon",
+      "tested": false,
+      "sources": [ "https://antrea.io/docs/" ],
+      "detect": [ { "apiGroup": "crd.antrea.io" } ],
+      "crdGroups": [ "*.antrea.io" ]
+    },
+    {
+      "id": "longhorn",
+      "name": "Longhorn",
+      "category": "addon",
+      "tested": false,
+      "sources": [ "https://longhorn.io/docs/" ],
+      "notes": "Longhorn's own records (volumes, replicas, engines) stay out; its volumes are backed up through CSI snapshots when a VolumeSnapshotClass exists for driver.longhorn.io.",
+      "detect": [ { "csiDriver": "driver.longhorn.io" }, { "apiGroup": "longhorn.io" } ],
+      "namespaces": [ "longhorn-system" ],
+      "crdGroups": [ "longhorn.io" ]
     }
   ]
 }

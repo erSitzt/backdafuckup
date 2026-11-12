@@ -1,0 +1,39 @@
+{
+  "source": "A MicroK8s node after public guides (the microk8s.io/cluster label; Calico by default).",
+  "tested": false,
+  "facts": {
+    "gitVersion": "v1.32.3",
+    "apiGroups": [
+      "admissionregistration.k8s.io",
+      "apiextensions.k8s.io",
+      "apps",
+      "batch",
+      "networking.k8s.io",
+      "policy",
+      "rbac.authorization.k8s.io",
+      "storage.k8s.io",
+      "crd.projectcalico.org"
+    ],
+    "namespaces": [
+      "default",
+      "kube-system"
+    ],
+    "nodes": [
+      {
+        "name": "node-1",
+        "providerId": null,
+        "labels": {
+          "kubernetes.io/os": "linux",
+          "kubernetes.io/arch": "amd64",
+          "microk8s.io/cluster": "true"
+        },
+        "annotations": {}
+      }
+    ],
+    "csiDrivers": []
+  },
+  "expect": [
+    "microk8s",
+    "calico"
+  ]
+}

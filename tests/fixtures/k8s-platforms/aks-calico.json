@@ -1,0 +1,45 @@
+{
+  "source": "An AKS cluster with Calico network policy after its documentation (the kubernetes.azure.com/cluster label, azure:// provider ids).",
+  "tested": false,
+  "facts": {
+    "gitVersion": "v1.31.2",
+    "apiGroups": [
+      "admissionregistration.k8s.io",
+      "apiextensions.k8s.io",
+      "apps",
+      "batch",
+      "networking.k8s.io",
+      "policy",
+      "rbac.authorization.k8s.io",
+      "storage.k8s.io",
+      "crd.projectcalico.org",
+      "operator.tigera.io"
+    ],
+    "namespaces": [
+      "calico-system",
+      "default",
+      "kube-system",
+      "tigera-operator"
+    ],
+    "nodes": [
+      {
+        "name": "node-1",
+        "providerId": "azure://",
+        "labels": {
+          "kubernetes.io/os": "linux",
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.azure.com/cluster": "x"
+        },
+        "annotations": {}
+      }
+    ],
+    "csiDrivers": [
+      "disk.csi.azure.com",
+      "file.csi.azure.com"
+    ]
+  },
+  "expect": [
+    "aks",
+    "calico"
+  ]
+}

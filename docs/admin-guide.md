@@ -738,16 +738,60 @@ Only running pods run hooks, through `pods/exec`.
 - A failed hook with `on-error: Continue` makes it crash-consistent with a warning.
 
 **The whole cluster:** turn on *Back up the whole cluster* in the job editor.
-- Each run backs up every namespace of the cluster at that time, except those of *Leave out these namespaces*: names, or patterns with `*`. The default leaves out what Kubernetes, RKE2, Rancher and Fleet make themselves: `kube-system`, `kube-public`, `kube-node-lease`, `cattle-*`, `fleet-*`, `cluster-fleet-*`, `local`. `backdafuckup-system` is always left out.
+- Each run backs up every namespace of the cluster at that time, except those left out:
+  - *Leave out what the cluster's platforms make* (on by default): the namespaces of the platforms detected at that run (see [Platforms](#platforms)), so a new platform or a catalog update reaches the job. In the job object this is `@platform`.
+  - *Also leave out*: names, or patterns with `*`.
+  - `backdafuckup-system` is always left out.
+  - Jobs saved before platforms were detected keep their fixed list (`kube-system`, `kube-public`, `kube-node-lease`, `cattle-*`, `fleet-*`, `cluster-fleet-*`, `local`). The job editor offers *Use the platform's list*.
 - Each run also makes a restore point *Cluster-scoped objects* (`@cluster`):
   - **Included:** the CRDs and their cluster-scoped objects (for example cert-manager's ClusterIssuers), the ClusterRoles and ClusterRoleBindings people made, and the StorageClasses, VolumeSnapshotClasses, IngressClasses, PriorityClasses and RuntimeClasses. The webhook configurations are included for the record.
-  - **Left out:** system and default roles, the roles and CRDs of RKE2, Rancher and Fleet, the CRDs of the CNI, of the snapshot API and of the vSphere CSI driver (`cns.vmware.com`), nodes, APIServices.
-- The session log names the namespaces of each run.
+  - **Left out:** what the cluster's platforms make (system and default roles, a distribution's or manager's roles and webhooks, the CRDs the platforms install), the snapshot API's CRDs, backdafuckup's own objects, nodes, APIServices. The log counts them per platform.
+- The session log names the platforms of the run, the namespaces it backs up, and those the platforms' list left out, per platform.
 
 **Secrets:** the restore point holds the namespace's Secrets with their values.
 - The repository protects them like disk images, through its file permissions.
 - There is no encryption at rest yet.
 - The console shows the keys of a Secret, never its values.
+
+### Platforms
+
+Kubernetes distributions, cluster managers and addons make objects of their own, and make them again: namespaces like `kube-system` or `cattle-system`, roles, webhooks, the CRDs they install, records such as Rancher's App objects. backdafuckup knows these from a catalog of platforms and recognises a cluster's platforms by what it shows: its version, its API groups, its namespaces, a sample of nodes (provider ids, labels, annotations) and its CSI drivers.
+
+- **When:** at every scan (adding, *Rescan*, the agent's connect) and at the start of every backup run. The clusters page names them (*Platform*, e.g. "RKE2 · Rancher · Fleet"); its *Platform* tab lists what gave each away.
+- **What they decide:**
+  - which namespaces a whole-cluster job leaves out with the platform's list;
+  - what the cluster-scoped objects leave out;
+  - what a restore leaves out as made by the platform: into another cluster everything the source's platforms made (they make their own there); into any cluster what they make in every namespace (e.g. OpenShift's image pull secrets, Istio's root CA ConfigMap);
+  - which labels and annotations mean nothing in another cluster (e.g. Rancher's project fields);
+  - CRDs a platform installs never come from a backup. Objects of such an API (e.g. RKE2's HelmCharts, OpenShift's Routes) go into a cluster that has it; elsewhere they stay out, named in the preview and the log.
+- **Restore points** record the platforms of their run; restores use those. Restore points from before platforms were recorded are restored with the rules of that time (Kubernetes, RKE2, k3s, Rancher, Fleet, Calico, Cilium, vSphere CSI).
+- **Set by hand:** *Platform → Set platforms…* chooses them instead of detecting them (for a cluster whose platform is not recognised, or not readable); *Set by hand* off detects them again.
+
+| Platform | Kind | Tested | Recognised by | Leaves out (namespaces) |
+|---|---|---|---|---|
+| Kubernetes | base | yes | always | `kube-system`, `kube-public`, `kube-node-lease` |
+| RKE2 | distribution | yes | version `+rke2r…`, node annotation `rke2.io/node-args` | — |
+| k3s | distribution | no | version `+k3s…`, node annotation `k3s.io/node-args` | — |
+| kind | distribution | yes | provider id `kind://` | `local-path-storage` |
+| OpenShift | distribution | no | API group `config.openshift.io`, namespace `openshift-config` | `openshift`, `openshift-*` |
+| GKE | distribution | no | version `-gke.`, provider id `gce://`, node label `cloud.google.com/gke-nodepool` | `gke-managed-*`, `gke-system`, `gmp-system`, `gmp-public` |
+| EKS | distribution | no | version `-eks-`, node label `eks.amazonaws.com/nodegroup` | `amazon-cloudwatch`, `amazon-guardduty` |
+| AKS | distribution | no | node label `kubernetes.azure.com/cluster`, provider id `azure://` | `gatekeeper-system`, `app-routing-system` |
+| MicroK8s | distribution | no | node label `microk8s.io/cluster=true` | — |
+| k0s | distribution | no | version `+k0s` | — |
+| Tanzu Kubernetes Grid | distribution | no | version `+vmware.`, namespace `tkg-system` | `tkg-system`, `vmware-system-*` |
+| Rancher | manager | yes | namespace `cattle-system`, API group `management.cattle.io` | `cattle-*`, `local` |
+| Fleet | manager | yes | namespace `cattle-fleet-system`, API group `fleet.cattle.io` | `fleet-*`, `cluster-fleet-*`, `cattle-fleet-*` |
+| Calico / Canal | addon | yes | API groups `crd.projectcalico.org`, `operator.tigera.io` | `calico-system`, `calico-apiserver`, `tigera-operator` |
+| Cilium | addon | no | API group `cilium.io` | `cilium-secrets` |
+| vSphere CSI | addon | yes | CSI driver `csi.vsphere.vmware.com`, API group `cns.vmware.com` | `vmware-system-csi` |
+| Istio | addon | yes | API group `networking.istio.io` | — (its root CA ConfigMap in every namespace) |
+| Antrea | addon | no | API group `crd.antrea.io` | — |
+| Longhorn | addon | no | CSI driver `driver.longhorn.io`, API group `longhorn.io` | `longhorn-system` |
+
+*Tested* means checked in the lab; the other platforms' rules come from their public documentation, named in the catalog (`src/Backdafuckup.Kubernetes/Platforms/platforms.json`). For a platform that is not recognised or not right, `scripts/k8s-platform-facts.sh` (read-only; kubectl and jq) prints what detection looks at, with node names, label values and namespaces that may be internal replaced, for a test fixture.
+
+**OpenShift (untested):** mover pods run as root, so the backdafuckup ServiceAccount needs an SCC that allows it (for example `anyuid`), which the setup manifest does not create. A namespace's UID range (`openshift.io/sa.scc.*`) is kept in another cluster on purpose: restored volume data keeps its owners, which pods of a new range could not read.
 
 ### Restore
 
@@ -803,7 +847,8 @@ Only running pods run hooks, through `pods/exec`.
     What the files path loses: hard links become copies, sparse files are written in full, extended attributes and ACLs stay behind. On an NFS export that maps root to nobody (`root_squash`), owners cannot be set. The session then notes that once, and the files belong to the export's user.
 - **Left out in another cluster:**
   - finalizers;
-  - Rancher's project fields, Rancher's RoleBindings, and the objects of Rancher's API groups (`*.cattle.io`, such as the App records of Helm releases; Rancher makes them again from the restored release Secrets) with their CRDs;
+  - what the source cluster's platforms made, and the labels and annotations they set for themselves (see [Platforms](#platforms)): for example Rancher's project RoleBindings, project fields and App records of Helm releases (Rancher makes them again from the restored release Secrets);
+  - objects of an API a platform installs, when the target lacks it (named in the preview and the log);
   - a Service's `loadBalancerIP` and `externalIPs`;
   - static PVs, for example of an NFS export. Their PVCs get new volumes, because both clusters would otherwise share the data.
 - **StorageClasses** of the backup are not created in another cluster.
