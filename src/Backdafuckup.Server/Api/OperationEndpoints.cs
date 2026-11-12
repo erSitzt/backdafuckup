@@ -30,6 +30,14 @@ public static class OperationEndpoints
                 return Results.Problem("Restoring to the original location requires the original pool.", statusCode: StatusCodes.Status400BadRequest);
             }
 
+            // A namespace goes into a cluster: its own, or another one (alternate location) with its StorageClasses mapped.
+            if (point.ObjectKind == RestorePointObjectKinds.KubernetesNamespace
+                && (request.TargetConnectionId ?? point.ConnectionId) is { } cluster
+                && await db.Connections.FindAsync([cluster], ct) is not { Kind: Core.Hypervisor.HypervisorKind.Kubernetes })
+            {
+                return Results.Problem("A namespace can only be restored into a Kubernetes cluster: the target connection is none (or no longer exists).", statusCode: StatusCodes.Status400BadRequest);
+            }
+
             var id = await queue.EnqueueRestoreAsync(request, point.VmName, http.User.Identity?.Name ?? "user", ct);
             return Results.Ok(new StartedDto(id));
         });

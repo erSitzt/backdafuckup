@@ -60,7 +60,10 @@ public sealed class RestoreSessionRunner(
             }
 
             var originalLocation = request.Mode == RestoreModeDto.OriginalLocation;
-            var storage = DiskStorage(manifest, request.DiskStorage, originalLocation: request.Mode == RestoreModeDto.OriginalLocation);
+            // A namespace's volumes go to the StorageClasses the restore maps them to; only a class chosen for a disk is fixed here.
+            var storage = manifest.Kubernetes is not null
+                ? manifest.Disks.ToDictionary(d => d.Key, d => request.DiskStorage.GetValueOrDefault(d.Key) ?? string.Empty)
+                : DiskStorage(manifest, request.DiskStorage, originalLocation: request.Mode == RestoreModeDto.OriginalLocation);
             if (resume)
             {
                 // The RAM image goes where it is chosen, else next to the first disk (the host that resumes must reach it).
@@ -94,6 +97,8 @@ public sealed class RestoreSessionRunner(
                         Objects = request.Kubernetes?.Objects,
                         ExactObjects = request.Kubernetes?.ExactObjects == true,
                         ClaimNames = request.Kubernetes?.ClaimNames ?? [],
+                        StorageClassMap = request.Kubernetes?.StorageClassMap ?? [],
+                        OtherCluster = await IsOtherClusterAsync(point, targetConnection, cancellationToken).ConfigureAwait(false),
                     }
                     : null,
             };
@@ -442,6 +447,19 @@ public sealed class RestoreSessionRunner(
     /// created empty: on the storage chosen for them, else on their original storage (restore to the original location),
     /// else next to the first restored disk (another location: where the user put the VM).
     /// </summary>
+    /// <summary>Whether the target connection is another cluster than the restore point's (by the cluster's platform id: one cluster may be added twice).</summary>
+    private async Task<bool> IsOtherClusterAsync(RestorePointEntity point, Guid targetConnection, CancellationToken cancellationToken)
+    {
+        if (targetConnection == point.ConnectionId)
+        {
+            return false;
+        }
+
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var platform = await db.Connections.AsNoTracking().Where(c => c.Id == targetConnection).Select(c => c.PlatformId).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        return platform is null || !string.Equals(platform, point.PlatformId, StringComparison.Ordinal);
+    }
+
     internal static Dictionary<string, string> DiskStorage(RestorePointManifest manifest, IReadOnlyDictionary<string, string> chosen, bool originalLocation)
     {
         var storage = manifest.Disks.ToDictionary(d => d.Key, d => chosen.GetValueOrDefault(d.Key) ?? d.StorageId ?? string.Empty);

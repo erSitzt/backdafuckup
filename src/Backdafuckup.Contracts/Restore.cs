@@ -68,6 +68,12 @@ public sealed record KubernetesRestoreDto
     public bool ExactObjects { get; init; }
 
     public Dictionary<string, string> ClaimNames { get; init; } = [];
+
+    /// <summary>
+    /// StorageClasses of the restore point → classes of the target cluster (needed when the target lacks a class, e.g.
+    /// another cluster). A volume whose target class has a VolumeSnapshotClass goes in as a block device, any other as files.
+    /// </summary>
+    public Dictionary<string, string> StorageClassMap { get; init; } = [];
 }
 
 /// <summary>What a restore point of a namespace holds: the cluster, its volumes and its objects.</summary>

@@ -190,6 +190,15 @@ public sealed record KubernetesRestoreOptions
     /// <summary>New names for restored PVCs (claim → name), e.g. to restore one next to the original.</summary>
     public IReadOnlyDictionary<string, string> ClaimNames { get; init; } = new Dictionary<string, string>();
 
+    /// <summary>StorageClasses of the restore point mapped to classes of the target cluster (source → target); unmapped ones keep their name.</summary>
+    public IReadOnlyDictionary<string, string> StorageClassMap { get; init; } = new Dictionary<string, string>();
+
+    /// <summary>
+    /// The target is another cluster than the restore point's: what only the old cluster means is left out (finalizers,
+    /// Rancher's fields, static PVs), and StorageClasses of the backup are never created there.
+    /// </summary>
+    public bool OtherCluster { get; init; }
+
     public string ClaimName(string claim) => ClaimNames.TryGetValue(claim, out var name) && !string.IsNullOrWhiteSpace(name) ? name : claim;
 }
 
