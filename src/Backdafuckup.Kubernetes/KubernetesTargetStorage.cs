@@ -51,6 +51,8 @@ internal sealed class KubernetesTargetStorage
 
     public bool Has(string storageClass) => _classes.ContainsKey(storageClass);
 
+    public V1StorageClass? Find(string? storageClass) => storageClass is not null ? _classes.GetValueOrDefault(storageClass) : null;
+
     /// <summary>Whether volumes of the class are provisioned only for a pod (WaitForFirstConsumer).</summary>
     public bool WaitsForConsumer(string? storageClass) =>
         storageClass is not null && _classes.TryGetValue(storageClass, out var found) && found.VolumeBindingMode == "WaitForFirstConsumer";

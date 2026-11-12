@@ -76,6 +76,35 @@ public sealed record KubernetesRestoreDto
     public Dictionary<string, string> StorageClassMap { get; init; } = [];
 }
 
+/// <summary>The preview of a namespace restore into a cluster (<c>POST /api/restore-points/{id}/kubernetes/restore-plan</c>).</summary>
+public sealed record KubernetesRestorePlanRequestDto
+{
+    /// <summary>The target cluster; empty: the restore point's.</summary>
+    public Guid? TargetConnectionId { get; init; }
+
+    /// <summary>Empty: the original namespace.</summary>
+    public string? TargetNamespace { get; init; }
+
+    public Dictionary<string, string> StorageClassMap { get; init; } = [];
+}
+
+/// <summary>How a restore would go: each PVC's class and data path in the target, what to look at first, and what stops it.</summary>
+public sealed record KubernetesRestorePlanDto(
+    Guid TargetConnectionId,
+    string Cluster,
+    string TargetNamespace,
+    bool OtherCluster,
+    bool NamespaceExists,
+    IReadOnlyList<string> StorageClasses,
+    string? DefaultStorageClass,
+    IReadOnlyList<KubernetesVolumePlanDto> Volumes,
+    IReadOnlyList<string> Warnings,
+    IReadOnlyList<string> Errors);
+
+/// <param name="Path"><c>block</c> (copied as a device, snapshotted with the target's class), <c>files</c> (read from its file system),
+/// <c>objects</c> (its data is not in the restore point) or <c>missing</c> (the target has no such class).</param>
+public sealed record KubernetesVolumePlanDto(string Claim, string? SourceStorageClass, string? TargetStorageClass, string Path, string Reason, long SizeBytes);
+
 /// <summary>What a restore point of a namespace holds: the cluster, its volumes and its objects.</summary>
 public sealed record KubernetesRestorePointDto(
     string Cluster,

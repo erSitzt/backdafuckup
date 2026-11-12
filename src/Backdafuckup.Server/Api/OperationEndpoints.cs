@@ -277,6 +277,38 @@ public static class OperationEndpoints
             }
         }).WithDescription("Compares the objects of a namespace's restore point with the live namespace: same, changed, missing (deleted since) or new (made since).");
 
+        points.MapPost("/{id:guid}/kubernetes/restore-plan", async (
+            Guid id, KubernetesRestorePlanRequestDto request, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, CancellationToken ct) =>
+        {
+            var (point, space, content, problem) = await NamespaceAsync(id, db, repositories, ct);
+            if (problem is not null)
+            {
+                return problem;
+            }
+
+            var targetId = request.TargetConnectionId ?? point!.ConnectionId;
+            if (targetId is not { } cluster || await db.Connections.AsNoTracking().FirstOrDefaultAsync(c => c.Id == targetId, ct) is not { Kind: Core.Hypervisor.HypervisorKind.Kubernetes } connection)
+            {
+                return Results.Problem("A namespace can only be restored into a Kubernetes cluster: the target connection is none (or no longer exists).", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            var target = string.IsNullOrWhiteSpace(request.TargetNamespace) ? space!.Namespace : request.TargetNamespace.Trim();
+            var other = cluster != point!.ConnectionId && !string.Equals(connection.PlatformId, point.PlatformId, StringComparison.Ordinal);
+            try
+            {
+                await using var session = await connections.OpenAsync(cluster, ct);
+                var plan = await ((Backdafuckup.Kubernetes.IKubernetesRestorePlanner)session).PlanRestoreAsync(space!, content!, target, request.StorageClassMap, other, ct);
+                return Results.Ok(new KubernetesRestorePlanDto(
+                    cluster, plan.Cluster, plan.TargetNamespace, plan.OtherCluster, plan.NamespaceExists, plan.StorageClasses, plan.DefaultStorageClass,
+                    [.. plan.Volumes.Select(v => new KubernetesVolumePlanDto(v.Claim, v.SourceStorageClass, v.TargetStorageClass, v.Path, v.Reason, v.SizeBytes))],
+                    plan.Warnings, plan.Errors));
+            }
+            catch (Exception ex) when (ex is Backdafuckup.Kubernetes.KubernetesOperationException or HttpRequestException or k8s.Autorest.HttpOperationException)
+            {
+                return Results.Problem($"Cluster {connection.DisplayName} could not be read for the plan: {ex.Message}", statusCode: StatusCodes.Status502BadGateway);
+            }
+        }).WithDescription("Previews a namespace restore into a cluster (the restore point's or another one, with StorageClasses mapped): each PVC's class and data path there (block, files, objects only, missing), warnings and what would stop it. Writes nothing.");
+
         points.MapGet("/{id:guid}/kubernetes/object", async (Guid id, string kind, string name, bool? live, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, CancellationToken ct) =>
         {
             var (point, space, content, problem) = await NamespaceAsync(id, db, repositories, ct);

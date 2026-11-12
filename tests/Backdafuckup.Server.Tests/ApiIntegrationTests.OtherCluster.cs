@@ -77,6 +77,24 @@ public sealed partial class ApiIntegrationTests
             return (session.Session.State, string.Join("\n", log.Select(l => $"{l.Severity}: {l.Message}")));
         }
 
+        // The preview: without a map the class is missing; mapped, the data path the restore will take, with what to look at.
+        async Task<KubernetesRestorePlanDto> PlanAsync(Dictionary<string, string> map) => await Read<KubernetesRestorePlanDto>(client.PostAsJsonAsync(
+            $"/api/restore-points/{point.Id}/kubernetes/restore-plan", new KubernetesRestorePlanRequestDto { TargetConnectionId = target.Id, StorageClassMap = map }, Ct));
+        var plan = await PlanAsync([]);
+        Assert.Equal((true, false, "bdfu-spike"), (plan.OtherCluster, plan.NamespaceExists, plan.TargetNamespace));
+        Assert.Equal(["fast-csi", "nfs-client"], plan.StorageClasses);
+        Assert.Equal(("missing", "vsphere-csi"), (Assert.Single(plan.Volumes).Path, plan.Volumes[0].TargetStorageClass));
+        Assert.Contains(plan.Errors, e => e.Contains("map vsphere-csi to one of them", StringComparison.Ordinal));
+        plan = await PlanAsync(new() { ["vsphere-csi"] = "fast-csi" });
+        Assert.Equal(("block", "fast-csi"), (Assert.Single(plan.Volumes).Path, plan.Volumes[0].TargetStorageClass));
+        Assert.Empty(plan.Errors);
+        plan = await PlanAsync(new() { ["vsphere-csi"] = "nfs-client" });
+        Assert.Equal("files", Assert.Single(plan.Volumes).Path);
+        Assert.Contains(plan.Warnings, w => w.StartsWith("PVC data-redis-test-0 goes onto NFS", StringComparison.Ordinal));
+        Assert.Contains(plan.Warnings, w => w.StartsWith("Volumes that go in as files are read from their file system", StringComparison.Ordinal));
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, (await client.PostAsJsonAsync(
+            $"/api/restore-points/{point.Id}/kubernetes/restore-plan", new KubernetesRestorePlanRequestDto { TargetConnectionId = Guid.NewGuid() }, Ct)).StatusCode);
+
         // Without a map the target lacks the class: the restore names the classes it has, and nothing is created.
         var (state, log) = await RestoreAsync(new KubernetesRestoreDto());
         Assert.True(state == "Failed", log);

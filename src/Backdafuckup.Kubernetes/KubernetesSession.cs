@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Operations;
+using Backdafuckup.Core.Repository;
 using k8s;
 
 namespace Backdafuckup.Kubernetes;
@@ -35,11 +36,17 @@ public interface IKubernetesAgentUpdater
 
 internal sealed class KubernetesSession(
     IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
-    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater, IKubernetesNamespaceSelector
+    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater, IKubernetesNamespaceSelector, IKubernetesRestorePlanner
 {
     private PlatformInfo? _platform;
 
     public PlatformInfo Platform => _platform ?? new PlatformInfo(string.Empty, settings.ClusterName(), settings.Address, "Kubernetes", string.Empty);
+
+    public Task<KubernetesRestorePlan> PlanRestoreAsync(
+        KubernetesNamespaceDescriptor descriptor, byte[] objects, string targetNamespace, IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster,
+        CancellationToken cancellationToken) =>
+        KubernetesRestorePlanner.PlanAsync(
+            client, settings.ClusterName(), descriptor, [.. KubernetesResources.Read(objects)], targetNamespace, storageClassMap, otherCluster, cancellationToken);
 
     public async Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken)
     {
