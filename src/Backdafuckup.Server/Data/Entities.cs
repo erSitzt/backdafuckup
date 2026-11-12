@@ -582,6 +582,22 @@ public sealed class RestorePointDisk
     public long ReadBytes { get; set; }
 
     public long NewStoredBytes { get; set; }
+
+    /// <summary><see cref="RestorePointDiskKinds.Disk"/>, or <see cref="RestorePointDiskKinds.FileTree"/> for a volume read file by file.</summary>
+    public string Kind { get; set; } = RestorePointDiskKinds.Disk;
+
+    /// <summary>A file tree's files.</summary>
+    public long? FileCount { get; set; }
+
+    /// <summary>A file tree's entries that were not read.</summary>
+    public long? IssueCount { get; set; }
+}
+
+public static class RestorePointDiskKinds
+{
+    public const string Disk = "disk";
+
+    public const string FileTree = "files";
 }
 
 public enum SessionKind

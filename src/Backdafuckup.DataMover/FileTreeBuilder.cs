@@ -18,12 +18,12 @@ public sealed class FileTreeBuilder(IRepositoryWriter writer, int chunkSize)
     private readonly Dictionary<ulong, (ChunkStreamRef Content, long Length)> _links = [];
     private readonly List<string> _issues = [];
     private readonly byte[] _piece = new byte[chunkSize];
-    private readonly ChunkStreams.PutChunk _put = async (id, data, ct) => await writer.PutChunkAsync(id, data, ct).ConfigureAwait(false);
     private long _files;
     private long _directories;
     private long _bytes;
     private long _issueCount;
     private long _changed;
+    private long _stored;
 
     /// <summary>The last heartbeat of the mover (entries, bytes, the path being read), for progress and stall messages.</summary>
     public TreeHeartbeat? LastHeartbeat { get; private set; }
@@ -168,7 +168,7 @@ public sealed class FileTreeBuilder(IRepositoryWriter writer, int chunkSize)
 
     private async Task FlushPieceAsync(FileState file, CancellationToken cancellationToken)
     {
-        file.Ids.Add(await ChunkStreams.PutPieceAsync(_piece.AsMemory(0, file.Filled), _put, cancellationToken).ConfigureAwait(false));
+        file.Ids.Add(await ChunkStreams.PutPieceAsync(_piece.AsMemory(0, file.Filled), PutAsync, cancellationToken).ConfigureAwait(false));
         file.Filled = 0;
     }
 
@@ -191,7 +191,7 @@ public sealed class FileTreeBuilder(IRepositoryWriter writer, int chunkSize)
                 await FlushPieceAsync(file, cancellationToken).ConfigureAwait(false);
             }
 
-            content = await ChunkStreams.FromIdsAsync(file.Length, [.. file.Ids], chunkSize, _put, cancellationToken).ConfigureAwait(false);
+            content = await ChunkStreams.FromIdsAsync(file.Length, [.. file.Ids], chunkSize, PutAsync, cancellationToken).ConfigureAwait(false);
         }
 
         var flags = (end.End == TreeFileEnd.Complete ? FileTreeEntryFlags.None : FileTreeEntryFlags.ChangedWhileRead)
@@ -222,7 +222,7 @@ public sealed class FileTreeBuilder(IRepositoryWriter writer, int chunkSize)
     }
 
     private async Task<ChunkStreamRef> WriteListingAsync(Folder folder, CancellationToken cancellationToken) =>
-        await ChunkStreams.WriteAsync(FileTreeListing.Serialize(folder.Entries), chunkSize, _put, allowInline: false, cancellationToken).ConfigureAwait(false);
+        await ChunkStreams.WriteAsync(FileTreeListing.Serialize(folder.Entries), chunkSize, PutAsync, allowInline: false, cancellationToken).ConfigureAwait(false);
 
     private async Task<Result> FinishAsync(TreeStat root, CancellationToken cancellationToken)
     {
@@ -231,7 +231,7 @@ public sealed class FileTreeBuilder(IRepositoryWriter writer, int chunkSize)
         var ids = new ChunkId[(listing.Length + chunkSize - 1) / chunkSize];
         for (var i = 0; i < ids.Length; i++)
         {
-            ids[i] = await ChunkStreams.PutPieceAsync(listing.AsMemory(i * chunkSize, Math.Min(chunkSize, listing.Length - (i * chunkSize))), _put, cancellationToken)
+            ids[i] = await ChunkStreams.PutPieceAsync(listing.AsMemory(i * chunkSize, Math.Min(chunkSize, listing.Length - (i * chunkSize))), PutAsync, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -242,8 +242,19 @@ public sealed class FileTreeBuilder(IRepositoryWriter writer, int chunkSize)
             new FileTreeStats
             {
                 Files = _files, Directories = _directories, Bytes = folder.Bytes, Issues = _issueCount, ChangedWhileRead = _changed, ReadBytes = Bytes,
+                NewStoredBytes = Interlocked.Read(ref _stored),
             },
             _issues);
+    }
+
+    /// <summary>Stores a chunk, counting what was new in the repository.</summary>
+    private async ValueTask PutAsync(ChunkId id, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
+        var result = await writer.PutChunkAsync(id, data, cancellationToken).ConfigureAwait(false);
+        if (result.Outcome == ChunkPutOutcome.Stored)
+        {
+            Interlocked.Add(ref _stored, result.StoredBytes);
+        }
     }
 
     private static FileTreeEntry Entry(byte[] name, FileTreeEntryType type, TreeStat stat) => new()

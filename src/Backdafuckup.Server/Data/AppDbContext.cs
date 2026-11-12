@@ -150,7 +150,11 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasIndex(x => new { x.RepositoryId, x.JobId, x.VmNativeId, x.CreatedUtc });
         });
 
-        builder.Entity<RestorePointDisk>(e => e.Property(x => x.Mode).HasConversion<string>().HasMaxLength(16));
+        builder.Entity<RestorePointDisk>(e =>
+        {
+            e.Property(x => x.Mode).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.Kind).HasMaxLength(16).HasDefaultValue(RestorePointDiskKinds.Disk);
+        });
 
         builder.Entity<SqlDatabaseEntity>(e =>
         {

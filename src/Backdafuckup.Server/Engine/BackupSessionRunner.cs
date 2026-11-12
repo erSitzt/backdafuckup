@@ -397,6 +397,29 @@ internal sealed class VmBackupTask(
             await tracker.UpdateTaskAsync(taskId, t => t.Metrics = CurrentMetrics(), CancellationToken.None).ConfigureAwait(false);
             var (manifestDisks, warnings) = await BackupDisksAsync(backup, writer, baseline, baseReader, cancellationToken).ConfigureAwait(false);
 
+            // Volumes without snapshots, read file by file; what waited for their files (post-hooks) runs when they are read.
+            var fileTrees = new List<ManifestFileTree>();
+            if (backup.FileTrees.Count > 0)
+            {
+                try
+                {
+                    var read = await BackupFileTreesAsync(backup, writer, cancellationToken).ConfigureAwait(false);
+                    fileTrees = read.Trees;
+                    warnings |= read.Warnings;
+                }
+                finally
+                {
+                    await backup.FileTreesReadAsync(_log, CancellationToken.None).ConfigureAwait(false);
+                }
+
+                // Files read while in use are not one point in time; a file that changed while it was read may be torn.
+                var changed = fileTrees.Sum(t => t.Stats.ChangedWhileRead);
+                var note = $"{string.Join(", ", fileTrees.Select(t => t.Name))} read file by file while in use, not at one point in time" +
+                           (changed > 0 ? $"; {changed} file(s) changed while they were read" : string.Empty);
+                consistencyReason = consistencyReason is null ? note : $"{consistencyReason}; {note}";
+                pointWarning |= changed > 0;
+            }
+
             // Snapshot with memory: the RAM image (read in full) and the checkpoint's metadata, for a restore that resumes.
             ManifestDisk? memoryImage = null;
             ManifestBlob? memoryMetadata = null;
@@ -508,6 +531,7 @@ internal sealed class VmBackupTask(
                 MemoryMetadata = memoryMetadata,
                 MemoryDiskIds = memoryImage is null ? null : backup.MemoryDiskIds,
                 Kubernetes = backup.Kubernetes,
+                FileTrees = fileTrees,
             };
             var committed = await writer.CommitAsync(manifest, cancellationToken).ConfigureAwait(false);
 
@@ -744,6 +768,45 @@ internal sealed class VmBackupTask(
         return (results.Select(r => r.Disk).ToList(), results.Any(r => r.Warned));
     }
 
+    /// <summary>Reads each volume of <see cref="IVmBackupSession.FileTrees"/> file by file into a file tree, one after another.</summary>
+    private async Task<(List<ManifestFileTree> Trees, bool Warnings)> BackupFileTreesAsync(IVmBackupSession backup, IRepositoryWriter writer, CancellationToken cancellationToken)
+    {
+        var trees = new List<ManifestFileTree>();
+        var warned = false;
+        foreach (var tree in backup.FileTrees)
+        {
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            await using var reader = await backup.OpenFileTreeAsync(tree, cancellationToken).ConfigureAwait(false);
+            var builder = new FileTreeBuilder(writer, repository.Info.ChunkSize);
+            FileTreeBuilder.Result? result = null;
+            await reader.ReadAsync(async (stream, ct) => result = await builder.BuildAsync(stream, ct).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+            var built = result ?? throw new InvalidOperationException($"The files of {tree.Description} were not read.");
+            var index = await writer.WriteFileTreeIndexAsync(tree.Key, built.Root, cancellationToken).ConfigureAwait(false);
+            Interlocked.Add(ref _storedBytes, built.Stats.NewStoredBytes);
+            var stats = built.Stats;
+            _log.Info($"Volume {tree.Name}: {stats.Files} file(s) in {stats.Directories} folder(s), {Format(stats.Bytes)}, read file by file through {reader.TransportName} " +
+                      $"in {System.Diagnostics.Stopwatch.GetElapsedTime(started):hh\\:mm\\:ss}; {Format(stats.NewStoredBytes)} new in the repository.");
+            if (stats.ChangedWhileRead > 0)
+            {
+                _log.Warning($"Volume {tree.Name}: {stats.ChangedWhileRead} file(s) changed while they were read; their copies may be torn (the next run reads them again).");
+            }
+
+            if (stats.Issues > 0)
+            {
+                warned = true;
+                _log.Warning($"Volume {tree.Name}: {stats.Issues} entr{(stats.Issues == 1 ? "y" : "ies")} not read: {string.Join("; ", built.Issues.Take(5))}" +
+                             (stats.Issues > 5 ? $"; and {stats.Issues - 5} more" : string.Empty) + ".");
+            }
+
+            trees.Add(new ManifestFileTree
+            {
+                Key = tree.Key, Name = tree.Name, Kind = tree.Kind, Reader = tree.Reader, Index = index, RootLength = built.Root.DiskSize, Root = built.RootMeta, Stats = stats,
+            });
+        }
+
+        return (trees, warned);
+    }
+
     private async Task<(ManifestDisk Disk, bool Warned)> BackupDiskAsync(
         IVmBackupSession backup,
         IRepositoryWriter writer,
@@ -892,8 +955,8 @@ internal sealed class VmBackupTask(
         entity.DomainController = manifest.DomainController ?? (manifest.Guest is null ? false : null);
         entity.AdDomain = manifest.AdDomain;
         entity.SqlBackupSetsRecorded = manifest.SqlSnapshot is null ? true : null;
-        entity.LogicalBytes = manifest.Disks.Sum(d => d.CapacityBytes);
-        entity.NewStoredBytes = manifest.AllImages.Sum(d => d.Stats.NewStoredBytes);
+        entity.LogicalBytes = manifest.Disks.Sum(d => d.CapacityBytes) + manifest.FileTrees.Sum(t => t.Stats.Bytes);
+        entity.NewStoredBytes = manifest.AllImages.Sum(d => d.Stats.NewStoredBytes) + manifest.FileTrees.Sum(t => t.Stats.NewStoredBytes);
         entity.MemoryImageBytes = manifest.Memory?.CapacityBytes;
         entity.Disks = manifest.Disks.Select(d => new RestorePointDisk
         {
@@ -910,7 +973,20 @@ internal sealed class VmBackupTask(
             ChangeTokenValue = d.ChangeToken?.Value,
             ReadBytes = d.Stats.ReadBytes,
             NewStoredBytes = d.Stats.NewStoredBytes,
-        }).ToList();
+        }).Concat(manifest.FileTrees.Select(t => new RestorePointDisk
+        {
+            RestorePointId = entity.Id,
+            DiskKey = t.Key,
+            SourceDiskId = t.Key,
+            Name = t.Name,
+            Kind = RestorePointDiskKinds.FileTree,
+            CapacityBytes = t.Stats.Bytes,
+            Mode = DiskBackupMode.Full,
+            ReadBytes = t.Stats.ReadBytes,
+            NewStoredBytes = t.Stats.NewStoredBytes,
+            FileCount = t.Stats.Files,
+            IssueCount = t.Stats.Issues,
+        })).ToList();
     }
 
     private async Task RemoveRestorePointAsync(Guid restorePointId, bool created)

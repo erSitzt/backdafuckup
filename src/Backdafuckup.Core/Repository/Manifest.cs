@@ -278,6 +278,9 @@ public sealed record FileTreeStats
 
     /// <summary>Bytes of file content read in this run.</summary>
     public long ReadBytes { get; init; }
+
+    /// <summary>Bytes the repository stored new for this tree (compressed; chunks it had already are not counted).</summary>
+    public long NewStoredBytes { get; init; }
 }
 
 public sealed record DiskBackupStats

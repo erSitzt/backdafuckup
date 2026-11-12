@@ -864,9 +864,25 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("disk_key");
 
+                    b.Property<long?>("FileCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("file_count");
+
                     b.Property<string>("FullReason")
                         .HasColumnType("text")
                         .HasColumnName("full_reason");
+
+                    b.Property<long?>("IssueCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("issue_count");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("disk")
+                        .HasColumnName("kind");
 
                     b.Property<string>("Mode")
                         .IsRequired()
