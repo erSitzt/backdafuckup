@@ -819,6 +819,11 @@ internal sealed class VmBackupTask(
         entity.ConsistencyReason = manifest.ConsistencyReason;
         entity.ConsistencyWarning = manifest.ConsistencyWarning ?? RestorePointConsistency.IsWarning(manifest.ConsistencyReason);
         entity.ObjectKind = manifest.Kubernetes is null ? RestorePointObjectKinds.Vm : RestorePointObjectKinds.KubernetesNamespace;
+        if (string.IsNullOrEmpty(entity.PlatformId) && !string.IsNullOrEmpty(manifest.Source.PlatformId))
+        {
+            // A cluster's session learns its platform id (kube-system's uid) only when the backup begins.
+            entity.PlatformId = manifest.Source.PlatformId;
+        }
         entity.SqlDatabaseCount = manifest.SqlDatabaseCount ?? (manifest.Guest is null ? 0 : null);
         entity.SqlUserDatabaseCount = manifest.SqlUserDatabaseCount ?? (manifest.Guest is null ? 0 : null);
         entity.SqlConsistentCount = manifest.SqlUserDatabaseCount is null ? entity.SqlUserDatabaseCount : manifest.SqlConsistentCount;
