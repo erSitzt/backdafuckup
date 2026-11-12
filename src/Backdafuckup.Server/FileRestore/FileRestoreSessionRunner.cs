@@ -354,7 +354,7 @@ public sealed class FileRestoreSessionRunner(
             {
                 using var image = GuestImage.Open(disks);
                 var volume = ReadableVolume(image, request.Volume);
-                if (volume.FileSystem is not ("ext" or "XFS"))
+                if (volume.FileSystem is not ("ext" or "XFS" or FileTreeFileSystem.TypeName))
                 {
                     throw new InvalidOperationException($"Volume {FileRestoreMounts.Title(volume)} is {volume.FileSystem}; SSH restores files of Linux volumes. Restore Windows files through the agent.");
                 }
@@ -488,7 +488,7 @@ public sealed class FileRestoreSessionRunner(
             {
                 using var image = GuestImage.Open(disks);
                 var volume = ReadableVolume(image, request.Volume);
-                if (volume.FileSystem is not ("ext" or "XFS"))
+                if (volume.FileSystem is not ("ext" or "XFS" or FileTreeFileSystem.TypeName))
                 {
                     throw new InvalidOperationException($"Volume {FileRestoreMounts.Title(volume)} is {volume.FileSystem}; files go back into PVCs with ext or XFS file systems only.");
                 }

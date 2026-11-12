@@ -82,6 +82,16 @@ public sealed partial class ApiIntegrationTests
             Assert.Equal(page, ChunkStreams.ReadAll(entries["site/index.bin"].Content!, reader.Chunks, reader.Manifest.Chunking.ChunkSize));
         }
 
+        // Browsing: the tree is a Unix volume named after its PVC; folders list, files download as they were.
+        var mount = await Read<FileMountDto>(client.PostAsJsonAsync("/api/file-restore/mounts", new OpenFileMountRequestDto(point.Id), Ct));
+        var volume = Assert.Single(mount.Volumes);
+        Assert.Equal(("data-web:files", "files", "unix", true), (volume.Id, volume.FileSystem, volume.Family, volume.Readable));
+        var top = (await client.GetFromJsonAsync<GuestEntryPageDto>($"/api/file-restore/mounts/{mount.Id}/entries?volume={Uri.EscapeDataString(volume.Id)}&path=/", Ct))!;
+        Assert.Equal([("config.txt", "file"), ("site", "directory")], top.Entries.Select(e => (e.Name, e.Kind)).Order());
+        var download = await client.GetByteArrayAsync($"/api/file-restore/mounts/{mount.Id}/file?volume={Uri.EscapeDataString(volume.Id)}&path=/site/index.bin", Ct);
+        Assert.Equal(page, download);
+        (await client.DeleteAsync($"/api/file-restore/mounts/{mount.Id}", Ct)).EnsureSuccessStatusCode();
+
         // Nothing left in the cluster; the export's PV untouched (its policy and the provisioner's annotation).
         Assert.DoesNotContain(nfs.All("persistentvolumes"), p => p["metadata"]?["labels"]?["backdafuckup.io/shadow-of"] is not null);
         Assert.Empty(nfs.All("pods"));

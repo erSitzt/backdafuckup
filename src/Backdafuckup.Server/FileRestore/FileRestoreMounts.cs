@@ -402,7 +402,10 @@ public sealed class FileRestoreMounts(
             },
             cancellationToken);
 
-    /// <summary>The disks of a restore point as sources for <see cref="GuestImage"/> (indexes read once, chunks through the cache).</summary>
+    /// <summary>
+    /// The disks of a restore point as sources for <see cref="GuestImage"/> (indexes read once, chunks through the cache), and
+    /// its volumes backed up file by file (their trees, read through the repository's chunks).
+    /// </summary>
     internal static async Task<List<GuestDiskSource>> OpenDisksAsync(IRestorePointReader reader, ChunkCache cache, CancellationToken cancellationToken)
     {
         var disks = new List<GuestDiskSource>();
@@ -411,6 +414,18 @@ public sealed class FileRestoreMounts(
             var index = await reader.ReadDiskIndexAsync(disk.Key, cancellationToken).ConfigureAwait(false);
             var chunks = reader.Chunks;
             disks.Add(new GuestDiskSource(disk.Key, disk.Name, () => new RestorePointDiskStream(index, chunks, cache)));
+        }
+
+        foreach (var tree in reader.Manifest.FileTrees)
+        {
+            var root = await reader.ReadFileTreeIndexAsync(tree.Key, cancellationToken).ConfigureAwait(false);
+            var chunks = reader.Chunks;
+            var chunkSize = reader.Manifest.Chunking.ChunkSize;
+            disks.Add(new GuestDiskSource(tree.Key, tree.Name, () => throw new NotSupportedException($"{tree.Name} is a file tree, not a disk image."))
+            {
+                OpenTree = () => new FileTreeFileSystem(Core.Repository.ChunkStreamRef.OfIds(root.DiskSize, root.Entries), tree.Root, chunks, chunkSize),
+                TreeBytes = tree.Stats.Bytes,
+            });
         }
 
         return disks;
@@ -444,7 +459,7 @@ public sealed class FileRestoreMounts(
         v.MountPoint,
         v.Label,
         v.FileSystem,
-        v.FileSystem switch { "NTFS" or "FAT" => "windows", "ext" or "XFS" => "unix", _ => null },
+        v.FileSystem switch { "NTFS" or "FAT" => "windows", "ext" or "XFS" or FileTreeFileSystem.TypeName => "unix", _ => null },
         v.Length,
         v.DiskName,
         v.PartitionType,

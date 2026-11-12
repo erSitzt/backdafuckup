@@ -122,7 +122,7 @@ public static class FileRestoreEndpoints
                         }
 
                         var pvcVolume = mount?.Image.Volumes.FirstOrDefault(v => v.Id == request.Volume);
-                        if (pvcVolume is not null && pvcVolume.FileSystem is not ("ext" or "XFS"))
+                        if (pvcVolume is not null && pvcVolume.FileSystem is not ("ext" or "XFS" or FileTreeFileSystem.TypeName))
                         {
                             throw new ArgumentException($"Files go back into PVCs with ext or XFS file systems only; this volume is {pvcVolume.FileSystem}.");
                         }
@@ -164,7 +164,7 @@ public static class FileRestoreEndpoints
 
                         if (mount?.Image.Volumes.FirstOrDefault(v => v.Id == request.Volume) is { } linuxVolume)
                         {
-                            if (linuxVolume.FileSystem is not ("ext" or "XFS"))
+                            if (linuxVolume.FileSystem is not ("ext" or "XFS" or FileTreeFileSystem.TypeName))
                             {
                                 throw new ArgumentException($"{linuxVolume.FileSystem} files are restored into a VM through the agent, not over SSH.");
                             }
