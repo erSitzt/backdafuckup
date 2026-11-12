@@ -606,7 +606,7 @@ It was built for RKE2 on vSphere with the vSphere CSI driver. Any CSI driver wit
    |---|---|
    | Namespace `backdafuckup-system` with `pod-security.kubernetes.io/enforce: baseline` | The work namespace: temporary PVCs and the mover pods |
    | ServiceAccount `backdafuckup` and its token Secret `backdafuckup-token` | The account the server uses |
-   | ClusterRole `backdafuckup-backup` | Read every object, Secrets included. Create and delete VolumeSnapshots and VolumeSnapshotContents. `pods/exec` for hooks. PersistentVolumes |
+   | ClusterRole `backdafuckup-backup` | List and watch every object, Secrets included; `get` only on the kinds it reads by name (core objects, workloads, CRDs, StorageClasses, snapshots), never on `*/*`, which would include `nodes/proxy`: the kubelet's API, and through it exec in any pod. Create and delete VolumeSnapshots and VolumeSnapshotContents. `pods/exec` for hooks. PersistentVolumes |
    | Role `backdafuckup-work` in `backdafuckup-system` | PVCs, pods and Secrets of the work namespace; patch the agent's Deployment `backdafuckup-agent` (its image) |
    | ClusterRole `backdafuckup-restore` (optional) | Create, change and delete objects in every namespace: restores, and the mover pod of a file restore in the PVC's namespace. `bind` and `escalate` on roles and ClusterRoles, to restore RoleBindings to `admin` or `edit` and the ClusterRoles of a whole cluster. Together this is as much as cluster-admin. |
 
@@ -873,6 +873,7 @@ Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-r
 |---|---|---|
 | `TooManyRequests` … "storage is (re)initializing" | The API server restarts its watch cache. | backdafuckup retries 429 and 503 up to 5 times and follows `Retry-After`. If it persists, check the API servers. |
 | "403 Forbidden: the ServiceAccount lacks a permission (apply the current setup manifest)" | The cluster has an older manifest, or one without the restore role. | Apply the current manifest from the console. |
+| Manifests from before this version | Their backup role grants `get` on `*/*`, which includes `nodes/proxy`, `pods/proxy` and `services/proxy`. Nothing in backdafuckup uses them. | Apply the current setup manifest; `kubectl auth can-i get nodes/proxy --as=system:serviceaccount:backdafuckup-system:backdafuckup` then answers `no`. |
 | "The mover pod … cannot start (ImagePullBackOff)" | The image is not in the registry, or the nodes may not pull it. | *Mover image → Push*; check the pull secret mode. |
 | "The mover for … did not connect to https://…:9555/… within … minutes" | The pod was not scheduled, its volume was not attached, or it cannot reach the server. | Check the server address under *Guest agents → Settings* and the firewall from the pod network to TCP 9555; see the pod's events. |
 | "The certificate of the backup server … is not trusted" (in the mover's log) | The server certificate is from your own CA. | Set `Agent:ServerPins`. |

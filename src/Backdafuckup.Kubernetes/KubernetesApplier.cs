@@ -127,10 +127,24 @@ internal sealed class KubernetesApplier(IKubernetes client, IReadOnlyDictionary<
             }
             else
             {
+                // By a list with a field selector, not a get: the account may list everything but get only what it reads by
+                // name itself (KubernetesSetup.ReadByName), so that no rule grants the proxy subresources.
                 var (group, version, plural, ns) = Grouped(o);
-                live = ns is null
-                    ? await client.CustomObjects.GetClusterCustomObjectAsync(group, version, plural, KubernetesObjects.Name(o), cancellationToken).ConfigureAwait(false)
-                    : await client.CustomObjects.GetNamespacedCustomObjectAsync(group, version, ns, plural, KubernetesObjects.Name(o), cancellationToken).ConfigureAwait(false);
+                var selector = $"metadata.name={KubernetesObjects.Name(o)}";
+                var list = ns is null
+                    ? await client.CustomObjects.ListClusterCustomObjectAsync(group, version, plural, fieldSelector: selector, cancellationToken: cancellationToken).ConfigureAwait(false)
+                    : await client.CustomObjects.ListNamespacedCustomObjectAsync(group, version, ns, plural, fieldSelector: selector, cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (KubernetesResources.Items(list).OfType<JsonObject>().FirstOrDefault() is not { } found)
+                {
+                    return null;
+                }
+
+                var item = (JsonObject)found.DeepClone();
+
+                // Items of a list of built-in kinds carry no apiVersion and kind.
+                item["apiVersion"] ??= (string?)o["apiVersion"];
+                item["kind"] ??= KubernetesObjects.Kind(o);
+                return item;
             }
 
             return JsonNode.Parse(live is JsonElement element ? element.GetRawText() : KubernetesJson.Serialize(live))!.AsObject();

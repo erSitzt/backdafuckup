@@ -259,4 +259,33 @@ public sealed class KubernetesSetupTests
         Assert.Equal(7, backupOnly.Count);
         Assert.DoesNotContain(backupOnly, o => o is k8s.Models.V1ClusterRole { Metadata.Name: "backdafuckup-restore" });
     }
+
+    [Fact]
+    public void The_backup_role_lists_everything_but_gets_only_what_it_reads_by_name_never_a_proxy()
+    {
+        var backup = k8s.KubernetesYaml.LoadAllFromString(KubernetesSetup.Manifest(includeRestore: false))
+            .OfType<k8s.Models.V1ClusterRole>().Single(r => r.Metadata.Name == "backdafuckup-backup");
+
+        // RBAC as the API server matches it: "*" in a rule's resources matches every resource and subresource.
+        bool Allows(string group, string resource, string verb) => backup.Rules.Any(r =>
+            (r.ApiGroups.Contains("*") || r.ApiGroups.Contains(group)) && (r.Resources.Contains("*") || r.Resources.Contains(resource))
+            && (r.Verbs.Contains("*") || r.Verbs.Contains(verb)));
+
+        // The kubelet's API (and through it exec in any pod) and the other proxies are never granted.
+        Assert.False(Allows("", "nodes/proxy", "get"));
+        Assert.False(Allows("", "pods/proxy", "get"));
+        Assert.False(Allows("", "services/proxy", "get"));
+        Assert.False(Allows("", "nodes/proxy", "create"));
+
+        // Every kind can be listed and watched (backups, restores reading objects of other kinds by a field selector).
+        Assert.True(Allows("example.com", "widgets", "list"));
+        Assert.True(Allows("", "secrets", "watch"));
+        Assert.False(Allows("example.com", "widgets", "get"));
+
+        // What the product reads by name is granted.
+        foreach (var (group, resources) in KubernetesSetup.ReadByName)
+        {
+            Assert.All(resources, resource => Assert.True(Allows(group, resource, "get"), $"get {group}/{resource}"));
+        }
+    }
 }

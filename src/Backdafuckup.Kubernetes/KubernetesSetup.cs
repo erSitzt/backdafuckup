@@ -12,6 +12,29 @@ public static class KubernetesSetup
     public const string FileName = "backdafuckup-setup.yaml";
 
     /// <summary>
+    /// The resources the product reads by name (<c>get</c>), per API group. Everything else is read by listing: a <c>get</c>
+    /// on <c>*/*</c> would also grant the proxy subresources (<c>nodes/proxy</c> reaches the kubelet, and through it exec in
+    /// any pod), which a backup never needs. Objects of other kinds are read by name through a list with a field selector
+    /// (<see cref="KubernetesApplier.ReadAsync"/>).
+    /// </summary>
+    public static IReadOnlyList<(string Group, IReadOnlyList<string> Resources)> ReadByName { get; } =
+    [
+        ("", ["configmaps", "limitranges", "namespaces", "persistentvolumeclaims", "persistentvolumes", "pods", "pods/log", "podtemplates",
+              "replicationcontrollers", "resourcequotas", "secrets", "serviceaccounts", "services"]),
+        ("apps", ["daemonsets", "deployments", "replicasets", "statefulsets"]),
+        ("apiextensions.k8s.io", ["customresourcedefinitions"]),
+        ("snapshot.storage.k8s.io", ["volumesnapshotclasses", "volumesnapshotcontents", "volumesnapshots"]),
+        ("storage.k8s.io", ["storageclasses"]),
+    ];
+
+    private static string ReadByNameRules() => string.Concat(ReadByName.Select(r => $$"""
+          - apiGroups: [{{Quote(r.Group)}}]
+            resources: [{{string.Join(", ", r.Resources)}}]
+            verbs: [get]
+
+        """));
+
+    /// <summary>
     /// The manifest to apply (kubectl or a Fleet bundle). Backup reads every object, Secrets included, takes and removes
     /// volume snapshots, runs hooks in pods and works with PVCs, PVs and pods in the work namespace. Restore creates and
     /// changes objects in any namespace; without it the account only backs up.
@@ -175,7 +198,8 @@ public static class KubernetesSetup
         type: kubernetes.io/service-account-token
         ---
         # Backup: read every object (Secrets too), take and remove volume snapshots, run hooks in pods, and hand restored
-        # volumes to their claims (PVs are cluster-scoped).
+        # volumes to their claims (PVs are cluster-scoped). Objects are read by listing; "get" only on the resources below,
+        # never on */*, which would include nodes/proxy (the kubelet's API, and through it exec in any pod).
         apiVersion: rbac.authorization.k8s.io/v1
         kind: ClusterRole
         metadata:
@@ -183,8 +207,8 @@ public static class KubernetesSetup
         rules:
           - apiGroups: ["*"]
             resources: ["*"]
-            verbs: [get, list, watch]
-          - apiGroups: [snapshot.storage.k8s.io]
+            verbs: [list, watch]
+        {{ReadByNameRules()}}  - apiGroups: [snapshot.storage.k8s.io]
             resources: [volumesnapshots, volumesnapshotcontents]
             verbs: [create, delete, patch, update]
           - apiGroups: [""]

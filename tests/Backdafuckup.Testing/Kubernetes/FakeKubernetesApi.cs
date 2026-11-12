@@ -6,7 +6,7 @@ namespace Backdafuckup.Testing.Kubernetes;
 
 /// <summary>
 /// An in-memory Kubernetes API for tests, plugged into the client as its outermost handler so no request reaches the
-/// network. It serves <c>/version</c>, lists (with equality label selectors), reads, creates, replaces, merge-patches
+/// network. It serves <c>/version</c>, lists (with equality label and field selectors), reads, creates, replaces, merge-patches
 /// and deletes of objects, core and grouped, cluster-scoped and namespaced, by the API's URL layout, and pod logs.
 /// <see cref="Created"/> stands in for the cluster's controllers (a snapshot becomes ready, a pod runs).
 /// </summary>
@@ -246,10 +246,19 @@ public sealed class FakeKubernetesApi
             return Json(HttpStatusCode.MethodNotAllowed, new JsonObject { ["kind"] = "Status", ["message"] = $"fake: {request.Method} /{path} not supported" });
         }
 
-        var selector = System.Web.HttpUtility.ParseQueryString(request.RequestUri.Query)["labelSelector"]?
+        var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri.Query);
+        var selector = query["labelSelector"]?
             .Split(',', StringSplitOptions.RemoveEmptyEntries)
             .Select(term => term.Split('=', 2))
             .ToList() ?? [];
+
+        // Field selectors with equality on dotted paths, e.g. metadata.name=x or spec.nodeName=n.
+        var fields = query["fieldSelector"]?
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(term => term.Split('=', 2))
+            .ToList() ?? [];
+        static string? Field(JsonObject item, string path) =>
+            path.Split('.').Aggregate((JsonNode?)item, (node, key) => node?[key]) is JsonValue value ? value.ToString() : null;
         List<JsonObject> matches;
         bool served;
         lock (_lock)
@@ -260,6 +269,7 @@ public sealed class FakeKubernetesApi
                 .Where(o => ns is null || (string?)o.Item["metadata"]?["namespace"] == ns)
                 .Where(o => name is null || (string?)o.Item["metadata"]?["name"] == name)
                 .Where(o => selector.All(term => (string?)o.Item["metadata"]?["labels"]?[term[0]] == term[^1]))
+                .Where(o => fields.All(term => Field(o.Item, term[0]) == term[^1]))
                 .Select(o => (JsonObject)o.Item.DeepClone())
                 .ToList();
         }
