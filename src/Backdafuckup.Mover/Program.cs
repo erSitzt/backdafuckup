@@ -6,8 +6,17 @@ namespace Backdafuckup.Mover;
 /// <summary>The mover of backdafuckup: runs in a pod of the cluster, next to one volume (see <see cref="MoverOptions"/> for its settings).</summary>
 internal static class Program
 {
-    public static async Task<int> Main()
+    public static async Task<int> Main(string[] args)
     {
+        // What the server execs in a node agent's pod: one request on standard input, its answer (JSON) on standard output.
+        if (args is ["node-request", ..])
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            return await NodeRequest.RunAsync(
+                Console.In, Console.Out, Environment.GetEnvironmentVariable("BDFU_NODE_SOCKET") is { Length: > 0 } socket ? socket : NodeAgentOptions.DefaultSocket, timeout.Token)
+                .ConfigureAwait(false);
+        }
+
         var version = typeof(MoverRunner).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?";
         Console.WriteLine($"backdafuckup mover {version}");
 
@@ -31,6 +40,13 @@ internal static class Program
             {
                 var agent = ClusterAgentOptions.FromEnvironment(Environment.GetEnvironmentVariable);
                 await ClusterAgent.Create(agent, Console.Out).RunAsync(stop.Token).ConfigureAwait(false);
+                return 0;
+            }
+
+            // The node agent: the same image, as a DaemonSet that reads pod volumes from the kubelet's directory.
+            if (string.Equals(Environment.GetEnvironmentVariable("BDFU_MOVER_MODE"), "node", StringComparison.OrdinalIgnoreCase))
+            {
+                await new NodeAgent(NodeAgentOptions.FromEnvironment(Environment.GetEnvironmentVariable), Console.Out).RunAsync(stop.Token).ConfigureAwait(false);
                 return 0;
             }
 

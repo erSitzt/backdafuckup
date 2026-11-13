@@ -68,6 +68,9 @@ public static class KubernetesInventoryProperties
     /// <summary>Pod volume: why a backup does not hold its data.</summary>
     public const string Reason = "reason";
 
+    /// <summary>Pod volume: <c>node-agent</c> when a backup reads it (asked for, and the node agent runs on its pods' nodes).</summary>
+    public const string ReadBy = "readBy";
+
     /// <summary>Container: how fast its pods write to local disks (bytes per second, over an hour).</summary>
     public const string WriteBytesPerSecond = "writeBytesPerSecond";
 }
@@ -113,7 +116,8 @@ internal static class KubernetesInventory
     }
 
     /// <param name="usage">The cluster's usage numbers (sizes of PVCs, pod volumes and containers' file systems); null: none.</param>
-    public static async Task<Inventory> GetAsync(IKubernetes client, ConnectionSettings settings, KubernetesUsage? usage, CancellationToken cancellationToken)
+    /// <param name="agents">The cluster's node agents (which read pod volumes asked for); null: none.</param>
+    public static async Task<Inventory> GetAsync(IKubernetes client, ConnectionSettings settings, KubernetesUsage? usage, CancellationToken cancellationToken, NodeAgents? agents = null)
     {
         var platform = await GetPlatformAsync(client, settings, cancellationToken).ConfigureAwait(false);
         var namespaces = await client.CoreV1.ListNamespaceAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -171,7 +175,7 @@ internal static class KubernetesInventory
         var writes = new List<(string Namespace, Core.Repository.KubernetesContainerWriteRecord Write)>();
         foreach (var group in pods.GroupBy(p => p.Metadata.NamespaceProperty, StringComparer.Ordinal))
         {
-            podVolumes.AddRange(PodVolumes.Find(group, selection.Set, all: false, usage).Select(v => (group.Key, v)));
+            podVolumes.AddRange(PodVolumes.Find(group, selection.Set, all: false, usage, agents?.Any == true ? node => agents.Pods.ContainsKey(node) : null).Select(v => (group.Key, v)));
             writes.AddRange(PodVolumes.Writes(group, usage).Select(w => (group.Key, w)));
         }
 
@@ -351,7 +355,10 @@ internal static class KubernetesInventory
                     [KubernetesInventoryProperties.SizeLimit] = first.SizeLimitBytes?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
                     [KubernetesInventoryProperties.OptIn] = group.Any(v => v.Volume.OptIn is not null) ? PodVolumeOptIns.Annotation : string.Empty,
                     [KubernetesInventoryProperties.Platform] = first.Platform ?? string.Empty,
-                    [KubernetesInventoryProperties.Reason] = group.FirstOrDefault(v => v.Volume.OptIn is not null).Volume?.Reason ?? first.Reason ?? string.Empty,
+                    [KubernetesInventoryProperties.Reason] = group.FirstOrDefault(v => v.Volume.OptIn is not null).Volume is { } asked
+                        ? asked.Reason ?? "asked for: the node agent reads it"
+                        : first.Reason ?? string.Empty,
+                    [KubernetesInventoryProperties.ReadBy] = group.Any(v => v.Volume.TreeKey is not null) ? "node-agent" : string.Empty,
                 });
         }
 

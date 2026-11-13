@@ -23,7 +23,30 @@ public sealed record KubernetesUsage(
     IReadOnlyDictionary<(string Namespace, string Pod, string Container), long> ContainerLayers,
     IReadOnlyDictionary<(string Namespace, string Claim), long> Claims,
     IReadOnlyDictionary<(string Namespace, string Pod, string Container), double> ContainerWrites,
-    IReadOnlyList<string> Problems);
+    IReadOnlyList<string> Problems)
+{
+    /// <summary>Both sources' numbers, the first's where both have one; null when neither is there.</summary>
+    public static KubernetesUsage? Merge(KubernetesUsage? first, KubernetesUsage? second) => (first, second) switch
+    {
+        (null, var only) => only,
+        (var only, null) => only,
+        ({ } a, { } b) => new KubernetesUsage(
+            $"{a.Source} and {b.Source}", Union(a.PodVolumes, b.PodVolumes), Union(a.ContainerLayers, b.ContainerLayers), Union(a.Claims, b.Claims),
+            Union(a.ContainerWrites, b.ContainerWrites), [.. a.Problems, .. b.Problems]),
+    };
+
+    private static Dictionary<TKey, TValue> Union<TKey, TValue>(IReadOnlyDictionary<TKey, TValue> first, IReadOnlyDictionary<TKey, TValue> second)
+        where TKey : notnull
+    {
+        var result = new Dictionary<TKey, TValue>(second);
+        foreach (var (key, value) in first)
+        {
+            result[key] = value;
+        }
+
+        return result;
+    }
+}
 
 /// <summary>Reads a cluster's usage numbers.</summary>
 public interface IKubernetesUsageSource

@@ -64,6 +64,30 @@ public sealed class PodVolumesTests
     }
 
     [Fact]
+    public void The_node_agent_of_a_pod_s_node_reads_its_volumes_asked_for()
+    {
+        var web = Pod("web-1", "web", "ReplicaSet", "web-5c", annotations: new() { [PodVolumes.BackupAnnotation] = "cache,scratch,logs,inline" },
+            """{ "name": "cache", "emptyDir": {} }""", """{ "name": "scratch", "emptyDir": { "medium": "Memory" } }""", """{ "name": "logs", "hostPath": { "path": "/var/log/web" } }""",
+            """{ "name": "inline", "csi": { "driver": "secrets-store.csi.k8s.io" } }""");
+        web.Spec.NodeName = "worker-1";
+        var other = Pod("web-2", "web", "ReplicaSet", "web-5c", annotations: new() { [PodVolumes.BackupAnnotation] = "cache" }, """{ "name": "cache", "emptyDir": {} }""");
+        other.Spec.NodeName = "worker-2";
+
+        var volumes = PodVolumes.Find([web, other], KubernetesPlatformSet.Base, all: false, usage: null, nodeAgent: node => node == "worker-1").ToDictionary(v => $"{v.Pod}/{v.Volume}");
+
+        Assert.Equal(("pod_web-1_cache", (string?)null), (volumes["web-1/cache"].TreeKey, volumes["web-1/cache"].Reason));
+        Assert.Equal("pod_web-1_scratch", volumes["web-1/scratch"].TreeKey);
+        Assert.Equal("pod_web-1_inline", volumes["web-1/inline"].TreeKey);
+        Assert.Equal(((string?)null, "a pod's hostPath volume is not read: its data belongs to the node"), (volumes["web-1/logs"].TreeKey, volumes["web-1/logs"].Reason));
+        Assert.Equal(((string?)null, "the node agent has no running pod on node worker-2"), (volumes["web-2/cache"].TreeKey, volumes["web-2/cache"].Reason));
+
+        var log = new Lines();
+        Assert.True(PodVolumes.Report("web", "rke2-test", [.. volumes.Values], [], null, log));
+        Assert.Contains("Info: Pod volumes read file by file by the node agent: Deployment web/cache (emptyDir, size unknown, by its annotation), Deployment web/inline (csi, secrets-store.csi.k8s.io, size unknown, by its annotation), Deployment web/scratch (emptyDir in memory, size unknown, by its annotation).", log.All);
+        Assert.Contains("Warning: Pod volumes asked for, not backed up: Deployment web/cache (emptyDir, size unknown, by its annotation) – the node agent has no running pod on node worker-2 (cluster rke2-test).", log.All);
+    }
+
+    [Fact]
     public void The_log_names_what_was_not_backed_up_with_sizes_and_warns_about_what_was_asked_for_or_is_large()
     {
         var web = Pod("web-1", "web", "ReplicaSet", "web-5c", annotations: new() { [PodVolumes.BackupAnnotation] = "cache" },

@@ -18,7 +18,7 @@
 {
     <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
         <div class="d-flex align-center gap-2 mb-2">
-            <MudText Typo="Typo.subtitle1" Class="section-title">Setup manifest@(_setupFor is { } forCluster ? $" of {forCluster.DisplayName}, with its agent" : string.Empty)</MudText>
+            <MudText Typo="Typo.subtitle1" Class="section-title">Setup manifest@(_setupFor is { } forCluster ? $" of {forCluster.DisplayName}{(forCluster.Agent is null ? string.Empty : ", with its agent")}" : string.Empty)</MudText>
             <MudSpacer />
             <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="CopySetupAsync">Copy</MudButton>
             <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Download" Href="@SetupUrl(download: true)">Download</MudButton>
@@ -31,13 +31,24 @@
             {
                 <span>Then <b>Add cluster</b> with the token and the cluster CA from its token secret, or add it through an agent.</span>
             }
-            else
+            else if (_setupFor.Agent is not null)
             {
                 <span>With the agent: a Deployment that dials out to this server, and its connect token. Keep the manifest like a password.</span>
             }
         </MudText>
         <MudSwitch T="bool" Value="_withRestore" ValueChanged="OnRestoreChangedAsync" Color="Color.Primary" Class="mb-2"
                    Label="With the restore role: create and change objects in any namespace (leave it off for an account that only backs up)" />
+        <MudSwitch T="bool" Value="_withNodeAgent" ValueChanged="OnNodeAgentChangedAsync" Color="Color.Primary" Class="mb-2"
+                   Label="With the node agent: reads pod volumes (emptyDirs) and the kubelets' usage numbers on every node" />
+        @if (_withNodeAgent)
+        {
+            <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
+                A DaemonSet in its own namespace backdafuckup-node, which Pod Security lets run privileged pods: the agent mounts the kubelet's directory
+                (read-only) to read pod volumes there. The agent itself runs as root with one capability only, DAC_READ_SEARCH (reading every file), a read-only
+                root file system and no host network; its ServiceAccount may only read the kubelets' statistics (nodes/stats). It sends the files to this
+                server's address, like the movers.
+            </MudText>
+        }
         <pre class="mono" style="max-height: 360px; overflow: auto; background: var(--mud-palette-background-gray); padding: 12px; border-radius: 8px; margin: 0">@_setup</pre>
     </MudPaper>
 }
@@ -123,6 +134,7 @@ else if (_clusters.Count > 0)
                 }
                 else
                 {
+                    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Description" OnClick="@(() => ShowAgentSetupAsync(selected))">Setup manifest</MudButton>
                     <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.SettingsEthernet" OnClick="@(() => SwitchToAgentAsync(selected))">Reach it through an agent</MudButton>
                 }
                 <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Refresh" OnClick="@(() => RescanAsync(selected))">Rescan</MudButton>
@@ -223,6 +235,10 @@ else if (_clusters.Count > 0)
                                             @if (kind == "container")
                                             {
                                                 <span class="mini-chip warning" title="@p.GetValueOrDefault("reason")">never backed up</span>
+                                            }
+                                            else if (p.GetValueOrDefault("readBy") == "node-agent")
+                                            {
+                                                <span class="mini-chip success" title="@p.GetValueOrDefault("reason")">asked for · node agent</span>
                                             }
                                             else if (!string.IsNullOrEmpty(p.GetValueOrDefault("optIn")))
                                             {
@@ -325,6 +341,7 @@ else if (_clusters.Count > 0)
     private string? _setup;
     private ConnectionDto? _setupFor;
     private bool _withRestore = true;
+    private bool _withNodeAgent;
     private bool _showMover;
     private MoverImageDto? _mover;
     private const string KubernetesSetupFile = "backdafuckup-setup.yaml";
@@ -394,7 +411,8 @@ else if (_clusters.Count > 0)
     }
 
     private string SetupUrl(bool download) =>
-        $"api/kubernetes/setup.yaml?restore={(_withRestore ? "true" : "false")}{(_setupFor is { } cluster ? $"&connectionId={cluster.Id}" : string.Empty)}{(download ? "&download=true" : string.Empty)}";
+        $"api/kubernetes/setup.yaml?restore={(_withRestore ? "true" : "false")}{(_withNodeAgent ? "&nodeAgent=true" : string.Empty)}" +
+        $"{(_setupFor is { } cluster ? $"&connectionId={cluster.Id}" : string.Empty)}{(download ? "&download=true" : string.Empty)}";
 
     /// <summary>The manifest of a cluster behind its agent, with the agent and its connect token (to apply it again).</summary>
     private async Task ShowAgentSetupAsync(ConnectionDto cluster)
@@ -437,6 +455,20 @@ else if (_clusters.Count > 0)
 
     private static string AgentTitle(ConnectionAgentDto agent) =>
         $"Version {agent.Version ?? "?"}{(agent.ConnectedUtc is { } at ? $", connected since {Fmt.Time(at)}" : string.Empty)}{(agent.ApiServer is { } api ? $", API server {api} in the cluster" : string.Empty)}";
+
+    private async Task OnNodeAgentChangedAsync(bool value)
+    {
+        _withNodeAgent = value;
+        try
+        {
+            _setup = await Api.GetStringAsync(SetupUrl(download: false));
+        }
+        catch (ApiException ex)
+        {
+            _withNodeAgent = false;
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
 
     private async Task OnRestoreChangedAsync(bool value)
     {

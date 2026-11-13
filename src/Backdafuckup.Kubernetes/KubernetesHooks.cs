@@ -14,6 +14,14 @@ public interface IPodExecutor
 {
     /// <returns>The exit code and the end of the output (stdout and stderr).</returns>
     Task<(int ExitCode, string Output)> ExecAsync(string ns, string pod, string container, IReadOnlyList<string> command, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Runs a command with <paramref name="input"/> on its standard input (one line; secrets go there, not into the command,
+    /// which the API server's audit log keeps).
+    /// </summary>
+    /// <returns>The exit code and its standard output.</returns>
+    Task<(int ExitCode, string Output)> ExecAsync(string ns, string pod, string container, IReadOnlyList<string> command, string input, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This executor sends nothing to standard input.");
 }
 
 /// <summary>Exec through the API server (a WebSocket to the pod's container).</summary>
@@ -34,6 +42,29 @@ internal sealed class ClientPodExecutor(IKubernetes client) : IPodExecutor
                 using var errReader = new StreamReader(stderr);
                 var texts = await Task.WhenAll(outReader.ReadToEndAsync(cancellationToken), errReader.ReadToEndAsync(cancellationToken)).ConfigureAwait(false);
                 output = string.Join('\n', texts.Where(t => t.Length > 0)).Trim();
+            },
+            cancellationToken).ConfigureAwait(false);
+        return (exitCode, output);
+    }
+
+    public async Task<(int ExitCode, string Output)> ExecAsync(string ns, string pod, string container, IReadOnlyList<string> command, string input, CancellationToken cancellationToken)
+    {
+        var output = string.Empty;
+        var exitCode = await client.NamespacedPodExecAsync(
+            pod,
+            ns,
+            container,
+            command,
+            false,
+            async (stdin, stdout, stderr) =>
+            {
+                var line = System.Text.Encoding.UTF8.GetBytes(input.ReplaceLineEndings(" ") + "\n");
+                await stdin.WriteAsync(line, cancellationToken).ConfigureAwait(false);
+                await stdin.FlushAsync(cancellationToken).ConfigureAwait(false);
+                using var outReader = new StreamReader(stdout);
+                using var errReader = new StreamReader(stderr);
+                var texts = await Task.WhenAll(outReader.ReadToEndAsync(cancellationToken), errReader.ReadToEndAsync(cancellationToken)).ConfigureAwait(false);
+                output = texts[0].Trim().Length > 0 ? texts[0].Trim() : texts[1].Trim();
             },
             cancellationToken).ConfigureAwait(false);
         return (exitCode, output);

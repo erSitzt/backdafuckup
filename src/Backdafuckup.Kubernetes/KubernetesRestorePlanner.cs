@@ -147,6 +147,19 @@ internal static class KubernetesRestorePlanner
             warnings.Add($"{group.Count()} object(s) made by {group.Key.Name} stay out ({kinds}): {group.Key.Name} makes them again{(otherCluster ? " where it runs" : string.Empty)}.");
         }
 
+        // Pod volumes: their pods are created again with them empty; the files of those read are in the restore point.
+        var podVolumes = descriptor.PodVolumes.Where(v => v.Platform is null).ToList();
+        if (podVolumes.Any(v => v.TreeKey is not null))
+        {
+            warnings.Add($"Pods start with empty volumes; the files of {string.Join(", ", podVolumes.Where(v => v.TreeKey is not null).Select(v => $"{v.Pod}/{v.Volume}"))} " +
+                         "are in the restore point: restore them under Files (browse, download, into a PVC or onto a share).");
+        }
+
+        if (podVolumes.Any(v => v.TreeKey is null && v.OptIn is not null))
+        {
+            warnings.Add($"Pod volumes asked for were not backed up ({string.Join(", ", podVolumes.Where(v => v.TreeKey is null && v.OptIn is not null).Select(v => $"{v.Pod}/{v.Volume}"))}): their pods start with them empty.");
+        }
+
         return new KubernetesRestorePlan(cluster, targetNamespace, otherCluster, exists, storage.ClassNames, storage.DefaultClass, volumes, warnings, errors);
     }
 

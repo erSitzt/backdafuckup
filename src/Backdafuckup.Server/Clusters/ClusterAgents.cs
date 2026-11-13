@@ -272,6 +272,11 @@ public sealed class ClusterAgents : IAsyncDisposable
                         logger.LogInformation("The agent of cluster {Cluster} ran {Previous}; its Deployment now runs {Image}, and the agent reconnects with it.", connection.DisplayName, previous, mover.Image);
                     }
 
+                    if (cluster is IKubernetesAgentUpdater nodes && await nodes.UpdateNodeAgentImageAsync(mover.Image, _stopping.Token).ConfigureAwait(false) is { } before)
+                    {
+                        logger.LogInformation("The node agent of cluster {Cluster} ran {Previous}; its DaemonSet now runs {Image}.", connection.DisplayName, before, mover.Image);
+                    }
+
                     return;
                 }
 

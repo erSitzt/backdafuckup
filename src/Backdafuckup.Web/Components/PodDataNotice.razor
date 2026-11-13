@@ -1,5 +1,12 @@
 @* What a namespace's restore point does not hold: the data of pod volumes that are not PVCs (emptyDir and the like) and
    what containers wrote into their own file systems. Restored pods start with those empty. *@
+@if (Read.Count > 0)
+{
+    <MudAlert Severity="Severity.Info" Dense="true" Class="@Class">
+        The files of @Read.Count pod volume(s) are in this restore point (@string.Join(", ", Read.Select(v => $"{v.Pod}/{v.Volume}").Take(6))@(Read.Count > 6 ? ", …" : string.Empty)):
+        restore them under Files – browse, download, into a PVC or onto a share. Restored pods start with these volumes empty.
+    </MudAlert>
+}
 @if (Missing.Count > 0 || Layers.Count > 0)
 {
     <MudAlert Severity="@(Missing.Any(v => v.OptIn is not null) ? Severity.Warning : Severity.Info)" Dense="true" Class="@Class">
@@ -29,6 +36,8 @@
 
     /// <summary>The workload's own pod volumes whose data is not in the restore point (platforms' left aside).</summary>
     private List<KubernetesPodVolumeDto> Missing => [.. (Details.PodVolumes ?? []).Where(v => !v.BackedUp && v.Platform is null)];
+
+    private List<KubernetesPodVolumeDto> Read => [.. (Details.PodVolumes ?? []).Where(v => v.BackedUp)];
 
     private List<KubernetesContainerWriteDto> Layers => [.. (Details.ContainerWrites ?? []).Where(w => w.LayerBytes is > 0)];
 

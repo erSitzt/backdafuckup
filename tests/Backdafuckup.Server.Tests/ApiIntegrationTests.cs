@@ -34,6 +34,9 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     private readonly FakeRegistry _registry = new("bdfu-push", "secret-1");
     private readonly Backdafuckup.Testing.Kubernetes.FakeKubernetesApi _cluster = new();
 
+    /// <summary>What a test's node agent answers to <c>node-request</c> (by agent pod and standard input); null: none.</summary>
+    private volatile Func<string, string, Task<(int, string)>>? _nodeRequests;
+
     /// <summary>The Prometheus every cluster's usage source reaches.</summary>
     private readonly Backdafuckup.Testing.Kubernetes.FakePrometheus _prometheus = new();
 
@@ -83,7 +86,7 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
                     {
                         Poll = TimeSpan.FromMilliseconds(20), SnapshotReady = TimeSpan.FromSeconds(20), Deleted = TimeSpan.FromSeconds(20), Progress = TimeSpan.FromHours(1),
                     },
-                    new HookRecorder(),
+                    new HookRecorder(() => _nodeRequests),
                     sp.GetRequiredService<Backdafuckup.Server.Clusters.KubernetesUsageSources>()));
                 services.RemoveAll<Backdafuckup.Server.Clusters.KubernetesUsageTransport>();
                 services.AddSingleton(new Backdafuckup.Server.Clusters.KubernetesUsageTransport(() => _prometheus.CreateHandler()));

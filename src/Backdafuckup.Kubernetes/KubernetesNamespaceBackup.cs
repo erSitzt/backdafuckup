@@ -24,12 +24,20 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
     private readonly ConcurrentDictionary<string, bool> _deleted = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (NamespaceVolume Volume, string? Node)> _files;
     private readonly DeferredHooks? _postHooks;
+    private readonly Dictionary<string, PodTree> _podTrees;
+    private readonly NodeAgents? _agents;
+
+    /// <summary>A pod volume the node agent on <paramref name="Node"/> reads (<paramref name="Plugin"/> <c>empty-dir</c> or <c>csi</c>).</summary>
+    internal sealed record PodTree(string Node, string PodUid, string Plugin, string Volume, KubernetesPodVolumeRecord Record);
 
     private KubernetesNamespaceBackup(
         VolumeSnapshotFlow flow, IMoverChannels? channels, MoverDeployment? mover, string run, VmDescriptor vm, IReadOnlyList<SnapshotDisk> disks,
         Dictionary<string, TakenSnapshot> snapshots, VmMetadataBlob metadata, GuestFreezeResult? freeze, SnapshotFacts? facts, KubernetesNamespaceDescriptor descriptor,
-        Dictionary<string, (NamespaceVolume Volume, string? Node)> files, DeferredHooks? postHooks, bool warned, IReadOnlyDictionary<string, long> claimBytes)
+        Dictionary<string, (NamespaceVolume Volume, string? Node)> files, DeferredHooks? postHooks, bool warned, IReadOnlyDictionary<string, long> claimBytes,
+        Dictionary<string, PodTree> podTrees, NodeAgents? agents)
     {
+        _podTrees = podTrees;
+        _agents = agents;
         _flow = flow;
         _channels = channels;
         _mover = mover;
@@ -48,7 +56,10 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         // A volume's files are estimated by what its PVC holds (the usage numbers), else by its size.
         FileTrees = [.. files.Values.Select(f => new FileTreeSource(
             f.Volume.Claim, f.Volume.Claim, "pvc", "shadow-pv", claimBytes.TryGetValue(f.Volume.Claim, out var used) ? used : f.Volume.SizeBytes,
-            $"PVC {descriptor.Namespace}/{f.Volume.Claim} (cluster {descriptor.Cluster})"))];
+            $"PVC {descriptor.Namespace}/{f.Volume.Claim} (cluster {descriptor.Cluster})")),
+            .. podTrees.Select(p => new FileTreeSource(
+                p.Key, $"{p.Value.Record.Pod}/{p.Value.Record.Volume}", "pod-volume", "node-agent", p.Value.Record.UsedBytes ?? p.Value.Record.SizeLimitBytes,
+                $"pod volume {descriptor.Namespace}/{p.Value.Record.Pod}/{p.Value.Record.Volume} ({p.Value.Record.Workload}, cluster {descriptor.Cluster})"))];
     }
 
     /// <summary>Pod volumes the job or a pod's annotation asked for were not backed up.</summary>
@@ -132,12 +143,33 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
             log.Info($"PVC {volume.Claim}: objects only, not its data – {volume.Reason}.");
         }
 
-        // Pod volumes that are not PVCs and what containers wrote into their own file systems: named, with sizes when known.
-        var podVolumes = PodVolumes.Find(pods, platforms, request.PodVolumes, usage);
+        // The node agents read pod volumes asked for; their kubelets' numbers count before Prometheus'.
+        var agents = await NodeAgents.FindAsync(client, executor, cluster, cancellationToken).ConfigureAwait(false);
+        if (agents.Any)
+        {
+            var nodes = pods.Select(p => p.Spec.NodeName).Where(n => !string.IsNullOrEmpty(n)).ToHashSet(StringComparer.Ordinal);
+            usage = KubernetesUsage.Merge(await agents.UsageAsync(nodes, cancellationToken).ConfigureAwait(false), usage);
+        }
+
+        // Pod volumes that are not PVCs and what containers wrote into their own file systems: named, with sizes when known;
+        // those asked for are read by the node agent of their pod's node, when there is one.
+        var podVolumes = PodVolumes.Find(pods, platforms, request.PodVolumes, usage, agents.Any ? node => agents.Pods.ContainsKey(node) : null);
+        var podTrees = new Dictionary<string, PodTree>(StringComparer.Ordinal);
+        foreach (var volume in podVolumes.Where(v => v.TreeKey is not null))
+        {
+            var pod = pods.First(p => p.Metadata.Name == volume.Pod);
+            podTrees[volume.TreeKey!] = new PodTree(pod.Spec.NodeName, pod.Metadata.Uid, volume.Kind == PodVolumeKinds.Csi ? "csi" : "empty-dir", volume.Volume, volume);
+        }
+
         var writes = PodVolumes.Writes(pods, usage);
         var warned = PodVolumes.Report(ns, cluster, podVolumes, writes, usage, log);
         var claimBytes = volumes.Select(v => (v.Claim, Used: v.UsedBytes(usage, ns))).Where(v => v.Used is not null)
             .ToDictionary(v => v.Claim, v => v.Used!.Value, StringComparer.Ordinal);
+
+        if (podTrees.Count > 0 && channels is null)
+        {
+            throw new KubernetesOperationException($"Pod volumes cannot be backed up from cluster {cluster}: this server has no mover channel.");
+        }
 
         // The mover image first: without it no volume can be read, so nothing is snapshotted in vain.
         MoverDeployment? mover = null;
@@ -192,10 +224,10 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         }
         finally
         {
-            if (succeeded && files.Count > 0 && postHooks.Count > 0)
+            if (succeeded && files.Count + podTrees.Count > 0 && postHooks.Count > 0)
             {
                 deferred = new DeferredHooks(executor, cluster, ns, postHooks, hookRecords);
-                log.Info($"The post-hooks of {ns} run after the files of {string.Join(", ", files.Keys)} are read.");
+                log.Info($"The post-hooks of {ns} run after the files of {string.Join(", ", files.Keys.Concat(podTrees.Values.Select(p => $"{p.Record.Pod}/{p.Record.Volume}")))} are read.");
             }
             else
             {
@@ -252,10 +284,12 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         {
             VmId = ns,
             Name = ns,
-            Description = $"Kubernetes namespace {ns} in cluster {cluster}: {objects.Count} objects, {snapshots.Count + files.Count} of {volumes.Count} PVCs with data.",
+            Description = $"Kubernetes namespace {ns} in cluster {cluster}: {objects.Count} objects, {snapshots.Count + files.Count} of {volumes.Count} PVCs with data" +
+                          (podTrees.Count > 0 ? $", {podTrees.Count} pod volume(s)." : "."),
         };
         return new KubernetesNamespaceBackup(
-            flow, channels, mover, run, vm, disks, snapshots, new VmMetadataBlob(KubernetesResources.Format, objects.Content), freeze, facts, descriptor, files, deferred, warned, claimBytes);
+            flow, channels, mover, run, vm, disks, snapshots, new VmMetadataBlob(KubernetesResources.Format, objects.Content), freeze, facts, descriptor, files, deferred, warned, claimBytes,
+            podTrees, agents.Any ? agents : null);
     }
 
     public Task<ChangedExtents> GetChangedExtentsAsync(SnapshotDisk disk, ChangeToken? since, IOperationLog log, CancellationToken cancellationToken) =>
@@ -273,6 +307,13 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
 
     public async Task<IFileTreeReader> OpenFileTreeAsync(FileTreeSource tree, IPreviousFileTree? previous, CancellationToken cancellationToken)
     {
+        if (_podTrees.TryGetValue(tree.Key, out var pod))
+        {
+            return await NodeVolume.StartAsync(
+                _agents!, pod.Node, pod.PodUid, pod.Plugin, pod.Volume, tree.Description, _channels!, _flow.Timings.FilesMoverConnect, previous, _flow.Log, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var (volume, node) = _files[tree.Key];
         return await ShadowVolume.StartAsync(_flow, Kubernetes.Namespace, volume.Claim, volume.VolumeName!, _run, node, _channels!, _mover!, previous, cancellationToken)
             .ConfigureAwait(false);

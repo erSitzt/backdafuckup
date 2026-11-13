@@ -469,9 +469,13 @@ public sealed partial class ApiIntegrationTests
     }
 
     /// <summary>Hooks in the fake cluster succeed.</summary>
-    private sealed class HookRecorder : IPodExecutor
+    /// <summary>Hooks succeed; <c>node-request</c> (with standard input) goes to the test's node agent, if it has one.</summary>
+    private sealed class HookRecorder(Func<Func<string, string, Task<(int, string)>>?>? nodeRequests = null) : IPodExecutor
     {
         public Task<(int ExitCode, string Output)> ExecAsync(string ns, string pod, string container, IReadOnlyList<string> command, CancellationToken cancellationToken) =>
             Task.FromResult((0, "OK"));
+
+        public Task<(int ExitCode, string Output)> ExecAsync(string ns, string pod, string container, IReadOnlyList<string> command, string input, CancellationToken cancellationToken) =>
+            nodeRequests?.Invoke() is { } handle ? handle(pod, input) : Task.FromResult((1, "{\"error\":\"no node agent in this test\"}"));
     }
 }

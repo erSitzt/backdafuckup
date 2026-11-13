@@ -41,6 +41,12 @@ public interface IKubernetesAgentUpdater
     /// runs <paramref name="image"/> already or the cluster has no agent Deployment.
     /// </summary>
     Task<string?> UpdateAgentImageAsync(string image, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Sets the image of the node agent's DaemonSet (its pods restart with it, a part at a time); returns the image it had,
+    /// or null when it runs <paramref name="image"/> already or the cluster has no node agent. Never while volumes are read.
+    /// </summary>
+    Task<string?> UpdateNodeAgentImageAsync(string image, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
 }
 
 internal sealed class KubernetesSession(
@@ -81,8 +87,11 @@ internal sealed class KubernetesSession(
 
     public async Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken)
     {
-        var numbers = await ReadUsageAsync(null, null, cancellationToken).ConfigureAwait(false);
-        var inventory = await KubernetesInventory.GetAsync(client, settings, numbers, cancellationToken).ConfigureAwait(false);
+        // The node agents' kubelet numbers count before Prometheus'.
+        var agents = await NodeAgents.FindAsync(client, executor ?? new ClientPodExecutor(client), settings.ClusterName(), cancellationToken).ConfigureAwait(false);
+        var numbers = KubernetesUsage.Merge(
+            agents.Any ? await agents.UsageAsync(null, cancellationToken).ConfigureAwait(false) : null, await ReadUsageAsync(null, null, cancellationToken).ConfigureAwait(false));
+        var inventory = await KubernetesInventory.GetAsync(client, settings, numbers, cancellationToken, agents).ConfigureAwait(false);
         _platform = inventory.Platform;
         return inventory;
     }
@@ -220,6 +229,46 @@ internal sealed class KubernetesSession(
         {
             throw new KubernetesOperationException(
                 $"The agent's Deployment {Ns}/{Name} in cluster {settings.ClusterName()} runs {current}, and the ServiceAccount may not change it: apply the current setup manifest with the agent once; from then on the server keeps the agent up to date itself.",
+                ex);
+        }
+
+        return current;
+    }
+
+    public async Task<string?> UpdateNodeAgentImageAsync(string image, CancellationToken cancellationToken)
+    {
+        const string Ns = KubernetesSetup.NodeNamespace;
+        const string Name = KubernetesSetup.NodeAgentName;
+        k8s.Models.V1DaemonSet daemonSet;
+        try
+        {
+            daemonSet = await client.AppsV1.ReadNamespacedDaemonSetAsync(Name, Ns, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        var containers = daemonSet.Spec?.Template?.Spec?.Containers?.ToList() ?? [];
+        var index = containers.FindIndex(c => c.Name == "node");
+        if (index < 0 || containers[index].Image == image)
+        {
+            return null;
+        }
+
+        var current = containers[index].Image;
+        var patch = new System.Text.Json.Nodes.JsonArray(
+            new System.Text.Json.Nodes.JsonObject { ["op"] = "test", ["path"] = $"/spec/template/spec/containers/{index}/name", ["value"] = "node" },
+            new System.Text.Json.Nodes.JsonObject { ["op"] = "replace", ["path"] = $"/spec/template/spec/containers/{index}/image", ["value"] = image });
+        try
+        {
+            await client.AppsV1.PatchNamespacedDaemonSetAsync(new k8s.Models.V1Patch(patch.ToJsonString(), k8s.Models.V1Patch.PatchType.JsonPatch), Name, Ns, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            throw new KubernetesOperationException(
+                $"The node agent's DaemonSet {Ns}/{Name} in cluster {settings.ClusterName()} runs {current}, and the ServiceAccount may not change it: apply the current setup manifest with the node agent once; from then on the server keeps it up to date itself.",
                 ex);
         }
 

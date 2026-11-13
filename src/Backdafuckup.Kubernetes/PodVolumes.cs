@@ -55,8 +55,10 @@ public static class PodVolumes
 
     /// <summary>The not-PVC volumes of the running pods.</summary>
     /// <param name="all">The job's switch: every pod volume, not only the annotated ones.</param>
-    /// <param name="nodeAgent">Whether the cluster has the node agent, which reads pod volumes.</param>
-    public static IReadOnlyList<KubernetesPodVolumeRecord> Find(IEnumerable<V1Pod> pods, KubernetesPlatformSet platforms, bool all, KubernetesUsage? usage, bool nodeAgent = false)
+    /// <param name="nodeAgent">Whether a node has a running node agent, which reads pod volumes there; null: no node agent.</param>
+    /// <remarks>Volumes asked for that the node agent reads get their file tree's key (<see cref="TreeKey"/>) and no reason.</remarks>
+    public static IReadOnlyList<KubernetesPodVolumeRecord> Find(
+        IEnumerable<V1Pod> pods, KubernetesPlatformSet platforms, bool all, KubernetesUsage? usage, Func<string, bool>? nodeAgent = null)
     {
         ArgumentNullException.ThrowIfNull(pods);
         ArgumentNullException.ThrowIfNull(platforms);
@@ -86,6 +88,9 @@ public static class PodVolumes
                     : all && !excluded.Contains(volume.Name) && platform is null && kind != PodVolumeKinds.HostPath ? PodVolumeOptIns.Job
                     : null;
                 var used = usage?.PodVolumes.TryGetValue((ns, pod.Metadata.Name, volume.Name), out var bytes) == true ? bytes : (long?)null;
+                var node = pod.Spec.NodeName ?? string.Empty;
+                var readable = kind is PodVolumeKinds.EmptyDir or PodVolumeKinds.MemoryEmptyDir or PodVolumeKinds.Csi;
+                var reads = optIn is not null && readable && nodeAgent?.Invoke(node) == true;
                 var reason = optIn is null
                     ? platform is not null
                         ? platform == owner ? $"a volume of {platform.Name} in its own namespace" : $"put into the pod by {platform.Name}, not the workload's data"
@@ -94,10 +99,13 @@ public static class PodVolumes
                     {
                         PodVolumeKinds.HostPath => "a pod's hostPath volume is not read: its data belongs to the node",
                         PodVolumeKinds.Nfs => $"the pod mounts the NFS export {source} itself, not through a PVC: give it a PV and PVC to back it up file by file",
-                        _ when !nodeAgent => "reading pod volumes needs the node agent, which the cluster does not have",
-                        _ => "not read",
+                        _ when !readable => $"a {kind} volume mounted by the pod itself is not read",
+                        _ when nodeAgent is null => "reading pod volumes needs the node agent, which the cluster does not have",
+                        _ when !reads => $"the node agent has no running pod on node {node}",
+                        _ => null,
                     };
-                result.Add(new KubernetesPodVolumeRecord(pod.Metadata.Name, WorkloadOf(pod), volume.Name, kind, source, optIn, platform?.Name, used, limit, null, reason));
+                result.Add(new KubernetesPodVolumeRecord(
+                    pod.Metadata.Name, WorkloadOf(pod), volume.Name, kind, source, optIn, platform?.Name, used, limit, reads ? TreeKeyOf(pod.Metadata.Name, volume.Name) : null, reason));
             }
         }
 
@@ -135,6 +143,9 @@ public static class PodVolumes
         return result;
     }
 
+    /// <summary>The key of a pod volume's file tree: '_' is in no pod's or volume's name, and stays in a file name.</summary>
+    public static string TreeKeyOf(string pod, string volume) => $"pod_{pod}_{volume}";
+
     /// <summary>The pod's controller: "Deployment web" (a ReplicaSet's by its name), "StatefulSet db", or "Pod x" without one.</summary>
     public static string WorkloadOf(V1Pod pod)
     {
@@ -157,13 +168,19 @@ public static class PodVolumes
         ArgumentNullException.ThrowIfNull(writes);
         ArgumentNullException.ThrowIfNull(log);
         var asked = volumes.Where(v => v.OptIn is not null && v.TreeKey is null).ToList();
+        var read = volumes.Where(v => v.TreeKey is not null).ToList();
+        if (read.Count > 0)
+        {
+            log.Info($"Pod volumes read file by file by the node agent: {Describe(read, withHow: true)}.");
+        }
+
         var notAsked = volumes.Where(v => v.OptIn is null && v.Platform is null).ToList();
         var platform = volumes.Where(v => v.OptIn is null && v.Platform is not null).ToList();
         if (asked.Count > 0)
         {
-            foreach (var group in asked.GroupBy(v => v.Reason, StringComparer.Ordinal))
+            foreach (var group in asked.GroupBy(v => v.Reason ?? "not read", StringComparer.Ordinal))
             {
-                log.Warning($"Pod volumes asked for, not backed up: {Describe(group.ToList(), withHow: true)} – {group.Key}{(group.Key!.Contains("node agent", StringComparison.Ordinal) ? $" (cluster {cluster})" : string.Empty)}.");
+                log.Warning($"Pod volumes asked for, not backed up: {Describe(group.ToList(), withHow: true)} – {group.Key}{(group.Key.Contains("node agent", StringComparison.Ordinal) ? $" (cluster {cluster})" : string.Empty)}.");
             }
         }
 
