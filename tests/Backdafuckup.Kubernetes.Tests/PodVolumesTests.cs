@@ -90,6 +90,7 @@ public sealed class PodVolumesTests
         Assert.True(PodVolumes.Report("web", "rke2-test", volumes, writes, usage, log));
         Assert.Contains("Warning: Pod volumes asked for, not backed up: Deployment web/cache (emptyDir, 120.0 MB, by its annotation) – reading pod volumes needs the node agent, which the cluster does not have (cluster rke2-test).", log.All);
         Assert.Contains("Info: Pod volumes without a PVC, not backed up (not asked for: the job's switch for pod volumes, or the pod annotation backup.velero.io/backup-volumes): Deployment web/tmp (emptyDir, 2 pods, 2.0 MB).", log.All);
+        Assert.Contains("Info: Containers writing to local disks over the last hour (their own file systems, emptyDirs or block PVCs): Deployment web/exporter 7.0 MB/h.", log.All);
         Assert.Contains("Warning: Containers hold 200.0 MB in their own file systems, which no backup reads: Deployment web/nginx 200.0 MB in 2 pods. Data worth keeping belongs in a PVC.", log.All);
         Assert.Contains("Info: Usage numbers of web from Prometheus https://prometheus.example: 2 pod volume(s), 3 container file system(s), 0 PVC(s), 2 write rate(s).", log.All);
         Assert.Contains("Warning: Usage numbers of web: Prometheus https://prometheus.example refused the query for PVCs (400 BadRequest): parse error.", log.All);

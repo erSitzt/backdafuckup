@@ -205,6 +205,16 @@ public static class PodVolumes
             }
         }
 
+        // Who writes to local disks: the hint where data lives that no PVC holds (the user's way to find such workloads).
+        var writers = writes.Where(w => w.WriteBytesPerSecond is > 0)
+            .GroupBy(w => (w.Workload, w.Container)).Select(g => (Name: $"{g.Key.Workload}/{g.Key.Container}", Rate: g.Sum(w => w.WriteBytesPerSecond!.Value)))
+            .OrderByDescending(w => w.Rate).ToList();
+        if (writers.Count > 0)
+        {
+            log.Info($"Containers writing to local disks over the last hour (their own file systems, emptyDirs or block PVCs): " +
+                     string.Join(", ", writers.Take(5).Select(w => $"{w.Name} {Bytes((long)(w.Rate * 3600))}/h")) + (writers.Count > 5 ? $" and {writers.Count - 5} more" : string.Empty) + ".");
+        }
+
         if (usage is not null)
         {
             log.Info($"Usage numbers of {ns} from {usage.Source}: {usage.PodVolumes.Count} pod volume(s), {usage.ContainerLayers.Count} container file system(s), {usage.Claims.Count} PVC(s), {usage.ContainerWrites.Count} write rate(s).");
