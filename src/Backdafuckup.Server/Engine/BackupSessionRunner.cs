@@ -382,7 +382,11 @@ internal sealed class VmBackupTask(
             }
 
             var images = backup.Memory is { } ram ? backup.Disks.Append(ram).ToList() : backup.Disks.ToList();
-            _totalBytes = Math.Max(1, images.Sum(d => d.CapacityBytes));
+
+            // Volumes read file by file count with what the previous run found in them, else with their size.
+            var treeBytes = backup.FileTrees.ToDictionary(
+                t => t.Key, t => baseReader?.Manifest.FileTrees.FirstOrDefault(b => b.Key == t.Key)?.Stats.Bytes ?? t.EstimatedBytes ?? 0);
+            _totalBytes = Math.Max(1, images.Sum(d => d.CapacityBytes) + treeBytes.Values.Sum());
             lock (_metricsLock)
             {
                 _diskMetrics = images.Select(d => new DiskMetricsDto
@@ -391,7 +395,14 @@ internal sealed class VmBackupTask(
                     Name = d.Name,
                     CapacityBytes = d.CapacityBytes,
                     Metrics = new TransferMetricsDto { TotalBytes = d.CapacityBytes },
-                }).ToList();
+                }).Concat(backup.FileTrees.Select(t => new DiskMetricsDto
+                {
+                    Key = t.Key,
+                    Name = t.Name,
+                    CapacityBytes = treeBytes[t.Key],
+                    Mode = "Files",
+                    Metrics = new TransferMetricsDto { TotalBytes = treeBytes[t.Key] },
+                })).ToList();
             }
 
             await tracker.UpdateTaskAsync(taskId, t => t.Metrics = CurrentMetrics(), CancellationToken.None).ConfigureAwait(false);
@@ -403,7 +414,7 @@ internal sealed class VmBackupTask(
             {
                 try
                 {
-                    var read = await BackupFileTreesAsync(backup, writer, cancellationToken).ConfigureAwait(false);
+                    var read = await BackupFileTreesAsync(backup, writer, baseline, baseReader, cancellationToken).ConfigureAwait(false);
                     fileTrees = read.Trees;
                     warnings |= read.Warnings;
                 }
@@ -768,8 +779,12 @@ internal sealed class VmBackupTask(
         return (results.Select(r => r.Disk).ToList(), results.Any(r => r.Warned));
     }
 
-    /// <summary>Reads each volume of <see cref="IVmBackupSession.FileTrees"/> file by file into a file tree, one after another.</summary>
-    private async Task<(List<ManifestFileTree> Trees, bool Warnings)> BackupFileTreesAsync(IVmBackupSession backup, IRepositoryWriter writer, CancellationToken cancellationToken)
+    /// <summary>
+    /// Reads each volume of <see cref="IVmBackupSession.FileTrees"/> file by file into a file tree, one after another; in an
+    /// incremental run against its tree in the previous restore point, whose unchanged files are not read again.
+    /// </summary>
+    private async Task<(List<ManifestFileTree> Trees, bool Warnings)> BackupFileTreesAsync(
+        IVmBackupSession backup, IRepositoryWriter writer, RestorePointEntity? baseline, IRestorePointReader? baseReader, CancellationToken cancellationToken)
     {
         var trees = new List<ManifestFileTree>();
         var warned = false;
@@ -781,37 +796,52 @@ internal sealed class VmBackupTask(
                 _transferStarted ??= time.GetUtcNow();
             }
 
-            await using var reader = await backup.OpenFileTreeAsync(tree, cancellationToken).ConfigureAwait(false);
-            var builder = new FileTreeBuilder(writer, repository.Info.ChunkSize);
+            var previous = await PreviousTreeAsync(tree, baseline, baseReader, cancellationToken).ConfigureAwait(false);
+            await using var reader = await backup.OpenFileTreeAsync(tree, previous, cancellationToken).ConfigureAwait(false);
+            var builder = new FileTreeBuilder(writer, repository.Info.ChunkSize) { Previous = previous };
             FileTreeBuilder.Result? result = null;
-            await reader.ReadAsync(async (stream, ct) => result = await builder.BuildAsync(stream, ct).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+            using (var reporting = new CancellationTokenSource())
+            {
+                var progress = ReportTreeProgressAsync(tree, builder, reader.TransportName, started, reporting.Token);
+                try
+                {
+                    await reader.ReadAsync(async (stream, ct) => result = await builder.BuildAsync(stream, ct).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    await reporting.CancelAsync().ConfigureAwait(false);
+                    await progress.ConfigureAwait(false);
+                }
+            }
+
             var built = result ?? throw new InvalidOperationException($"The files of {tree.Description} were not read.");
             var index = await writer.WriteFileTreeIndexAsync(tree.Key, built.Root, cancellationToken).ConfigureAwait(false);
             Interlocked.Add(ref _storedBytes, built.Stats.NewStoredBytes);
             var stats = built.Stats;
             var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            UpdateDisk(tree.Key, d => d with
+            {
+                // The tree in the run's figures (the summary line, the task's metrics).
+                CapacityBytes = stats.Bytes,
+                State = "Done",
+                Mode = "Files",
+                Transport = reader.TransportName,
+                Metrics = new TransferMetricsDto
+                {
+                    TotalBytes = stats.Bytes, ProcessedBytes = stats.Bytes, ReadBytes = stats.ReadBytes, UnchangedBytes = stats.UnchangedBytes, DedupedBytes = built.DedupedBytes,
+                    NewDataBytes = built.NewBytes, StoredBytes = stats.NewStoredBytes, Seconds = Math.Round(elapsed.TotalSeconds, 3),
+                },
+            });
             lock (_metricsLock)
             {
-                // The tree in the run's figures (the summary line, the task's metrics): read in full, nothing taken as unchanged.
-                _diskMetrics.Add(new DiskMetricsDto
-                {
-                    Key = tree.Key,
-                    Name = tree.Name,
-                    CapacityBytes = stats.Bytes,
-                    State = "Done",
-                    Mode = "Files",
-                    Transport = reader.TransportName,
-                    Metrics = new TransferMetricsDto
-                    {
-                        TotalBytes = stats.Bytes, ProcessedBytes = stats.Bytes, ReadBytes = stats.ReadBytes, DedupedBytes = built.DedupedBytes, NewDataBytes = built.NewBytes,
-                        StoredBytes = stats.NewStoredBytes, Seconds = Math.Round(elapsed.TotalSeconds, 3),
-                    },
-                });
                 _transferEnded = time.GetUtcNow();
             }
 
-            _log.Info($"Volume {tree.Name}: {stats.Files} file(s) in {stats.Directories} folder(s), {Format(stats.Bytes)}, read file by file through {reader.TransportName} " +
-                      $"in {elapsed:hh\\:mm\\:ss}; {Format(stats.NewStoredBytes)} new in the repository.");
+            var unchanged = previous is null
+                ? string.Empty
+                : $"; {stats.UnchangedFiles:N0} file(s) unchanged since the previous run ({Format(stats.UnchangedBytes)} not read again), {Format(stats.ReadBytes)} read";
+            _log.Info($"Volume {tree.Name}: {stats.Files:N0} file(s) in {stats.Directories:N0} folder(s), {Format(stats.Bytes)}, read file by file through {reader.TransportName} " +
+                      $"in {elapsed:hh\\:mm\\:ss}{unchanged}; {Format(stats.NewStoredBytes)} new in the repository.", $"tree-{tree.Key}");
             if (stats.ChangedWhileRead > 0)
             {
                 _log.Warning($"Volume {tree.Name}: {stats.ChangedWhileRead} file(s) changed while they were read; their copies may be torn (the next run reads them again).");
@@ -827,10 +857,74 @@ internal sealed class VmBackupTask(
             trees.Add(new ManifestFileTree
             {
                 Key = tree.Key, Name = tree.Name, Kind = tree.Kind, Reader = tree.Reader, Index = index, RootLength = built.Root.DiskSize, Root = built.RootMeta, Stats = stats,
+                BaseRestorePointId = stats.UnchangedFiles > 0 ? previous?.RestorePointId : null,
             });
         }
 
         return (trees, warned);
+    }
+
+    /// <summary>The volume's tree in the previous restore point, if this run is incremental and that restore point has it.</summary>
+    private async Task<FileTreeBase?> PreviousTreeAsync(FileTreeSource tree, RestorePointEntity? baseline, IRestorePointReader? baseReader, CancellationToken cancellationToken)
+    {
+        if (session.RunMode == SessionRunMode.ActiveFull)
+        {
+            _log.Info($"Volume {tree.Name}: active full, every file is read.");
+            return null;
+        }
+
+        if (baseline is null || baseReader?.Manifest.FileTrees.FirstOrDefault(t => t.Key == tree.Key) is not { } before)
+        {
+            _log.Info($"Volume {tree.Name}: no previous restore point of this job has it; every file is read.");
+            return null;
+        }
+
+        try
+        {
+            var root = await baseReader.ReadFileTreeIndexAsync(tree.Key, cancellationToken).ConfigureAwait(false);
+            _log.Info($"Volume {tree.Name}: compared with the restore point of {baseline.CreatedUtc.ToLocalTime():yyyy-MM-dd HH:mm} " +
+                      $"({before.Stats.Files:N0} file(s), {Format(before.Stats.Bytes)}); files unchanged since then are not read again.");
+            return new FileTreeBase(ChunkStreamRef.OfIds(root.DiskSize, root.Entries), baseReader.Chunks, repository.Info.ChunkSize, baseline.Id);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or KeyNotFoundException)
+        {
+            _log.Warning($"Volume {tree.Name}: the tree of the previous restore point {baseline.Id} cannot be read ({ex.Message}); every file is read.");
+            return null;
+        }
+    }
+
+    /// <summary>The volume's progress every few seconds while it is read: in the task's metrics, the overall progress and a log line.</summary>
+    private async Task ReportTreeProgressAsync(FileTreeSource tree, FileTreeBuilder builder, string transport, long started, CancellationToken stop)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(stop).ConfigureAwait(false))
+            {
+                var processed = builder.ProcessedBytes;
+                var read = builder.Bytes;
+                var seconds = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds;
+                UpdateDisk(tree.Key, d => d with
+                {
+                    State = "Running",
+                    Transport = transport,
+                    CapacityBytes = Math.Max(d.CapacityBytes, processed),
+                    Metrics = new TransferMetricsDto
+                    {
+                        TotalBytes = Math.Max(d.CapacityBytes, processed), ProcessedBytes = processed, ReadBytes = read, UnchangedBytes = builder.UnchangedBytes,
+                        Seconds = Math.Round(seconds, 3),
+                    },
+                });
+                var unchanged = builder.UnchangedFiles > 0 ? $" · {builder.UnchangedFiles:N0} unchanged" : string.Empty;
+                var at = builder.LastHeartbeat is { Path.Length: > 0 } heartbeat ? $" · at {heartbeat.Path}" : string.Empty;
+                _log.Info($"Volume {tree.Name}: {builder.Files:N0} file(s) · read {Format(read)} at {MetricsText.Rate(seconds > 0 ? read / seconds : 0)}{unchanged}{at}", $"tree-{tree.Key}");
+                await UpdateProgressAsync().ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The volume is read (or failed).
+        }
     }
 
     private async Task<(ManifestDisk Disk, bool Warned)> BackupDiskAsync(

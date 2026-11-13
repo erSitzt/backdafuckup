@@ -284,6 +284,9 @@ public sealed record FileTreeStats
     /// <summary>Files taken from the base tree without reading them (unchanged).</summary>
     public long UnchangedFiles { get; init; }
 
+    /// <summary>The content bytes of those files.</summary>
+    public long UnchangedBytes { get; init; }
+
     /// <summary>Bytes of file content read in this run.</summary>
     public long ReadBytes { get; init; }
 

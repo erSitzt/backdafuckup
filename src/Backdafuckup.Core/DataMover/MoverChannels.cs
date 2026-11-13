@@ -2,9 +2,10 @@ namespace Backdafuckup.Core.DataMover;
 
 /// <summary>
 /// What a mover pod needs to reach the server for one volume: the URL of its channel, where it reports the end of a
-/// restore, the one-time token, and the server certificate's SPKI pins (empty: system validation).
+/// restore, the one-time token, and the server certificate's SPKI pins (empty: system validation). A volume read file by
+/// file in an incremental run also gets where it fetches the previous run's tree (<see cref="MoverPrevious"/>).
 /// </summary>
-public sealed record MoverEndpoint(Uri DataUrl, Uri ResultUrl, string Token, IReadOnlyList<string> ServerPins);
+public sealed record MoverEndpoint(Uri DataUrl, Uri ResultUrl, string Token, IReadOnlyList<string> ServerPins, Uri? PreviousUrl = null);
 
 /// <summary>
 /// What a mover reports to <see cref="MoverEndpoint.ResultUrl"/>: after a restore the data bytes it wrote and flushed
@@ -77,8 +78,16 @@ public interface IMoverChannels
     Task<IMoverFilesChannel> OpenFilesAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null);
 
     /// <param name="description">For messages: the volume read file by file (cluster, namespace, PVC or pod volume).</param>
-    Task<IMoverTreeChannel> OpenTreeBackupAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null) =>
+    /// <param name="previous">The volume's tree in the previous run: the mover fetches it and sends unchanged files as such.</param>
+    Task<IMoverTreeChannel> OpenTreeBackupAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null, IPreviousFileTree? previous = null) =>
         throw new NotSupportedException("This server takes no volumes file by file.");
+}
+
+/// <summary>A volume's tree in the previous run, served to its mover for an incremental read (<see cref="MoverPrevious"/>).</summary>
+public interface IPreviousFileTree
+{
+    /// <summary>Writes the <c>BDFUPRV1</c> stream to <paramref name="output"/>.</summary>
+    Task WriteAsync(Stream output, CancellationToken cancellationToken);
 }
 
 /// <summary>

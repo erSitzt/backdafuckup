@@ -48,11 +48,12 @@ internal sealed class ShadowVolume : IFileTreeReader
 
     /// <summary>
     /// Starts the mover for <paramref name="claim"/> in <paramref name="ns"/> (bound to <paramref name="volumeName"/>). A hostPath
-    /// PV without node affinity is read on <paramref name="node"/>, the node of a pod that uses it.
+    /// PV without node affinity is read on <paramref name="node"/>, the node of a pod that uses it. With
+    /// <paramref name="previous"/>, the mover fetches the previous run's tree and does not read unchanged files again.
     /// </summary>
     public static async Task<ShadowVolume> StartAsync(
         VolumeSnapshotFlow flow, string ns, string claim, string volumeName, string run, string? node, IMoverChannels channels, MoverDeployment mover,
-        CancellationToken cancellationToken)
+        IPreviousFileTree? previous, CancellationToken cancellationToken)
     {
         var source = $"PVC {ns}/{claim}";
         var pv = await flow.CallAsync($"reading the PV {volumeName} of {source}", () => flow.Client.CoreV1.ReadPersistentVolumeAsync(volumeName, cancellationToken: cancellationToken))
@@ -62,7 +63,7 @@ internal sealed class ShadowVolume : IFileTreeReader
         var shadow = new ShadowVolume(flow, source, run, name, $"a read-only copy of PV {volumeName} ({describe})");
         try
         {
-            await shadow.StartAsync(pv, spec, node, channels, mover, cancellationToken).ConfigureAwait(false);
+            await shadow.StartAsync(pv, spec, node, channels, mover, previous, cancellationToken).ConfigureAwait(false);
             return shadow;
         }
         catch
@@ -115,7 +116,8 @@ internal sealed class ShadowVolume : IFileTreeReader
     public async Task ReadAsync(Func<Stream, CancellationToken, Task> consume, CancellationToken cancellationToken) =>
         await (_channel ?? throw new InvalidOperationException("The mover has not started.")).ConsumeAsync(consume, cancellationToken).ConfigureAwait(false);
 
-    private async Task StartAsync(V1PersistentVolume pv, V1PersistentVolumeSpec spec, string? node, IMoverChannels channels, MoverDeployment mover, CancellationToken cancellationToken)
+    private async Task StartAsync(
+        V1PersistentVolume pv, V1PersistentVolumeSpec spec, string? node, IMoverChannels channels, MoverDeployment mover, IPreviousFileTree? previous, CancellationToken cancellationToken)
     {
         var client = _flow.Client;
         var capacity = pv.Spec.Capacity is { } sizes && sizes.TryGetValue("storage", out var size) ? size : new ResourceQuantity("1Gi");
@@ -139,7 +141,7 @@ internal sealed class ShadowVolume : IFileTreeReader
             cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
 
         await _flow.EnsurePullSecretAsync(mover, cancellationToken).ConfigureAwait(false);
-        _channel = await channels.OpenTreeBackupAsync($"{_source} (cluster {_flow.Cluster})", cancellationToken, _flow.Timings.FilesMoverConnect).ConfigureAwait(false);
+        _channel = await channels.OpenTreeBackupAsync($"{_source} (cluster {_flow.Cluster})", cancellationToken, _flow.Timings.FilesMoverConnect, previous).ConfigureAwait(false);
         var endpoint = _channel.Endpoint;
         var tokenSecret = $"{_name}-token";
         await CreateAsync(KubernetesArtifactKinds.Secret, Work, tokenSecret, () => client.CoreV1.CreateNamespacedSecretAsync(
@@ -150,7 +152,8 @@ internal sealed class ShadowVolume : IFileTreeReader
             MoverPods.BuildRead(_name, Meta(PodName, pv.Metadata.Name), mover, endpoint, tokenSecret, node),
             Work,
             cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
-        _flow.Log.Info($"Mover pod {Work}/{PodName} started for {_source}: it reads the volume file by file through {TransportName}{(node is null ? string.Empty : $" on node {node}")}, image {mover.Image}.");
+        _flow.Log.Info($"Mover pod {Work}/{PodName} started for {_source}: it reads the volume file by file through {TransportName}{(node is null ? string.Empty : $" on node {node}")}" +
+                       $"{(previous is null ? string.Empty : ", files unchanged since the previous run not again")}, image {mover.Image}.");
         var channel = _channel;
         _watching = MoverPods.WatchAsync(_flow, PodName, _source, channel.Abort, _stopWatching.Token, mode: "tree");
     }

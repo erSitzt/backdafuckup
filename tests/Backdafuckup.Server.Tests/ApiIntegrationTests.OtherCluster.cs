@@ -312,7 +312,9 @@ public sealed partial class ApiIntegrationTests
                     var options = new Backdafuckup.Mover.MoverOptions(
                         env["BDFU_MOVER_MODE"] == "tree" ? Backdafuckup.Mover.MoverMode.Tree : Backdafuckup.Mover.MoverMode.Files,
                         new Uri(env["BDFU_MOVER_DATA_URL"]!), new Uri(env["BDFU_MOVER_RESULT_URL"]!), token, [], string.Empty,
-                        Root: folder, Keep: env.GetValueOrDefault("BDFU_MOVER_IF_EXISTS") == "keep", Owners: env.GetValueOrDefault("BDFU_MOVER_OWNERS") == "1");
+                        Root: folder, Keep: env.GetValueOrDefault("BDFU_MOVER_IF_EXISTS") == "keep", Owners: env.GetValueOrDefault("BDFU_MOVER_OWNERS") == "1",
+                        PreviousUrl: env.GetValueOrDefault("BDFU_MOVER_PREVIOUS_URL") is { } previous ? new Uri(previous) : null,
+                        Racy: TimeSpan.Zero); // files written just before count as settled: the test's next run is moments later
                     nfs.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Running" });
                     _ = Task.Run(async () =>
                     {

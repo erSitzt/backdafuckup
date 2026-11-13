@@ -30,6 +30,7 @@ internal enum MoverMode
 /// <item><c>BDFU_MOVER_BYTES</c>: backup only: the bytes to send, from the start of the device (a volume restored from a
 /// snapshot may be larger than the snapshot); default the whole device.</item>
 /// <item><c>BDFU_MOVER_ROOT</c>: files and tree: where the volume is mounted; default <see cref="DefaultRoot"/>.</item>
+/// <item><c>BDFU_MOVER_PREVIOUS_URL</c>: tree only: where the previous run's tree is (an incremental read); unset: everything is read.</item>
 /// <item><c>BDFU_MOVER_IF_EXISTS</c>: files only: <c>replace</c> (default) or <c>keep</c> (RESTORED-&lt;name&gt; next to it).</item>
 /// <item><c>BDFU_MOVER_OWNERS</c>: files only: <c>1</c> (default) owner and group from the backup, <c>0</c> those of
 /// the folder an item goes into.</item>
@@ -46,7 +47,9 @@ internal sealed record MoverOptions(
     long? Bytes = null,
     string Root = MoverOptions.DefaultRoot,
     bool Keep = false,
-    bool Owners = true)
+    bool Owners = true,
+    Uri? PreviousUrl = null,
+    TimeSpan? Racy = null)
 {
     public const string DefaultDevice = "/dev/bdfu-volume";
     public const string DefaultRoot = "/bdfu-volume";
@@ -105,6 +108,7 @@ internal sealed record MoverOptions(
                 "" or "1" or "true" => true,
                 "0" or "false" => false,
                 var other => throw new ArgumentException($"BDFU_MOVER_OWNERS is '{other}', expected 1 or 0."),
-            });
+            },
+            get("BDFU_MOVER_PREVIOUS_URL") is { Length: > 0 } ? Url("BDFU_MOVER_PREVIOUS_URL") : null);
     }
 }

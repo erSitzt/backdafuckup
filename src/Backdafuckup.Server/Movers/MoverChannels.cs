@@ -45,10 +45,15 @@ public sealed class MoverChannels(AgentSettingsStore settings, ILogger<MoverChan
         return Register(new FilesChannel(this, id, endpoint, description), connectTimeout);
     }
 
-    public async Task<IMoverTreeChannel> OpenTreeBackupAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null)
+    public async Task<IMoverTreeChannel> OpenTreeBackupAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null, IPreviousFileTree? previous = null)
     {
         var (id, endpoint) = await NewEndpointAsync(cancellationToken).ConfigureAwait(false);
-        return Register(new TreeBackupChannel(this, id, endpoint, description), connectTimeout);
+        if (previous is not null)
+        {
+            endpoint = endpoint with { PreviousUrl = new Uri(endpoint.DataUrl, "previous") };
+        }
+
+        return Register(new TreeBackupChannel(this, id, endpoint, description, previous), connectTimeout);
     }
 
     /// <summary>The open channel with this id, if the request carries its token; null for anything else.</summary>
@@ -241,8 +246,11 @@ internal sealed class BackupChannel(MoverChannels owner, Guid id, MoverEndpoint 
     protected override void Cancel() => _done.TrySetCanceled();
 }
 
-/// <summary>Takes the file tree a mover sends (PUT) and hands it to its consumer (the file tree builder).</summary>
-internal sealed class TreeBackupChannel(MoverChannels owner, Guid id, MoverEndpoint endpoint, string description)
+/// <summary>
+/// Takes the file tree a mover sends (PUT) and hands it to its consumer (the file tree builder); in an incremental run it
+/// also serves the previous run's tree to the mover (GET <c>previous</c>, once).
+/// </summary>
+internal sealed class TreeBackupChannel(MoverChannels owner, Guid id, MoverEndpoint endpoint, string description, IPreviousFileTree? previous = null)
     : MoverChannel(owner, id, endpoint, description), IMoverTreeChannel
 {
     private static readonly TimeSpan ReportGrace = TimeSpan.FromSeconds(30);
@@ -252,6 +260,13 @@ internal sealed class TreeBackupChannel(MoverChannels owner, Guid id, MoverEndpo
 
     private readonly TaskCompletionSource _done = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _consuming;
+    private int _previousServed;
+
+    /// <summary>The previous run's tree, if this run is incremental.</summary>
+    public IPreviousFileTree? Previous => previous;
+
+    /// <summary>The previous tree is fetched once (a restarted mover could not use it: its channel is taken).</summary>
+    internal bool TryClaimPrevious() => previous is not null && Interlocked.Exchange(ref _previousServed, 1) == 0;
 
     public async Task ConsumeAsync(Func<Stream, CancellationToken, Task> consume, CancellationToken cancellationToken)
     {

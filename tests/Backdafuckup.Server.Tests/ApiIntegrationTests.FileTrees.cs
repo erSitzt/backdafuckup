@@ -67,6 +67,7 @@ public sealed partial class ApiIntegrationTests
         Assert.Contains("PVC data-web: NFS volume (10.26.9.9:", log, StringComparison.Ordinal);
         Assert.Contains("Volume data-web: 2 file(s) in 1 folder(s)", log, StringComparison.Ordinal);
         Assert.Contains("read file by file through a read-only copy of PV pv-data-web (NFS 10.26.9.9:", log, StringComparison.Ordinal);
+        Assert.Contains("Volume data-web: no previous restore point of this job has it; every file is read.", log, StringComparison.Ordinal);
 
         // The restore point holds the tree: the same files, the same bytes.
         var point = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!);
@@ -141,6 +142,30 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal(page, await File.ReadAllBytesAsync(Path.Combine(localFolder, "site", "index.bin"), Ct));
         Assert.Empty(nfs.All("pods"));
         Assert.DoesNotContain(nfs.All("persistentvolumeclaims"), c => (string?)c["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
+
+        // The next run reads only what changed: the mover gets the previous tree and sends unchanged files as such; the
+        // server takes their content from the previous restore point.
+        await File.WriteAllTextAsync(Path.Combine(folder, "config.txt"), "port=9090", Ct);
+        var again = await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{job.Id}/run", new RunJobDto(), Ct));
+        var againSession = await WaitForSessionAsync(client, again.SessionId);
+        var againLog = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{again.SessionId}/log", Ct))!.Select(l => $"{l.Severity}: {l.Message}"));
+        Assert.True(againSession.Session.State == "Succeeded", againLog);
+        Assert.Contains("Volume data-web: compared with the restore point of ", againLog, StringComparison.Ordinal);
+        Assert.Contains("(2 file(s), 293.0 KB); files unchanged since then are not read again.", againLog, StringComparison.Ordinal);
+        Assert.Contains("1 file(s) unchanged since the previous run (293.0 KB not read again), 0.0 KB read", againLog, StringComparison.Ordinal);
+        var next = (await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!.Single(p => p.Id != point.Id);
+        await using (var reader = await store.OpenRestorePointAsync(next.Id, Ct))
+        {
+            var tree = Assert.Single(reader.Manifest.FileTrees);
+            Assert.Equal((2L, 1L, 9L, (Guid?)point.Id), (tree.Stats.Files, tree.Stats.UnchangedFiles, tree.Stats.ReadBytes, tree.BaseRestorePointId));
+            var root = await reader.ReadFileTreeIndexAsync("data-web", Ct);
+            var entries = FileTreeWalker.Enumerate(ChunkStreamRef.OfIds(root.DiskSize, root.Entries), reader.Chunks, reader.Manifest.Chunking.ChunkSize).ToDictionary(e => e.Path, e => e.Entry);
+            Assert.Equal(page, ChunkStreams.ReadAll(entries["site/index.bin"].Content!, reader.Chunks, reader.Manifest.Chunking.ChunkSize));
+            Assert.Equal("port=9090"u8.ToArray(), ChunkStreams.ReadAll(entries["config.txt"].Content!, reader.Chunks, reader.Manifest.Chunking.ChunkSize));
+        }
+
+        Assert.True((await store.VerifyAsync(next.Id, VerifyDepth.Full, null, Ct)).Ok);
+        Assert.Empty(nfs.All("pods"));
     }
 
     /// <summary>

@@ -116,8 +116,11 @@ public interface IVmBackupSession : IAsyncDisposable
     /// </summary>
     IReadOnlyList<FileTreeSource> FileTrees => [];
 
-    /// <summary>Starts reading a volume file by file (its mover); the reader hands over the mover's stream once.</summary>
-    Task<IFileTreeReader> OpenFileTreeAsync(FileTreeSource tree, CancellationToken cancellationToken) =>
+    /// <summary>
+    /// Starts reading a volume file by file (its mover); the reader hands over the mover's stream once. With
+    /// <paramref name="previous"/> (an incremental run), files unchanged since then are not read again.
+    /// </summary>
+    Task<IFileTreeReader> OpenFileTreeAsync(FileTreeSource tree, IPreviousFileTree? previous, CancellationToken cancellationToken) =>
         throw new NotSupportedException("This platform reads no volumes file by file.");
 
     /// <summary>

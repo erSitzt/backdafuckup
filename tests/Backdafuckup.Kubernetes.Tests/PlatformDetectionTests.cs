@@ -81,18 +81,23 @@ public sealed class PlatformDetectionTests
         Guid.Empty, HypervisorKind.Kubernetes, "10.26.1.10", 6443, new System.Net.NetworkCredential("backdafuckup", "token-for-tests"), TlsTrustMode.Pinned,
         [new PinnedCertificate("10.26.1.10", "spki", "thumb", string.Empty)], options ?? new Dictionary<string, string>());
 
-    /// <summary>tests/fixtures/k8s-platforms above the test binaries.</summary>
+    /// <summary>tests/fixtures/k8s-platforms above the test's output, or above its source file (the output may be elsewhere: <c>--artifacts-path</c>).</summary>
     private static string FixtureDirectory()
     {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        foreach (var start in new[] { AppContext.BaseDirectory, Path.GetDirectoryName(SourceFile())! })
         {
-            var candidate = Path.Combine(dir.FullName, "tests", "fixtures", "k8s-platforms");
-            if (File.Exists(Path.Combine(dir.FullName, "backdafuckup.slnx")) && Directory.Exists(candidate))
+            for (var dir = new DirectoryInfo(start); dir is not null; dir = dir.Parent)
             {
-                return candidate;
+                var candidate = Path.Combine(dir.FullName, "tests", "fixtures", "k8s-platforms");
+                if (File.Exists(Path.Combine(dir.FullName, "backdafuckup.slnx")) && Directory.Exists(candidate))
+                {
+                    return candidate;
+                }
             }
         }
 
-        throw new DirectoryNotFoundException($"tests/fixtures/k8s-platforms not found above {AppContext.BaseDirectory}");
+        throw new DirectoryNotFoundException($"tests/fixtures/k8s-platforms not found above {AppContext.BaseDirectory} or {SourceFile()}");
     }
+
+    private static string SourceFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
 }

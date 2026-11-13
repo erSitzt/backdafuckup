@@ -69,4 +69,23 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal((1L, 5L), (entries["data/inner"].SubtreeFiles, entries["data/inner"].SubtreeBytes));
         Assert.True((await repository.VerifyAsync(id, VerifyDepth.Full, null, Ct)).Ok);
     }
+
+    [Fact]
+    public async Task A_mover_that_cannot_read_its_volume_reports_why_not_that_its_upload_broke()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.X64, "The mover reads volumes on linux-x64.");
+        const int ChunkSize = 64 * 1024;
+        var channels = await MoverChannelsAsync();
+        await using var repository = await LocalDirectoryRepository.CreateAsync(Path.Combine(_root, "tree-repo-missing"), Ct, ChunkSize, 3);
+        await using var writer = repository.BeginWrite(Guid.CreateVersion7(), "bdfu-spike", null);
+        await using var channel = await channels.OpenTreeBackupAsync("bdfu-spike/data-missing", Ct);
+        var consuming = channel.ConsumeAsync(async (stream, ct) => await new FileTreeBuilder(writer, ChunkSize).BuildAsync(stream, ct), Ct);
+
+        var missing = Path.Combine(_root, "not-mounted");
+        var options = new MoverOptions(MoverMode.Tree, channel.Endpoint.DataUrl, channel.Endpoint.ResultUrl, channel.Endpoint.Token, channel.Endpoint.ServerPins, "/dev/null", Root: missing);
+        var log = new StringWriter();
+        Assert.Equal(1, await MoverRunner.RunAsync(options, _factory!.Server.CreateHandler(), log, Ct));
+        var error = await Assert.ThrowsAnyAsync<Exception>(() => consuming);
+        Assert.Contains($"Reading {missing} failed: The volume at {missing} cannot be opened", error.Message, StringComparison.Ordinal);
+    }
 }

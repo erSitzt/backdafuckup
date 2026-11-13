@@ -159,6 +159,7 @@ internal static class MoverPods
                         new V1EnvVar { Name = "BDFU_MOVER_MODE", Value = "tree" },
                         new V1EnvVar { Name = "BDFU_MOVER_DATA_URL", Value = endpoint.DataUrl.ToString() },
                         new V1EnvVar { Name = "BDFU_MOVER_RESULT_URL", Value = endpoint.ResultUrl.ToString() },
+                        .. endpoint.PreviousUrl is { } previous ? [new V1EnvVar { Name = "BDFU_MOVER_PREVIOUS_URL", Value = previous.ToString() }] : Array.Empty<V1EnvVar>(),
                         new V1EnvVar { Name = "BDFU_MOVER_SERVER_PINS", Value = string.Join(',', endpoint.ServerPins) },
                         new V1EnvVar { Name = "BDFU_MOVER_ROOT", Value = FilesRoot },
                         new V1EnvVar { Name = "DOTNET_EnableDiagnostics", Value = "0" },

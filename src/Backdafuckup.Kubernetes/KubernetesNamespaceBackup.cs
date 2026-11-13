@@ -254,10 +254,11 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
 
     public ChangeToken? GetNewChangeToken(SnapshotDisk disk) => null;
 
-    public async Task<IFileTreeReader> OpenFileTreeAsync(FileTreeSource tree, CancellationToken cancellationToken)
+    public async Task<IFileTreeReader> OpenFileTreeAsync(FileTreeSource tree, IPreviousFileTree? previous, CancellationToken cancellationToken)
     {
         var (volume, node) = _files[tree.Key];
-        return await ShadowVolume.StartAsync(_flow, Kubernetes.Namespace, volume.Claim, volume.VolumeName!, _run, node, _channels!, _mover!, cancellationToken).ConfigureAwait(false);
+        return await ShadowVolume.StartAsync(_flow, Kubernetes.Namespace, volume.Claim, volume.VolumeName!, _run, node, _channels!, _mover!, previous, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task FileTreesReadAsync(IOperationLog log, CancellationToken cancellationToken)
