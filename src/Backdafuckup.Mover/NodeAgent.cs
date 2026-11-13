@@ -335,7 +335,7 @@ internal sealed partial class NodeAgent(NodeAgentOptions options, TextWriter log
                 }
             }
 
-            pods.Add(new JsonObject
+            pods.Add((JsonNode)new JsonObject
             {
                 ["namespace"] = (string?)pod?["podRef"]?["namespace"],
                 ["name"] = (string?)pod?["podRef"]?["name"],
