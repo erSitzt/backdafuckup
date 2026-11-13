@@ -20,6 +20,8 @@ public enum DiskBackupMode
 /// The commit record of a restore point (<c>manifest.json</c>). A restore point exists exactly when its manifest
 /// exists. Every manifest references complete chunk indexes, so each restore point is restorable on its own.
 /// </summary>
+// Members added after the first manifests coalesce null in their init: the JSON source generator sets a member missing
+// from an older manifest to null (it initialises every member of a type with required members), not to its default.
 public sealed record RestorePointManifest
 {
     /// <summary>The newest format this version reads.</summary>
@@ -46,7 +48,7 @@ public sealed record RestorePointManifest
     public required RestorePointKind Kind { get; init; }
 
     /// <summary>"crash" or "application" (guest frozen through the agent while the snapshot was taken).</summary>
-    public string Consistency { get; init; } = "crash";
+    public string Consistency { get; init => field = value ?? "crash"; } = "crash";
 
     /// <summary>Why a backup with guest processing is only crash-consistent.</summary>
     public string? ConsistencyReason { get; init; }
@@ -105,7 +107,7 @@ public sealed record RestorePointManifest
     public required IReadOnlyList<ManifestDisk> Disks { get; init; }
 
     /// <summary>Disks of the VM that were deliberately not backed up; a restore of the VM creates them empty.</summary>
-    public IReadOnlyList<ManifestExcludedDisk> ExcludedDisks { get; init; } = [];
+    public IReadOnlyList<ManifestExcludedDisk> ExcludedDisks { get; init => field = value ?? []; } = [];
 
     /// <summary>
     /// The RAM image of a snapshot with memory (key <c>memory</c>), stored like a disk but not a disk of the VM; null without
@@ -131,7 +133,7 @@ public sealed record RestorePointManifest
     /// snapshots, and pod volumes without a PVC. Their chunks are referenced through their listings, not through
     /// <see cref="AllImages"/>.
     /// </summary>
-    public IReadOnlyList<ManifestFileTree> FileTrees { get; init; } = [];
+    public IReadOnlyList<ManifestFileTree> FileTrees { get; init => field = value ?? []; } = [];
 
     /// <summary>The disks and, with memory, the RAM image: everything whose chunks the restore point references.</summary>
     [JsonIgnore]
@@ -163,19 +165,19 @@ public sealed record KubernetesNamespaceDescriptor
     public int ObjectCount { get; init; }
 
     /// <summary>Every PVC of the namespace: how its data was backed up, or why only its objects were.</summary>
-    public IReadOnlyList<KubernetesVolumeRecord> Volumes { get; init; } = [];
+    public IReadOnlyList<KubernetesVolumeRecord> Volumes { get; init => field = value ?? []; } = [];
 
     /// <summary>The hooks that ran in pods before and after the snapshots.</summary>
-    public IReadOnlyList<KubernetesHookRecord> Hooks { get; init; } = [];
+    public IReadOnlyList<KubernetesHookRecord> Hooks { get; init => field = value ?? []; } = [];
 
     /// <summary>
     /// The volumes of the namespace's running pods that are not PVCs (emptyDir, hostPath, NFS or CSI mounted directly): whether
     /// their data was backed up, or why not, and how much there was when usage numbers were available.
     /// </summary>
-    public IReadOnlyList<KubernetesPodVolumeRecord> PodVolumes { get; init; } = [];
+    public IReadOnlyList<KubernetesPodVolumeRecord> PodVolumes { get; init => field = value ?? []; } = [];
 
     /// <summary>What the running containers wrote into their own file systems (never backed up), from the usage numbers.</summary>
-    public IReadOnlyList<KubernetesContainerWriteRecord> ContainerWrites { get; init; } = [];
+    public IReadOnlyList<KubernetesContainerWriteRecord> ContainerWrites { get; init => field = value ?? []; } = [];
 
     /// <summary>Where the usage numbers came from ("Prometheus https://…"); null: none were read.</summary>
     public string? UsageSource { get; init; }
@@ -276,10 +278,10 @@ public sealed record ManifestFileTree
     public required string Name { get; init; }
 
     /// <summary>"pvc" or "pod-volume".</summary>
-    public string Kind { get; init; } = "pvc";
+    public string Kind { get; init => field = value ?? "pvc"; } = "pvc";
 
     /// <summary>How it was read: "shadow-pv" (a read-only copy of its PV) or "node-agent".</summary>
-    public string Reader { get; init; } = "shadow-pv";
+    public string Reader { get; init => field = value ?? "shadow-pv"; } = "shadow-pv";
 
     /// <summary>The root listing's chunks (its length is the index's size).</summary>
     public required ManifestIndexRef Index { get; init; }
@@ -288,7 +290,7 @@ public sealed record ManifestFileTree
 
     public FileTreeRootMeta Root { get; init; } = new(0755, 0, 0, 0);
 
-    public FileTreeStats Stats { get; init; } = new();
+    public FileTreeStats Stats { get; init => field = value ?? new(); } = new();
 
     /// <summary>The restore point whose tree unchanged files were taken from (their chunks, not the restore point itself).</summary>
     public Guid? BaseRestorePointId { get; init; }

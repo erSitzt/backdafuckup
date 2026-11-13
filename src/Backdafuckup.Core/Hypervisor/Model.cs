@@ -120,7 +120,7 @@ public sealed record VmDescriptor
 
     public string? OsName { get; init; }
 
-    public IReadOnlyList<VmNic> Nics { get; init; } = [];
+    public IReadOnlyList<VmNic> Nics { get; init => field = value ?? []; } = [];
 
     /// <summary>
     /// The VM generation id at backup time (Xen: <c>generation_id</c>). Windows compares it at start: a changed id tells a
