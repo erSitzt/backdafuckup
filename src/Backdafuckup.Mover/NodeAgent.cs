@@ -5,7 +5,6 @@ using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 using Backdafuckup.Core.Tls;
 
 namespace Backdafuckup.Mover;
@@ -58,7 +57,7 @@ internal sealed record NodeAgentOptions(
 /// a mover channel and its token, a pod's uid and a volume's name; the agent builds the path from fixed patterns and sends
 /// the files to its own server's channel. At most <see cref="NodeAgentOptions.MaxReads"/> reads run at once.
 /// </summary>
-internal sealed partial class NodeAgent(NodeAgentOptions options, TextWriter log, Func<MoverOptions, HttpMessageHandler?>? transport = null)
+internal sealed class NodeAgent(NodeAgentOptions options, TextWriter log, Func<MoverOptions, HttpMessageHandler?>? transport = null)
 {
     private readonly SemaphoreSlim _reads = new(options.MaxReads, options.MaxReads);
     private int _running;
@@ -123,9 +122,15 @@ internal sealed partial class NodeAgent(NodeAgentOptions options, TextWriter log
                 var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
                 response = await HandleAsync(JsonNode.Parse(line ?? "{}") as JsonObject ?? [], cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or FormatException)
+            catch (Exception ex) when (ex is System.Text.Json.JsonException or FormatException)
             {
                 response = Error($"The request is not one the node agent understands: {ex.Message}");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Every request gets an answer: the server must not read silence as success.
+                log.WriteLine($"A request failed: {ex}");
+                response = Error($"The node agent on {options.NodeName ?? "this node"} failed on the request ({ex.GetType().Name}): {ex.Message}");
             }
 
             await writer.WriteLineAsync(response.ToJsonString(NodeRequest.Json)).ConfigureAwait(false);
@@ -205,7 +210,7 @@ internal sealed partial class NodeAgent(NodeAgentOptions options, TextWriter log
     /// </summary>
     internal string? VolumePath(string? podUid, string? plugin, string? volume)
     {
-        if (podUid is null || !Guid.TryParseExact(podUid, "D", out _) || volume is null || !VolumeName().IsMatch(volume))
+        if (podUid is null || !Guid.TryParseExact(podUid, "D", out _) || volume is null || !IsVolumeName(volume))
         {
             return null;
         }
@@ -219,9 +224,14 @@ internal sealed partial class NodeAgent(NodeAgentOptions options, TextWriter log
         };
     }
 
-    /// <summary>A volume's or PV's name: lower-case letters, digits, '-' and '.', starting and ending alphanumeric.</summary>
-    [GeneratedRegex("^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$", RegexOptions.CultureInvariant)]
-    private static partial Regex VolumeName();
+    /// <summary>
+    /// A volume's or PV's name: lower-case letters, digits, '-' and '.', starting and ending alphanumeric, at most 253
+    /// characters. Checked without regular expressions: the trimmed image leaves their assembly out.
+    /// </summary>
+    internal static bool IsVolumeName(string name) =>
+        name.Length is > 0 and <= 253 && IsAlphanumeric(name[0]) && IsAlphanumeric(name[^1]) && name.All(c => IsAlphanumeric(c) || c is '-' or '.');
+
+    private static bool IsAlphanumeric(char c) => c is >= 'a' and <= 'z' or >= '0' and <= '9';
 
     /// <summary>
     /// The kubelet's <c>/stats/summary</c>, cut to what the server uses: per pod its volumes' and containers' bytes. TLS
@@ -386,7 +396,9 @@ internal static class NodeRequest
             }
 
             using var reader = new StreamReader(stream, Encoding.UTF8);
-            answer = JsonNode.Parse(await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) ?? "{}") as JsonObject ?? [];
+            answer = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { Length: > 0 } line
+                ? JsonNode.Parse(line) as JsonObject ?? new JsonObject { ["error"] = $"The node agent answered something else than a JSON object: {line}" }
+                : new JsonObject { ["error"] = "The node agent closed the connection without an answer." };
         }
         catch (Exception ex) when (ex is SocketException or IOException or System.Text.Json.JsonException)
         {
