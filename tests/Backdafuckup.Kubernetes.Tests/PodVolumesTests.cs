@@ -28,11 +28,13 @@ public sealed class PodVolumesTests
             """{ "name": "tmp", "emptyDir": {} }""",
             """{ "name": "queue", "emptyDir": {} }""");
         var done = Pod("job-xyz", "web", "Job", "job", annotations: null, """{ "name": "out", "emptyDir": {} }""");
+        var exporter = Pod("node-exporter-x", "web", "DaemonSet", "node-exporter", annotations: null, """{ "name": "proc", "hostPath": { "path": "/proc" } }""");
+        exporter.Spec.Containers[0].VolumeMounts = [new V1VolumeMount { Name = "proc", MountPath = "/host/proc", ReadOnlyProperty = true }];
         done.Status.Phase = "Succeeded";
         var istio = KubernetesPlatformSet.Of(["istio"]);
 
         // Without the job's switch only the annotated volume is asked for; the platform's sidecar volume is Istio's.
-        var some = PodVolumes.Find([web, worker, done], istio, all: false, usage: null).ToDictionary(v => $"{v.Pod}/{v.Volume}");
+        var some = PodVolumes.Find([web, worker, done, exporter], istio, all: false, usage: null).ToDictionary(v => $"{v.Pod}/{v.Volume}");
         Assert.Equal(["web-7d9f-abc12/cache", "web-7d9f-abc12/istio-data", "web-7d9f-abc12/node-logs", "web-7d9f-abc12/scratch", "web-7d9f-abc12/shared", "worker-0/queue", "worker-0/tmp"],
             some.Keys.Order(StringComparer.Ordinal));
         var cache = some["web-7d9f-abc12/cache"];
@@ -72,16 +74,16 @@ public sealed class PodVolumesTests
         var usage = new KubernetesUsage(
             "Prometheus https://prometheus.example",
             new Dictionary<(string, string, string), long> { [("web", "web-1", "cache")] = 120L << 20, [("web", "web-1", "tmp")] = 2L << 20 },
-            new Dictionary<(string, string, string), long> { [("web", "web-1", "nginx")] = 150L << 20, [("web", "web-2", "nginx")] = 50L << 20 },
+            new Dictionary<(string, string, string), long> { [("web", "web-1", "nginx")] = 150L << 20, [("web", "web-2", "nginx")] = 50L << 20, [("web", "web-1", "exporter")] = 0 },
             new Dictionary<(string, string), long>(),
-            new Dictionary<(string, string, string), double> { [("web", "web-1", "exporter")] = 2048 },
+            new Dictionary<(string, string, string), double> { [("web", "web-1", "exporter")] = 2048, [("web", "web-2", "nginx")] = 0 },
             ["Prometheus https://prometheus.example refused the query for PVCs (400 BadRequest): parse error."]);
 
         var volumes = PodVolumes.Find([web, web2], KubernetesPlatformSet.Base, all: false, usage);
         var writes = PodVolumes.Writes([web, web2], usage);
         Assert.Equal(120L << 20, volumes.Single(v => v.Volume == "cache").UsedBytes);
         Assert.Null(volumes.Single(v => v.Pod == "web-2").UsedBytes);
-        Assert.Equal([("web-1", "nginx", 150L << 20, (double?)null), ("web-1", "exporter", (long?)null, 2048.0), ("web-2", "nginx", 50L << 20, null)],
+        Assert.Equal([("web-1", "nginx", 150L << 20, (double?)null), ("web-1", "exporter", (long?)0, 2048.0), ("web-2", "nginx", 50L << 20, 0.0)],
             writes.Select(w => (w.Pod, w.Container, w.LayerBytes, w.WriteBytesPerSecond)));
 
         var log = new Lines();
@@ -89,7 +91,7 @@ public sealed class PodVolumesTests
         Assert.Contains("Warning: Pod volumes asked for, not backed up: Deployment web/cache (emptyDir, 120.0 MB, by its annotation) – reading pod volumes needs the node agent, which the cluster does not have (cluster rke2-test).", log.All);
         Assert.Contains("Info: Pod volumes without a PVC, not backed up (not asked for: the job's switch for pod volumes, or the pod annotation backup.velero.io/backup-volumes): Deployment web/tmp (emptyDir, 2 pods, 2.0 MB).", log.All);
         Assert.Contains("Warning: Containers hold 200.0 MB in their own file systems, which no backup reads: Deployment web/nginx 200.0 MB in 2 pods. Data worth keeping belongs in a PVC.", log.All);
-        Assert.Contains("Info: Usage numbers of web from Prometheus https://prometheus.example: 2 pod volume(s), 2 container file system(s), 0 PVC(s), 1 write rate(s).", log.All);
+        Assert.Contains("Info: Usage numbers of web from Prometheus https://prometheus.example: 2 pod volume(s), 3 container file system(s), 0 PVC(s), 2 write rate(s).", log.All);
         Assert.Contains("Warning: Usage numbers of web: Prometheus https://prometheus.example refused the query for PVCs (400 BadRequest): parse error.", log.All);
 
         // Nothing asked for: no warning about it; without numbers, sizes are unknown.

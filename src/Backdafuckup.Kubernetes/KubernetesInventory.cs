@@ -175,7 +175,7 @@ internal static class KubernetesInventory
             writes.AddRange(PodVolumes.Writes(group, usage).Select(w => (group.Key, w)));
         }
 
-        items.AddRange(PodVolumeItems(podVolumes, writes));
+        items.AddRange(PodVolumeItems(podVolumes, writes, selection.Set));
 
         foreach (var ns in namespaces.Items)
         {
@@ -333,7 +333,7 @@ internal static class KubernetesInventory
     /// </summary>
     private static IEnumerable<InventoryItem> PodVolumeItems(
         IReadOnlyList<(string Namespace, Core.Repository.KubernetesPodVolumeRecord Volume)> volumes,
-        IReadOnlyList<(string Namespace, Core.Repository.KubernetesContainerWriteRecord Write)> writes)
+        IReadOnlyList<(string Namespace, Core.Repository.KubernetesContainerWriteRecord Write)> writes, KubernetesPlatformSet platforms)
     {
         foreach (var group in volumes.GroupBy(v => (v.Namespace, v.Volume.Workload, v.Volume.Volume)))
         {
@@ -368,6 +368,7 @@ internal static class KubernetesInventory
                     [KubernetesInventoryProperties.Pods] = group.Count().ToString(CultureInfo.InvariantCulture),
                     [KubernetesInventoryProperties.UsedBytes] = layers.Count == 0 ? string.Empty : layers.Sum().ToString(CultureInfo.InvariantCulture),
                     [KubernetesInventoryProperties.WriteBytesPerSecond] = rates.Count == 0 ? string.Empty : rates.Sum().ToString("0.###", CultureInfo.InvariantCulture),
+                    [KubernetesInventoryProperties.Platform] = platforms.NamespaceOwner(group.Key.Namespace)?.Name ?? string.Empty,
                     [KubernetesInventoryProperties.Reason] = "a container's own file system: no backup reads it",
                 });
         }

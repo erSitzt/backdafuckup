@@ -76,6 +76,11 @@ public static class PodVolumes
                 }
 
                 var (kind, source, limit) = classified;
+                if (kind == PodVolumeKinds.HostPath && OnlyRead(pod, volume.Name))
+                {
+                    continue; // The node's files for an agent to look at (/proc, /sys, …), not data the pod writes.
+                }
+
                 var platform = platforms.PodVolumeOf(volume.Name) ?? owner;
                 var optIn = named.Contains(volume.Name) ? PodVolumeOptIns.Annotation
                     : all && !excluded.Contains(volume.Name) && platform is null && kind != PodVolumeKinds.HostPath ? PodVolumeOptIns.Job
@@ -99,7 +104,10 @@ public static class PodVolumes
         return result;
     }
 
-    /// <summary>The running containers with what the usage numbers say about their own file systems; empty without numbers.</summary>
+    /// <summary>
+    /// The running containers that, by the usage numbers, hold data in their own file systems or write to local disks;
+    /// empty without numbers.
+    /// </summary>
     public static IReadOnlyList<KubernetesContainerWriteRecord> Writes(IEnumerable<V1Pod> pods, KubernetesUsage? usage)
     {
         ArgumentNullException.ThrowIfNull(pods);
@@ -117,7 +125,7 @@ public static class PodVolumes
                 var key = (ns, pod.Metadata.Name, container.Name);
                 long? layer = usage.ContainerLayers.TryGetValue(key, out var bytes) ? bytes : null;
                 double? rate = usage.ContainerWrites.TryGetValue(key, out var perSecond) ? perSecond : null;
-                if (layer is not null || rate is not null)
+                if (layer is > 0 || rate is > 0)
                 {
                     result.Add(new KubernetesContainerWriteRecord(pod.Metadata.Name, WorkloadOf(pod), container.Name, layer, rate));
                 }
@@ -245,6 +253,13 @@ public static class PodVolumes
         >= 1L << 20 => string.Create(CultureInfo.InvariantCulture, $"{bytes / (double)(1L << 20):0.0} MB"),
         _ => string.Create(CultureInfo.InvariantCulture, $"{bytes / 1024.0:0.0} KB"),
     };
+
+    /// <summary>Whether every container that mounts the volume mounts it read-only.</summary>
+    private static bool OnlyRead(V1Pod pod, string volume)
+    {
+        var mounts = (pod.Spec.Containers ?? []).Concat(pod.Spec.InitContainers ?? []).SelectMany(c => c.VolumeMounts ?? []).Where(m => m.Name == volume).ToList();
+        return mounts.Count > 0 && mounts.All(m => m.ReadOnlyProperty == true);
+    }
 
     private static bool IsRunning(V1Pod pod) => pod.Status?.Phase == "Running" && pod.Metadata.DeletionTimestamp is null;
 
