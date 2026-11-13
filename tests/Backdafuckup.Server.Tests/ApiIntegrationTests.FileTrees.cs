@@ -68,9 +68,11 @@ public sealed partial class ApiIntegrationTests
         Assert.Contains("Volume data-web: 2 file(s) in 1 folder(s)", log, StringComparison.Ordinal);
         Assert.Contains("read file by file through a read-only copy of PV pv-data-web (NFS 10.26.9.9:", log, StringComparison.Ordinal);
         Assert.Contains("Volume data-web: no previous restore point of this job has it; every file is read.", log, StringComparison.Ordinal);
+        Assert.Matches(@"Volume data-web: 2 file\(s\) in 1 folder\(s\), [^\n]* in 00:00:\d\d; 293\.0 KB read; ", log);
 
         // The restore point holds the tree: the same files, the same bytes.
         var point = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!);
+        Assert.Equal("Full", point.Kind);
         var store = await _factory.Services.GetRequiredService<RepositoryManager>().GetAsync(repository.Id, Ct);
         await using (var reader = await store.OpenRestorePointAsync(point.Id, Ct))
         {
@@ -154,6 +156,7 @@ public sealed partial class ApiIntegrationTests
         Assert.Contains("(2 file(s), 293.0 KB); files unchanged since then are not read again.", againLog, StringComparison.Ordinal);
         Assert.Contains("1 file(s) unchanged since the previous run (293.0 KB not read again), 0.0 KB read", againLog, StringComparison.Ordinal);
         var next = (await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!.Single(p => p.Id != point.Id);
+        Assert.Equal("Incremental", next.Kind);
         await using (var reader = await store.OpenRestorePointAsync(next.Id, Ct))
         {
             var tree = Assert.Single(reader.Manifest.FileTrees);

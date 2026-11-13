@@ -512,7 +512,11 @@ internal sealed class VmBackupTask(
             }
 
             var metadata = await writer.WriteBlobAsync("vm-metadata", backup.Metadata.Format, new MemoryStream(backup.Metadata.Content), cancellationToken).ConfigureAwait(false);
-            var kind = manifestDisks.All(d => d.Stats.Mode == DiskBackupMode.Cbt) && manifestDisks.Count > 0 ? RestorePointKind.Incremental : RestorePointKind.Full;
+            // Incremental when every volume was read as its changes: disks by change tracking, file trees against the base's tree.
+            var kind = manifestDisks.Count + fileTrees.Count > 0
+                && manifestDisks.All(d => d.Stats.Mode == DiskBackupMode.Cbt)
+                && fileTrees.All(t => t.BaseRestorePointId is not null)
+                ? RestorePointKind.Incremental : RestorePointKind.Full;
             var manifest = new RestorePointManifest
             {
                 RestorePointId = restorePointId,
@@ -837,11 +841,13 @@ internal sealed class VmBackupTask(
                 _transferEnded = time.GetUtcNow();
             }
 
-            var unchanged = previous is null
-                ? string.Empty
-                : $"; {stats.UnchangedFiles:N0} file(s) unchanged since the previous run ({Format(stats.UnchangedBytes)} not read again), {Format(stats.ReadBytes)} read";
+            var read = previous is null
+                ? $"{Format(stats.ReadBytes)} read"
+                : stats.UnchangedFiles == 0
+                    ? $"no file unchanged since the previous run, {Format(stats.ReadBytes)} read"
+                    : $"{stats.UnchangedFiles:N0} file(s) unchanged since the previous run ({Format(stats.UnchangedBytes)} not read again), {Format(stats.ReadBytes)} read";
             _log.Info($"Volume {tree.Name}: {stats.Files:N0} file(s) in {stats.Directories:N0} folder(s), {Format(stats.Bytes)}, read file by file through {reader.TransportName} " +
-                      $"in {elapsed:hh\\:mm\\:ss}{unchanged}; {Format(stats.NewStoredBytes)} new in the repository.", $"tree-{tree.Key}");
+                      $"in {elapsed:hh\\:mm\\:ss}; {read}; {Format(stats.NewStoredBytes)} new in the repository.", $"tree-{tree.Key}");
             if (stats.ChangedWhileRead > 0)
             {
                 _log.Warning($"Volume {tree.Name}: {stats.ChangedWhileRead} file(s) changed while they were read; their copies may be torn (the next run reads them again).");
