@@ -63,7 +63,18 @@ public sealed class NodeAgents
             throw new KubernetesOperationException($"The node agent has no running pod on node {node} of cluster {_cluster}.");
         }
 
-        var (code, output) = await _executor.ExecAsync(KubernetesSetup.NodeNamespace, pod, "node", Command, request.ToJsonString(), cancellationToken).ConfigureAwait(false);
+        int code;
+        string output;
+        try
+        {
+            (code, output) = await _executor.ExecAsync(KubernetesSetup.NodeNamespace, pod, "node", Command, request.ToJsonString(), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is System.Net.WebSockets.WebSocketException or HttpOperationException or HttpRequestException or IOException)
+        {
+            throw new KubernetesOperationException(
+                $"The node agent {KubernetesSetup.NodeNamespace}/{pod} on node {node} of cluster {_cluster} cannot be reached by exec: {ex.Message}" +
+                (ex.Message.Contains("403", StringComparison.Ordinal) ? " (the ServiceAccount may not get and create pods/exec: apply the current setup manifest)" : string.Empty), ex);
+        }
         var line = output.Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.StartsWith('{'));
         JsonObject? answer = null;
         try

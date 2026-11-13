@@ -247,7 +247,7 @@ public sealed class KubernetesSetupTests
         Assert.Equal(("kubernetes.io/service-account-token", "backdafuckup"), (token.Type, token.Metadata.Annotations["kubernetes.io/service-account.name"]));
         var backup = Assert.IsType<k8s.Models.V1ClusterRole>(objects[3]);
         Assert.Contains(backup.Rules, r => r.Resources.Contains("volumesnapshotcontents") && r.Verbs.Contains("create"));
-        Assert.Contains(backup.Rules, r => r.Resources.Contains("pods/exec"));
+        Assert.Contains(backup.Rules, r => r.Resources.Contains("pods/exec") && r.Verbs.Contains("create") && r.Verbs.Contains("get"));
 
         // The restore may bind and escalate roles: RoleBindings to admin or edit, and the ClusterRoles of a whole-cluster restore.
         var restore = Assert.IsType<k8s.Models.V1ClusterRole>(objects[7]);

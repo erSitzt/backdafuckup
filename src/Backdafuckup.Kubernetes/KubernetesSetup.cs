@@ -426,9 +426,10 @@ public static class KubernetesSetup
         {{ReadByNameRules()}}  - apiGroups: [snapshot.storage.k8s.io]
             resources: [volumesnapshots, volumesnapshotcontents]
             verbs: [create, delete, patch, update]
+          # Hooks and the node agent: exec over a WebSocket is a GET the API server authorizes as get (and create).
           - apiGroups: [""]
             resources: [pods/exec]
-            verbs: [create]
+            verbs: [create, get]
           - apiGroups: [""]
             resources: [persistentvolumes]
             verbs: [create, delete, patch, update]
