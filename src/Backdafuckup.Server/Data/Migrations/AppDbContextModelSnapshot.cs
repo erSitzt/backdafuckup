@@ -327,6 +327,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(16)")
                         .HasColumnName("guest_processing_mode");
 
+                    b.Property<bool>("KubernetesPodVolumes")
+                        .HasColumnType("boolean")
+                        .HasColumnName("kubernetes_pod_volumes");
+
                     b.Property<string>("LastResult")
                         .HasMaxLength(16)
                         .HasColumnType("character varying(16)")
@@ -705,6 +709,14 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)")
                         .HasColumnName("trust_mode");
+
+                    b.Property<string>("UsageSecret")
+                        .HasColumnType("text")
+                        .HasColumnName("usage_secret");
+
+                    b.Property<string>("UsageSource")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("usage_source");
 
                     b.Property<uint>("Version")
                         .IsConcurrencyToken()

@@ -97,6 +97,13 @@ public sealed class KubernetesPlatformSet
     /// <summary>A label or annotation that means something only in a cluster the platform manages (removed in another cluster).</summary>
     public bool IsStripped(string key) => Profiles.Any(p => p.Strip.Any(s => s.IsMatch(key)));
 
+    /// <summary>The platform whose namespace this is (by the patterns <c>@platform</c> leaves out), or null.</summary>
+    public KubernetesPlatformProfile? NamespaceOwner(string ns) =>
+        Profiles.FirstOrDefault(p => p.Namespaces.Any(pattern => new Glob(pattern, $"platform {p.Id}, namespaces").IsMatch(ns)));
+
+    /// <summary>The platform that puts a pod volume of this name into pods (a sidecar's), or null.</summary>
+    public KubernetesPlatformProfile? PodVolumeOf(string volume) => Profiles.FirstOrDefault(p => p.PodVolumes.Any(v => v.IsMatch(volume)));
+
     public override string ToString() => string.Join(", ", Ids);
 }
 

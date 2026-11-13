@@ -322,7 +322,10 @@ public static class OperationEndpoints
                 space.KubernetesVersion,
                 [.. space.Volumes.Select(v => new KubernetesVolumeDto(v.Claim, v.DataPath, v.Reason, v.StorageClass, v.SizeBytes, v.VolumeMode))],
                 [.. Backdafuckup.Kubernetes.KubernetesRestorePoints.Objects(content).Select(o => new KubernetesObjectDto(o.ApiVersion, o.Kind, o.Name, o.Namespace, o.Controlled, o.App, o.Needs))],
-                [.. space.Hooks.Select(h => new KubernetesHookDto(h.Phase, h.Pod, h.Container, h.Command, h.ExitCode, h.Error, h.Seconds))]));
+                [.. space.Hooks.Select(h => new KubernetesHookDto(h.Phase, h.Pod, h.Container, h.Command, h.ExitCode, h.Error, h.Seconds))],
+                [.. space.PodVolumes.Select(v => new KubernetesPodVolumeDto(v.Pod, v.Workload, v.Volume, v.Kind, v.Source, v.OptIn, v.Platform, v.UsedBytes, v.TreeKey is not null, v.Reason))],
+                [.. space.ContainerWrites.Select(w => new KubernetesContainerWriteDto(w.Pod, w.Workload, w.Container, w.LayerBytes, w.WriteBytesPerSecond))],
+                space.UsageSource));
         }).WithDescription("A restore point of a Kubernetes namespace: its volumes (with or without data), its objects (with their app and, for workloads, what a restore of them brings along) and its hooks.");
 
         points.MapGet("/{id:guid}/kubernetes/compare", async (Guid id, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, TimeProvider time, CancellationToken ct) =>
@@ -654,6 +657,7 @@ public static class OperationEndpoints
         job.NbdConnectionsPerDisk = Math.Clamp(request.NbdConnectionsPerDisk, 1, 12);
         job.MaxParallelDisks = Math.Clamp(request.MaxParallelDisks, 1, 8);
         job.GuestProcessing = request.GuestProcessing;
+        job.KubernetesPodVolumes = request.KubernetesPodVolumes;
         job.GuestFailurePolicy = Enum.TryParse<GuestFailurePolicy>(request.GuestFailurePolicy, true, out var policy) ? policy : GuestFailurePolicy.CrashConsistentWithWarning;
         job.GuestCredentialId = request.GuestCredentialId;
         job.GuestProcessingMode = Enum.TryParse<GuestProcessingMode>(request.GuestProcessingMode, true, out var mode) && !int.TryParse(request.GuestProcessingMode, out _) ? mode : GuestProcessingMode.Vss;

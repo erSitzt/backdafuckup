@@ -90,6 +90,12 @@ public sealed class HypervisorConnection
     /// <summary>Kubernetes: the platforms set by hand (catalog ids), used instead of the detected ones; null: detected.</summary>
     public List<string>? PlatformOverride { get; set; }
 
+    /// <summary>Kubernetes: where the cluster's usage numbers come from (a Prometheus API); null: none.</summary>
+    public Backdafuckup.Kubernetes.KubernetesUsageConfig? UsageSource { get; set; }
+
+    /// <summary>The usage source's password or bearer token, protected with ASP.NET Data Protection; never returned by the API.</summary>
+    public string? UsageSecret { get; set; }
+
     public Guid CredentialId { get; set; }
 
     public Credential Credential { get; set; } = null!;
@@ -394,6 +400,12 @@ public sealed class BackupJob
 
     /// <summary>Application-consistent backups: freeze the guest through the backdafuckup agent (VSS) for the snapshot.</summary>
     public bool GuestProcessing { get; set; }
+
+    /// <summary>
+    /// Kubernetes: back up every pod volume that is not a PVC (emptyDir and the like), not only those a pod names in
+    /// <c>backup.velero.io/backup-volumes</c>. Needs the node agent in the cluster.
+    /// </summary>
+    public bool KubernetesPodVolumes { get; set; }
 
     public GuestFailurePolicy GuestFailurePolicy { get; set; } = GuestFailurePolicy.CrashConsistentWithWarning;
 

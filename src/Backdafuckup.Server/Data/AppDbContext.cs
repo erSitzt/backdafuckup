@@ -88,6 +88,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.Version).IsRowVersion();
             ConfigureJsonList(e.Property(x => x.DetectedPlatforms));
             ConfigureJsonList(e.Property(x => x.PlatformOverride));
+            e.Property(x => x.UsageSource).HasColumnType("jsonb").HasConversion(
+                v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+                v => JsonSerializer.Deserialize<Backdafuckup.Kubernetes.KubernetesUsageConfig>(v, JsonSerializerOptions.Default));
         });
 
         builder.Entity<ConnectionHost>(e => e.HasIndex(x => new { x.ConnectionId, x.Address }).IsUnique());

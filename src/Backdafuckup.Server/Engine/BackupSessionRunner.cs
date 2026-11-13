@@ -360,7 +360,7 @@ internal sealed class VmBackupTask(
             try
             {
                 started = await hypervisor.BeginBackupAsync(
-                    new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer, metrics.ForPool(Pool), vm.WithMemory), _log, ledger, cancellationToken).ConfigureAwait(false);
+                    new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer, metrics.ForPool(Pool), vm.WithMemory, job.KubernetesPodVolumes), _log, ledger, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -448,7 +448,7 @@ internal sealed class VmBackupTask(
                 }
             }
 
-            warnings |= consistencyWarning || guest?.Warning == true;
+            warnings |= consistencyWarning || guest?.Warning == true || backup.Warned;
             ManifestBlob? guestBlob = null;
             ManifestBlob? vssBlob = null;
             ManifestBlob? sqlSnapshotBlob = null;

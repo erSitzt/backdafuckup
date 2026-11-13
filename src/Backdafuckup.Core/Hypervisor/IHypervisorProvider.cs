@@ -77,6 +77,9 @@ public interface IVmBackupSession : IAsyncDisposable
     /// <summary>A Kubernetes namespace's cluster, volumes and hooks (the backup of a namespace); null for a VM.</summary>
     Repository.KubernetesNamespaceDescriptor? Kubernetes => null;
 
+    /// <summary>Data the job asked for was not backed up (the provider logged what): the run ends with a warning.</summary>
+    bool Warned => false;
+
     /// <summary>How long <see cref="CommitAsync"/> took to remove the snapshot data; null before the commit.</summary>
     TimeSpan? ReleaseDuration => null;
 

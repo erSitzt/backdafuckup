@@ -25,6 +25,7 @@ else
             @_details.Objects.Count objects · @_details.Volumes.Count(v => KubernetesDataPaths.HasData(v.DataPath)) of @_details.Volumes.Count PVCs with data ·
             <ConsistencyChip Consistency="@_point.Consistency" Reason="@_point.ConsistencyReason" Warning="@_point.ConsistencyWarning" Hooks="true" />
         </MudText>
+        <PodDataNotice Details="_details" Class="mt-3" />
     </MudPaper>
 
     <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">

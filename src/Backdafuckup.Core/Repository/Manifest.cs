@@ -169,6 +169,18 @@ public sealed record KubernetesNamespaceDescriptor
     public IReadOnlyList<KubernetesHookRecord> Hooks { get; init; } = [];
 
     /// <summary>
+    /// The volumes of the namespace's running pods that are not PVCs (emptyDir, hostPath, NFS or CSI mounted directly): whether
+    /// their data was backed up, or why not, and how much there was when usage numbers were available.
+    /// </summary>
+    public IReadOnlyList<KubernetesPodVolumeRecord> PodVolumes { get; init; } = [];
+
+    /// <summary>What the running containers wrote into their own file systems (never backed up), from the usage numbers.</summary>
+    public IReadOnlyList<KubernetesContainerWriteRecord> ContainerWrites { get; init; } = [];
+
+    /// <summary>Where the usage numbers came from ("Prometheus https://…"); null: none were read.</summary>
+    public string? UsageSource { get; init; }
+
+    /// <summary>
     /// The platforms of the cluster at backup time (ids of the platform catalog): what a restore leaves out as made by them.
     /// Null in restore points from before platforms were detected.
     /// </summary>
@@ -186,6 +198,23 @@ public sealed record KubernetesVolumeRecord(
     [System.Text.Json.Serialization.JsonIgnore]
     public bool HasData => DiskKey is not null || TreeKey is not null;
 }
+
+/// <summary>A volume of a running pod that is not a PVC.</summary>
+/// <param name="Workload">The pod's controller ("Deployment web"), or "Pod name" without one.</param>
+/// <param name="Kind"><c>emptyDir</c>, <c>emptyDir-memory</c> (tmpfs), <c>hostPath</c>, <c>nfs</c>, <c>csi</c> or another volume type mounted directly.</param>
+/// <param name="Source">Where it lives: the hostPath's path, the NFS export, the CSI driver; null for an emptyDir.</param>
+/// <param name="OptIn">Why its data was asked for: <c>job</c> (the job's switch), <c>annotation</c> (<c>backup.velero.io/backup-volumes</c>); null: not asked for.</param>
+/// <param name="Platform">The platform that puts it into pods (a sidecar's volume, not the workload's data), or null.</param>
+/// <param name="UsedBytes">Its data from the usage numbers; null: not known.</param>
+/// <param name="SizeLimitBytes">An emptyDir's sizeLimit; null: none.</param>
+/// <param name="TreeKey">The file tree with its files; null: not backed up (see <paramref name="Reason"/>).</param>
+public sealed record KubernetesPodVolumeRecord(
+    string Pod, string Workload, string Volume, string Kind, string? Source, string? OptIn, string? Platform, long? UsedBytes, long? SizeLimitBytes, string? TreeKey, string? Reason);
+
+/// <summary>A running container and what it wrote into its own file system (its writable layer), from the usage numbers.</summary>
+/// <param name="LayerBytes">The data in its writable layer; null: not known.</param>
+/// <param name="WriteBytesPerSecond">How fast it writes to local disks over the last hour (its writable layer, emptyDirs, block PVCs); null: not known.</param>
+public sealed record KubernetesContainerWriteRecord(string Pod, string Workload, string Container, long? LayerBytes, double? WriteBytesPerSecond);
 
 /// <param name="Phase"><c>pre</c> (before the snapshots) or <c>post</c>.</param>
 public sealed record KubernetesHookRecord(string Phase, string Pod, string Container, string Command, int? ExitCode, string? Error, double Seconds);

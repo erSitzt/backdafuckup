@@ -111,6 +111,9 @@ public sealed class KubernetesPlatformProfile
 
     internal IReadOnlyList<Glob> Strip { get; init; } = [];
 
+    /// <summary>Volumes the platform puts into pods (a sidecar's emptyDirs): never backed up or warned about as pod data.</summary>
+    internal IReadOnlyList<Glob> PodVolumes { get; init; } = [];
+
     public string? KubeletRootDir { get; init; }
 
     public string? ContainerRuntimeRoot { get; init; }
@@ -157,6 +160,7 @@ public sealed class KubernetesPlatformProfile
             CrdGroups = [.. (d.CrdGroups ?? []).Select(g => new Glob(g, $"{where}, crdGroups"))],
             Made = [.. (d.Made ?? []).Select(m => PlatformObjectMatcher.From(m, where))],
             Strip = [.. (d.Strip ?? []).Select(s => new Glob(s, $"{where}, strip"))],
+            PodVolumes = [.. (d.PodVolumes ?? []).Select(v => new Glob(v, $"{where}, podVolumes"))],
             KubeletRootDir = d.KubeletRootDir,
             ContainerRuntimeRoot = d.ContainerRuntimeRoot,
         };
@@ -365,6 +369,7 @@ internal sealed record PlatformProfileData(
     IReadOnlyList<string>? CrdGroups = null,
     IReadOnlyList<PlatformMatcherData>? Made = null,
     IReadOnlyList<string>? Strip = null,
+    IReadOnlyList<string>? PodVolumes = null,
     string? KubeletRootDir = null,
     string? ContainerRuntimeRoot = null);
 

@@ -28,7 +28,7 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
     private KubernetesNamespaceBackup(
         VolumeSnapshotFlow flow, IMoverChannels? channels, MoverDeployment? mover, string run, VmDescriptor vm, IReadOnlyList<SnapshotDisk> disks,
         Dictionary<string, TakenSnapshot> snapshots, VmMetadataBlob metadata, GuestFreezeResult? freeze, SnapshotFacts? facts, KubernetesNamespaceDescriptor descriptor,
-        Dictionary<string, (NamespaceVolume Volume, string? Node)> files, DeferredHooks? postHooks)
+        Dictionary<string, (NamespaceVolume Volume, string? Node)> files, DeferredHooks? postHooks, bool warned, IReadOnlyDictionary<string, long> claimBytes)
     {
         _flow = flow;
         _channels = channels;
@@ -43,9 +43,16 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         GuestFreeze = freeze;
         Snapshot = facts;
         Kubernetes = descriptor;
+        Warned = warned;
+
+        // A volume's files are estimated by what its PVC holds (the usage numbers), else by its size.
         FileTrees = [.. files.Values.Select(f => new FileTreeSource(
-            f.Volume.Claim, f.Volume.Claim, "pvc", "shadow-pv", f.Volume.SizeBytes, $"PVC {descriptor.Namespace}/{f.Volume.Claim} (cluster {descriptor.Cluster})"))];
+            f.Volume.Claim, f.Volume.Claim, "pvc", "shadow-pv", claimBytes.TryGetValue(f.Volume.Claim, out var used) ? used : f.Volume.SizeBytes,
+            $"PVC {descriptor.Namespace}/{f.Volume.Claim} (cluster {descriptor.Cluster})"))];
     }
+
+    /// <summary>Pod volumes the job or a pod's annotation asked for were not backed up.</summary>
+    public bool Warned { get; }
 
     public IReadOnlyList<FileTreeSource> FileTrees { get; }
 
@@ -79,7 +86,7 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
 
     public static async Task<KubernetesNamespaceBackup> StartAsync(
         IKubernetes client, ConnectionSettings settings, string kubernetesVersion, KubernetesPlatformSet platforms, VmBackupRequest request, IOperationLog log, IArtifactLedger ledger,
-        IMoverChannels? channels, IMoverImageSource? images, IPodExecutor executor, KubernetesTimings timings, CancellationToken cancellationToken)
+        IMoverChannels? channels, IMoverImageSource? images, IPodExecutor executor, KubernetesTimings timings, KubernetesUsage? usage, CancellationToken cancellationToken)
     {
         var cluster = settings.ClusterName();
         var ns = request.VmId;
@@ -124,6 +131,13 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
         {
             log.Info($"PVC {volume.Claim}: objects only, not its data – {volume.Reason}.");
         }
+
+        // Pod volumes that are not PVCs and what containers wrote into their own file systems: named, with sizes when known.
+        var podVolumes = PodVolumes.Find(pods, platforms, request.PodVolumes, usage);
+        var writes = PodVolumes.Writes(pods, usage);
+        var warned = PodVolumes.Report(ns, cluster, podVolumes, writes, usage, log);
+        var claimBytes = volumes.Select(v => (v.Claim, Used: v.UsedBytes(usage, ns))).Where(v => v.Used is not null)
+            .ToDictionary(v => v.Claim, v => v.Used!.Value, StringComparer.Ordinal);
 
         // The mover image first: without it no volume can be read, so nothing is snapshotted in vain.
         MoverDeployment? mover = null;
@@ -230,6 +244,9 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
                 files.ContainsKey(v.Claim) ? v.Claim : null) with { DataPath = files.ContainsKey(v.Claim) || v.DataPath != DataPaths.Files ? v.DataPath : DataPaths.ObjectsOnly })],
             Hooks = hookRecords,
             Platforms = platforms.Ids,
+            PodVolumes = podVolumes,
+            ContainerWrites = writes,
+            UsageSource = usage?.Source,
         };
         var vm = new VmDescriptor
         {
@@ -238,7 +255,7 @@ internal sealed class KubernetesNamespaceBackup : IVmBackupSession
             Description = $"Kubernetes namespace {ns} in cluster {cluster}: {objects.Count} objects, {snapshots.Count + files.Count} of {volumes.Count} PVCs with data.",
         };
         return new KubernetesNamespaceBackup(
-            flow, channels, mover, run, vm, disks, snapshots, new VmMetadataBlob(KubernetesResources.Format, objects.Content), freeze, facts, descriptor, files, deferred);
+            flow, channels, mover, run, vm, disks, snapshots, new VmMetadataBlob(KubernetesResources.Format, objects.Content), freeze, facts, descriptor, files, deferred, warned, claimBytes);
     }
 
     public Task<ChangedExtents> GetChangedExtentsAsync(SnapshotDisk disk, ChangeToken? since, IOperationLog log, CancellationToken cancellationToken) =>

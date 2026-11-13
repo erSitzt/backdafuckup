@@ -209,7 +209,8 @@
       "detect": [ { "apiGroup": "networking.istio.io" } ],
       "made": [
         { "kinds": [ "ConfigMap" ], "names": [ "istio-ca-root-cert" ], "always": true }
-      ]
+      ],
+      "podVolumes": [ "istio-envoy", "istio-data", "istio-podinfo", "istio-token", "istiod-ca-cert", "workload-socket", "credential-socket", "workload-certs" ]
     },
     {
       "id": "antrea",

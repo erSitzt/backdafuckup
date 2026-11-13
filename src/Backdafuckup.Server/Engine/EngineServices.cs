@@ -498,7 +498,8 @@ public static class EngineServiceCollectionExtensions
         if (!services.Any(d => d.ServiceType == typeof(IHypervisorProvider) && d.ImplementationInstance is IHypervisorProvider { Kind: HypervisorKind.Kubernetes }))
         {
             services.AddSingleton<IHypervisorProvider>(sp => new Backdafuckup.Kubernetes.KubernetesProvider(
-                channels: sp.GetRequiredService<Backdafuckup.Core.DataMover.IMoverChannels>(), images: sp.GetRequiredService<Movers.MoverRegistry>()));
+                channels: sp.GetRequiredService<Backdafuckup.Core.DataMover.IMoverChannels>(), images: sp.GetRequiredService<Movers.MoverRegistry>(),
+                usage: sp.GetRequiredService<Clusters.KubernetesUsageSources>()));
         }
 
         services.Configure<Agents.AgentOptions>(configuration.GetSection("Agent"));
@@ -508,6 +509,8 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Backdafuckup.Core.DataMover.IMoverChannels>(sp => sp.GetRequiredService<Movers.MoverChannels>());
         services.AddSingleton<Movers.MoverImage>();
         services.TryAddSingleton(new Movers.RegistryTransport());
+        services.TryAddSingleton(new Clusters.KubernetesUsageTransport());
+        services.AddSingleton<Clusters.KubernetesUsageSources>();
         services.AddSingleton<Movers.MoverRegistry>();
         services.AddSingleton<Agents.AgentService>();
         services.AddSingleton<Agents.AgentPackages>();

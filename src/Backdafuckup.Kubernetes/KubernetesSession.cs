@@ -44,7 +44,8 @@ public interface IKubernetesAgentUpdater
 }
 
 internal sealed class KubernetesSession(
-    IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
+    IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null,
+    IKubernetesUsageSources? usage = null)
     : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater, IKubernetesNamespaceSelector, IKubernetesRestorePlanner, IKubernetesClusterRestorer, IKubernetesPlatforms
 {
     private PlatformInfo? _platform;
@@ -80,7 +81,8 @@ internal sealed class KubernetesSession(
 
     public async Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken)
     {
-        var inventory = await KubernetesInventory.GetAsync(client, settings, cancellationToken).ConfigureAwait(false);
+        var numbers = await ReadUsageAsync(null, null, cancellationToken).ConfigureAwait(false);
+        var inventory = await KubernetesInventory.GetAsync(client, settings, numbers, cancellationToken).ConfigureAwait(false);
         _platform = inventory.Platform;
         return inventory;
     }
@@ -113,9 +115,36 @@ internal sealed class KubernetesSession(
             return await KubernetesClusterBackup.StartAsync(client, settings, _platform.ProductVersion, platforms, request, log, cancellationToken).ConfigureAwait(false);
         }
 
+        var numbers = await ReadUsageAsync(request.VmId, log, cancellationToken).ConfigureAwait(false);
         return await KubernetesNamespaceBackup.StartAsync(
-            client, settings, _platform.ProductVersion, platforms, request, log, ledger, channels, images, executor ?? new ClientPodExecutor(client), timings ?? new KubernetesTimings(), cancellationToken)
-            .ConfigureAwait(false);
+            client, settings, _platform.ProductVersion, platforms, request, log, ledger, channels, images, executor ?? new ClientPodExecutor(client), timings ?? new KubernetesTimings(),
+            numbers, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The usage numbers of a namespace (or all) from the source configured for the cluster; null without one, or when it
+    /// cannot be read (a warning in the log: the backup goes on without sizes).
+    /// </summary>
+    private async Task<KubernetesUsage?> ReadUsageAsync(string? ns, Core.Operations.IOperationLog? log, CancellationToken cancellationToken)
+    {
+        if (usage is null || await usage.ForAsync(settings.ConnectionId, cancellationToken).ConfigureAwait(false) is not { } source)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await source.ReadAsync(ns, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Text.Json.JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            log?.Warning($"Usage numbers from {source.Name} cannot be read ({ex.Message}); sizes of what is not backed up are unknown.");
+            return null;
+        }
+        finally
+        {
+            (source as IDisposable)?.Dispose();
+        }
     }
 
     public async Task<IReadOnlyList<System.Text.Json.Nodes.JsonObject>> ReadObjectsAsync(string ns, CancellationToken cancellationToken)

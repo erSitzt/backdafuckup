@@ -105,7 +105,33 @@ public sealed record ConnectionDto(
     bool AllowInsecureNbd,
     IReadOnlyList<ConnectionHostDto> Hosts,
     ConnectionAgentDto? Agent = null,
-    KubernetesPlatformsDto? Platforms = null);
+    KubernetesPlatformsDto? Platforms = null,
+    KubernetesUsageSourceDto? UsageSource = null);
+
+/// <summary>
+/// Where a Kubernetes cluster's usage numbers come from: a Prometheus API with the cluster's storage metrics. Queries left
+/// null use <see cref="KubernetesUsageQueries"/>; <c>$namespace</c> and <c>$filter</c> are filled in.
+/// </summary>
+/// <param name="Username">Basic authentication with the secret; without one the secret is a bearer token.</param>
+/// <param name="HasSecret">A password or token is stored (never returned).</param>
+/// <param name="CaPem">Trust this CA instead of the system's.</param>
+/// <param name="PinnedSpkiSha256">Trust exactly this certificate (trusted after a test showed it).</param>
+/// <param name="Filter">Label matchers for a Prometheus of several clusters: <c>cluster="prod"</c>.</param>
+public sealed record KubernetesUsageSourceDto(
+    string Url, string? Username, bool HasSecret, string? CaPem, string? PinnedSpkiSha256, string? Filter,
+    string? PodVolumesQuery, string? ContainerLayersQuery, string? ClaimsQuery, string? ContainerWritesQuery);
+
+/// <summary>Saves (or, with <see cref="Test"/>, only tests) a cluster's usage source.</summary>
+/// <param name="Secret">null: keep the stored one; empty: remove it.</param>
+public sealed record SaveKubernetesUsageSourceDto(
+    string Url, string? Username = null, string? Secret = null, string? CaPem = null, string? PinnedSpkiSha256 = null, string? Filter = null,
+    string? PodVolumesQuery = null, string? ContainerLayersQuery = null, string? ClaimsQuery = null, string? ContainerWritesQuery = null);
+
+/// <summary>What a test of a usage source found: the series each query gave, what failed, and a certificate to trust.</summary>
+public sealed record KubernetesUsageTestDto(int PodVolumes, int ContainerLayers, int Claims, int ContainerWrites, IReadOnlyList<string> Problems, CertificateDto? Untrusted);
+
+/// <summary>The default queries of a usage source (for the console to show).</summary>
+public sealed record KubernetesUsageQueries(string PodVolumes, string ContainerLayers, string Claims, string ContainerWrites);
 
 /// <summary>
 /// A Kubernetes cluster's platforms (spec 2026-11-12-1952-kubernetes-platform-profiles): what was detected (with evidence),
@@ -200,7 +226,8 @@ public sealed record JobDto(
     string GuestProcessingMode = GuestProcessingModes.Vss,
     Guid? SqlCredentialId = null,
     bool SqlSnapshotCopyOnly = false,
-    SqlBackupSettingsDto? SqlBackup = null);
+    SqlBackupSettingsDto? SqlBackup = null,
+    bool KubernetesPodVolumes = false);
 
 /// <summary>
 /// SQL Server backups the agent runs in the job's VMs (the log chain): transaction log backups every
@@ -268,6 +295,12 @@ public sealed record SaveJobDto
 
     /// <summary>SQL Server backups in the VMs (log chain); null: off.</summary>
     public SqlBackupSettingsDto? SqlBackup { get; init; }
+
+    /// <summary>
+    /// Kubernetes: back up every pod volume that is not a PVC (emptyDir and the like), not only those a pod names in
+    /// <c>backup.velero.io/backup-volumes</c>; needs the node agent.
+    /// </summary>
+    public bool KubernetesPodVolumes { get; init; }
 
     public int RetryCount { get; init; } = 2;
 

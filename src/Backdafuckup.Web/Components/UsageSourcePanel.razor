@@ -1,0 +1,242 @@
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+
+@* A Kubernetes cluster's usage numbers: a Prometheus API with its storage metrics (the ephemeral-storage-exporter for
+   emptyDirs and containers' writable layers, the kubelet's kubelet_volume_stats for PVCs, cAdvisor's write rates). Backups
+   and the inventory name what is not backed up with these sizes. *@
+<div class="pa-4">
+    <MudText Typo="Typo.body2" Class="mb-3">
+        Sizes of what backups do not hold – pod volumes without a PVC, what containers write into their own file systems – and of the PVCs come from a
+        Prometheus that has the cluster's storage metrics: the <span class="mono">ephemeral-storage-exporter</span> for emptyDirs and writable layers,
+        the kubelet's <span class="mono">kubelet_volume_stats</span> for PVCs, cAdvisor's <span class="mono">container_fs_writes_bytes_total</span> for write rates.
+        This server queries it at each scan and backup; it needs to reach its address.
+    </MudText>
+
+    @if (Cluster.UsageSource is { } current && !_editing)
+    {
+        <dl class="summary-list mb-3">
+            <dt>Prometheus</dt><dd class="mono">@current.Url</dd>
+            <dt>Sign-in</dt><dd>@(current.HasSecret ? current.Username is null ? "bearer token" : $"basic, user {current.Username}" : "none")</dd>
+            <dt>TLS</dt><dd>@(current.PinnedSpkiSha256 is not null ? "this certificate only (trusted after a test)" : current.CaPem is not null ? "issued by the CA given" : "the system's CAs")</dd>
+            @if (current.Filter is not null)
+            {
+                <dt>Label filter</dt><dd class="mono">@current.Filter</dd>
+            }
+            @if (current.PodVolumesQuery is not null || current.ContainerLayersQuery is not null || current.ClaimsQuery is not null || current.ContainerWritesQuery is not null)
+            {
+                <dt>Queries</dt><dd>changed</dd>
+            }
+        </dl>
+        <div class="d-flex gap-2">
+            <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Edit" OnClick="Edit">Change</MudButton>
+            <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.NetworkCheck" OnClick="TestCurrentAsync" Disabled="_busy">Test</MudButton>
+            <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.Delete" OnClick="RemoveAsync" Disabled="_busy">Remove</MudButton>
+        </div>
+    }
+    else if (!_editing)
+    {
+        <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">No usage numbers: backups name pod volumes and containers' file systems without their sizes.</MudAlert>
+        <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Add" OnClick="Edit">Add Prometheus</MudButton>
+    }
+    else
+    {
+        <div class="form-wide">
+            <MudTextField @bind-Value="_url" Label="Prometheus URL" Variant="Variant.Outlined" Class="mb-2"
+                          HelperText="The address of its API, without /api/v1: https://prometheus.example:9090 (Thanos, Mimir and VictoriaMetrics answer the same queries)." />
+            <div class="d-flex gap-2 mb-2">
+                <MudTextField @bind-Value="_username" Label="User (optional)" Variant="Variant.Outlined" HelperText="With a user: basic authentication; without: the secret is a bearer token." />
+                <MudTextField @bind-Value="_secret" Label="@(Cluster.UsageSource?.HasSecret == true ? "Password or token (empty: keep)" : "Password or token (optional)")" Variant="Variant.Outlined" InputType="InputType.Password" />
+            </div>
+            @if (Cluster.UsageSource?.HasSecret == true)
+            {
+                <MudCheckBox T="bool" @bind-Value="_removeSecret" Dense="true" Color="Color.Primary" Label="Remove the stored password or token" />
+            }
+            <MudTextField @bind-Value="_filter" Label="Label filter (optional)" Variant="Variant.Outlined" Class="mb-2"
+                          HelperText="For a Prometheus of several clusters: label matchers every query gets, e.g. cluster=&quot;prod&quot;." />
+            <MudTextField @bind-Value="_caPem" Label="CA certificate (optional, PEM)" Variant="Variant.Outlined" Lines="3" Class="mb-2"
+                          HelperText="Trust certificates issued by this CA instead of the system's." />
+            @if (_pin is not null)
+            {
+                <div class="cell-sub mb-2">Trusts exactly the certificate with the public key <span class="mono">@_pin</span>. <MudLink OnClick="@(() => _pin = null)">Trust by CA again</MudLink></div>
+            }
+            <MudExpansionPanels Elevation="0" Class="mb-2">
+                <MudExpansionPanel Text="Queries">
+                    <MudText Typo="Typo.caption" Class="mb-2 d-block">
+                        Empty: the default. <span class="mono">$namespace</span> becomes the namespace (a regular expression), <span class="mono">$filter</span> the label filter.
+                        Each gives an instant vector with the labels namespace (or pod_namespace), pod (pod_name) and volume (volume_name), container, or persistentvolumeclaim.
+                    </MudText>
+                    <MudTextField @bind-Value="_podVolumesQuery" Label="Pod volumes (bytes)" Placeholder="@_defaults?.PodVolumes" Variant="Variant.Outlined" Lines="2" Class="mb-2 mono" />
+                    <MudTextField @bind-Value="_layersQuery" Label="Containers' file systems (bytes)" Placeholder="@_defaults?.ContainerLayers" Variant="Variant.Outlined" Lines="2" Class="mb-2 mono" />
+                    <MudTextField @bind-Value="_claimsQuery" Label="PVCs (bytes)" Placeholder="@_defaults?.Claims" Variant="Variant.Outlined" Lines="2" Class="mb-2 mono" />
+                    <MudTextField @bind-Value="_writesQuery" Label="Write rates (bytes per second)" Placeholder="@_defaults?.ContainerWrites" Variant="Variant.Outlined" Lines="2" Class="mono" />
+                </MudExpansionPanel>
+            </MudExpansionPanels>
+        </div>
+        <div class="d-flex gap-2">
+            <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.NetworkCheck" OnClick="TestFormAsync" Disabled="_busy">Test</MudButton>
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="SaveAsync" Disabled="_busy">Save</MudButton>
+            <MudButton OnClick="@(() => { _editing = false; _test = null; })">Cancel</MudButton>
+        </div>
+    }
+
+    @if (_busy)
+    {
+        <MudProgressLinear Indeterminate="true" Class="mt-3" />
+    }
+
+    @if (_test is { } test)
+    {
+        <MudPaper Elevation="0" Outlined="true" Class="pa-3 mt-3">
+            <MudText Typo="Typo.subtitle2">Test</MudText>
+            <dl class="summary-list">
+                <dt>Pod volumes</dt><dd>@Found(test.PodVolumes, "ephemeral-storage-exporter")</dd>
+                <dt>Containers' file systems</dt><dd>@Found(test.ContainerLayers, "ephemeral-storage-exporter")</dd>
+                <dt>PVCs</dt><dd>@Found(test.Claims, "the kubelet's metrics")</dd>
+                <dt>Write rates</dt><dd>@Found(test.ContainerWrites, "cAdvisor's metrics")</dd>
+            </dl>
+            @foreach (var problem in test.Problems)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">@problem</MudAlert>
+            }
+            @if (test.Untrusted is { } certificate && _editing)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">
+                    The certificate of @certificate.HostAddress is not trusted: @certificate.Subject, issued by @certificate.Issuer, valid until @Fmt.Time(certificate.NotAfter),
+                    SHA-256 @certificate.Sha256Thumbprint.
+                    <MudButton Size="Size.Small" Variant="Variant.Outlined" Class="ml-2" OnClick="@(() => TrustAsync(certificate))">Trust this certificate</MudButton>
+                </MudAlert>
+            }
+        </MudPaper>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public ConnectionDto Cluster { get; set; } = null!;
+
+    /// <summary>Called with the cluster as saved.</summary>
+    [Parameter]
+    public EventCallback<ConnectionDto> OnSaved { get; set; }
+
+    private bool _editing;
+    private bool _busy;
+    private string? _url;
+    private string? _username;
+    private string? _secret;
+    private bool _removeSecret;
+    private string? _filter;
+    private string? _caPem;
+    private string? _pin;
+    private string? _podVolumesQuery;
+    private string? _layersQuery;
+    private string? _claimsQuery;
+    private string? _writesQuery;
+    private KubernetesUsageQueries? _defaults;
+    private KubernetesUsageTestDto? _test;
+
+    private async Task Edit()
+    {
+        var current = Cluster.UsageSource;
+        _url = current?.Url;
+        _username = current?.Username;
+        _secret = null;
+        _removeSecret = false;
+        _filter = current?.Filter;
+        _caPem = current?.CaPem;
+        _pin = current?.PinnedSpkiSha256;
+        _podVolumesQuery = current?.PodVolumesQuery;
+        _layersQuery = current?.ContainerLayersQuery;
+        _claimsQuery = current?.ClaimsQuery;
+        _writesQuery = current?.ContainerWritesQuery;
+        _test = null;
+        _editing = true;
+        try
+        {
+            _defaults ??= await Api.GetAsync<KubernetesUsageQueries>("api/connections/usage-queries");
+        }
+        catch (ApiException)
+        {
+            // Only the placeholders.
+        }
+    }
+
+    private SaveKubernetesUsageSourceDto Form() => new(
+        _url ?? string.Empty, _username, _removeSecret ? string.Empty : string.IsNullOrEmpty(_secret) ? null : _secret, _caPem, _pin, _filter,
+        _podVolumesQuery, _layersQuery, _claimsQuery, _writesQuery);
+
+    private async Task TestFormAsync() => await TestAsync(Form());
+
+    private async Task TestCurrentAsync()
+    {
+        if (Cluster.UsageSource is { } u)
+        {
+            await TestAsync(new SaveKubernetesUsageSourceDto(u.Url, u.Username, null, u.CaPem, u.PinnedSpkiSha256, u.Filter, u.PodVolumesQuery, u.ContainerLayersQuery, u.ClaimsQuery, u.ContainerWritesQuery));
+        }
+    }
+
+    private async Task TestAsync(SaveKubernetesUsageSourceDto form)
+    {
+        _busy = true;
+        _test = null;
+        try
+        {
+            _test = await Api.PostAsync<KubernetesUsageTestDto>($"api/connections/{Cluster.Id}/usage-source/test", form);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task TrustAsync(CertificateDto certificate)
+    {
+        _pin = certificate.SpkiSha256;
+        await TestFormAsync();
+    }
+
+    private async Task SaveAsync()
+    {
+        _busy = true;
+        try
+        {
+            var saved = await Api.PutAsync<ConnectionDto>($"api/connections/{Cluster.Id}/usage-source", Form());
+            _editing = false;
+            Snackbar.Add($"Usage numbers of {Cluster.DisplayName} saved.", Severity.Success);
+            await OnSaved.InvokeAsync(saved);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task RemoveAsync()
+    {
+        _busy = true;
+        try
+        {
+            await Api.DeleteAsync($"api/connections/{Cluster.Id}/usage-source");
+            _test = null;
+            Snackbar.Add($"Usage numbers of {Cluster.DisplayName} removed.", Severity.Success);
+            await OnSaved.InvokeAsync(Cluster with { UsageSource = null });
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private static string Found(int series, string from) => series == 0 ? $"nothing found (is {from} in this Prometheus?)" : $"{series} series";
+}

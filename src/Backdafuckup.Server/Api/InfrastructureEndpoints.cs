@@ -13,6 +13,7 @@ public static class InfrastructureEndpoints
     public static void MapInfrastructureEndpoints(this IEndpointRouteBuilder app)
     {
         var connections = app.MapGroup("/api/connections");
+        Clusters.KubernetesUsageSources.Map(connections);
 
         connections.MapGet("/", async (AppDbContext db, Clusters.ClusterAgents agents, string? kind, CancellationToken ct) =>
         {
@@ -486,7 +487,7 @@ public static class InfrastructureEndpoints
     /// stays, shows the error and can be rescanned or removed). Returns the error, or null.
     /// </summary>
     /// <summary>A connection for the console; a cluster behind its agent with the agent's state.</summary>
-    private static ConnectionDto WithAgent(HypervisorConnection connection, Clusters.ClusterAgents agents) =>
+    internal static ConnectionDto WithAgent(HypervisorConnection connection, Clusters.ClusterAgents agents) =>
         connection.Access == ConnectionAccess.Agent
             ? connection.ToDto() with { Agent = agents.Describe(connection.Id) ?? new ConnectionAgentDto(false, null, null, null, null, null, null) }
             : connection.ToDto();

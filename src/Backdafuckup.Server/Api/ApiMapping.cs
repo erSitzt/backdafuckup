@@ -13,7 +13,11 @@ internal static class ApiMapping
         c.Id, c.Kind.ToString(), c.DisplayName, c.Address, c.Port, c.CurrentMasterAddress, c.PlatformName, c.ProductName, c.ProductVersion,
         c.Status.ToString(), c.LastConnectedUtc, c.LastError, c.Credential?.Username ?? string.Empty, c.AllowInsecureNbd,
         c.Hosts.OrderBy(h => h.Address).Select(h => new ConnectionHostDto(h.Address, h.SpkiSha256, h.TrustedUtc)).ToList(),
-        Platforms: KubernetesPlatformMapping.Platforms(c));
+        Platforms: KubernetesPlatformMapping.Platforms(c),
+        UsageSource: c.UsageSource is { } usage ? usage.ToDto(c.UsageSecret is not null) : null);
+
+    public static KubernetesUsageSourceDto ToDto(this Backdafuckup.Kubernetes.KubernetesUsageConfig u, bool hasSecret) => new(
+        u.Url, u.Username, hasSecret, u.CaPem, u.PinnedSpkiSha256, u.Filter, u.PodVolumesQuery, u.ContainerLayersQuery, u.ClaimsQuery, u.ContainerWritesQuery);
 
     public static InventoryItemDto ToDto(this InventoryEntry e) => new(e.Kind.ToString(), e.NativeId, e.Name, e.ParentNativeId, e.Properties);
 
@@ -41,7 +45,7 @@ internal static class ApiMapping
         j.Objects.OrderBy(o => o.Order).Select(o => new JobObjectDto(o.NativeId, o.CachedName, o.WithMemory)).ToList(),
         j.NextRunUtc, j.LastRunUtc, j.LastResult?.ToString(), running, j.MaxParallelVms, j.NbdConnectionsPerDisk, j.RetryCount, j.TransportMode.ToString(), j.MaxParallelDisks,
         j.GuestProcessing, j.GuestFailurePolicy.ToString(), j.GuestCredentialId, j.GuestProcessingMode.ToString(), j.SqlCredentialId, j.SqlSnapshotCopyOnly,
-        j.SqlBackup.ToDto());
+        j.SqlBackup.ToDto(), j.KubernetesPodVolumes);
 
     public static SqlBackupSettingsDto ToDto(this SqlBackupSettings s) => new(
         s.Enabled, s.LogIntervalMinutes, s.FullSchedule.ToDto(), s.SystemSchedule.ToDto(), s.FullForAllDatabases, s.FullOnChainBreak, [.. s.ExcludedDatabases], s.StagingFolder);

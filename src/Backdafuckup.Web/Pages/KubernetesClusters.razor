@@ -144,7 +144,10 @@ else if (_clusters.Count > 0)
                                     <tr>
                                         <td>@volume.ParentNativeId</td>
                                         <td>@volume.Name</td>
-                                        <td class="c-560 num">@Fmt.Bytes(long.TryParse(p.GetValueOrDefault("sizeBytes"), out var size) ? size : null)</td>
+                                        <td class="c-560 num">@Fmt.Bytes(long.TryParse(p.GetValueOrDefault("sizeBytes"), out var size) ? size : null)@if (long.TryParse(p.GetValueOrDefault("usedBytes"), out var used))
+                                            {
+                                                <span class="cell-sub">@Fmt.Bytes(used) used</span>
+                                            }</td>
                                         <td class="c-760">@(string.IsNullOrEmpty(p.GetValueOrDefault("storageClass")) ? "–" : p["storageClass"])<span class="cell-sub">@p.GetValueOrDefault("driver")</span></td>
                                         <td class="c-950">@p.GetValueOrDefault("usedBy")</td>
                                         <td>
@@ -172,7 +175,7 @@ else if (_clusters.Count > 0)
                 <MudTabPanel Text="Namespaces">
                     <div class="cq" style="overflow-x: auto">
                         <MudSimpleTable Dense="true" Hover="true" Elevation="0">
-                            <thead><tr><th>Namespace</th><th class="num">Volumes</th><th class="num">With data</th><th class="c-560">Phase</th></tr></thead>
+                            <thead><tr><th>Namespace</th><th class="num">Volumes</th><th class="num">With data</th><th class="num" title="Volumes of pods that are not PVCs (without those of platforms)">Pod volumes</th><th class="num" title="Data in pod volumes and containers' own file systems, from the usage numbers">Outside PVCs</th><th class="c-560">Phase</th></tr></thead>
                             <tbody>
                                 @foreach (var ns in items.Where(i => i.Kind == "Namespace").OrderBy(i => i.Name))
                                 {
@@ -180,12 +183,69 @@ else if (_clusters.Count > 0)
                                         <td>@ns.Name</td>
                                         <td class="num">@ns.Properties.GetValueOrDefault("volumeClaims")</td>
                                         <td class="num" title="Through a snapshot, or file by file">@WithData(ns)</td>
+                                        <td class="num">@ns.Properties.GetValueOrDefault("podVolumes")</td>
+                                        <td class="num">@(long.TryParse(ns.Properties.GetValueOrDefault("unsavedBytes"), out var unsaved) ? Fmt.Bytes(unsaved) : "–")</td>
                                         <td class="c-560">@ns.Properties.GetValueOrDefault("phase")</td>
                                     </tr>
                                 }
                             </tbody>
                         </MudSimpleTable>
                     </div>
+                </MudTabPanel>
+                <MudTabPanel Text="Pod volumes">
+                    <div class="d-flex align-center flex-wrap gap-2 px-4 pt-3">
+                        <MudText Typo="Typo.body2">
+                            Volumes of running pods that are not PVCs, and what containers write into their own file systems, per workload. Backups hold none of it unless asked
+                            for (the job's switch, or the pod annotation <span class="mono">backup.velero.io/backup-volumes</span>), and reading pod volumes needs the node agent.
+                            @(selected.UsageSource is null ? "Sizes need usage numbers (tab Usage numbers)." : string.Empty)
+                        </MudText>
+                        <MudSpacer />
+                        <MudSwitch T="bool" @bind-Value="_showPlatformVolumes" Color="Color.Primary" Label="Platforms' volumes too" />
+                    </div>
+                    <div class="cq" style="overflow-x: auto">
+                        <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+                            <thead><tr><th>Namespace</th><th>Workload</th><th>Volume</th><th class="c-560">Kind</th><th class="num">Data</th><th>Backup</th></tr></thead>
+                            <tbody>
+                                @foreach (var v in PodVolumeRows(items))
+                                {
+                                    var p = v.Properties;
+                                    var kind = p.GetValueOrDefault("kind");
+                                    <tr>
+                                        <td>@v.ParentNativeId</td>
+                                        <td>@p.GetValueOrDefault("workload")<span class="cell-sub">@(p.GetValueOrDefault("pods") is "1" or null ? "1 pod" : $"{p["pods"]} pods")</span></td>
+                                        <td>@v.Name</td>
+                                        <td class="c-560">@KindLabel(kind)<span class="cell-sub">@p.GetValueOrDefault("source")@(long.TryParse(p.GetValueOrDefault("sizeLimitBytes"), out var limit) ? $"limit {Fmt.Bytes(limit)}" : null)</span></td>
+                                        <td class="num">@(long.TryParse(p.GetValueOrDefault("usedBytes"), out var data) ? Fmt.Bytes(data) : "–")@if (double.TryParse(p.GetValueOrDefault("writeBytesPerSecond"), System.Globalization.CultureInfo.InvariantCulture, out var rate))
+                                            {
+                                                <span class="cell-sub">writes @Fmt.Bytes((long)(rate * 3600))/h</span>
+                                            }</td>
+                                        <td>
+                                            @if (kind == "container")
+                                            {
+                                                <span class="mini-chip warning" title="@p.GetValueOrDefault("reason")">never backed up</span>
+                                            }
+                                            else if (!string.IsNullOrEmpty(p.GetValueOrDefault("optIn")))
+                                            {
+                                                <span class="mini-chip warning" title="@p.GetValueOrDefault("reason")">asked for · not backed up</span>
+                                                <span class="cell-sub">@p.GetValueOrDefault("reason")</span>
+                                            }
+                                            else if (!string.IsNullOrEmpty(p.GetValueOrDefault("platform")))
+                                            {
+                                                <span class="mini-chip" title="@p.GetValueOrDefault("reason")">@p["platform"]</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="mini-chip" title="@p.GetValueOrDefault("reason")">not asked for</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                    </div>
+                </MudTabPanel>
+                <MudTabPanel Text="Usage numbers">
+                    <UsageSourcePanel Cluster="selected" OnSaved="OnUsageSavedAsync" />
                 </MudTabPanel>
                 <MudTabPanel Text="Platform">
                     <div class="pa-4">
@@ -400,6 +460,38 @@ else if (_clusters.Count > 0)
     private async Task OnClusterAddedAsync()
     {
         _adding = false;
+        await LoadAsync();
+    }
+
+    private bool _showPlatformVolumes;
+
+    /// <summary>Pod volumes and containers' file systems, the largest first; those of platforms only when asked for.</summary>
+    private IEnumerable<InventoryItemDto> PodVolumeRows(List<InventoryItemDto> items) => items
+        .Where(i => i.Kind == "PodVolume" && (_showPlatformVolumes || string.IsNullOrEmpty(i.Properties.GetValueOrDefault("platform"))))
+        .OrderByDescending(i => string.IsNullOrEmpty(i.Properties.GetValueOrDefault("optIn")) ? 0 : 1)
+        .ThenByDescending(i => long.TryParse(i.Properties.GetValueOrDefault("usedBytes"), out var b) ? b : -1)
+        .ThenBy(i => i.ParentNativeId).ThenBy(i => i.Properties.GetValueOrDefault("workload")).ThenBy(i => i.Name);
+
+    private static string KindLabel(string? kind) => kind switch
+    {
+        "emptyDir-memory" => "emptyDir in memory",
+        "container" => "container file system",
+        null or "" => "–",
+        _ => kind,
+    };
+
+    /// <summary>A changed usage source shows its numbers at once: the cluster is scanned again.</summary>
+    private async Task OnUsageSavedAsync(ConnectionDto saved)
+    {
+        try
+        {
+            await Api.PostAsync($"api/connections/{saved.Id}/rescan");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Warning);
+        }
+
         await LoadAsync();
     }
 
