@@ -39,7 +39,7 @@
         <MudSwitch T="bool" Value="_withRestore" ValueChanged="OnRestoreChangedAsync" Color="Color.Primary" Class="mb-2"
                    Label="With the restore role: create and change objects in any namespace (leave it off for an account that only backs up)" />
         <MudSwitch T="bool" Value="_withNodeAgent" ValueChanged="OnNodeAgentChangedAsync" Color="Color.Primary" Class="mb-2"
-                   Label="With the node agent: reads pod volumes (emptyDirs) and the kubelets' usage numbers on every node" />
+                   Label="With the node agent: reads pod volumes (emptyDirs), CSI volumes without snapshots that pods have mounted, and the kubelets' usage numbers on every node" />
         @if (_withNodeAgent)
         {
             <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
@@ -110,7 +110,7 @@ else if (_clusters.Count > 0)
                             @foreach (var (driver, path) in summary.Drivers)
                             {
                                 <span class="@(KubernetesDataPaths.HasData(path) ? "mini-chip success" : "mini-chip")"
-                                      title="@(path switch { KubernetesDataPaths.Snapshot => "Volumes of this driver are backed up through a CSI snapshot.", KubernetesDataPaths.Files => "Volumes of this driver are backed up file by file, through a read-only copy of their PV.", _ => "Volumes of this driver: objects only." })">@driver · @(path == KubernetesDataPaths.Snapshot ? "snapshots" : KubernetesDataPaths.Label(path))</span>
+                                      title="@(path switch { KubernetesDataPaths.Snapshot => "Volumes of this driver are backed up through a CSI snapshot.", KubernetesDataPaths.Files => "Volumes of this driver are backed up file by file: through a read-only copy of their PV, or by the node agent from a pod's mount.", _ => "Volumes of this driver: objects only." })">@driver · @(path == KubernetesDataPaths.Snapshot ? "snapshots" : KubernetesDataPaths.Label(path))</span>
                             }
                         </td>
                         <td class="c-950 num">@summary.Namespaces</td>

@@ -98,13 +98,14 @@ public sealed class NodeAgents
     }
 
     /// <summary>
-    /// The kubelets' usage numbers through every agent (or those of <paramref name="nodes"/>): pod volumes and containers'
-    /// writable layers. An agent that fails is a problem; the others still count.
+    /// The kubelets' usage numbers through every agent (or those of <paramref name="nodes"/>): pod volumes, PVCs and
+    /// containers' writable layers. An agent that fails is a problem; the others still count.
     /// </summary>
     public async Task<KubernetesUsage> UsageAsync(IReadOnlyCollection<string>? nodes, CancellationToken cancellationToken)
     {
         var volumes = new Dictionary<(string, string, string), long>();
         var layers = new Dictionary<(string, string, string), long>();
+        var claims = new Dictionary<(string, string), long>();
         var problems = new List<string>();
         foreach (var node in Pods.Keys.Where(n => nodes is null || nodes.Contains(n)).Order(StringComparer.Ordinal))
         {
@@ -134,6 +135,14 @@ public sealed class NodeAgents
                     }
                 }
 
+                foreach (var (claim, bytes) in pod["claims"]?.AsObject() ?? [])
+                {
+                    if (bytes is JsonValue value && value.TryGetValue<long>(out var used))
+                    {
+                        claims[(ns, claim)] = used;
+                    }
+                }
+
                 foreach (var (container, bytes) in pod["containers"]?.AsObject() ?? [])
                 {
                     if (bytes is JsonValue value && value.TryGetValue<long>(out var used))
@@ -145,7 +154,7 @@ public sealed class NodeAgents
         }
 
         return new KubernetesUsage(
-            "the node agents (the kubelets' statistics)", volumes, layers, new Dictionary<(string, string), long>(), new Dictionary<(string, string, string), double>(), problems);
+            "the node agents (the kubelets' statistics)", volumes, layers, claims, new Dictionary<(string, string, string), double>(), problems);
     }
 
     private static string Short(string text) => text.Length > 400 ? text[..400] + "…" : text;

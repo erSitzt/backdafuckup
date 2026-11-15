@@ -16,7 +16,7 @@ namespace Backdafuckup.Server.Tests;
 public sealed partial class ApiIntegrationTests
 {
     [Fact]
-    public async Task The_node_agent_reads_a_pod_volume_asked_for_into_the_restore_point_and_its_kubelet_s_numbers_count()
+    public async Task The_node_agent_reads_a_pod_volume_asked_for_and_a_mounted_CSI_volume_without_snapshots_and_its_kubelet_s_numbers_count()
     {
         Assert.SkipUnless(OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.X64, "The mover reads volumes on linux-x64.");
         const string PodUid = "0b8f5f1e-3c2a-4b7d-9e61-5a4c3d2b1f00";
@@ -29,9 +29,33 @@ public sealed partial class ApiIntegrationTests
         Directory.CreateDirectory(Path.Combine(cache, "pages"));
         await File.WriteAllTextAsync(Path.Combine(cache, "pages", "index.html"), "<h1>cached</h1>", Ct);
         await File.WriteAllBytesAsync(Path.Combine(cache, "blob.bin"), System.Security.Cryptography.RandomNumberGenerator.GetBytes(200_000), Ct);
+
+        // Its PVC logs-web is a CSI volume without a VolumeSnapshotClass, mounted by its container.
+        var logs = Path.Combine(kubelet, "pods", PodUid, "volumes", "kubernetes.io~csi", "pvc-7d1c", "mount");
+        Directory.CreateDirectory(logs);
+        await File.WriteAllTextAsync(Path.Combine(logs, "access.log"), "GET / 200\n", Ct);
         var api = new FakeKubernetesApi("uid-kube-system-node");
         _clusters["10.26.8.10"] = api;
         api.Add("api/v1", "namespaces", FakeKubernetesApi.Namespace("web"));
+        api.Add("apis/storage.k8s.io/v1", "storageclasses", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "plain-csi" }, ["provisioner"] = "csi.plain.example" });
+        api.Add("api/v1", "persistentvolumes", new JsonObject
+        {
+            ["metadata"] = new JsonObject { ["name"] = "pvc-7d1c", ["annotations"] = new JsonObject { ["pv.kubernetes.io/provisioned-by"] = "csi.plain.example" } },
+            ["spec"] = new JsonObject
+            {
+                ["capacity"] = new JsonObject { ["storage"] = "1Gi" },
+                ["csi"] = new JsonObject { ["driver"] = "csi.plain.example", ["volumeHandle"] = "vol-7d1c" },
+                ["storageClassName"] = "plain-csi",
+                ["claimRef"] = new JsonObject { ["namespace"] = "web", ["name"] = "logs-web" },
+            },
+            ["status"] = new JsonObject { ["phase"] = "Bound" },
+        });
+        api.Add("api/v1", "persistentvolumeclaims", new JsonObject
+        {
+            ["metadata"] = new JsonObject { ["name"] = "logs-web", ["namespace"] = "web" },
+            ["spec"] = new JsonObject { ["volumeName"] = "pvc-7d1c", ["storageClassName"] = "plain-csi", ["accessModes"] = new JsonArray("ReadWriteOnce") },
+            ["status"] = new JsonObject { ["phase"] = "Bound", ["capacity"] = new JsonObject { ["storage"] = "1Gi" } },
+        });
         api.Add("api/v1", "namespaces", FakeKubernetesApi.Namespace(KubernetesSetup.NodeNamespace));
         api.Add("api/v1", "pods", new JsonObject
         {
@@ -43,8 +67,14 @@ public sealed partial class ApiIntegrationTests
             ["spec"] = new JsonObject
             {
                 ["nodeName"] = "worker-1",
-                ["containers"] = new JsonArray(new JsonObject { ["name"] = "nginx", ["image"] = "nginx:1.27" }),
-                ["volumes"] = new JsonArray(new JsonObject { ["name"] = "cache", ["emptyDir"] = new JsonObject() }),
+                ["containers"] = new JsonArray(new JsonObject
+                {
+                    ["name"] = "nginx", ["image"] = "nginx:1.27",
+                    ["volumeMounts"] = new JsonArray(new JsonObject { ["name"] = "logs", ["mountPath"] = "/var/log/nginx" }),
+                }),
+                ["volumes"] = new JsonArray(
+                    new JsonObject { ["name"] = "cache", ["emptyDir"] = new JsonObject() },
+                    new JsonObject { ["name"] = "logs", ["persistentVolumeClaim"] = new JsonObject { ["claimName"] = "logs-web" } }),
             },
             ["status"] = new JsonObject { ["phase"] = "Running" },
         });
@@ -75,7 +105,7 @@ public sealed partial class ApiIntegrationTests
             // The kubelet's statistics as the agent cuts them; everything else through the agent's socket.
             if ((string?)JsonNode.Parse(input)!["op"] == "stats")
             {
-                return (0, """{"node":"worker-1","pods":[{"namespace":"web","name":"web-0","volumes":{"cache":204800},"containers":{"nginx":8192}}]}""");
+                return (0, """{"node":"worker-1","pods":[{"namespace":"web","name":"web-0","volumes":{"cache":204800},"claims":{"logs-web":4096},"containers":{"nginx":8192}}]}""");
             }
 
             var output = new StringWriter();
@@ -86,6 +116,13 @@ public sealed partial class ApiIntegrationTests
         try
         {
             var cluster = await AddClusterAsync(client, "rke2-node", "10.26.8.10");
+
+            // The inventory: the CSI volume is read by the node agent, its size from the kubelet.
+            var inventory = (await client.GetFromJsonAsync<List<InventoryItemDto>>($"/api/connections/{cluster.Id}/inventory", Ct))!;
+            var claim = inventory.Single(i => i.Kind == "VolumeClaim" && i.Name == "logs-web");
+            Assert.Equal(
+                ("files", "node-agent", "no VolumeSnapshotClass for the CSI driver csi.plain.example: read file by file by the node agent from the mount of pod web-0 on node worker-1", "4096"),
+                (claim.Properties["dataPath"], claim.Properties["readBy"], claim.Properties["dataPathReason"], claim.Properties["usedBytes"]));
             var repository = await Read<RepositoryDto>(client.PostAsJsonAsync("/api/repositories", new CreateRepositoryDto { Name = "Local", Path = Path.Combine(_root, "repo") }, Ct));
             var job = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", new SaveJobDto
             {
@@ -97,20 +134,28 @@ public sealed partial class ApiIntegrationTests
             Assert.True(state == "Succeeded", log);
             Assert.Contains("web: Pod volumes read file by file by the node agent: StatefulSet web/cache (emptyDir, 200.0 KB, by its annotation).", log, StringComparison.Ordinal);
             Assert.Contains("read file by file by the node agent backdafuckup-node/backdafuckup-node-x7k2p on node worker-1 from " + cache, log, StringComparison.Ordinal);
-            Assert.Contains("web: Usage numbers of web from the node agents (the kubelets' statistics): 1 pod volume(s), 1 container file system(s), 0 PVC(s), 0 write rate(s).", log, StringComparison.Ordinal);
+            Assert.Contains("web: Usage numbers of web from the node agents (the kubelets' statistics): 1 pod volume(s), 1 container file system(s), 1 PVC(s), 0 write rate(s).", log, StringComparison.Ordinal);
             Assert.Contains("web: Volume web-0/cache: 2 file(s) in 1 folder(s)", log, StringComparison.Ordinal);
-            Assert.Contains("backdafuckup-node-x7k2p read", requests);
+            Assert.Contains(
+                "web: PVC logs-web: no VolumeSnapshotClass for the CSI driver csi.plain.example: read file by file by the node agent from the mount of pod web-0 on node worker-1.",
+                log, StringComparison.Ordinal);
+            Assert.Contains("read file by file by the node agent backdafuckup-node/backdafuckup-node-x7k2p on node worker-1 from " + logs, log, StringComparison.Ordinal);
+            Assert.Contains("web: Volume logs-web: 1 file(s) in 0 folder(s)", log, StringComparison.Ordinal);
+            Assert.Equal(2, requests.Count(r => r == "backdafuckup-node-x7k2p read"));
 
             var point = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!);
             var store = await _factory.Services.GetRequiredService<RepositoryManager>().GetAsync(repository.Id, Ct);
             await using (var reader = await store.OpenRestorePointAsync(point.Id, Ct))
             {
-                var tree = Assert.Single(reader.Manifest.FileTrees);
-                Assert.Equal(("pod_web-0_cache", "web-0/cache", "pod-volume", "node-agent"), (tree.Key, tree.Name, tree.Kind, tree.Reader));
-                var root = await reader.ReadFileTreeIndexAsync(tree.Key, Ct);
+                Assert.Equal(
+                    "logs-web logs-web pvc node-agent; pod_web-0_cache web-0/cache pod-volume node-agent",
+                    string.Join("; ", reader.Manifest.FileTrees.OrderBy(t => t.Key, StringComparer.Ordinal).Select(t => $"{t.Key} {t.Name} {t.Kind} {t.Reader}")));
+                var root = await reader.ReadFileTreeIndexAsync("pod_web-0_cache", Ct);
                 var entries = FileTreeWalker.Enumerate(ChunkStreamRef.OfIds(root.DiskSize, root.Entries), reader.Chunks, reader.Manifest.Chunking.ChunkSize).ToDictionary(e => e.Path, e => e.Entry);
                 Assert.Equal("<h1>cached</h1>"u8.ToArray(), ChunkStreams.ReadAll(entries["pages/index.html"].Content!, reader.Chunks, reader.Manifest.Chunking.ChunkSize));
                 Assert.Equal("pod_web-0_cache", Assert.Single(reader.Manifest.Kubernetes!.PodVolumes).TreeKey);
+                var record = Assert.Single(reader.Manifest.Kubernetes.Volumes);
+                Assert.Equal(("files", "logs-web"), (record.DataPath, record.TreeKey));
             }
 
             Assert.True((await store.VerifyAsync(point.Id, VerifyDepth.Full, null, Ct)).Ok);
@@ -119,12 +164,14 @@ public sealed partial class ApiIntegrationTests
             var plan = await Read<KubernetesRestorePlanDto>(client.PostAsJsonAsync($"/api/restore-points/{point.Id}/kubernetes/restore-plan",
                 new KubernetesRestorePlanRequestDto { TargetNamespace = "web-copy" }, Ct));
             Assert.Contains("Pods start with empty volumes; the files of web-0/cache are in the restore point: restore them under Files (browse, download, into a PVC or onto a share).", plan.Warnings);
+            Assert.Contains(plan.Volumes, v => v.Claim == "logs-web" && v.Path == "files");
 
             // The next run compares the volume with this one (the pod keeps its name): nothing read again.
             (state, log) = await RunAsync(client, job.Id);
             Assert.True(state == "Succeeded", log);
             Assert.Contains("Volume web-0/cache: compared with the restore point of", log, StringComparison.Ordinal);
             Assert.Contains("2 file(s) unchanged since the previous run", log, StringComparison.Ordinal);
+            Assert.Contains("Volume logs-web: compared with the restore point of", log, StringComparison.Ordinal);
         }
         finally
         {

@@ -93,8 +93,11 @@ public static class DataPaths
 /// <param name="SharedFileSystem">An NFS or hostPath PV: the kubelet's numbers for it are those of the whole export or node disk.</param>
 internal sealed record NamespaceVolume(
     string Claim, string DataPath, string? Reason, string? StorageClass, string Driver, string? SnapshotClass, long SizeBytes, string VolumeMode, string? VolumeName,
-    bool OnNodeOfConsumer = false, bool SharedFileSystem = false)
+    bool OnNodeOfConsumer = false, bool SharedFileSystem = false, bool Csi = false)
 {
+    /// <summary>A CSI volume without snapshots, as a file system: the node agent can read it from a pod's mount.</summary>
+    public bool NodeAgentReadable => Csi && DataPath == DataPaths.ObjectsOnly && VolumeName is not null && VolumeMode == "Filesystem";
+
     /// <summary>What the usage numbers say the PVC holds, when they can be about it alone.</summary>
     public long? UsedBytes(KubernetesUsage? usage, string ns) => KubernetesInventory.ClaimUsage(usage, ns, Claim, SizeBytes, SharedFileSystem);
 }
@@ -139,6 +142,14 @@ internal static class KubernetesInventory
             var className = claim.Spec.StorageClassName ?? volume?.Spec.StorageClassName ?? string.Empty;
             var driver = volume?.Spec.Csi?.Driver ?? (volume?.Spec.Nfs is not null ? "nfs" : classes.GetValueOrDefault(className)?.Provisioner ?? string.Empty);
             var (path, reason, snapshotClass) = DataPathOf(volume, driver, snapshotClasses);
+            var readBy = string.Empty;
+            if (path == DataPaths.ObjectsOnly && volume?.Spec.Csi is not null && (claim.Spec.VolumeMode ?? "Filesystem") == "Filesystem")
+            {
+                (path, reason, readBy) = MountingPod(pods, ns, claim.Metadata.Name, node => agents?.Pods.ContainsKey(node) == true) is { } pod
+                    ? (DataPaths.Files, NodeAgentReason(reason, pod), "node-agent")
+                    : (path, reason + (agents?.Any == true ? "; the node agent reads it only while a running pod has it mounted" : "; the node agent would read it file by file while a pod has it mounted"), string.Empty);
+            }
+
             var size = claim.Status?.Capacity?.TryGetValue("storage", out var capacity) == true ? capacity
                 : claim.Spec.Resources?.Requests?.TryGetValue("storage", out var requested) == true ? requested : null;
             var properties = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -155,6 +166,7 @@ internal static class KubernetesInventory
                 [KubernetesInventoryProperties.DataPath] = path,
                 [KubernetesInventoryProperties.DataPathReason] = reason ?? string.Empty,
                 [KubernetesInventoryProperties.SnapshotClass] = snapshotClass ?? string.Empty,
+                [KubernetesInventoryProperties.ReadBy] = readBy,
                 [KubernetesInventoryProperties.UsedBytes] = ClaimUsage(usage, ns, claim.Metadata.Name, size?.ToInt64() ?? 0, volume?.Spec.Nfs is not null || volume?.Spec.HostPath is not null)
                     ?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
             };
@@ -265,7 +277,8 @@ internal static class KubernetesInventory
                 : claim.Spec.Resources?.Requests?.TryGetValue("storage", out var requested) == true ? requested.ToInt64() : 0;
             result.Add(new NamespaceVolume(
                 claim.Metadata.Name, path, reason, className, driver, snapshotClass, size, claim.Spec.VolumeMode ?? "Filesystem", volume?.Metadata.Name,
-                volume?.Spec.HostPath is not null && volume.Spec.NodeAffinity is null, volume?.Spec.Nfs is not null || volume?.Spec.HostPath is not null));
+                volume?.Spec.HostPath is not null && volume.Spec.NodeAffinity is null, volume?.Spec.Nfs is not null || volume?.Spec.HostPath is not null,
+                volume?.Spec.Csi is not null));
         }
 
         return result;
@@ -305,6 +318,29 @@ internal static class KubernetesInventory
 
         return result;
     }
+
+    /// <summary>
+    /// The running pod on a node with a node agent that has <paramref name="claim"/> mounted as a file system (a container
+    /// mounts it, so the kubelet has): the agent reads a CSI volume without snapshots from that mount. Null: none.
+    /// </summary>
+    internal static V1Pod? MountingPod(IEnumerable<V1Pod> pods, string ns, string claim, Func<string, bool> hasAgent) =>
+        pods.Where(p => p.Metadata.NamespaceProperty == ns && p.Status?.Phase == "Running" && p.Metadata.DeletionTimestamp is null
+                        && !string.IsNullOrEmpty(p.Spec.NodeName) && hasAgent(p.Spec.NodeName)
+                        && (p.Spec.Volumes ?? []).Any(v => ClaimOf(p, v) == claim && Mounted(p, v.Name)))
+            .OrderBy(p => p.Metadata.Name, StringComparer.Ordinal)
+            .FirstOrDefault();
+
+    /// <summary>Why the node agent reads a CSI volume, and from where.</summary>
+    internal static string NodeAgentReason(string? reason, V1Pod pod) =>
+        $"{reason}: read file by file by the node agent from the mount of pod {pod.Metadata.Name} on node {pod.Spec.NodeName}";
+
+    /// <summary>The PVC a pod's volume is: its claim, or the one Kubernetes makes for a generic ephemeral volume (<c>&lt;pod&gt;-&lt;volume&gt;</c>).</summary>
+    private static string? ClaimOf(V1Pod pod, V1Volume volume) =>
+        volume.PersistentVolumeClaim?.ClaimName ?? (volume.Ephemeral is not null ? $"{pod.Metadata.Name}-{volume.Name}" : null);
+
+    /// <summary>A container mounts the volume as a file system: only then does the kubelet mount it.</summary>
+    private static bool Mounted(V1Pod pod, string volume) =>
+        (pod.Spec.Containers ?? []).Concat(pod.Spec.InitContainers ?? []).Any(c => c.VolumeMounts?.Any(m => m.Name == volume) == true);
 
     /// <summary>Which workloads mount each PVC: the owner of each pod (a ReplicaSet's Deployment by its name prefix).</summary>
     private static Dictionary<(string Namespace, string Claim), SortedSet<string>> UsedBy(IEnumerable<V1Pod> pods)

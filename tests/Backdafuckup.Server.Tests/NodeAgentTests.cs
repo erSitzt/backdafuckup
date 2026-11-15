@@ -110,7 +110,7 @@ public sealed class NodeAgentTests : IDisposable
     }
 
     [Fact]
-    public void The_kubelet_s_statistics_are_cut_to_pod_volumes_and_writable_layers()
+    public void The_kubelet_s_statistics_are_cut_to_pod_volumes_PVCs_and_writable_layers()
     {
         var summary = JsonNode.Parse("""
             { "node": { "nodeName": "worker-1" },
@@ -124,7 +124,7 @@ public sealed class NodeAgentTests : IDisposable
         var cut = NodeAgent.Summarize(summary, "worker-1");
 
         Assert.Equal(
-            """{"node":"worker-1","pods":[{"namespace":"web","name":"web-1","volumes":{"cache":1048576,"kube-api-access-x":12288},"containers":{"nginx":4096}}]}""",
+            """{"node":"worker-1","pods":[{"namespace":"web","name":"web-1","volumes":{"cache":1048576,"kube-api-access-x":12288},"claims":{"data-web":665000000000},"containers":{"nginx":4096}}]}""",
             cut.ToJsonString());
     }
 

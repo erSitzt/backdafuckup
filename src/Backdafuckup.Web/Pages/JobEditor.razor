@@ -159,7 +159,8 @@ else
                             <span>
                                 Every object of a namespace is backed up, Secrets included. PVCs on a CSI driver with a VolumeSnapshotClass are backed up with their data
                                 (a snapshot, read by a mover pod, deleted right after); PVCs on NFS, hostPath and local volumes file by file, through a read-only copy of
-                                their PV, while they are in use; other PVCs only as objects. Pods with the annotation
+                                their PV, while they are in use; CSI volumes without snapshots file by file by the node agent, while a pod has them mounted; other
+                                PVCs only as objects. Pods with the annotation
                                 <span class="mono nowrap">pre.hook.backup.velero.io/command</span> run it before the snapshots (application-consistent), and
                                 <span class="mono nowrap">post.hook.backup.velero.io/command</span> after them (after the files are read, when there are such volumes).
                             </span>

@@ -121,7 +121,7 @@ public sealed class KubernetesProviderTests
         Assert.Equal(("nfs", "Deployment web"), (uploads.Properties[KubernetesInventoryProperties.Driver], uploads.Properties[KubernetesInventoryProperties.UsedBy]));
 
         var legacy = Item(inventory, InventoryKind.VolumeClaim, "legacy/data");
-        Assert.Equal("no VolumeSnapshotClass for the CSI driver csi.example.com", legacy.Properties[KubernetesInventoryProperties.DataPathReason]);
+        Assert.Equal("no VolumeSnapshotClass for the CSI driver csi.example.com; the node agent would read it file by file while a pod has it mounted", legacy.Properties[KubernetesInventoryProperties.DataPathReason]);
         Assert.Equal("not bound to a volume", Item(inventory, InventoryKind.VolumeClaim, "legacy/pending").Properties[KubernetesInventoryProperties.DataPathReason]);
 
         Assert.Equal(("1", "1"), Counts(Item(inventory, InventoryKind.Namespace, "redis")));
@@ -153,7 +153,7 @@ public sealed class KubernetesProviderTests
         await using var session = await new KubernetesProvider(api.CreateHandler).OpenAsync(Settings(), Ct);
         var inventory = await session.GetInventoryAsync(Ct);
 
-        Assert.Equal("no VolumeSnapshotClass for the CSI driver csi.vsphere.vmware.com",
+        Assert.Equal("no VolumeSnapshotClass for the CSI driver csi.vsphere.vmware.com; the node agent would read it file by file while a pod has it mounted",
             Item(inventory, InventoryKind.VolumeClaim, "redis/data").Properties[KubernetesInventoryProperties.DataPathReason]);
     }
 

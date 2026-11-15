@@ -321,18 +321,28 @@ internal sealed class NodeAgent(NodeAgentOptions options, TextWriter log, Func<M
         };
     }
 
-    /// <summary>Per pod (namespace, name): its volumes' used bytes and its containers' writable layers.</summary>
+    /// <summary>Per pod (namespace, name): its volumes' used bytes, its PVCs' (by claim) and its containers' writable layers.</summary>
     internal static JsonObject Summarize(JsonObject summary, string? node)
     {
         var pods = new JsonArray();
         foreach (var pod in summary["pods"]?.AsArray() ?? [])
         {
             var volumes = new JsonObject();
+            var claims = new JsonObject();
             foreach (var volume in pod?["volume"]?.AsArray() ?? [])
             {
-                if ((string?)volume?["name"] is { } name && volume?["usedBytes"] is JsonValue used && used.TryGetValue<long>(out var bytes) && volume["pvcRef"] is null)
+                if ((string?)volume?["name"] is not { } name || volume["usedBytes"] is not JsonValue used || !used.TryGetValue<long>(out var bytes))
+                {
+                    continue;
+                }
+
+                if (volume["pvcRef"] is null)
                 {
                     volumes[name] = bytes;
+                }
+                else if ((string?)volume["pvcRef"]?["name"] is { } claim)
+                {
+                    claims[claim] = bytes;
                 }
             }
 
@@ -350,6 +360,7 @@ internal sealed class NodeAgent(NodeAgentOptions options, TextWriter log, Func<M
                 ["namespace"] = (string?)pod?["podRef"]?["namespace"],
                 ["name"] = (string?)pod?["podRef"]?["name"],
                 ["volumes"] = volumes,
+                ["claims"] = claims,
                 ["containers"] = containers,
             });
         }
