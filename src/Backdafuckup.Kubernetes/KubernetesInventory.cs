@@ -182,7 +182,7 @@ internal static class KubernetesInventory
         return result;
     }
 
-    private static async Task<IReadOnlyList<(string Name, string Driver, bool IsDefault)>> SnapshotClassesAsync(IKubernetes client, CancellationToken cancellationToken)
+    internal static async Task<IReadOnlyList<(string Name, string Driver, bool IsDefault)>> SnapshotClassesAsync(IKubernetes client, CancellationToken cancellationToken)
     {
         object list;
         try

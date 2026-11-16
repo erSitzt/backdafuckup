@@ -93,10 +93,7 @@ internal sealed class VolumeExport(VolumeSnapshotFlow flow, TakenSnapshot snapsh
             Work,
             cancellationToken: cancellationToken), cancellationToken).ConfigureAwait(false);
 
-        if (mover.DockerConfigJson is { } dockerConfig && mover.PullSecretName is { } pullSecret)
-        {
-            await EnsurePullSecretAsync(pullSecret, dockerConfig, cancellationToken).ConfigureAwait(false);
-        }
+        await flow.EnsurePullSecretAsync(mover, cancellationToken).ConfigureAwait(false);
 
         _channel = await channels.OpenBackupAsync($"{source} (cluster {flow.Cluster})", snapshot.RestoreSize, cancellationToken, flow.Timings.MoverConnect).ConfigureAwait(false);
         var endpoint = _channel.Endpoint;
@@ -164,37 +161,6 @@ internal sealed class VolumeExport(VolumeSnapshotFlow flow, TakenSnapshot snapsh
         var ledgerId = await flow.Ledger.RecordAsync(kind, id, null, null, cancellationToken).ConfigureAwait(false);
         _created.Add((kind, ns, objectName, ledgerId));
         await flow.CallAsync($"creating {kind} {id}", create).ConfigureAwait(false);
-    }
-
-    private async Task EnsurePullSecretAsync(string secretName, string dockerConfig, CancellationToken cancellationToken)
-    {
-        var client = flow.Client;
-        var secret = new V1Secret
-        {
-            Metadata = new V1ObjectMeta { Name = secretName, Labels = new Dictionary<string, string> { [VolumeSnapshotFlow.ManagedByLabel] = "backdafuckup" } },
-            Type = "kubernetes.io/dockerconfigjson",
-            Data = new Dictionary<string, byte[]> { [".dockerconfigjson"] = Encoding.UTF8.GetBytes(dockerConfig) },
-        };
-        V1Secret? existing = null;
-        try
-        {
-            existing = await client.CoreV1.ReadNamespacedSecretAsync(secretName, Work, cancellationToken: cancellationToken).ConfigureAwait(false);
-        }
-        catch (HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
-        {
-            // Created below.
-        }
-
-        if (existing is null)
-        {
-            await flow.CallAsync($"creating the pull secret {Work}/{secretName}", () => client.CoreV1.CreateNamespacedSecretAsync(secret, Work, cancellationToken: cancellationToken)).ConfigureAwait(false);
-        }
-        else if (existing.Data?.TryGetValue(".dockerconfigjson", out var current) != true || !current.AsSpan().SequenceEqual(secret.Data[".dockerconfigjson"]))
-        {
-            secret.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
-            await flow.CallAsync($"updating the pull secret {Work}/{secretName}", () => client.CoreV1.ReplaceNamespacedSecretAsync(secret, secretName, Work, cancellationToken: cancellationToken))
-                .ConfigureAwait(false);
-        }
     }
 
     private V1ObjectMeta Meta(string? objectName = null) => new()

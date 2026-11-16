@@ -251,6 +251,12 @@ public static class KubernetesSetup
           - apiGroups: ["*"]
             resources: ["*"]
             verbs: [create, update, patch, delete]
+          # Roles and bindings with rights this account does not have itself: RoleBindings to admin or edit, and the
+          # ClusterRoles and ClusterRoleBindings of a whole-cluster restore. Together with the rule above this is as
+          # much as cluster-admin.
+          - apiGroups: ["rbac.authorization.k8s.io"]
+            resources: ["roles", "clusterroles"]
+            verbs: [bind, escalate]
         ---
         apiVersion: rbac.authorization.k8s.io/v1
         kind: ClusterRoleBinding

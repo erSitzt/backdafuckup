@@ -83,6 +83,20 @@ else
                     </div>
                     @if (IsCluster)
                     {
+                        <MudSwitch T="bool" @bind-Value="_wholeCluster" Color="Color.Primary" Class="mb-2"
+                                   Label="Back up the whole cluster: every namespace at the time of a run, and the cluster-scoped objects (CRDs, ClusterRoles, classes)" />
+                    }
+                    @if (IsCluster && _wholeCluster)
+                    {
+                        <MudTextField T="string" @bind-Value="_excludes" Immediate="true" DebounceInterval="250" Variant="Variant.Outlined" Margin="Margin.Dense"
+                                      Label="Leave out these namespaces" Error="@(ExcludesError is not null)" ErrorText="@ExcludesError"
+                                      HelperText="Names or patterns with *, separated by commas. By default what Kubernetes, RKE2, Rancher and Fleet make themselves; backdafuckup-system is always left out." />
+                        <div class="cell-sub mt-1 mb-2">
+                            Backed up now: @(WholeClusterNamespaces() is { Count: > 0 } now ? string.Join(", ", now) : "no namespace") and the cluster-scoped objects.
+                        </div>
+                    }
+                    else if (IsCluster)
+                    {
                         <div class="mb-3">
                             <MudTextField T="string" @bind-Value="_labelSelector" Immediate="true" DebounceInterval="250" Variant="Variant.Outlined" Margin="Margin.Dense"
                                           Label="And every namespace with these labels (optional)" Placeholder="backup=daily"
@@ -627,6 +641,19 @@ else
     /// <summary>Kubernetes: the namespaces with these labels too, checked at every run (empty: none).</summary>
     private string _labelSelector = string.Empty;
 
+    /// <summary>Kubernetes: the whole cluster, without the namespaces of <see cref="_excludes"/>.</summary>
+    private bool _wholeCluster;
+
+    private string _excludes = string.Join(", ", KubernetesClusterScope.DefaultExcludes);
+
+    private IReadOnlyList<string> ExcludeList() => _excludes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private string? ExcludesError => KubernetesClusterScope.Validate(ExcludeList());
+
+    /// <summary>The namespaces of the inventory a whole-cluster run would back up now.</summary>
+    private List<string> WholeClusterNamespaces() =>
+        [.. _vms.Select(v => v.Name).Where(n => !KubernetesClusterScope.IsExcluded(n, ExcludeList())).Order(StringComparer.Ordinal)];
+
     private string? SelectorError => string.IsNullOrWhiteSpace(_labelSelector) ? null : KubernetesLabelSelector.Parse(_labelSelector).Error;
 
     /// <summary>The namespaces of the inventory whose labels match the selector now; null without a valid selector.</summary>
@@ -744,6 +771,13 @@ else
                     continue;
                 }
 
+                if (KubernetesClusterScope.IsJobObject(o.NativeId))
+                {
+                    _wholeCluster = true;
+                    _excludes = string.Join(", ", KubernetesClusterScope.Excludes(o.NativeId));
+                    continue;
+                }
+
                 _selected[o.NativeId] = o.Name;
                 if (o.WithMemory)
                 {
@@ -825,6 +859,8 @@ else
     private string? Validate(int step) => step switch
     {
         0 when string.IsNullOrWhiteSpace(_name) => "Enter a name.",
+        1 when IsCluster && _wholeCluster && ExcludesError is { } excludesError => excludesError,
+        1 when IsCluster && _wholeCluster => null,
         1 when IsCluster && SelectorError is { } selectorError => selectorError,
         1 when _selected.Count == 0 && !(IsCluster && !string.IsNullOrWhiteSpace(_labelSelector)) => IsCluster ? "Select at least one namespace, or give labels." : "Select at least one VM.",
         2 when _repositoryId == Guid.Empty => "Select a repository.",
@@ -852,10 +888,12 @@ else
             RepositoryId = _repositoryId,
             RetentionPoints = _retention,
             Schedule = Schedule(),
-            Objects = [.. _selected.Select(kv => new JobObjectDto(kv.Key, kv.Value, !IsCluster && _withMemory.Contains(kv.Key))),
-                .. IsCluster && !string.IsNullOrWhiteSpace(_labelSelector)
-                    ? [new JobObjectDto(KubernetesLabelSelector.JobObject(_labelSelector), KubernetesLabelSelector.Describe(_labelSelector.Trim()))]
-                    : Array.Empty<JobObjectDto>()],
+            Objects = IsCluster && _wholeCluster
+                ? [new JobObjectDto(KubernetesClusterScope.JobObject(ExcludeList()), KubernetesClusterScope.Describe(ExcludeList()))]
+                : [.. _selected.Select(kv => new JobObjectDto(kv.Key, kv.Value, !IsCluster && _withMemory.Contains(kv.Key))),
+                    .. IsCluster && !string.IsNullOrWhiteSpace(_labelSelector)
+                        ? [new JobObjectDto(KubernetesLabelSelector.JobObject(_labelSelector), KubernetesLabelSelector.Describe(_labelSelector.Trim()))]
+                        : Array.Empty<JobObjectDto>()],
             MaxParallelVms = _parallelVms,
             NbdConnectionsPerDisk = _nbdConnections,
             MaxParallelDisks = _parallelDisks,

@@ -12,15 +12,23 @@ namespace Backdafuckup.Kubernetes;
 /// A Kubernetes cluster as a connection: its namespaces and volumes are the inventory. The server reaches the API with a
 /// ServiceAccount token; the API server's certificate is pinned on first use, as for pools.
 /// </summary>
-/// <param name="transport">Tests only: answers every API request instead of the network.</param>
+/// <param name="transport">Tests only: answers the API requests of a connection instead of the network (null: the network).</param>
 /// <param name="channels">The server's mover channels (volume data); null: objects only.</param>
 /// <param name="images">The mover image in a registry the clusters can pull from.</param>
 /// <param name="timings">Tests only: shorter waits.</param>
 /// <param name="executor">Tests only: runs hooks instead of the cluster's exec.</param>
 public sealed class KubernetesProvider(
-    Func<DelegatingHandler?>? transport = null, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
+    Func<ConnectionSettings, DelegatingHandler?>? transport = null, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null,
+    IPodExecutor? executor = null)
     : IHypervisorProvider
 {
+    /// <summary>Tests only: one transport for every connection.</summary>
+    public KubernetesProvider(
+        Func<DelegatingHandler?> transport, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
+        : this(_ => transport(), channels, images, timings, executor)
+    {
+    }
+
     public HypervisorKind Kind => HypervisorKind.Kubernetes;
 
     public async Task<CertificateProbe> ProbeCertificateAsync(string address, int port, CancellationToken cancellationToken)
@@ -37,7 +45,7 @@ public sealed class KubernetesProvider(
         ArgumentNullException.ThrowIfNull(settings);
         var tls = new TlsObserver();
         var url = KubernetesClients.BaseUrl(settings);
-        using var client = KubernetesClients.Create(settings, tls, transport?.Invoke());
+        using var client = KubernetesClients.Create(settings, tls, transport?.Invoke(settings));
         PlatformInfo platform;
         try
         {
@@ -78,7 +86,7 @@ public sealed class KubernetesProvider(
     public Task<IHypervisorSession> OpenAsync(ConnectionSettings settings, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        IHypervisorSession session = new KubernetesSession(KubernetesClients.Create(settings, null, transport?.Invoke()), settings, channels, images, timings, executor);
+        IHypervisorSession session = new KubernetesSession(KubernetesClients.Create(settings, null, transport?.Invoke(settings)), settings, channels, images, timings, executor);
         return Task.FromResult(session);
     }
 

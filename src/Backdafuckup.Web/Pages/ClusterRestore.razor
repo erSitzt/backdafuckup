@@ -1,0 +1,297 @@
+@page "/restore-cluster/{SessionId:guid}"
+@inject ApiClient Api
+@inject NavigationManager Navigation
+
+@* The restore of a whole-cluster job's run (spec 2026-11-11-1343, phase 2): its cluster-scoped objects, then the chosen
+   namespaces, into the cluster backed up or another one, with its StorageClasses mapped. Each namespace is previewed
+   the way the namespace restore previews it. *@
+<PageTitle>Restore cluster – backdafuckup</PageTitle>
+<PageHeader Title="@($"Restore cluster {_run?.Cluster}")" Back="/backups"
+            Description="The cluster-scoped objects of the run come first (CRDs, ClusterRoles and their bindings, classes), then the namespaces, each as a task of its own. Webhook configurations are listed, not created: their operators make them again." />
+
+@if (_error is not null && _run is null)
+{
+    <MudAlert Severity="Severity.Error">@_error</MudAlert>
+}
+else if (_run is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
+        <MudText Typo="Typo.body2">
+            Run of <b>@Fmt.Time(_run.CreatedUtc)</b> (job @_run.JobName) · cluster @_run.Cluster · @_run.ClusterObjects cluster-scoped objects · @_run.Namespaces.Count namespace(s)
+        </MudText>
+    </MudPaper>
+
+    <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
+        <MudText Typo="Typo.subtitle1" Class="section-title mb-2">Where</MudText>
+        <div class="form-narrow">
+            <MudSelect T="Guid" Value="_cluster" ValueChanged="OnClusterChanged" Label="Cluster" Variant="Variant.Outlined" Class="mb-3"
+                       HelperText="@(_cluster == _run.ConnectionId ? "The cluster that was backed up." : "Another cluster: its StorageClasses take the volumes (below).")">
+                @foreach (var cluster in _clusters)
+                {
+                    <MudSelectItem T="Guid" Value="@cluster.Id">@cluster.DisplayName@(cluster.Id == _run.ConnectionId ? " (backed up here)" : string.Empty)</MudSelectItem>
+                }
+            </MudSelect>
+            <MudSwitch T="bool" @bind-Value="_replace" Color="Color.Primary"
+                       Label="Replace objects that exist with their state in the run (otherwise they are left as they are)" />
+        </div>
+
+        @if (SourceClasses().Any())
+        {
+            <div class="table-box mt-3">
+                <MudSimpleTable Dense="true" Elevation="0">
+                    <thead><tr><th>StorageClass of the backup</th><th>Goes into</th></tr></thead>
+                    <tbody>
+                        @foreach (var source in SourceClasses())
+                        {
+                            <tr>
+                                <td class="nowrap">@source</td>
+                                <td>
+                                    <MudSelect T="string" Value="@(_map.GetValueOrDefault(source) ?? source)" ValueChanged="@(v => OnMapChanged(source, v))" Variant="Variant.Outlined"
+                                               Margin="Margin.Dense" Dense="true" Style="max-width: 320px">
+                                        @if (!_targetClasses.Contains(source))
+                                        {
+                                            <MudSelectItem T="string" Value="@source">@source (not in this cluster)</MudSelectItem>
+                                        }
+                                        @foreach (var name in _targetClasses)
+                                        {
+                                            <MudSelectItem T="string" Value="@name">@name@(name == _defaultClass ? " (default)" : string.Empty)</MudSelectItem>
+                                        }
+                                    </MudSelect>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </MudSimpleTable>
+            </div>
+        }
+    </MudPaper>
+
+    <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
+        <MudText Typo="Typo.subtitle1" Class="section-title mb-2">Namespaces</MudText>
+        @if (_planning)
+        {
+            <MudProgressLinear Indeterminate="true" Class="mb-2" />
+        }
+        <div class="table-box">
+            <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+                <thead><tr><th style="width:48px"></th><th>Namespace</th><th class="num">PVCs</th><th>Data</th><th>To look at</th></tr></thead>
+                <tbody>
+                    @foreach (var ns in _run.Namespaces)
+                    {
+                        var plan = _plans.GetValueOrDefault(ns.Namespace);
+                        <tr class="@(_chosen.Contains(ns.Namespace) ? "row-selected" : null)">
+                            <td><MudCheckBox T="bool" Value="@_chosen.Contains(ns.Namespace)" ValueChanged="@(on => Toggle(ns.Namespace, on))" Dense="true" Color="Color.Primary" /></td>
+                            <td>
+                                @ns.Namespace
+                                @if (!ns.FromRun)
+                                {
+                                    <span class="mini-chip warning" title="Its backup failed in this run">from @Fmt.Time(ns.CreatedUtc)</span>
+                                }
+                            </td>
+                            <td class="num">@ns.VolumesWithData / @ns.Volumes</td>
+                            <td>
+                                @if (plan is not null)
+                                {
+                                    @foreach (var path in plan.Volumes.GroupBy(v => v.Path))
+                                    {
+                                        <span class="@(path.Key == "missing" ? "mini-chip error" : "mini-chip")">@path.Count() @PathText(path.Key)</span>
+                                    }
+                                }
+                            </td>
+                            <td>
+                                @if (plan is not null)
+                                {
+                                    @foreach (var problem in plan.Errors)
+                                    {
+                                        <div class="cell-sub" style="color: var(--mud-palette-error)">@problem</div>
+                                    }
+
+                                    @foreach (var warning in plan.Warnings.Take(3))
+                                    {
+                                        <div class="cell-sub">@warning</div>
+                                    }
+
+                                    @if (plan.Warnings.Count > 3)
+                                    {
+                                        <div class="cell-sub">and @(plan.Warnings.Count - 3) more</div>
+                                    }
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </MudSimpleTable>
+        </div>
+    </MudPaper>
+
+    @if (_error is not null)
+    {
+        <MudAlert Severity="Severity.Error" Dense="true" Class="mb-3">@_error</MudAlert>
+    }
+
+    <div class="d-flex gap-2">
+        <MudButton Href="/backups">Cancel</MudButton>
+        <MudSpacer />
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.SettingsBackupRestore"
+                   Disabled="@(_busy || _planning || _chosen.Count == 0 || _plans.Where(p => _chosen.Contains(p.Key)).Any(p => p.Value.Errors.Count > 0))" OnClick="StartAsync">
+            Restore the cluster
+        </MudButton>
+    </div>
+}
+
+@code {
+    [Parameter] public Guid SessionId { get; set; }
+
+    private ClusterRunDto? _run;
+    private List<ConnectionDto> _clusters = [];
+    private Guid _cluster;
+    private readonly HashSet<string> _chosen = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _map = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, KubernetesRestorePlanDto> _plans = new(StringComparer.Ordinal);
+    private IReadOnlyList<string> _targetClasses = [];
+    private string? _defaultClass;
+    private bool _replace;
+    private bool _planning;
+    private bool _busy;
+    private string? _error;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _run = await Api.GetAsync<ClusterRunDto>($"api/kubernetes/cluster-runs/{SessionId}");
+            _clusters = [.. (await Api.GetAsync<List<ConnectionDto>>("api/connections")).Where(c => c.Kind == "Kubernetes").OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)];
+            _chosen.UnionWith(_run.Namespaces.Select(n => n.Namespace));
+            _cluster = _run.ConnectionId ?? _clusters.FirstOrDefault()?.Id ?? Guid.Empty;
+            await PlanAsync();
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    /// <summary>The StorageClasses the chosen namespaces' PVCs come from.</summary>
+    private IEnumerable<string> SourceClasses() => _run!.Namespaces.Where(n => _chosen.Contains(n.Namespace))
+        .SelectMany(n => n.StorageClasses).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+
+    private static string PathText(string path) => path switch
+    {
+        "block" => "as block volumes",
+        "files" => "as files",
+        "missing" => "without a class",
+        _ => "objects only",
+    };
+
+    private async Task OnClusterChanged(Guid cluster)
+    {
+        _cluster = cluster;
+        _map.Clear();
+        await PlanAsync();
+        if (cluster != _run!.ConnectionId)
+        {
+            var fallback = _defaultClass ?? _targetClasses.FirstOrDefault();
+            foreach (var source in SourceClasses().Where(c => fallback is not null && !_targetClasses.Contains(c)))
+            {
+                _map[source] = fallback!;
+            }
+
+            if (_map.Count > 0)
+            {
+                await PlanAsync();
+            }
+        }
+    }
+
+    private async Task OnMapChanged(string source, string target)
+    {
+        if (target == source)
+        {
+            _map.Remove(source);
+        }
+        else
+        {
+            _map[source] = target;
+        }
+
+        await PlanAsync();
+    }
+
+    private async Task Toggle(string ns, bool on)
+    {
+        if (on)
+        {
+            _chosen.Add(ns);
+        }
+        else
+        {
+            _chosen.Remove(ns);
+        }
+
+        await Task.CompletedTask;
+    }
+
+    /// <summary>The preview of each namespace of the run in the target, as the namespace restore makes it.</summary>
+    private async Task PlanAsync()
+    {
+        if (_run is null || _cluster == Guid.Empty)
+        {
+            return;
+        }
+
+        _planning = true;
+        _error = null;
+        StateHasChanged();
+        try
+        {
+            foreach (var ns in _run.Namespaces)
+            {
+                var plan = await Api.PostAsync<KubernetesRestorePlanDto>($"api/restore-points/{ns.PointId}/kubernetes/restore-plan", new KubernetesRestorePlanRequestDto
+                {
+                    TargetConnectionId = _cluster, TargetNamespace = ns.Namespace, StorageClassMap = new Dictionary<string, string>(_map),
+                });
+                _plans[ns.Namespace] = plan;
+                _targetClasses = plan.StorageClasses;
+                _defaultClass = plan.DefaultStorageClass;
+            }
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _planning = false;
+        }
+    }
+
+    private async Task StartAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>("api/kubernetes/cluster-restores", new ClusterRestoreRequestDto
+            {
+                BackupSessionId = SessionId,
+                TargetConnectionId = _cluster,
+                Namespaces = _chosen.Count == _run!.Namespaces.Count ? null : [.. _chosen],
+                StorageClassMap = new Dictionary<string, string>(_map),
+                ReplaceExisting = _replace,
+            });
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

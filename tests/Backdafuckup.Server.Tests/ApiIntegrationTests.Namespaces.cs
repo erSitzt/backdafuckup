@@ -307,9 +307,10 @@ public sealed partial class ApiIntegrationTests
     /// make snapshots ready, and a mover pod runs the real mover program with <paramref name="device"/> as its volume (of
     /// <paramref name="bytes"/>); a file restore's mover pod in bdfu-spike puts the files into the folder <paramref name="live"/>.
     /// </summary>
-    private void SetUpCluster(string device, List<string> movers, List<string> restoredDevices, long bytes = 8L * 1024 * 1024, string? live = null)
+    private void SetUpCluster(
+        string device, List<string> movers, List<string> restoredDevices, long bytes = 8L * 1024 * 1024, string? live = null, Backdafuckup.Testing.Kubernetes.FakeKubernetesApi? cluster = null)
     {
-        var api = _cluster;
+        var api = cluster ?? _cluster;
         api.Add("api/v1", "namespaces", Backdafuckup.Testing.Kubernetes.FakeKubernetesApi.Namespace("bdfu-spike"));
         api.Add("api/v1", "namespaces", Backdafuckup.Testing.Kubernetes.FakeKubernetesApi.Namespace(KubernetesSetup.WorkNamespace));
         api.Add("api/v1", "configmaps", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "redis-config", ["namespace"] = "bdfu-spike" } });
@@ -343,6 +344,17 @@ public sealed partial class ApiIntegrationTests
         api.Add("apis/storage.k8s.io/v1", "storageclasses", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "vsphere-csi" }, ["provisioner"] = "csi.vsphere.vmware.com" });
         api.Add(Snapshots, "volumesnapshotclasses", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "vsphere-snapshots" }, ["driver"] = "csi.vsphere.vmware.com" });
 
+        SetUpControllers(api, device, movers, restoredDevices, bytes, live);
+    }
+
+    /// <summary>
+    /// The controllers of a fake cluster with the CSI driver <paramref name="driver"/>: they make snapshots ready, provision
+    /// work PVCs, and run a mover pod as the real mover program (see <see cref="SetUpCluster"/>).
+    /// </summary>
+    private void SetUpControllers(
+        Backdafuckup.Testing.Kubernetes.FakeKubernetesApi api, string device, List<string> movers, List<string> restoredDevices, long bytes = 8L * 1024 * 1024, string? live = null,
+        string driver = "csi.vsphere.vmware.com")
+    {
         api.Created = (plural, item) =>
         {
             var ns = (string?)item["metadata"]!["namespace"];
@@ -353,7 +365,7 @@ public sealed partial class ApiIntegrationTests
                     api.Add(Snapshots, "volumesnapshotcontents", new JsonObject
                     {
                         ["metadata"] = new JsonObject { ["name"] = $"snapcontent-{name}" },
-                        ["spec"] = new JsonObject { ["driver"] = "csi.vsphere.vmware.com", ["deletionPolicy"] = "Delete" },
+                        ["spec"] = new JsonObject { ["driver"] = driver, ["deletionPolicy"] = "Delete" },
                         ["status"] = new JsonObject { ["snapshotHandle"] = "fcd-1+snap-1", ["restoreSize"] = bytes, ["readyToUse"] = true },
                     });
                     api.Mutate(() => item["status"] = new JsonObject { ["readyToUse"] = true, ["boundVolumeSnapshotContentName"] = $"snapcontent-{name}" });
@@ -369,7 +381,7 @@ public sealed partial class ApiIntegrationTests
                         ["spec"] = new JsonObject
                         {
                             ["capacity"] = new JsonObject { ["storage"] = (string?)item["spec"]!["resources"]!["requests"]!["storage"] },
-                            ["csi"] = new JsonObject { ["driver"] = "csi.vsphere.vmware.com", ["volumeHandle"] = $"fcd-{name}" },
+                            ["csi"] = new JsonObject { ["driver"] = driver, ["volumeHandle"] = $"fcd-{name}" },
                             ["persistentVolumeReclaimPolicy"] = "Delete",
                             ["volumeMode"] = "Block",
                         },

@@ -248,6 +248,12 @@ public sealed class KubernetesSetupTests
         Assert.Contains(backup.Rules, r => r.Resources.Contains("volumesnapshotcontents") && r.Verbs.Contains("create"));
         Assert.Contains(backup.Rules, r => r.Resources.Contains("pods/exec"));
 
+        // The restore may bind and escalate roles: RoleBindings to admin or edit, and the ClusterRoles of a whole-cluster restore.
+        var restore = Assert.IsType<k8s.Models.V1ClusterRole>(objects[7]);
+        Assert.Equal("backdafuckup-restore", restore.Metadata.Name);
+        Assert.Contains(restore.Rules, r => r.ApiGroups.SequenceEqual(["rbac.authorization.k8s.io"]) && r.Resources.SequenceEqual(["roles", "clusterroles"])
+                                             && r.Verbs.SequenceEqual(["bind", "escalate"]));
+
         // Without restore: the same up to the work namespace's role, no rights to create objects anywhere.
         var backupOnly = k8s.KubernetesYaml.LoadAllFromString(KubernetesSetup.Manifest(includeRestore: false));
         Assert.Equal(7, backupOnly.Count);

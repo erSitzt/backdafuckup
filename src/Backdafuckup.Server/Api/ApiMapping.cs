@@ -94,5 +94,6 @@ internal static class ApiMapping
         SqlConsistentCount: r.SqlConsistentCount,
         ConsistencyWarning: r.ConsistencyWarning,
         SqlUserDatabaseCount: r.SqlUserDatabaseCount,
-        ObjectKind: r.ObjectKind);
+        ObjectKind: r.ObjectKind,
+        SessionId: r.SessionId);
 }

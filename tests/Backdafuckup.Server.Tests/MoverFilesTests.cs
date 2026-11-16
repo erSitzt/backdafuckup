@@ -130,7 +130,7 @@ public sealed class MoverFilesTests : IDisposable
     }
 
     [Fact]
-    public async Task Owners_from_the_backup_that_cannot_be_set_are_reported_and_the_file_is_still_restored()
+    public async Task A_volume_that_keeps_no_owners_is_reported_once_and_the_files_are_still_restored()
     {
         Assert.SkipUnless(OperatingSystem.IsLinux(), "The mover puts files into volumes on Linux only (statx, lchown).");
         if (Environment.IsPrivilegedProcess)
@@ -138,17 +138,41 @@ public sealed class MoverFilesTests : IDisposable
             return; // root may give files to anyone
         }
 
+        // Like an NFS export with root_squash: the mover cannot give files to other users (here: it is no root).
         var report = await ApplyAsync(keep: false, owners: true, w =>
         {
-            w.File(0, "owned.txt", Text("x"), 1, Ct);
-            w.Meta(0, "owned.txt", folder: false, new MoverFileMeta(0b110_100_100, 0, 0, Modified, null));
+            w.Directory(0, "data");
+            w.File(1, "data/owned.txt", Text("x"), 1, Ct);
+            w.Meta(1, "data/owned.txt", folder: false, new MoverFileMeta(0b110_100_100, 0, 0, Modified, null));
+            w.File(2, "data/other.txt", Text("y"), 1, Ct);
+            w.Meta(2, "data/other.txt", folder: false, new MoverFileMeta(0b110_000_000, 999, 999, Modified, null));
+            w.Meta(0, "data", folder: true, new MoverFileMeta(0b111_000_000, 999, 999, Modified, null));
         });
 
-        Assert.Equal((1L, 1L), (report.Files, report.Partial));
+        Assert.Equal((2L, 0L, 0L), (report.Files, report.Partial, report.Failed));
         var issue = Assert.Single(report.Issues);
-        Assert.Equal(MoverFileIssueKinds.Partial, issue.Kind);
-        Assert.StartsWith("owner 0:0 not set", issue.Text, StringComparison.Ordinal);
-        Assert.Equal(Modified, File.GetLastWriteTimeUtc(Path.Combine(_volume, "owned.txt")));
+        Assert.Equal((-1, MoverFileIssueKinds.Partial), (issue.Index, issue.Kind));
+        Assert.StartsWith("owners are not kept: the volume does not let the mover give files to other users", issue.Text, StringComparison.Ordinal);
+        Assert.Equal(Modified, File.GetLastWriteTimeUtc(Path.Combine(_volume, "data", "owned.txt")));
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(_volume, "data", "other.txt")));
+        Assert.DoesNotContain(Directory.EnumerateFileSystemEntries(_volume), e => Path.GetFileName(e).StartsWith(".bdfu-", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task The_volume_root_gets_the_mode_and_times_of_the_backed_up_root()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The mover puts files into volumes on Linux only (statx, lchown).");
+
+        // A whole volume into a new one: the root's own meta comes last, under the empty path.
+        var report = await ApplyAsync(keep: false, owners: false, w =>
+        {
+            w.File(0, "PG_VERSION", Text("17"), 2, Ct);
+            w.Meta(1, string.Empty, folder: true, new MoverFileMeta(0b111_000_000, null, null, Modified, null));
+        });
+
+        Assert.Equal((1L, 0L, 0L), (report.Files, report.Partial, report.Failed));
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(_volume));
+        Assert.Equal(Modified, Directory.GetLastWriteTimeUtc(_volume));
     }
 
     /// <summary>Writes a stream with its end and applies it to the volume.</summary>

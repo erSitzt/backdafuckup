@@ -30,9 +30,87 @@ public static class OperationEndpoints
                 return Results.Problem("Restoring to the original location requires the original pool.", statusCode: StatusCodes.Status400BadRequest);
             }
 
+            if (point.ObjectKind == RestorePointObjectKinds.KubernetesCluster && request.KubernetesCluster is null)
+            {
+                return Results.Problem("This restore point holds the cluster-scoped objects of a whole-cluster run: restore it with the cluster restore (POST /api/kubernetes/cluster-restores).",
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            // A namespace goes into a cluster: its own, or another one (alternate location) with its StorageClasses mapped.
+            if (point.ObjectKind == RestorePointObjectKinds.KubernetesNamespace
+                && (request.TargetConnectionId ?? point.ConnectionId) is { } cluster
+                && await db.Connections.FindAsync([cluster], ct) is not { Kind: Core.Hypervisor.HypervisorKind.Kubernetes })
+            {
+                return Results.Problem("A namespace can only be restored into a Kubernetes cluster: the target connection is none (or no longer exists).", statusCode: StatusCodes.Status400BadRequest);
+            }
+
             var id = await queue.EnqueueRestoreAsync(request, point.VmName, http.User.Identity?.Name ?? "user", ct);
             return Results.Ok(new StartedDto(id));
         });
+
+        app.MapGet("/api/kubernetes/cluster-runs/{sessionId:guid}", async (Guid sessionId, AppDbContext db, RepositoryManager repositories, CancellationToken ct) =>
+        {
+            if (await ClusterRuns.LoadAsync(db, sessionId, ct) is not { } run)
+            {
+                return Results.Problem("The session is no run of a whole-cluster job with an available restore point of its cluster-scoped objects.", statusCode: StatusCodes.Status404NotFound);
+            }
+
+            var namespaces = new List<ClusterRunNamespaceDto>();
+            foreach (var (name, point, fromRun) in run.Namespaces)
+            {
+                var repository = await repositories.GetAsync(point.RepositoryId, ct);
+                await using var reader = await repository.OpenRestorePointAsync(point.Id, ct);
+                var volumes = reader.Manifest.Kubernetes?.Volumes ?? [];
+                namespaces.Add(new ClusterRunNamespaceDto(
+                    name, point.Id, fromRun, point.CreatedUtc, volumes.Count, volumes.Count(v => v.DiskKey is not null),
+                    [.. volumes.Select(v => v.StorageClass).OfType<string>().Where(c => c.Length > 0).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)]));
+            }
+
+            var cluster = run.ClusterPoint;
+            var objects = 0;
+            {
+                var repository = await repositories.GetAsync(cluster.RepositoryId, ct);
+                await using var reader = await repository.OpenRestorePointAsync(cluster.Id, ct);
+                objects = reader.Manifest.Kubernetes?.ObjectCount ?? 0;
+            }
+
+            var clusterName = cluster.ConnectionId is { } connectionId
+                ? await db.Connections.Where(c => c.Id == connectionId).Select(c => c.DisplayName).FirstOrDefaultAsync(ct) ?? cluster.PlatformId
+                : cluster.PlatformId;
+            return Results.Ok(new ClusterRunDto(sessionId, cluster.JobName ?? string.Empty, cluster.ConnectionId, clusterName, cluster.CreatedUtc, cluster.Id, objects, namespaces));
+        }).WithDescription("A run of a whole-cluster job as the cluster restore offers it: the restore point of its cluster-scoped objects and its namespaces (a namespace that failed in the run with its newest older point).");
+
+        app.MapPost("/api/kubernetes/cluster-restores", async (ClusterRestoreRequestDto request, AppDbContext db, SessionQueue queue, HttpContext http, CancellationToken ct) =>
+        {
+            if (await ClusterRuns.LoadAsync(db, request.BackupSessionId, ct) is not { } run)
+            {
+                return Results.Problem("The session is no run of a whole-cluster job with an available restore point of its cluster-scoped objects.", statusCode: StatusCodes.Status404NotFound);
+            }
+
+            var target = request.TargetConnectionId ?? run.ClusterPoint.ConnectionId;
+            if (target is not { } targetId || await db.Connections.FindAsync([targetId], ct) is not { Kind: Core.Hypervisor.HypervisorKind.Kubernetes } connection)
+            {
+                return Results.Problem("A cluster can only be restored into a Kubernetes cluster: the target connection is none (or no longer exists).", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            if (request.Namespaces is { } names && names.FirstOrDefault(n => run.Namespaces.All(r => r.Namespace != n)) is { } unknown)
+            {
+                return Results.Problem($"The run has no namespace {unknown}.", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            var restore = new RestoreRequestDto
+            {
+                RestorePointId = run.ClusterPoint.Id,
+                TargetConnectionId = targetId,
+                Mode = targetId == run.ClusterPoint.ConnectionId ? RestoreModeDto.OriginalLocation : RestoreModeDto.AlternateLocation,
+                KubernetesCluster = new KubernetesClusterRestoreDto
+                {
+                    Namespaces = request.Namespaces, StorageClassMap = request.StorageClassMap, ReplaceExisting = request.ReplaceExisting,
+                },
+            };
+            var id = await queue.EnqueueRestoreAsync(restore, $"cluster into {connection.DisplayName}", http.User.Identity?.Name ?? "user", ct);
+            return Results.Ok(new StartedDto(id));
+        }).WithDescription("Restores a whole-cluster job's run into a cluster (its own or another, with StorageClasses mapped): the cluster-scoped objects first (CRDs, ClusterRoles and bindings, classes; webhooks are only listed), then the chosen namespaces, each as a task.");
 
         app.MapGet("/api/dashboard", async (AppDbContext db, TimeProvider time, CancellationToken ct) =>
         {
@@ -198,9 +276,13 @@ public static class OperationEndpoints
 
         var repository = await repositories.GetAsync(point.RepositoryId, ct);
         await using var reader = await repository.OpenRestorePointAsync(id, ct);
-        if (reader.Manifest is not { Kubernetes: { } space, Metadata: { } metadata })
+        if (reader.Manifest is not { Kubernetes: { ClusterScope: false } space, Metadata: { } metadata })
         {
-            return (point, null, null, Results.Problem("The restore point is not one of a Kubernetes namespace.", statusCode: StatusCodes.Status400BadRequest));
+            return (point, null, null, Results.Problem(
+                reader.Manifest.Kubernetes is { ClusterScope: true }
+                    ? "The restore point holds the cluster-scoped objects of a whole-cluster run, not a namespace: restore it with the cluster restore."
+                    : "The restore point is not one of a Kubernetes namespace.",
+                statusCode: StatusCodes.Status400BadRequest));
         }
 
         await using var blob = await reader.OpenBlobAsync(metadata, ct);
@@ -269,6 +351,38 @@ public static class OperationEndpoints
             }
         }).WithDescription("Compares the objects of a namespace's restore point with the live namespace: same, changed, missing (deleted since) or new (made since).");
 
+        points.MapPost("/{id:guid}/kubernetes/restore-plan", async (
+            Guid id, KubernetesRestorePlanRequestDto request, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, CancellationToken ct) =>
+        {
+            var (point, space, content, problem) = await NamespaceAsync(id, db, repositories, ct);
+            if (problem is not null)
+            {
+                return problem;
+            }
+
+            var targetId = request.TargetConnectionId ?? point!.ConnectionId;
+            if (targetId is not { } cluster || await db.Connections.AsNoTracking().FirstOrDefaultAsync(c => c.Id == targetId, ct) is not { Kind: Core.Hypervisor.HypervisorKind.Kubernetes } connection)
+            {
+                return Results.Problem("A namespace can only be restored into a Kubernetes cluster: the target connection is none (or no longer exists).", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            var target = string.IsNullOrWhiteSpace(request.TargetNamespace) ? space!.Namespace : request.TargetNamespace.Trim();
+            var other = cluster != point!.ConnectionId && !string.Equals(connection.PlatformId, point.PlatformId, StringComparison.Ordinal);
+            try
+            {
+                await using var session = await connections.OpenAsync(cluster, ct);
+                var plan = await ((Backdafuckup.Kubernetes.IKubernetesRestorePlanner)session).PlanRestoreAsync(space!, content!, target, request.StorageClassMap, other, ct);
+                return Results.Ok(new KubernetesRestorePlanDto(
+                    cluster, plan.Cluster, plan.TargetNamespace, plan.OtherCluster, plan.NamespaceExists, plan.StorageClasses, plan.DefaultStorageClass,
+                    [.. plan.Volumes.Select(v => new KubernetesVolumePlanDto(v.Claim, v.SourceStorageClass, v.TargetStorageClass, v.Path, v.Reason, v.SizeBytes))],
+                    plan.Warnings, plan.Errors));
+            }
+            catch (Exception ex) when (ex is Backdafuckup.Kubernetes.KubernetesOperationException or HttpRequestException or k8s.Autorest.HttpOperationException)
+            {
+                return Results.Problem($"Cluster {connection.DisplayName} could not be read for the plan: {ex.Message}", statusCode: StatusCodes.Status502BadGateway);
+            }
+        }).WithDescription("Previews a namespace restore into a cluster (the restore point's or another one, with StorageClasses mapped): each PVC's class and data path there (block, files, objects only, missing), warnings and what would stop it. Writes nothing.");
+
         points.MapGet("/{id:guid}/kubernetes/object", async (Guid id, string kind, string name, bool? live, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, CancellationToken ct) =>
         {
             var (point, space, content, problem) = await NamespaceAsync(id, db, repositories, ct);
@@ -297,7 +411,7 @@ public static class OperationEndpoints
             return Results.Ok(new KubernetesObjectDetailDto(kind, name, Backdafuckup.Kubernetes.KubernetesCompare.Show(content!, kind, name), current));
         }).WithDescription("An object of a namespace's restore point as stored and (live=true) as the cluster has it now; Secrets show their keys, never their values.");
 
-        points.MapGet("/", async (AppDbContext db, Guid? jobId, string? vmId, CancellationToken ct) =>
+        points.MapGet("/", async (AppDbContext db, Guid? jobId, string? vmId, string? platformId, CancellationToken ct) =>
         {
             var query = db.RestorePoints.Include(r => r.Disks).Where(r => r.State == RestorePointState.Available);
             if (jobId is { } job)
@@ -308,6 +422,12 @@ public static class OperationEndpoints
             if (!string.IsNullOrEmpty(vmId))
             {
                 query = query.Where(r => r.VmNativeId == vmId);
+            }
+
+            // Namespaces of the same name in two clusters: the cluster's platform id (BackupVmDto.PlatformId) tells them apart.
+            if (!string.IsNullOrEmpty(platformId))
+            {
+                query = query.Where(r => r.PlatformId == platformId);
             }
 
             return (await query.OrderBy(r => r.VmName).ThenByDescending(r => r.CreatedUtc).ToListAsync(ct)).Select(r => r.ToDto());
@@ -321,7 +441,7 @@ public static class OperationEndpoints
                 ? Results.Problem(problem, statusCode: StatusCodes.Status400BadRequest)
                 : Results.Ok(await BackupVms.ListAsync(db, filter, time.GetUtcNow(), ct));
         }).WithSummary("One row per VM: its jobs, the newest restore point in each and whether it missed a scheduled run")
-          .WithDescription("Filters (all optional, repeatable where noted): q (part of the VM's or a job's name), jobId (repeatable; 00000000-0000-0000-0000-000000000000 = restore points without a job, i.e. of a deleted job), repositoryId, content (repeatable: ad, sql), consistency (application, crash, warning), state (repeatable: stale, nopoint, ok), olderThanDays. A VM keeps only the jobs that match. The restore points of a VM: GET /api/restore-points?vmId=…&jobId=….");
+          .WithDescription("Filters (all optional, repeatable where noted): q (part of the VM's or a job's name), jobId (repeatable; 00000000-0000-0000-0000-000000000000 = restore points without a job, i.e. of a deleted job), repositoryId, content (repeatable: ad, sql), consistency (application, crash, warning), state (repeatable: stale, nopoint, ok), olderThanDays. A VM keeps only the jobs that match. The restore points of a VM: GET /api/restore-points?vmId=…&jobId=… (for a namespace also &platformId=… of its row).");
 
         points.MapGet("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>
         {
@@ -426,6 +546,26 @@ public static class OperationEndpoints
             {
                 errors["objects"] = [invalid];
             }
+        }
+
+        // The whole cluster: only on a cluster, once, with valid exclude patterns, and not as a namespace name.
+        var wholes = request.Objects.Where(o => KubernetesClusterScope.IsJobObject(o.NativeId)).ToList();
+        if (wholes.Count > 0 && !cluster)
+        {
+            errors["objects"] = ["Only a Kubernetes cluster is backed up as a whole."];
+        }
+        else if (wholes.Count > 1)
+        {
+            errors["objects"] = ["A job backs up its cluster as a whole once."];
+        }
+        else if (wholes.Count == 1 && KubernetesClusterScope.Validate(KubernetesClusterScope.Excludes(wholes[0].NativeId)) is { } badPattern)
+        {
+            errors["objects"] = [badPattern];
+        }
+
+        if (request.Objects.Any(o => o.NativeId == KubernetesClusterScope.Member))
+        {
+            errors["objects"] = ["The cluster-scoped objects come with a whole-cluster object of the job."];
         }
 
         // A namespace has no guest and no memory: its consistency comes from its hooks.

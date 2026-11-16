@@ -177,6 +177,7 @@ internal sealed class PvcFileImport : IPvcFileRestore
             cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         // The pull secret lives in the work namespace; the pod in the PVC's namespace needs a copy of it.
+        await _flow.EnsurePullSecretAsync(mover, cancellationToken).ConfigureAwait(false);
         if (mover.PullSecretName is { } pull)
         {
             byte[]? config = null;

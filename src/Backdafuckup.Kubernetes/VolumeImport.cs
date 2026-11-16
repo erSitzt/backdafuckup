@@ -35,8 +35,9 @@ internal sealed class VolumeImport : IDiskWriter
     private string? _handle;
     private string _driver = string.Empty;
 
-    private VolumeImport(VolumeSnapshotFlow flow, string run, RestoreDiskTarget target, string targetNamespace, string? snapshotClass, string source)
+    private VolumeImport(VolumeSnapshotFlow flow, string run, RestoreDiskTarget target, string targetNamespace, string? storageClass, string? snapshotClass, string source)
     {
+        StorageClass = storageClass;
         _flow = flow;
         _run = run;
         _target = target;
@@ -50,6 +51,9 @@ internal sealed class VolumeImport : IDiskWriter
 
     /// <summary>The volume's import: the work PVC it is written to (also the name of its snapshots).</summary>
     public string DiskId => _name;
+
+    /// <summary>The target cluster's StorageClass of the volume (null: the default class); the target PVC gets the same.</summary>
+    public string? StorageClass { get; }
 
     /// <summary>The VolumeSnapshot in the target namespace the target PVC is created from (once exposed).</summary>
     public string? Snapshot { get; private set; }
@@ -69,7 +73,7 @@ internal sealed class VolumeImport : IDiskWriter
     public static async Task<VolumeImport> CreateAsync(
         VolumeSnapshotFlow flow, string run, RestoreDiskTarget target, string? storageClass, string? snapshotClass, string targetNamespace, string source, CancellationToken cancellationToken)
     {
-        var import = new VolumeImport(flow, run, target, targetNamespace, snapshotClass, source);
+        var import = new VolumeImport(flow, run, target, targetNamespace, string.IsNullOrEmpty(storageClass) ? null : storageClass, snapshotClass, source);
         var size = target.CapacityBytes.ToString(CultureInfo.InvariantCulture);
         await import.CreateAsync(KubernetesArtifactKinds.PersistentVolumeClaim, Work, import._name, () => flow.Client.CoreV1.CreateNamespacedPersistentVolumeClaimAsync(
             new V1PersistentVolumeClaim
@@ -97,6 +101,7 @@ internal sealed class VolumeImport : IDiskWriter
             throw new KubernetesOperationException($"Volume data cannot be restored to cluster {_flow.Cluster}: this server has no mover channel or image.");
         }
 
+        await _flow.EnsurePullSecretAsync(mover, cancellationToken).ConfigureAwait(false);
         _channel = await channels.OpenRestoreAsync($"{_source} (cluster {_flow.Cluster})", image, cancellationToken, _flow.Timings.MoverConnect, processed).ConfigureAwait(false);
         var endpoint = _channel.Endpoint;
         var tokenSecret = $"{_name}-token";

@@ -41,6 +41,12 @@ backdafuckup backs up Kubernetes workloads at the Kubernetes level: the API obje
 
   Variant **B**, an applications view per cluster with policies, stays an option for parts later: policies that select namespaces by wildcard or label (also new ones), application cards with protection status, the 14-day restore point strip, and per-volume choices in the restore.
 
+### Confirmed by the user (2026-11-12), phase 2
+- **Order:** phase 2 right after phase 1 (K1–K11 checked).
+- **Second test cluster:** `rke2-target`, mostly empty. Only new test namespaces and `backdafuckup-system` are written there; its existing workloads are not touched. It has only an nfs-subdir StorageClass and no CSI driver, so it tests the files data path.
+- **DR scope:** a cluster job leaves out the Kubernetes system namespaces and those of Rancher and Fleet by default (`kube-system`, `kube-public`, `kube-node-lease`, `cattle-*`, `fleet-*`, `cluster-fleet-*`, `local`, `backdafuckup-system`). The list can be changed per job.
+- **DR test target:** a local kind cluster, reached through the agent, that can be thrown away.
+
 ### Technical
 - **Data path for block PVCs:**
   1. A CSI VolumeSnapshot.

@@ -115,10 +115,91 @@ Spec folder: `agent-os/specs/2026-11-11-1343-kubernetes-workload-backup/`
 - **Object explorer:**
   - Browse a restore point's objects by kind, compare them with the live cluster, restore selected ones. The pattern of `AdExplorer`/`SqlBrowser`; a preview before writing.
 
+### Phase 2: another cluster and whole-cluster DR (planned 2026-11-12)
+
+**Starting point** (code as of phase 1):
+- A restore always goes into the source cluster. The volume import uses the source's VolumeSnapshotClass name, and the target PVC keeps the source StorageClass.
+- The block data path needs a CSI driver with snapshots and Block volumes in the target. The second test cluster (`rke2-target`: only an nfs-subdir class) and kind (local-path) have neither.
+- Cluster-scoped objects backed up are only the Namespace, its PVCs' PVs and StorageClasses, and the CRDs of its CRs.
+- The restore role has no `bind`/`escalate`.
+- The console rolls restore points up by namespace name only.
+
+**2a: a namespace into another cluster**
+- **Target:** `TargetConnectionId` names the target cluster. `AlternateLocation` with a connected Kubernetes connection; `OriginalLocation` only for the same cluster.
+- **StorageClass map** (`KubernetesRestoreDto.StorageClassMap`; a per-claim `DiskStorage` wins). It applies to:
+  - the work PVC and the target PVC;
+  - StatefulSet `volumeClaimTemplates`;
+  - the legacy class annotation;
+  - the WaitForFirstConsumer check.
+
+  Backed-up StorageClasses are created only when they are unmapped and missing; a class that is unmapped and missing in the target fails the validation.
+- **Data path per volume, decided against the target:**
+  - **Block** (as phase 1): the target class is CSI, and the target has a snapshot class for its driver. That class is looked up in the target.
+  - **Files** (new) otherwise:
+    1. A Filesystem work PVC on the mapped class in `backdafuckup-system`.
+    2. The files mover writes the volume's files, read by the server from the image (`FileLevel`, ext/XFS), with owners, modes and times.
+    3. The PV is handed over to the target PVC: Retain, target PVC with `volumeName`, delete the work PVC, `claimRef` to the target, Bound, reclaim policy back.
+
+    It is not used for drivers that have snapshots: on vSphere the rebind breaks (see "Restores as built").
+- **Mover:**
+  - The root folder of the volume keeps its owner and mode.
+  - A root_squash probe: on NFS exports that map root to nobody, one issue instead of one per file.
+- **Cleaning for another cluster:**
+  - finalizers, Rancher fields, Service `loadBalancerIP`/`externalIPs`;
+  - Rancher's RoleBindings skipped;
+  - static NFS PVs not re-created;
+  - CRDs waited for until Established;
+  - the mover's pull secret ensured in the target.
+- **Preview** (`POST /api/restore-points/{id}/kubernetes/restore-plan`): the data path per volume, and warnings:
+  - missing classes or CRDs;
+  - NFS owners;
+  - what the files path loses (hard links, sparse files, xattrs/ACLs);
+  - unknown priority or runtime classes;
+  - host affinity, Ingress hosts;
+  - fstype mismatches.
+- **Console:** a target cluster picker, the StorageClass map and the preview on the namespace restore page.
+- **Keys:** restore points are rolled up and filtered by the cluster's platform id and the namespace.
+
+**2b: whole-cluster DR**
+- **Backup:** a job object `cluster:` with an exclude list per job.
+  - Default exclude list: `kube-system`, `kube-public`, `kube-node-lease`, `cattle-*`, `fleet-*`, `cluster-fleet-*`, `local`, `backdafuckup-system`.
+  - It backs up every other namespace as its own restore point, plus one restore point of kind `KubernetesCluster` per run with the cluster-scoped objects:
+    - CRDs, without `*.cattle.io`, snapshot, CNI and vSphere CSI (`cns.vmware.com`) groups;
+    - ClusterRoles and Bindings that are neither system, defaults, RKE2, Rancher nor Fleet ones;
+    - StorageClasses, PriorityClasses, IngressClasses, VolumeSnapshotClasses, RuntimeClasses;
+    - cluster-scoped CRs;
+    - webhook configurations, for the record.
+  - APIServices, nodes and other runtime objects are never backed up.
+- **RBAC:** the restore role gets `bind` and `escalate` on roles and clusterroles. That is effectively cluster-admin, and the admin guide says so. A restore checks the right first with a SelfSubjectAccessReview.
+- **Restore** of one run into a target cluster, one session:
+  1. Cluster-scoped objects first, CRDs until Established, existing ones skipped. A second default class is not created.
+  2. Then each chosen namespace as its own task, through 2a with the same StorageClass map.
+  3. Webhooks are not restored, only listed, because a stale CA with `failurePolicy: Fail` would block the whole cluster. APIServices never.
+- **Console:** "Whole cluster" in the job editor with the exclude list; *Restore cluster* for a run, with the target, a namespace checklist, the map and the preview.
+
+**Tasks:**
+1. Test harness: a second fake cluster and an NFS-like fake.
+2. Keys per cluster.
+3. Cleaning and class mapping of objects.
+4. API and block path into another cluster.
+5. Mover: root folder and root_squash.
+6. Files path with the PV hand-over.
+7. Preview.
+8. Console.
+9. Lab: `rke2-test` → `rke2-target` (nfs-subdir).
+10. DR: RBAC.
+11. DR: backup.
+12. DR: restore session.
+13. DR: console.
+14. Lab: DR into a local kind cluster.
+15. Docs.
+
+**Verification:**
+- Unit and integration tests per task against two fake clusters (CSI with other class names; NFS-like with the files mover).
+- **Lab, 2a:** a namespace with Redis from `rke2-test` (vSphere CSI) into `rke2-target` (nfs-subdir) through the files path. Redis runs with its data; nothing is left in either cluster; nothing existing in the target is touched.
+- **Lab, 2b:** a DR run of `rke2-test` into a local kind cluster. The cluster-scoped objects and namespaces are there, Redis has its data, and the webhooks are only listed.
+
 ### Later phases (same spec)
-- **Phase 2:**
-  - Restore into another cluster with namespace and StorageClass mapping. The data path does not depend on the snapshot.
-  - Whole-cluster DR: cluster-scoped objects, CRDs, all namespaces; a "cluster" job object.
 - **Phase 3:**
   - NFS PVs at file level (the mover reads the mounted share; needs a file store in the repository).
   - CBT through CSI SnapshotMetadata (gRPC; CSI hostpath already offers it).
@@ -169,7 +250,7 @@ Spec folder: `agent-os/specs/2026-11-11-1343-kubernetes-workload-backup/`
 9. **Docs and lab:**
    - Admin guide (Kubernetes chapter: setup, RBAC, snapshot limits, consistency, Secrets), runbook rows K1…, `THIRD-PARTY-NOTICES.md`.
    - Lab runs on the test cluster through both API paths.
-10. **Phases 2 and 3:** their own tasks, planned once Phase 1 is in use.
+10. **Phases 2 and 3:** their own tasks. Phase 2 is planned above (2026-11-12).
 
 ## Verification
 - **Tests:**

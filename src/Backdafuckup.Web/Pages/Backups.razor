@@ -454,7 +454,7 @@ else
 
         if (Grouping == "vm")
         {
-            yield return new Group("all", null, string.Empty, Sort(vms.Select(v => new BackupRow("all|" + v.VmNativeId, v, null, KindOf(v)))));
+            yield return new Group("all", null, string.Empty, Sort(vms.Select(v => new BackupRow("all|" + RowId(v), v, null, KindOf(v)))));
             yield break;
         }
 
@@ -467,10 +467,10 @@ else
             var connection = _jobs.FirstOrDefault(j => j.Id == job.Key) is { } dto && _connections.TryGetValue(dto.ConnectionId, out var found) ? found : null;
             var cluster = connection is null ? (bool?)null : connection.Kind == "Kubernetes";
             var source = connection is null ? null : $"{(cluster == true ? "cluster" : "pool")} {connection.DisplayName}";
-            yield return new Group(key, first.JobName, detail, Sort(job.Select(r => new BackupRow(key + "|" + r.Vm.VmNativeId, r.Vm, r.Job, KindOf(r.Vm)))), source, cluster);
+            yield return new Group(key, first.JobName, detail, Sort(job.Select(r => new BackupRow(key + "|" + RowId(r.Vm), r.Vm, r.Job, KindOf(r.Vm)))), source, cluster);
         }
 
-        var orphans = rows.Where(r => !r.Job.JobExists).Select(r => new BackupRow("none|" + r.Vm.VmNativeId, r.Vm, r.Job, KindOf(r.Vm))).ToList();
+        var orphans = rows.Where(r => !r.Job.JobExists).Select(r => new BackupRow("none|" + RowId(r.Vm), r.Vm, r.Job, KindOf(r.Vm))).ToList();
         if (orphans.Count > 0)
         {
             yield return new Group("none", "Without job", "restore points of deleted jobs, kept until they are deleted", Sort(orphans));
@@ -525,11 +525,16 @@ else
         }
     }
 
+    /// <summary>A row's id: a namespace is unique only within its cluster.</summary>
+    private static string RowId(BackupVmDto vm) => vm.PlatformId is { } platform ? $"{vm.VmNativeId}@{platform}" : vm.VmNativeId;
+
     private async Task LoadPointsAsync(BackupRow row)
     {
         var key = row.Key;
         _points[key] = null;
-        var url = $"api/restore-points?vmId={Uri.EscapeDataString(row.Vm.VmNativeId)}" + (row.Job is { JobExists: true, JobId: { } jobId } ? $"&jobId={jobId}" : string.Empty);
+        var url = $"api/restore-points?vmId={Uri.EscapeDataString(row.Vm.VmNativeId)}"
+            + (row.Vm.PlatformId is { } platform ? $"&platformId={Uri.EscapeDataString(platform)}" : string.Empty)
+            + (row.Job is { JobExists: true, JobId: { } jobId } ? $"&jobId={jobId}" : string.Empty);
         try
         {
             var points = await Api.GetAsync<List<RestorePointDto>>(url);

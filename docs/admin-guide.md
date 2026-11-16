@@ -576,12 +576,13 @@ Only folders named `{GUID}` or `{GUID}.bdfu-*` directly in `Policies` are ever t
 
 ## Kubernetes namespaces
 
-backdafuckup backs up namespaces of Kubernetes clusters, with their objects and the data of their PVCs. It restores them into the same cluster:
-- the whole namespace;
+backdafuckup backs up namespaces of Kubernetes clusters, with their objects and the data of their PVCs, or a whole cluster. It restores:
+- the whole namespace, into the same cluster or another one;
 - apps and workloads;
 - single PVCs;
 - single objects;
-- files of a PVC.
+- files of a PVC;
+- a whole cluster from one run, into the same cluster or another one.
 
 It was built for RKE2 on vSphere with the vSphere CSI driver. Any CSI driver with volume snapshots works the same way.
 
@@ -607,7 +608,7 @@ It was built for RKE2 on vSphere with the vSphere CSI driver. Any CSI driver wit
    | ServiceAccount `backdafuckup` and its token Secret `backdafuckup-token` | The account the server uses |
    | ClusterRole `backdafuckup-backup` | Read every object, Secrets included. Create and delete VolumeSnapshots and VolumeSnapshotContents. `pods/exec` for hooks. PersistentVolumes |
    | Role `backdafuckup-work` in `backdafuckup-system` | PVCs, pods and Secrets of the work namespace; patch the agent's Deployment `backdafuckup-agent` (its image) |
-   | ClusterRole `backdafuckup-restore` (optional) | Create, change and delete objects in every namespace: restores, and the mover pod of a file restore in the PVC's namespace |
+   | ClusterRole `backdafuckup-restore` (optional) | Create, change and delete objects in every namespace: restores, and the mover pod of a file restore in the PVC's namespace. `bind` and `escalate` on roles and ClusterRoles, to restore RoleBindings to `admin` or `edit` and the ClusterRoles of a whole cluster. Together this is as much as cluster-admin. |
 
 3. Read the token and the cluster CA. The commands are in the manifest's header:
    ```sh
@@ -736,6 +737,13 @@ Only running pods run hooks, through `pods/exec`.
 - When every pre-hook succeeded, the restore point is *app-consistent (hooks)*.
 - A failed hook with `on-error: Continue` makes it crash-consistent with a warning.
 
+**The whole cluster:** turn on *Back up the whole cluster* in the job editor.
+- Each run backs up every namespace of the cluster at that time, except those of *Leave out these namespaces*: names, or patterns with `*`. The default leaves out what Kubernetes, RKE2, Rancher and Fleet make themselves: `kube-system`, `kube-public`, `kube-node-lease`, `cattle-*`, `fleet-*`, `cluster-fleet-*`, `local`. `backdafuckup-system` is always left out.
+- Each run also makes a restore point *Cluster-scoped objects* (`@cluster`):
+  - **Included:** the CRDs and their cluster-scoped objects (for example cert-manager's ClusterIssuers), the ClusterRoles and ClusterRoleBindings people made, and the StorageClasses, VolumeSnapshotClasses, IngressClasses, PriorityClasses and RuntimeClasses. The webhook configurations are included for the record.
+  - **Left out:** system and default roles, the roles and CRDs of RKE2, Rancher and Fleet, the CRDs of the CNI, of the snapshot API and of the vSphere CSI driver (`cns.vmware.com`), nodes, APIServices.
+- The session log names the namespaces of each run.
+
 **Secrets:** the restore point holds the namespace's Secrets with their values.
 - The repository protects them like disk images, through its file permissions.
 - There is no encryption at rest yet.
@@ -776,6 +784,47 @@ Only running pods run hooks, through `pods/exec`.
   A pod of a DaemonSet or Job, or one without a controller, stops the swap before anything changes. In the lab a Redis StatefulSet was down for about 9 s.
 - **A restore that does not complete removes what it created:** a namespace it created, with everything in it; otherwise each object it created. Work PVCs and snapshots go through the ledger.
 
+**Into another cluster:** choose the cluster under *Where*.
+- **StorageClasses:** classes the target lacks start on its default class. Choose another one per class under *Volumes in the target*.
+- **Preview:** before anything is written, it shows each PVC's class and data path in the target, and what stops the restore. It warns about:
+  - owners on NFS;
+  - what the files path loses;
+  - CRDs whose operators are not part of the restore;
+  - priority, runtime and Ingress classes the target lacks;
+  - pods pinned to nodes of the old cluster;
+  - Ingress hosts whose DNS still points to the old cluster.
+- **Data paths, chosen per volume:**
+  - **As a block volume:** when the target class's driver has a VolumeSnapshotClass (the one marked default, else the only one). This is the way described above, with the target's own snapshot class.
+  - **As files:** for any other class, for example NFS (nfs-subdir) or local-path.
+    1. A Filesystem PVC of that class is made in `backdafuckup-system`.
+    2. A mover pod on it receives the files of the volume, which the server reads from the image's file system. Only ext and XFS can be read. Owners, modes and times come along; the root folder of the volume gets those of the backup.
+    3. The volume is handed over to the restored PVC: its PV keeps `Retain` while the work PVC is deleted, is reserved for the restored PVC, and gets its reclaim policy back once bound.
+
+    What the files path loses: hard links become copies, sparse files are written in full, extended attributes and ACLs stay behind. On an NFS export that maps root to nobody (`root_squash`), owners cannot be set. The session then notes that once, and the files belong to the export's user.
+- **Left out in another cluster:**
+  - finalizers;
+  - Rancher's project fields, Rancher's RoleBindings, and the objects of Rancher's API groups (`*.cattle.io`, such as the App records of Helm releases; Rancher makes them again from the restored release Secrets) with their CRDs;
+  - a Service's `loadBalancerIP` and `externalIPs`;
+  - static PVs, for example of an NFS export. Their PVCs get new volumes, because both clusters would otherwise share the data.
+- **StorageClasses** of the backup are not created in another cluster.
+- **The mover's pull secret** is created in the target as for a backup.
+
+**Whole cluster from this run** (on a restore point *Cluster-scoped objects*):
+- **What:** the run's cluster-scoped objects, then the namespaces you choose (all by default), into the cluster backed up or another one, with the StorageClass map. Each namespace is previewed as above.
+- **Order:**
+  1. The account's right to bind and escalate roles is checked first, with a SelfSubjectAccessReview. Without it, apply the current setup manifest.
+  2. CRDs, waited for until they are established.
+  3. ClusterRoles (aggregated ones without their rules, which the cluster fills in), ClusterRoleBindings, the classes, then the CRDs' cluster-scoped objects.
+  4. Each namespace as a task of its own.
+- **Not created:**
+  - objects that exist (unless you replace them);
+  - a StorageClass the map replaces;
+  - a second default StorageClass, IngressClass or VolumeSnapshotClass, or a second global default PriorityClass;
+  - VolumeSnapshotClasses, when the target does not serve the snapshot API (its volumes then come back as files);
+  - webhook configurations: with a stale CA and `failurePolicy: Fail` they would block the whole cluster. They are listed with the services they call; their operators make them again once their namespaces are back.
+- **A namespace whose backup failed in the run** comes from its newest older restore point, with a warning.
+- **When the cluster-scoped objects fail,** the namespaces are not restored.
+
 **Objects: compare and pick:**
 - **Compare:** the restore point against the live namespace. Each object is *same*, *changed*, *deleted since* or *new since*. The deployment revision annotation and a PVC's `volumeName` do not count as changes.
 - **Show:** an object as stored and as it is now. Secrets show their keys only.
@@ -811,8 +860,9 @@ Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-r
 
 ### Limits
 
-- **Restores go into the same cluster.** Another cluster, with namespace and StorageClass mapping, and whole-cluster recovery are planned.
-- **Namespaces are chosen by name or by labels**, one selector per job.
+- **Volumes go into another cluster's StorageClass without snapshots only as files**, from ext or XFS. Any other file system needs a target class with snapshots.
+- **Webhook configurations and APIServices are never restored**; the operators that own them make them again.
+- **Namespaces are chosen by name or by labels**, one selector per job, or as the whole cluster with exclude patterns.
 - **No changed block tracking and no group snapshots** on vanilla vSphere CSI.
 - **NFS volumes** are backed up as objects only. Their data at file level is planned.
 - **GitOps:** Fleet or Argo CD may set restored objects back to the state in Git. Restore those from Git, and use backdafuckup for the data and for objects made by hand.
@@ -829,6 +879,9 @@ Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-r
 | "The snapshot … was not ready to use after 10 minutes" | The CSI snapshotter cannot create the snapshot (limit reached, storage, class). | Check the VolumeSnapshot's events and the `csi-snapshotter` log. On vSphere, check the volume's snapshot count. |
 | "The namespace … enforces the Pod Security level "restricted"" | File restore into a PVC of such a namespace. | Download the files as ZIP, or allow "baseline" for the namespace during the restore. |
 | "The PVC … is ReadWriteOncePod and used by …" | No second pod may mount the PVC. | Scale the workload to 0 for the restore, or download the files. |
+| "PVC …: the StorageClass … does not exist in cluster … (it has …)" | The target lacks the class of a backed-up PVC (another cluster). | Map the class to one the target has; the preview shows them. |
+| "… restored, but owners are not kept: the volume does not let the mover give files to other users" | The target volume is on an NFS export with `root_squash`, or the like. | Allow root on the export for the restore, or fix the owners afterwards; the files are there. |
+| "The account may not escalate ClusterRoles in cluster …" | The cluster has a setup manifest from before the cluster restore. | Apply the current setup manifest (its restore role has `bind` and `escalate`). |
 | "The agent of cluster … is not connected to this server" | The agent pod is not running, or cannot reach the server. | Check `kubectl -n backdafuckup-system logs deploy/backdafuckup-agent`: it names the server address and the error (certificate, connection). |
 | "Cannot connect to the backup server … 401" (in the agent's log) | The connect token is not the cluster's current one (the cluster was added again or switched). | Apply the current setup manifest with the agent. |
 | "the agent cannot reach the API server …" (server log) | The agent cannot open a TCP connection to `KUBERNETES_SERVICE_HOST`. | Check network policies in `backdafuckup-system`. |

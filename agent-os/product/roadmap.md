@@ -46,7 +46,7 @@
 
   Built and checked on the test cluster on 2026-11-11 and 2026-11-12 (lab runbook K1–K11): connection, mover image, backup with hooks, restore of a namespace, apps and PVCs (also replacing a PVC in place), picked objects through the object explorer, files back into a live PVC (refused in namespaces with Pod Security `restricted`), and a mover pod deleted while it copies, over the direct API path and through the in-cluster agent (a tunnel for clusters the server cannot reach; the server keeps the agent's image at its own version). Jobs choose namespaces by name or by labels; `bdfu_k8s_*` metrics and two alerts cover snapshots, mover pods, hooks and agents.
 
-  Later: another cluster and whole-cluster DR, then NFS volumes at file level, changed block tracking (CSI SnapshotMetadata) and group snapshots; then Kubernetes clusters on XCP-ng, whose PVs could be read through XAPI with CBT.
+  Phase 2, planned 2026-11-12: restore into another cluster (StorageClass mapping; a files data path for clusters without CSI snapshots, e.g. NFS) and whole-cluster DR (a cluster job with an exclude list, cluster-scoped objects, a cluster restore). Later: NFS volumes at file level, changed block tracking (CSI SnapshotMetadata) and group snapshots; then Kubernetes clusters on XCP-ng, whose PVs could be read through XAPI with CBT.
 
 ## Phase 2: Post-Launch
 

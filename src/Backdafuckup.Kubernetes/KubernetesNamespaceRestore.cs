@@ -31,7 +31,10 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
     private readonly List<JsonObject> _objects;
     private readonly HashSet<string> _selected;
     private readonly string _run;
+    private readonly ObjectRewrite _rewrite;
+    private readonly Dictionary<string, TargetVolume> _targets = new(StringComparer.Ordinal);
     private readonly List<VolumeImport> _imports = [];
+    private readonly List<VolumeFilesImport> _fileImports = [];
     private readonly List<JsonObject> _created = [];
     private readonly List<string> _warnings = [];
     private readonly Dictionary<string, IReadOnlyList<(string Kind, string Name)>> _swaps = new(StringComparer.Ordinal);
@@ -52,6 +55,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         _run = (plan.SessionId == Guid.Empty ? Guid.NewGuid() : plan.SessionId).ToString("N")[..8];
         _flow = new VolumeSnapshotFlow(client, settings.ClusterName(), log, ledger, timings) { Channels = channels };
         _objects = [.. KubernetesResources.Read(plan.Metadata.Content)];
+        _rewrite = new ObjectRewrite(_options.StorageClassMap, _options.OtherCluster);
 
         var plurals = KubernetesApplier.BuiltInPlurals();
         foreach (var crd in _objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition"))
@@ -108,6 +112,8 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             errors.Add("Replacing PVCs is a restore of single PVCs.");
         }
 
+        await CheckStorageAsync(errors, cancellationToken).ConfigureAwait(false);
+
         foreach (var volume in DataVolumes)
         {
             var name = _options.ClaimName(volume.Claim);
@@ -156,7 +162,8 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             var what = _options.OnlyClaims is { } claims
                 ? $"PVC(s) {string.Join(", ", claims.Select(c => _options.ClaimName(c) == c ? c : $"{c} as {_options.ClaimName(c)}"))}"
                 : _options.Objects is not null ? $"{_selected.Count} object(s) of the selection and what they need" : "the namespace";
-            Log.Info($"Restoring {what} of {Source} into namespace {Target} of cluster {_settings.ClusterName()} ({DataVolumes.Count()} volume(s) with data; existing objects: {(_options.ReplaceExisting ? "replaced" : "left as they are")}).");
+            var from = _options.OtherCluster ? $" (cluster {_descriptor.Cluster})" : string.Empty;
+            Log.Info($"Restoring {what} of {Source}{from} into namespace {Target} of cluster {_settings.ClusterName()} ({DataVolumes.Count()} volume(s) with data; existing objects: {(_options.ReplaceExisting ? "replaced" : "left as they are")}).");
         }
 
         return new RestoreValidation(errors, warnings);
@@ -165,9 +172,19 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
     public async Task<IDiskWriter> CreateDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken)
     {
         var volume = DataVolumes.First(v => v.DiskKey == target.DiskKey);
-        var storageClass = string.IsNullOrEmpty(target.StorageId) ? volume.StorageClass : target.StorageId;
+        var way = _targets.GetValueOrDefault(volume.Claim) ?? throw new InvalidOperationException($"The volume of PVC {volume.Claim} was not validated.");
+        if (way.Path == VolumeDataPath.Files)
+        {
+            var modes = (_objects.FirstOrDefault(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && KubernetesObjects.Name(o) == volume.Claim)?["spec"]?["accessModes"] as JsonArray)
+                ?.Select(m => (string?)m).OfType<string>().ToList() ?? [];
+            var files = await VolumeFilesImport.CreateAsync(_flow, _run, target, way.StorageClass, modes, $"{Target}/{_options.ClaimName(volume.Claim)}", cancellationToken)
+                .ConfigureAwait(false);
+            _fileImports.Add(files);
+            return files;
+        }
+
         var import = await VolumeImport.CreateAsync(
-            _flow, _run, target, storageClass, volume.SnapshotClass, Target, $"{Target}/{_options.ClaimName(volume.Claim)}", cancellationToken).ConfigureAwait(false);
+            _flow, _run, target, way.StorageClass, way.SnapshotClass, Target, $"{Target}/{_options.ClaimName(volume.Claim)}", cancellationToken).ConfigureAwait(false);
         _imports.Add(import);
         return import;
     }
@@ -182,12 +199,13 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         var existing = new List<string>();
         var replaced = new List<string>();
         var controlled = 0;
+        var rancher = 0;
 
         // The namespace first (as in the restore point, renamed when it goes elsewhere).
         if (await _applier.ReadAsync(new JsonObject { ["apiVersion"] = "v1", ["kind"] = "Namespace", ["metadata"] = new JsonObject { ["name"] = Target } }, cancellationToken).ConfigureAwait(false) is null)
         {
             var space = _objects.FirstOrDefault(o => KubernetesObjects.Kind(o) == "Namespace") is { } original
-                ? KubernetesObjects.Prepare(original, Source, Target)
+                ? KubernetesObjects.Prepare(original, Source, Target, _rewrite)
                 : new JsonObject { ["apiVersion"] = "v1", ["kind"] = "Namespace", ["metadata"] = new JsonObject { ["name"] = Target } };
             await CallAsync($"creating the namespace {Target}", () => _applier.CreateAsync(space, cancellationToken)).ConfigureAwait(false);
             _namespaceCreated = true;
@@ -200,22 +218,33 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             await import.ExposeAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        // What the selected objects need from the cluster's scope: their CRDs and StorageClasses, when missing.
-        var kinds = _objects.Where(o => _selected.Contains(KubernetesObjects.Key(o))).Select(KubernetesObjects.Kind).ToHashSet(StringComparer.Ordinal);
-        var classes = _objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && _selected.Contains(KubernetesObjects.Key(o)))
-            .Select(o => (string?)o["spec"]?["storageClassName"]).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        // What the selected objects need from the cluster's scope, when missing: their CRDs, and in the same cluster the
+        // StorageClasses they keep (another cluster has its own classes: the map names them).
+        var kinds = _objects.Where(o => _selected.Contains(KubernetesObjects.Key(o)) && !(_options.OtherCluster && KubernetesObjects.IsRancherMade(o)))
+            .Select(KubernetesObjects.Kind).ToHashSet(StringComparer.Ordinal);
+        var classes = _options.OtherCluster
+            ? []
+            : _objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && _selected.Contains(KubernetesObjects.Key(o)))
+                .Select(o => (string?)o["spec"]?["storageClassName"]).OfType<string>().Where(c => _rewrite.MapClass(c) == c).ToHashSet(StringComparer.Ordinal);
+        var definitions = new List<JsonObject>();
         foreach (var definition in _objects.Where(o =>
                      (KubernetesObjects.Kind(o) == "CustomResourceDefinition" && kinds.Contains((string?)o["spec"]?["names"]?["kind"] ?? string.Empty))
                      || (KubernetesObjects.Kind(o) == "StorageClass" && classes.Contains(KubernetesObjects.Name(o)))))
         {
-            if (await _applier.ReadAsync(definition, cancellationToken).ConfigureAwait(false) is null)
+            var prepared = KubernetesObjects.Prepare(definition, Source, Target, _rewrite);
+            if (await _applier.ReadAsync(definition, cancellationToken).ConfigureAwait(false) is null
+                && await TryCreateAsync(prepared, restored, cancellationToken).ConfigureAwait(false)
+                && KubernetesObjects.Kind(definition) == "CustomResourceDefinition")
             {
-                await TryCreateAsync(KubernetesObjects.Prepare(definition, Source, Target), restored, cancellationToken).ConfigureAwait(false);
+                definitions.Add(prepared);
             }
         }
 
+        await WaitEstablishedAsync(definitions, cancellationToken).ConfigureAwait(false);
+
         // The namespaced objects in order; PVCs with data take their restored volumes.
         var volumes = _imports.ToDictionary(i => i.DiskId, StringComparer.Ordinal);
+        var fileVolumes = _fileImports.ToDictionary(i => i.DiskId, StringComparer.Ordinal);
         foreach (var item in _objects
                      .Where(o => KubernetesObjects.Namespace(o) is not null && _selected.Contains(KubernetesObjects.Key(o)))
                      .OrderBy(o => KubernetesObjects.Rank(KubernetesObjects.Kind(o))).ThenBy(KubernetesObjects.Key, StringComparer.Ordinal))
@@ -232,13 +261,19 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                 continue;
             }
 
-            if (KubernetesObjects.Kind(item) == "PersistentVolumeClaim")
+            if (_options.OtherCluster && KubernetesObjects.IsRancherMade(item))
             {
-                await RestoreClaimAsync(item, sourceToNewDiskId, volumes, restored, cancellationToken).ConfigureAwait(false);
+                rancher++;
                 continue;
             }
 
-            var prepared = KubernetesObjects.Prepare(item, Source, Target);
+            if (KubernetesObjects.Kind(item) == "PersistentVolumeClaim")
+            {
+                await RestoreClaimAsync(item, sourceToNewDiskId, volumes, fileVolumes, restored, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            var prepared = KubernetesObjects.Prepare(item, Source, Target, _rewrite);
             var live = await ReadQuietlyAsync(prepared, cancellationToken).ConfigureAwait(false);
             if (live is null)
             {
@@ -267,7 +302,8 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         Log.Info($"{restored.Count} object(s) restored{(restored.Count > 0 ? $" ({Summary(restored)})" : string.Empty)}" +
                  (replaced.Count > 0 ? $"; {replaced.Count} replaced ({Summary(replaced)})" : string.Empty) +
                  (existing.Count > 0 ? $"; {existing.Count} existed and were left as they are ({Summary(existing)})" : string.Empty) +
-                 (controlled > 0 ? $"; {controlled} made by their controllers (they make them again)" : string.Empty) + ".");
+                 (controlled > 0 ? $"; {controlled} made by their controllers (they make them again)" : string.Empty) +
+                 (rancher > 0 ? $"; {rancher} object(s) of Rancher's left out (Rancher makes them where it manages the cluster)" : string.Empty) + ".");
         return new RestoredVm(Target, Target, Warnings: _warnings);
     }
 
@@ -283,6 +319,11 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         foreach (var import in _imports)
         {
             await import.DisposeAsync().ConfigureAwait(false);
+        }
+
+        foreach (var files in _fileImports)
+        {
+            await files.DisposeAsync().ConfigureAwait(false);
         }
 
         if (!_completed)
@@ -316,6 +357,20 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             }
         }
 
+        // Volumes written as files that never reached their PVC (a completed restore handed them over).
+        foreach (var files in _fileImports)
+        {
+            using var timeout = new CancellationTokenSource(_flow.Timings.Deleted);
+            try
+            {
+                await files.ReleaseAsync(timeout.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is KubernetesOperationException or OperationCanceledException or HttpRequestException)
+            {
+                Log.Warning($"A restored volume of {files.Description} could not be removed (retried later): {ex.Message}");
+            }
+        }
+
         // The snapshots and work volumes of the restored volumes (a completed restore released them already).
         foreach (var import in _imports)
         {
@@ -336,20 +391,42 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
     /// bound again to its static PV (e.g. an NFS export).
     /// </summary>
     private async Task RestoreClaimAsync(
-        JsonObject claim, IReadOnlyDictionary<string, string> sourceToNewDiskId, Dictionary<string, VolumeImport> volumes, List<string> restored, CancellationToken cancellationToken)
+        JsonObject claim, IReadOnlyDictionary<string, string> sourceToNewDiskId, Dictionary<string, VolumeImport> volumes, Dictionary<string, VolumeFilesImport> fileVolumes,
+        List<string> restored, CancellationToken cancellationToken)
     {
         var originalName = KubernetesObjects.Name(claim);
         var name = _options.ClaimName(originalName);
-        var prepared = KubernetesObjects.Prepare(claim, Source, Target);
+        var prepared = KubernetesObjects.Prepare(claim, Source, Target, _rewrite);
         prepared["metadata"]!["name"] = name;
         var spec = (JsonObject)prepared["spec"]!;
         var backupVolume = (string?)claim["spec"]?["volumeName"] is { } pvName ? _objects.FirstOrDefault(o => KubernetesObjects.Kind(o) == "PersistentVolume" && KubernetesObjects.Name(o) == pvName) : null;
+
+        if (sourceToNewDiskId.TryGetValue($"{Source}/{originalName}", out var fileDiskId) && fileVolumes.TryGetValue(fileDiskId, out var files))
+        {
+            // The volume written as files: handed over to the PVC, which names it as its volume.
+            if (_swaps.TryGetValue(name, out var swapped))
+            {
+                await SwapOutAsync(name, swapped, cancellationToken).ConfigureAwait(false);
+            }
+
+            spec["volumeName"] = await files.HandOverAsync(Target, name, cancellationToken).ConfigureAwait(false);
+            spec["storageClassName"] = files.StorageClass;
+            await CallAsync($"creating the PVC {Target}/{name}", () => _applier.CreateAsync(prepared, cancellationToken)).ConfigureAwait(false);
+            _created.Add(prepared);
+            restored.Add($"PersistentVolumeClaim/{name}");
+            await files.CompleteHandOverAsync(Target, name, cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
         if (sourceToNewDiskId.TryGetValue($"{Source}/{originalName}", out var diskId) && volumes.TryGetValue(diskId, out var import) && import.Snapshot is { } snapshot)
         {
             // A Filesystem PVC from the snapshot of the restored volume: an ordinary volume of the driver, a copy of it.
             spec.Remove("volumeName");
             spec["dataSource"] = new JsonObject { ["apiGroup"] = VolumeSnapshotFlow.Group, ["kind"] = "VolumeSnapshot", ["name"] = snapshot };
+            if (import.StorageClass is { } storageClass)
+            {
+                spec["storageClassName"] = storageClass; // the class the volume was written to (a choice for this claim, or the default)
+            }
             if (await WaitsForConsumerAsync((string?)spec["storageClassName"], cancellationToken).ConfigureAwait(false) && import.Node is { } node)
             {
                 // Provisioned now, not when a pod comes: the snapshots go once the copy is made.
@@ -376,13 +453,19 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         }
 
         // Objects only: a static PV (no provisioner) that is gone comes back and binds; otherwise the PVC gets a new volume.
+        // Not in another cluster: the PV names storage of the old one (e.g. an NFS export), so both would share the data.
         spec.Remove("volumeName");
-        if (backupVolume is not null && (string?)backupVolume["metadata"]?["annotations"]?[ProvisionedBy] is null)
+        var staticVolume = backupVolume is not null && (string?)backupVolume["metadata"]?["annotations"]?[ProvisionedBy] is null;
+        if (staticVolume && _options.OtherCluster)
         {
-            var live = await _applier.ReadAsync(backupVolume, cancellationToken).ConfigureAwait(false);
+            Warn($"PVC {Target}/{name}: its static PV {KubernetesObjects.Name(backupVolume!)} is not created in another cluster (it names storage of cluster {_descriptor.Cluster}); the PVC gets a new, empty volume.");
+        }
+        else if (staticVolume)
+        {
+            var live = await _applier.ReadAsync(backupVolume!, cancellationToken).ConfigureAwait(false);
             if (live is null)
             {
-                var pv = KubernetesObjects.Prepare(backupVolume, Source, Target);
+                var pv = KubernetesObjects.Prepare(backupVolume!, Source, Target, _rewrite);
                 pv["spec"]!["claimRef"] = new JsonObject { ["apiVersion"] = "v1", ["kind"] = "PersistentVolumeClaim", ["namespace"] = Target, ["name"] = name };
                 if (await TryCreateAsync(pv, restored, cancellationToken).ConfigureAwait(false))
                 {
@@ -391,11 +474,11 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             }
             else if ((string?)live["status"]?["phase"] == "Available")
             {
-                spec["volumeName"] = KubernetesObjects.Name(backupVolume);
+                spec["volumeName"] = KubernetesObjects.Name(backupVolume!);
             }
         }
 
-        if (spec["volumeName"] is null)
+        if (spec["volumeName"] is null && !(staticVolume && _options.OtherCluster))
         {
             Warn($"PVC {Target}/{name}: created without its data (not in the restore point); it gets a new, empty volume.");
         }
@@ -482,6 +565,86 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                 {
                     reported = DateTimeOffset.UtcNow;
                     Log.Info($"Waiting for PVC {Target}/{KubernetesObjects.Name(claim)}: the storage copies the restored volume ({waited.TotalMinutes:0} min).");
+                }
+
+                await Task.Delay(_flow.Timings.Poll, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The StorageClass of each restored PVC in the target (mapped, or chosen for its disk) and, for one with data, the way
+    /// its data goes in. A class the target lacks is an error naming the classes it has; in the same cluster a missing class
+    /// the restore point holds is created from it (for PVCs without data).
+    /// </summary>
+    private async Task CheckStorageAsync(List<string> errors, CancellationToken cancellationToken)
+    {
+        KubernetesTargetStorage storage;
+        try
+        {
+            storage = await KubernetesTargetStorage.ReadAsync(_client, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpOperationException ex)
+        {
+            errors.Add($"The StorageClasses of cluster {_settings.ClusterName()} could not be read: {VolumeSnapshotFlow.Problem(ex)}");
+            return;
+        }
+
+        var available = storage.ClassNames.Count > 0 ? string.Join(", ", storage.ClassNames) : "none";
+        foreach (var claim in _objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && _selected.Contains(KubernetesObjects.Key(o))))
+        {
+            var name = KubernetesObjects.Name(claim);
+            var source = (string?)claim["spec"]?["storageClassName"];
+            var volume = DataVolumes.FirstOrDefault(v => v.Claim == name);
+            var chosen = volume?.DiskKey is { } key && _plan.DiskStorage.GetValueOrDefault(key) is { Length: > 0 } picked ? picked : null;
+            var target = chosen ?? _rewrite.MapClass(source);
+            if (volume is null)
+            {
+                var fromBackup = !_options.OtherCluster && target == source
+                    && _objects.Any(o => KubernetesObjects.Kind(o) == "StorageClass" && KubernetesObjects.Name(o) == target);
+                if (!string.IsNullOrEmpty(target) && !storage.Has(target) && !fromBackup)
+                {
+                    errors.Add($"PVC {name}: the StorageClass {target} does not exist in cluster {_settings.ClusterName()} (it has {available}); map {source} to one of them.");
+                }
+
+                continue;
+            }
+
+            if (storage.Decide(target) is not { } way)
+            {
+                errors.Add(string.IsNullOrEmpty(target)
+                    ? $"PVC {name} has no StorageClass, and cluster {_settings.ClusterName()} has no default class (it has {available}): map it to one of them."
+                    : $"PVC {name}: the StorageClass {target} does not exist in cluster {_settings.ClusterName()} (it has {available}); map {source} to one of them.");
+                continue;
+            }
+
+            _targets[name] = way;
+            Log.Info(way.Path == VolumeDataPath.Block
+                ? $"PVC {name}: its data goes into the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()} as a block volume ({way.Reason})."
+                : $"PVC {name}: its data goes into the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()} as files ({way.Reason}): read from the file system " +
+                  "of its image (ext or XFS) with owners, modes and times; hard links become copies, sparse files are written in full, extended attributes and ACLs stay behind.");
+        }
+    }
+
+    /// <summary>Waits until the CRDs the restore created are established, so that their objects can be created.</summary>
+    private async Task WaitEstablishedAsync(IReadOnlyList<JsonObject> definitions, CancellationToken cancellationToken)
+    {
+        foreach (var definition in definitions)
+        {
+            var started = DateTimeOffset.UtcNow;
+            while (true)
+            {
+                var live = await ReadQuietlyAsync(definition, cancellationToken).ConfigureAwait(false);
+                if ((live?["status"]?["conditions"] as JsonArray)?.OfType<JsonObject>()
+                    .Any(c => (string?)c["type"] == "Established" && (string?)c["status"] == "True") == true)
+                {
+                    break;
+                }
+
+                if (DateTimeOffset.UtcNow - started > _flow.Timings.CrdEstablished)
+                {
+                    Warn($"The CRD {KubernetesObjects.Name(definition)} is not established in cluster {_settings.ClusterName()} after {_flow.Timings.CrdEstablished.TotalSeconds:0} s; its objects may fail.");
+                    break;
                 }
 
                 await Task.Delay(_flow.Timings.Poll, cancellationToken).ConfigureAwait(false);

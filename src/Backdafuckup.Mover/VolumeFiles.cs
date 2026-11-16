@@ -18,6 +18,9 @@ internal sealed class VolumeFiles(string root, bool keep, bool owners, TextWrite
 {
     private const int DefaultFileMode = 0b110_100_100;   // 0644
     private const int DefaultFolderMode = 0b111_101_101; // 0755
+
+    /// <summary>The user a probe file is given to: whether owners can be set on the volume at all.</summary>
+    private const long ProbeUser = 54321;
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromSeconds(30);
 
     private readonly List<MoverFileIssue> _issues = [];
@@ -31,6 +34,10 @@ internal sealed class VolumeFiles(string root, bool keep, bool owners, TextWrite
     private long _renamed;
     private long _partial;
     private long _lastProgress = Stopwatch.GetTimestamp();
+    private bool _squashed;
+
+    /// <summary>Owners are set: asked for, and the volume lets the mover give files to other users.</summary>
+    private bool SetsOwners => owners && !_squashed;
 
     /// <summary>A file written under its temporary name, waiting for its owner, mode and times.</summary>
     private sealed record Pending(int Index, string Temp, string Target, string Relative, long Size, bool Renamed);
@@ -39,6 +46,11 @@ internal sealed class VolumeFiles(string root, bool keep, bool owners, TextWrite
     {
         var reader = new MoverFileReader(stream);
         await reader.ReadHeaderAsync(cancellationToken).ConfigureAwait(false);
+        if (owners)
+        {
+            ProbeOwners();
+        }
+
         try
         {
             while (true)
@@ -302,7 +314,7 @@ internal sealed class VolumeFiles(string root, bool keep, bool owners, TextWrite
                 }
 
                 // Until its own owner comes at the end: that of its parent, so the workload can use it.
-                if (Native.Owner(Path.GetDirectoryName(full)!) is { } parent)
+                if (!_squashed && Native.Owner(Path.GetDirectoryName(full)!) is { } parent)
                 {
                     Native.ChangeOwner(full, parent.UserId, parent.GroupId);
                 }
@@ -314,14 +326,16 @@ internal sealed class VolumeFiles(string root, bool keep, bool owners, TextWrite
         }
     }
 
+    /// <summary>A folder's owner, mode and times; the empty path is the volume's root (a whole volume restored into a new one).</summary>
     private void FolderMeta(int index, string relative, MoverFileMeta meta)
     {
-        if (!Resolve(relative, out var full, out _) || Probe(full) != EntryKind.Directory)
+        var full = root;
+        if (relative.Length > 0 && (!Resolve(relative, out full, out _) || Probe(full) != EntryKind.Directory))
         {
             return;
         }
 
-        if (ApplyMeta(full, meta, Path.GetDirectoryName(full)!, isFolder: true) is { } problem)
+        if (ApplyMeta(full, meta, relative.Length > 0 ? Path.GetDirectoryName(full)! : root, isFolder: true) is { } problem)
         {
             Issue(index, MoverFileIssueKinds.Partial, problem);
             _partial++;
@@ -370,7 +384,7 @@ internal sealed class VolumeFiles(string root, bool keep, bool owners, TextWrite
             return;
         }
 
-        if (owners && meta.UserId is { } uid && meta.GroupId is { } gid)
+        if (SetsOwners && meta.UserId is { } uid && meta.GroupId is { } gid)
         {
             Native.ChangeOwner(path, uid, gid);
         }
@@ -386,7 +400,11 @@ internal sealed class VolumeFiles(string root, bool keep, bool owners, TextWrite
     private string? ApplyMeta(string path, MoverFileMeta? meta, string parent, bool isFolder)
     {
         var problems = new List<string>();
-        if (owners && meta is { UserId: { } uid, GroupId: { } gid })
+        if (_squashed)
+        {
+            // Reported once for the volume (ProbeOwners): the files belong to whom its server gives them.
+        }
+        else if (owners && meta is { UserId: { } uid, GroupId: { } gid })
         {
             if (Native.ChangeOwner(path, uid, gid) is { } error)
             {
@@ -503,6 +521,41 @@ internal sealed class VolumeFiles(string root, bool keep, bool owners, TextWrite
     }
 
     private string Relative(string full) => full.Length > root.Length ? full[(root.Length + 1)..] : "/";
+
+    /// <summary>
+    /// Whether the volume lets the mover give files to other users: a probe file is given to another one once. An NFS export
+    /// that maps root to nobody (root_squash) refuses that; then owners are left to its server, with one issue for the volume
+    /// (index -1) instead of one per item.
+    /// </summary>
+    private void ProbeOwners()
+    {
+        var probe = Path.Combine(root, $".bdfu-owner-probe{_suffix}");
+        try
+        {
+            using (new FileStream(probe, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite }))
+            {
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return; // Nothing can be written here: each item reports it.
+        }
+
+        try
+        {
+            if (Native.ChangeOwner(probe, ProbeUser, ProbeUser) is { } error)
+            {
+                _squashed = true;
+                Issue(-1, MoverFileIssueKinds.Partial,
+                    $"owners are not kept: the volume does not let the mover give files to other users ({error}); its server may map root to another user (NFS root_squash). The files belong to the user it gives them.");
+                log.WriteLine($"Owners are not kept on {root}: giving a file to another user failed ({error}).");
+            }
+        }
+        finally
+        {
+            TryDelete(probe);
+        }
+    }
 
     private void Fail(int index, string reason)
     {

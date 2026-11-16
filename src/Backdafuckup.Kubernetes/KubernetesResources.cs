@@ -159,7 +159,7 @@ internal static class KubernetesResources
         }
     }
 
-    private static JsonObject Clean(JsonObject item, string apiVersion, string kind)
+    internal static JsonObject Clean(JsonObject item, string apiVersion, string kind)
     {
         var copy = new JsonObject { ["apiVersion"] = apiVersion, ["kind"] = kind };
         foreach (var (key, value) in item)
@@ -174,9 +174,9 @@ internal static class KubernetesResources
         return copy;
     }
 
-    private static JsonNode? Node(object? value) => value is null ? null : JsonNode.Parse(KubernetesJson.Serialize(value));
+    internal static JsonNode? Node(object? value) => value is null ? null : JsonNode.Parse(KubernetesJson.Serialize(value));
 
-    private static IEnumerable<JsonNode?> Items(object? list) => list switch
+    internal static IEnumerable<JsonNode?> Items(object? list) => list switch
     {
         null => [],
         JsonElement element => element.TryGetProperty("items", out var items) ? JsonNode.Parse(items.GetRawText())!.AsArray() : [],

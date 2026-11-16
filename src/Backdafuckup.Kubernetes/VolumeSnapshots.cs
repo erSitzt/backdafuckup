@@ -42,6 +42,9 @@ public sealed record KubernetesTimings
 
     /// <summary>How often a wait writes a line to the session log.</summary>
     public TimeSpan Progress { get; init; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>How long a restore waits for a CRD it created to be established before it creates the CRD's objects.</summary>
+    public TimeSpan CrdEstablished { get; init; } = TimeSpan.FromMinutes(2);
 }
 
 /// <summary>A failure of the cluster in the snapshot flow (with the object and the cluster in its message).</summary>
@@ -127,6 +130,49 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
         {
             CreatedUtc = created,
         };
+    }
+
+    /// <summary>
+    /// The pull secret of the mover image in the work namespace, when the server keeps the registry's credentials (pull
+    /// secret mode "Create"): created, or updated when the credentials changed. Any data path calls it before its first
+    /// mover pod, so a cluster that never ran a backup (a restore's target) gets it too.
+    /// </summary>
+    public async Task EnsurePullSecretAsync(MoverDeployment mover, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(mover);
+        if (mover.DockerConfigJson is not { } dockerConfig || mover.PullSecretName is not { } secretName)
+        {
+            return;
+        }
+
+        var client = Client;
+        var secret = new V1Secret
+        {
+            Metadata = new V1ObjectMeta { Name = secretName, Labels = new Dictionary<string, string> { [ManagedByLabel] = "backdafuckup" } },
+            Type = "kubernetes.io/dockerconfigjson",
+            Data = new Dictionary<string, byte[]> { [".dockerconfigjson"] = Encoding.UTF8.GetBytes(dockerConfig) },
+        };
+        V1Secret? existing = null;
+        try
+        {
+            existing = await client.CoreV1.ReadNamespacedSecretAsync(secretName, KubernetesSetup.WorkNamespace, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            // Created below.
+        }
+
+        if (existing is null)
+        {
+            await CallAsync($"creating the pull secret {KubernetesSetup.WorkNamespace}/{secretName}", () => client.CoreV1.CreateNamespacedSecretAsync(
+                secret, KubernetesSetup.WorkNamespace, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        }
+        else if (existing.Data?.TryGetValue(".dockerconfigjson", out var current) != true || !current.AsSpan().SequenceEqual(secret.Data[".dockerconfigjson"]))
+        {
+            secret.Metadata.ResourceVersion = existing.Metadata.ResourceVersion;
+            await CallAsync($"updating the pull secret {KubernetesSetup.WorkNamespace}/{secretName}", () => client.CoreV1.ReplaceNamespacedSecretAsync(
+                secret, secretName, KubernetesSetup.WorkNamespace, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        }
     }
 
     /// <summary>Exposes the snapshot to a mover pod that sends it through a channel; dispose the export to remove its objects.</summary>
@@ -287,7 +333,7 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
         return code switch
         {
             HttpStatusCode.Forbidden => $"403 Forbidden: the ServiceAccount lacks a permission (apply the current setup manifest). {message}",
-            { } c => $"{(int)c} {c}: {message}",
+            { } c => $"{(int)c} {c}: {message?.Trim()}",
             null => ex.Message,
         };
     }

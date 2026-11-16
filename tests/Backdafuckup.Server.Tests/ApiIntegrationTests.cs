@@ -34,6 +34,9 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     private readonly FakeRegistry _registry = new("bdfu-push", "secret-1");
     private readonly Backdafuckup.Testing.Kubernetes.FakeKubernetesApi _cluster = new();
 
+    /// <summary>More clusters by the address of their connection; every other address reaches <see cref="_cluster"/>.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Backdafuckup.Testing.Kubernetes.FakeKubernetesApi> _clusters = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The Kubernetes client goes over the network (through a cluster agent's tunnel to a TLS server of the fake) instead of calling the fake directly.</summary>
     private volatile bool _clusterOverNetwork;
     private WebApplicationFactory<Program>? _factory;
@@ -70,7 +73,7 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
                 services.AddSingleton(new Backdafuckup.Server.Movers.RegistryTransport(() => _registry));
                 services.RemoveAll<IHypervisorProvider>();
                 services.AddSingleton<IHypervisorProvider>(sp => new Backdafuckup.Kubernetes.KubernetesProvider(
-                    () => _clusterOverNetwork ? null : _cluster.CreateHandler(),
+                    settings => _clusterOverNetwork ? null : (_clusters.TryGetValue(settings.Address, out var other) ? other : _cluster).CreateHandler(),
                     sp.GetRequiredService<Backdafuckup.Core.DataMover.IMoverChannels>(),
                     sp.GetRequiredService<Backdafuckup.Server.Movers.MoverRegistry>(),
                     new Backdafuckup.Kubernetes.KubernetesTimings

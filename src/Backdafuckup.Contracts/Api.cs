@@ -308,13 +308,17 @@ public sealed record RestorePointDto(
     int? SqlConsistentCount = null,
     bool ConsistencyWarning = false,
     int? SqlUserDatabaseCount = null,
-    string ObjectKind = RestorePointObjectKinds.Vm);
+    string ObjectKind = RestorePointObjectKinds.Vm,
+    Guid? SessionId = null);
 
 /// <summary>What a restore point holds: a VM, or a Kubernetes namespace (its objects and volumes).</summary>
 public static class RestorePointObjectKinds
 {
     public const string Vm = "Vm";
     public const string KubernetesNamespace = "KubernetesNamespace";
+
+    /// <summary>The cluster-scoped objects of a whole-cluster job's run (CRDs, ClusterRoles and their bindings, classes).</summary>
+    public const string KubernetesCluster = "KubernetesCluster";
 }
 
 public sealed record VerifyResultDto(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
@@ -380,6 +384,7 @@ public sealed record BackupVmJobDto(
     DateTimeOffset? MissedRunUtc);
 
 /// <summary>One VM with its jobs; <see cref="State"/> is <c>stale</c> if one of its jobs is, else <c>nopoint</c> without any restore point, else <c>ok</c>.</summary>
+/// <param name="PlatformId">A namespace's cluster (its platform id; namespaces are unique only within it); null for a VM.</param>
 public sealed record BackupVmDto(
     string VmNativeId,
     string VmName,
@@ -388,7 +393,8 @@ public sealed record BackupVmDto(
     int PointCount,
     long StoredBytes,
     BackupVmPointDto? Latest,
-    string State);
+    string State,
+    string? PlatformId = null);
 
 // ---- Dashboard ----
 public sealed record DashboardDto(
