@@ -1,0 +1,44 @@
+#!/bin/bash
+# Installs Holo VTL from the pinned release (checked against its SHA-256) and creates the library through the REST
+# API. cloud-init runs it once at the first boot; running it again is safe.
+set -euo pipefail
+exec > >(tee -a /var/log/holo-setup.log) 2>&1
+echo "=== holo-setup $(date -Is) ==="
+
+VERSION="${holo_version}"
+SHA256="${holo_sha256}"
+PORTAL_HOST="${portal_host}"
+CFG=/etc/holo-terraform
+REL_DIR=/opt/holo-release/$VERSION
+TARBALL=holo-vtl-$VERSION-linux-x86_64.tar.gz
+URL="https://github.com/Holo-VTL/Holo/releases/download/Holo%40v$VERSION/$TARBALL"
+
+# LIO/TCMU modules (in Ubuntu's standard kernel).
+for m in target_core_mod target_core_user iscsi_target_mod tcm_loop; do
+	modprobe "$m"
+done
+
+if [ -x /opt/holo/bin/control-plane ] && systemctl is-active --quiet holo-control-plane \
+	&& [ "$(cat "$CFG/installed-version" 2>/dev/null)" = "$VERSION" ]; then
+	echo "Holo $VERSION is installed already"
+else
+	mkdir -p "$REL_DIR"
+	cd "$REL_DIR"
+	# A tarball put there beforehand is used (networks whose proxy breaks TLS to GitHub); the SHA-256 checks either.
+	[ -f "$TARBALL" ] || curl -fsSL --retry 5 --retry-delay 5 -o "$TARBALL" "$URL"
+	echo "$SHA256  $TARBALL" | sha256sum -c -
+	tar -xzf "$TARBALL"
+	action=install
+	[ -x /opt/holo/bin/control-plane ] && action=upgrade   # keeps the cartridges
+	args=("$action" --api-key-file "$CFG/api-key")
+	[ -n "$PORTAL_HOST" ] && args+=(--portal-host "$PORTAL_HOST")
+	bash "$REL_DIR/holo-vtl-$VERSION-linux-x86_64/install-holo.sh" "$${args[@]}"
+	echo "$VERSION" > "$CFG/installed-version"
+fi
+
+echo "--- library through the API ---"
+python3 -I /usr/local/sbin/holo-bootstrap.py "$CFG/bootstrap.json"
+
+IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')
+echo "Web UI: http://$IP/ui/ (log in with the API key)"
+echo "=== holo-setup done ==="

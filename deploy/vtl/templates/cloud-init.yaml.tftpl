@@ -1,0 +1,39 @@
+#cloud-config
+hostname: ${hostname}
+fqdn: ${hostname}
+manage_etc_hosts: true
+timezone: ${timezone}
+%{ if length(ssh_public_keys) > 0 ~}
+ssh_authorized_keys: ${jsonencode(ssh_public_keys)}
+%{ endif ~}
+
+package_update: true
+package_upgrade: false
+packages:
+  - curl
+  - python3
+  - lsscsi
+  - sg3-utils
+  - xe-guest-utilities
+
+write_files:
+  - path: /etc/holo-terraform/api-key
+    encoding: b64
+    content: ${api_key_b64}
+    permissions: "0600"
+  - path: /etc/holo-terraform/bootstrap.json
+    encoding: b64
+    content: ${bootstrap_json_b64}
+    permissions: "0644"
+  - path: /usr/local/sbin/holo-bootstrap.py
+    encoding: b64
+    content: ${bootstrap_py_b64}
+    permissions: "0755"
+  - path: /usr/local/sbin/holo-setup
+    encoding: b64
+    content: ${setup_script_b64}
+    permissions: "0755"
+
+runcmd:
+  - [sh, -c, "systemctl enable --now xe-daemon.service || true"]
+  - [/usr/local/sbin/holo-setup]

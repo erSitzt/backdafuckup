@@ -14,6 +14,7 @@
     <Project Path="src/Backdafuckup.Smb/Backdafuckup.Smb.csproj" />
     <Project Path="src/Backdafuckup.Ssh/Backdafuckup.Ssh.csproj" />
     <Project Path="src/Backdafuckup.Storage/Backdafuckup.Storage.csproj" />
+    <Project Path="src/Backdafuckup.Tape/Backdafuckup.Tape.csproj" />
     <Project Path="src/Backdafuckup.Web/Backdafuckup.Web.csproj" />
     <Project Path="src/Backdafuckup.Xen/Backdafuckup.Xen.csproj" />
   </Folder>
@@ -32,6 +33,7 @@
     <Project Path="tests/Backdafuckup.Nbd.Tests/Backdafuckup.Nbd.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Server.Tests/Backdafuckup.Server.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Storage.Tests/Backdafuckup.Storage.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.Tape.Tests/Backdafuckup.Tape.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Testing/Backdafuckup.Testing.csproj" />
     <Project Path="tests/Backdafuckup.Xen.Tests/Backdafuckup.Xen.Tests.csproj" />
   </Folder>

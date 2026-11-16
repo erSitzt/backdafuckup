@@ -47,7 +47,12 @@ The tapes carry their own label and catalog in a documented format, so a recover
   - restore from tape with the tapes needed;
   - the operator banner and restore points marked "on tape".
 
-  The chosen variant is recorded here once the user has picked it.
+  **Chosen by the user (2026-11-16): variant B**, tables with filters as in Proxmox Backup Server:
+  - the tape page has the tabs *Libraries & drives*, *Media* and *Media pools*;
+  - drives are a compact table (drive, library, state, cartridge, job, speed);
+  - media are a table with search, pool and location chips, and the actions in a row menu.
+
+  The dialogs below the variants (media pool, tape job editor, restore from tape, operator banner, restore points marked *on tape*) apply as drawn.
 - **References:** see `references.md`.
 - **Product alignment:**
   - roadmap Phase 2 "Tape out: move or copy backups to tape on an HPE MSL tape library";

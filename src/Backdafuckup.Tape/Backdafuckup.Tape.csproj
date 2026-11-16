@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Tape: SCSI commands from the public T10 standards (SPC, SSC, SMC), transports for Linux (SG_IO) and Windows
+    (SCSI pass-through), drives, changers and the on-tape format. No vendor SDKs or tools.
+  -->
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Backdafuckup.Tape.Tests" />
+  </ItemGroup>
+</Project>

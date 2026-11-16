@@ -37,7 +37,14 @@ The console can inventory, load, unload, import, export and label. Tape jobs (Pa
 
 ## Context
 
-- **Visuals:** mockups in a design canvas, with three variants of the tape page (slot map, tables, tree with details) plus the pool dialog, the tape job editor, the restore from tape and the operator prompt. They are not stored in the repository; the chosen variant is recorded here once the user has picked it.
+- **Visuals:** mockups in a design canvas, with three variants of the tape page (slot map, tables, tree with details) plus the pool dialog, the tape job editor, the restore from tape and the operator prompt. They are not stored in the repository.
+
+  **Chosen by the user (2026-11-16): variant B**, tables with filters as in Proxmox Backup Server:
+  - the tape page has the tabs *Libraries & drives*, *Media* and *Media pools*;
+  - drives are a compact table (drive, library, state, cartridge, job, speed);
+  - media are a table with search, pool and location chips, and the actions in a row menu.
+
+  The dialogs below the variants (media pool, tape job editor, restore from tape, operator banner, restore points marked *on tape*) apply as drawn.
 - **References:** see `references.md`.
 - **Product alignment:**
   - mission: "Works with … iSCSI block storage and tape", public documented APIs only;

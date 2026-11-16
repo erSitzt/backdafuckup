@@ -494,3 +494,9 @@ deploy/lab/.terraform/
 deploy/lab/*.tfstate
 deploy/lab/*.tfstate.*
 deploy/lab/*.tfvars
+
+# OpenTofu lab VTL (deploy/vtl): providers, state and variables hold Holo's API key
+deploy/vtl/.terraform/
+deploy/vtl/*.tfstate
+deploy/vtl/*.tfstate.*
+deploy/vtl/*.tfvars

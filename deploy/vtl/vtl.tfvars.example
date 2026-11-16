@@ -1,0 +1,29 @@
+# Copy to vtl.auto.tfvars (not committed) and fill in the names as Xen Orchestra shows them.
+
+pool        = "xcp-pool-01"
+lab_sr      = "lab-sr"         # must carry the tag bdfu-lab
+lab_network = "lab-network"    # DHCP, or set ip_cidr/gateway/dns_servers below
+template    = "Ubuntu 24.04 Cloud-Init"
+
+# Accounts that are no pool administrators create VMs in a resource set (the lab SR, network and template).
+# resource_set = "bdfu-lab"
+
+ssh_public_keys = [
+  # "ssh-ed25519 AAAA... you@workstation",
+]
+
+# Static address (the iSCSI portal and the web UI stay put). Leave out for DHCP.
+# ip_cidr     = "10.26.20.60/24"
+# gateway     = "10.26.20.1"
+# dns_servers = ["10.26.20.1"]
+
+# The library: an HPE MSL6480 with two LTO-9 drives and 20 small cartridges (end of tape comes quickly).
+# library_type   = "hpe-msl6480"
+# drive_type     = "hpe-ultrium-9-scsi"
+# lto_generation = 9
+# drive_count    = 2
+# cartridge_gib  = 2
+
+# Only these initiators may log in (empty: every one). On Linux: cat /etc/iscsi/initiatorname.iscsi;
+# on Windows: (Get-InitiatorPort).NodeAddress
+# initiator_iqns = ["iqn.1991-05.com.microsoft:backup01.corp.example"]
