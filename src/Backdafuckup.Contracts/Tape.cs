@@ -199,3 +199,7 @@ public sealed record TapeCopyDto(
     IReadOnlyList<TapeNeededDto> Tapes);
 
 public sealed record TapeRestoreRequestDto(Guid RepositoryId);
+
+/// <summary>Marks a cartridge <c>Free</c> (written over on its next use) or <c>Damaged</c> (never used); its barcode typed to confirm.</summary>
+public sealed record TapeMediumStateDto(string State, string Barcode);
+

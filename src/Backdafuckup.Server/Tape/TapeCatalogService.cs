@@ -270,6 +270,51 @@ public sealed class TapeCatalogService(IDbContextFactory<AppDbContext> dbFactory
         }
     }
 
+    /// <summary>
+    /// Marks a cartridge free (it is written over on its next use) or damaged (never used). Both need its barcode typed;
+    /// free is refused for WORM cartridges and for tapes of a set that is kept.
+    /// </summary>
+    public async Task SetMediumStateAsync(Guid mediumId, TapeMediumStateDto request, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var medium = await db.TapeMedia.FirstOrDefaultAsync(m => m.Id == mediumId, cancellationToken).ConfigureAwait(false)
+            ?? throw new TapeRequestException($"Cartridge {mediumId} does not exist.", StatusCodes.Status404NotFound);
+        if (!string.Equals(request.Barcode?.Trim(), medium.Barcode, StringComparison.Ordinal))
+        {
+            throw new TapeRequestException($"Type the barcode {medium.Barcode} to confirm.");
+        }
+
+        switch (request.State)
+        {
+            case "Free":
+                if (medium.Kind == TapeMediumKind.Worm)
+                {
+                    throw new TapeRequestException($"{medium.Barcode} is a WORM cartridge: what is on it cannot be written over.");
+                }
+
+                if (medium.SetId is { } setId && await db.MediaSets.AsNoTracking().FirstOrDefaultAsync(s => s.Id == setId, cancellationToken).ConfigureAwait(false) is { State: MediaSetState.Open or MediaSetState.Closed } set)
+                {
+                    throw new TapeRequestException(
+                        $"{medium.Barcode} is tape #{medium.Sequence} of a set that is kept{(set.ExpiresUtc is { } until ? $" until {until:yyyy-MM-dd}" : string.Empty)}; it becomes reusable when its set expires.",
+                        StatusCodes.Status409Conflict);
+                }
+
+                medium.State = TapeMediumState.Free;
+                medium.SetId = null;
+                medium.PoolId = null;
+                medium.Sequence = null;
+                medium.FileCount = 0;
+                break;
+            case "Damaged":
+                medium.State = TapeMediumState.Damaged;
+                break;
+            default:
+                throw new TapeRequestException($"A cartridge is marked Free or Damaged, not '{request.State}'.");
+        }
+
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<TapeCopyDto>> CopiesAsync(string? vmId, Guid? originalId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);

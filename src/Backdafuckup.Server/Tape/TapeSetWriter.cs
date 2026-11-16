@@ -288,7 +288,10 @@ internal sealed class TapeSetWriter(
             _drive = await libraries.OpenDriveAsync(context.Library, context.Drive, cancellationToken).ConfigureAwait(false);
             await _drive.Drive.PrepareAsync(cancellationToken).ConfigureAwait(false);
             var label = await TapeLabelReader.ReadAsync(_drive.Drive, cancellationToken).ConfigureAwait(false);
-            if (label.Foreign)
+
+            // A tape marked free in the console (its barcode typed) is written over, whatever is on it.
+            var released = !appending && candidate.State == TapeMediumState.Free && candidate.SetId is null;
+            if (label.Foreign && !released)
             {
                 Log.Warning($"{barcode} holds data that is not backdafuckup's ({label.Reason}); it is never written to.");
                 await MarkAsync(candidate.Id, TapeMediumState.Foreign, cancellationToken).ConfigureAwait(false);
@@ -318,7 +321,7 @@ internal sealed class TapeSetWriter(
             }
             else
             {
-                if (label.Label is { } old && old.Set is not null && !(candidate.State == TapeMediumState.Expired && old.Set.PoolId == context.Pool.Id))
+                if (label.Label is { } old && old.Set is not null && !released && !(candidate.State == TapeMediumState.Expired && old.Set.PoolId == context.Pool.Id))
                 {
                     Log.Warning($"{barcode} belongs to set {old.Set.Id} of pool {old.Set.PoolName} that has not expired; it is not written to.");
                     await MarkAsync(candidate.Id, TapeMediumState.Full, cancellationToken).ConfigureAwait(false);
@@ -356,7 +359,7 @@ internal sealed class TapeSetWriter(
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var last = await db.TapeMedia.AsNoTracking().Where(m => m.SetId == Set.Id).OrderByDescending(m => m.Sequence).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        if (last is { State: TapeMediumState.Appendable } && last.LibraryId == context.Library.Id && last.Location != TapeLocation.Offline && !_skipped.Contains(last.Id))
+        if (last is { State: TapeMediumState.Appendable, Location: TapeLocation.Slot or TapeLocation.Drive } && last.LibraryId == context.Library.Id && !_skipped.Contains(last.Id))
         {
             _skipped.Add(last.Id);
             return (last, true);
@@ -365,7 +368,7 @@ internal sealed class TapeSetWriter(
         var kind = context.Pool.WormOnly ? TapeMediumKind.Worm : TapeMediumKind.Data;
         var usable = new[] { TapeMediumState.Expired, TapeMediumState.Free, TapeMediumState.Blank, TapeMediumState.Unknown };
         var media = await db.TapeMedia.AsNoTracking()
-            .Where(m => m.LibraryId == context.Library.Id && m.Location != TapeLocation.Offline && m.Kind == kind && usable.Contains(m.State))
+            .Where(m => m.LibraryId == context.Library.Id && (m.Location == TapeLocation.Slot || m.Location == TapeLocation.Drive) && m.Kind == kind && usable.Contains(m.State))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         var choice = media
             .Where(m => !_skipped.Contains(m.Id) && (m.State != TapeMediumState.Expired || m.PoolId == context.Pool.Id))

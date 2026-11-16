@@ -121,6 +121,44 @@ public sealed class TapeSessionRunner(TapeLibraries libraries, TapeLocks locks, 
         }
     }
 
+    /// <summary>Moves cartridges from their slots into free mail slots (the export rule of a pool); the rest stay, with a warning.</summary>
+    internal async Task ExportFromSlotsAsync(TapeLibraryEntity library, IReadOnlyCollection<string> barcodes, string holder, IOperationLog log, CancellationToken cancellationToken)
+    {
+        if (barcodes.Count == 0 || library.ChangerSerial is null)
+        {
+            return;
+        }
+
+        await using var robot = await AcquireRobotAsync(library, holder, log, cancellationToken).ConfigureAwait(false);
+        await using var changer = await libraries.OpenChangerAsync(library, cancellationToken).ConfigureAwait(false);
+        var inventory = await changer.Changer.ReadInventoryAsync(cancellationToken).ConfigureAwait(false);
+        var free = new Queue<ChangerElement>(inventory.MailSlots.Where(m => !m.Full && m.Accessible));
+        var left = new List<string>();
+        foreach (var barcode in barcodes)
+        {
+            if (inventory.Find(barcode) is not { Type: Cdb.ElementType.Storage } source)
+            {
+                continue;
+            }
+
+            if (!free.TryDequeue(out var mail))
+            {
+                left.Add(barcode);
+                continue;
+            }
+
+            await changer.Changer.MoveAsync(source.Address, mail.Address, cancellationToken).ConfigureAwait(false);
+            log.Info($"{barcode} exported to {TapeLibraries.Describe(library, mail)}.");
+        }
+
+        if (left.Count > 0)
+        {
+            log.Warning($"No free mail slot in {library.Name} for {string.Join(", ", left)}; take the exported cartridges out and export these by hand.");
+        }
+
+        await libraries.ApplyAsync(library.Id, await changer.Changer.ReadInventoryAsync(cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Unloads <paramref name="drive"/> (held by the caller) into a slot, or into a mail slot with <paramref name="export"/>.</summary>
     internal async Task<string> UnloadHeldAsync(TapeLibraryEntity library, TapeDriveEntity drive, bool export, string holder, IOperationLog log, CancellationToken cancellationToken)
     {

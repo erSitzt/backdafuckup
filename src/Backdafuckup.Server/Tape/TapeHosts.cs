@@ -47,3 +47,10 @@ public sealed class TapeRequestException(string message, int statusCode = Status
 {
     public int StatusCode { get; } = statusCode;
 }
+
+/// <summary>A tape action without a session writes to the server log.</summary>
+public sealed class TapeLoggerLog(ILogger logger) : Core.Operations.IOperationLog
+{
+    public void Write(Core.Operations.LogSeverity severity, string message, string? key = null) =>
+        logger.Log(severity == Core.Operations.LogSeverity.Error ? LogLevel.Error : severity == Core.Operations.LogSeverity.Warning ? LogLevel.Warning : LogLevel.Information, "{Message}", message);
+}

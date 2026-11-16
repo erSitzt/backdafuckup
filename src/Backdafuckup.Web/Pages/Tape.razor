@@ -307,6 +307,22 @@ else
                     <MudToggleItem Value="@("Offline")" Text="Offline" />
                 </MudToggleGroup>
             </div>
+            @if (_marking is { } marking)
+            {
+                <MudAlert Severity="@(_markState == "Free" ? Severity.Warning : Severity.Info)" Class="mb-3">
+                    <div class="d-flex gap-2 align-center flex-wrap">
+                        <span>
+                            @(_markState == "Free"
+                                ? $"Mark {marking.Barcode} free? The next run that needs a tape writes over everything on it."
+                                : $"Mark {marking.Barcode} damaged? It is never written to again; copies on it may not come back.")
+                            Type its barcode to confirm:
+                        </span>
+                        <MudTextField @bind-Value="_markBarcode" Immediate="true" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:180px" />
+                        <MudButton Size="Size.Small" OnClick="@(() => _marking = null)">Cancel</MudButton>
+                        <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Warning" Disabled="@(_markBarcode != marking.Barcode)" OnClick="MarkAsync">Mark @_markState.ToLowerInvariant()</MudButton>
+                    </div>
+                </MudAlert>
+            }
             <div class="cq">
                 <MudTable Items="FilteredMedia()" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
                     <HeaderContent>
@@ -338,6 +354,11 @@ else
                                     @if (context.Kind != "Cleaning")
                                     {
                                         <MudMenuItem Icon="@Icons.Material.Filled.Label" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Identify, context.Barcode), $"Reading the label of {context.Barcode}"))">Read its label</MudMenuItem>
+                                        @if (context.Kind != "Worm" && context.State is "Expired" or "Foreign" or "Full" or "Damaged" or "Unknown")
+                                        {
+                                            <MudMenuItem Icon="@Icons.Material.Filled.LockOpen" OnClick="@(() => { _marking = context; _markState = "Free"; _markBarcode = string.Empty; })">Mark free…</MudMenuItem>
+                                        }
+                                        <MudMenuItem Icon="@Icons.Material.Filled.ReportProblem" OnClick="@(() => { _marking = context; _markState = "Damaged"; _markBarcode = string.Empty; })">Mark damaged…</MudMenuItem>
                                     }
                                 </MudMenu>
                             }
@@ -369,6 +390,10 @@ else
                         <MudTd Style="text-align:right; white-space:nowrap">
                             <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
                                 <MudMenuItem Icon="@Icons.Material.Filled.Edit" OnClick="@(() => EditPool(context))">Edit</MudMenuItem>
+                                @if (context.OpenSet is not null)
+                                {
+                                    <MudMenuItem Icon="@Icons.Material.Filled.NoteAdd" OnClick="@(() => NewSetAsync(context))">Start a new set with the next run</MudMenuItem>
+                                }
                                 <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => DeleteAsync($"api/tape/pools/{context.Id}", $"Remove pool {context.Name}?"))">Remove</MudMenuItem>
                             </MudMenu>
                         </MudTd>
@@ -418,6 +443,13 @@ else
                                 </MudSelect>
                             </MudItem>
                         }
+                        <MudItem xs="12" md="4">
+                            <MudSelect T="string" @bind-Value="pf.Export" Label="Take tapes out" Variant="Variant.Outlined" HelperText="Into the mail slots, for storing them elsewhere.">
+                                <MudSelectItem T="string" Value="@("Never")">never</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("WhenSetCloses")">when their set closes</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("AfterEveryRun")">after every run</MudSelectItem>
+                            </MudSelect>
+                        </MudItem>
                         <MudItem xs="12" md="4"><MudSwitch T="bool" @bind-Value="pf.WormOnly" Label="WORM tapes only" Color="Color.Primary" /></MudItem>
                         <MudItem xs="12" md="4">
                             <MudSelect T="int" @bind-Value="pf.BlockSizeKiB" Label="Block size" Variant="Variant.Outlined" HelperText="256 KiB reads back on every host and through iSCSI.">
@@ -702,6 +734,10 @@ else
     private TapeAgentSecretDto? _agentSecret;
     private string _agentName = string.Empty;
 
+    private TapeMediumDto? _marking;
+    private string _markState = "Free";
+    private string _markBarcode = string.Empty;
+
     private Guid? _renaming;
     private string _newName = string.Empty;
 
@@ -900,6 +936,7 @@ else
         public Guid? KeyId { get; set; }
         public bool WormOnly { get; set; }
         public int BlockSizeKiB { get; set; } = 256;
+        public string Export { get; set; } = "Never";
     }
 
     private sealed class TapeJobForm
@@ -954,14 +991,14 @@ else
         _poolForm = new PoolForm
         {
             Name = pool.Name, LibraryId = pool.LibraryId, NewSet = pool.NewSet, RetentionDays = pool.RetentionDays, Encryption = pool.Encryption, KeyId = pool.KeyId,
-            WormOnly = pool.WormOnly, BlockSizeKiB = pool.BlockSizeKiB,
+            WormOnly = pool.WormOnly, BlockSizeKiB = pool.BlockSizeKiB, Export = pool.Export,
         };
     }
 
     private async Task SavePoolAsync()
     {
         var f = _poolForm!;
-        var request = new MediaPoolRequestDto(f.Name.Trim(), f.LibraryId, f.NewSet, "UTC", f.RetentionDays, f.WormOnly, f.Encryption, f.KeyId, "Never", f.BlockSizeKiB);
+        var request = new MediaPoolRequestDto(f.Name.Trim(), f.LibraryId, f.NewSet, "UTC", f.RetentionDays, f.WormOnly, f.Encryption, f.KeyId, f.Export, f.BlockSizeKiB);
         await SaveAsync(async () =>
         {
             if (_poolEditing is { } id)
@@ -1065,6 +1102,27 @@ else
         {
             Snackbar.Add(ex.Message, Severity.Error);
         }
+    }
+
+    private async Task MarkAsync()
+    {
+        var medium = _marking!;
+        await SaveAsync(async () =>
+        {
+            await Api.PostAsync($"api/tape/media/{medium.Id}/state", new TapeMediumStateDto(_markState, _markBarcode));
+            Snackbar.Add($"{medium.Barcode} is marked {_markState.ToLowerInvariant()}.", Severity.Success);
+            _marking = null;
+        });
+    }
+
+    private async Task NewSetAsync(MediaPoolDto pool)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("New set", $"Close the open set of {pool.Name} now? The next run starts a new set on new tapes; the closed set is kept for the pool's retention.", yesText: "Close the set", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        await SaveAsync(() => Api.PostAsync($"api/tape/pools/{pool.Id}/new-set"));
     }
 
     private async Task DeleteAsync(string url, string question)

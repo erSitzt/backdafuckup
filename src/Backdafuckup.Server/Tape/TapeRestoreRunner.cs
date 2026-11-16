@@ -69,7 +69,8 @@ public sealed class TapeRestoreRunner(
         var holder = $"Restore {copy.VmName} from tape";
         var drive = library.Drives.OrderBy(d => locks.Drive(d.Id).Snapshot().Holder is null ? 0 : 1).ThenBy(d => d.ElementAddress).First();
         await using var lease = await locks.Drive(drive.Id).AcquireAsync(holder, h => log.Info($"Waiting for {drive.Name}: '{h}' uses it."), cancellationToken).ConfigureAwait(false);
-        var blockSize = Math.Max(pool.BlockSize, 1024 * 1024);
+        // Blocks are never larger than the pool's block size; a larger buffer only costs transfer where no residual is reported.
+        var blockSize = pool.BlockSize;
         var tapes = new TapeReaderSession(library, drive, media, libraries, robot, holder, log);
         var newId = Guid.CreateVersion7();
         try

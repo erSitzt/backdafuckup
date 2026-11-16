@@ -51,7 +51,12 @@ public sealed class TapeBackupRunner(
 
         var (kek, kdf, fingerprint) = await KeyAsync(pool, cancellationToken).ConfigureAwait(false);
         await ExpireSetsAsync(pool, log, cancellationToken).ConfigureAwait(false);
-        var set = await OpenSetAsync(pool, fingerprint, log, cancellationToken).ConfigureAwait(false);
+        var (set, closed) = await OpenSetAsync(pool, fingerprint, log, cancellationToken).ConfigureAwait(false);
+        if (closed is not null)
+        {
+            await ExportClosedAsync(pool, library, closed.Value, $"Tape job {job.Name}", log, cancellationToken).ConfigureAwait(false);
+        }
+
         var points = await SelectAsync(job, set, log, cancellationToken).ConfigureAwait(false);
         if (points.Count == 0)
         {
@@ -98,6 +103,11 @@ public sealed class TapeBackupRunner(
             result = await writer.FinishAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        if (pool.Export == TapeExport.AfterEveryRun)
+        {
+            await robot.ExportFromSlotsAsync(library, result.Tapes.Distinct().ToList(), holder, log, cancellationToken).ConfigureAwait(false);
+        }
+
         var summary = $"{result.Copied} restore point(s) copied to {string.Join(", ", result.Tapes.Distinct())}: {VmBackupTask.Format(result.NewBytes)} new, {result.ReusedChunks} chunk(s) the set had already." +
             (failed > 0 ? $" {failed} not copied." : string.Empty);
         log.Info(summary);
@@ -142,25 +152,68 @@ public sealed class TapeBackupRunner(
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>The pool's open set, or a new one when the policy asks for it (the old one closes).</summary>
-    private async Task<MediaSetEntity> OpenSetAsync(MediaPoolEntity pool, string? fingerprint, IOperationLog log, CancellationToken cancellationToken)
+    /// <summary>Closes the pool's open set now: the next run starts a new one. Its tapes are exported by the pool's rule.</summary>
+    public async Task<bool> CloseOpenSetAsync(Guid poolId, IOperationLog log, CancellationToken cancellationToken)
+    {
+        MediaPoolEntity pool;
+        Guid? closed;
+        await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            pool = await db.MediaPools.AsNoTracking().FirstOrDefaultAsync(p => p.Id == poolId, cancellationToken).ConfigureAwait(false)
+                ?? throw new TapeRequestException($"Media pool {poolId} does not exist.", StatusCodes.Status404NotFound);
+            var open = await db.MediaSets.FirstOrDefaultAsync(s => s.PoolId == pool.Id && s.State == MediaSetState.Open, cancellationToken).ConfigureAwait(false);
+            closed = open is null ? null : await CloseAsync(db, pool, open, log, cancellationToken).ConfigureAwait(false);
+            await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (closed is { } setId)
+        {
+            await ExportClosedAsync(pool, await libraries.LoadAsync(pool.LibraryId, cancellationToken).ConfigureAwait(false), setId, $"Close a set of {pool.Name}", log, cancellationToken).ConfigureAwait(false);
+        }
+
+        return closed is not null;
+    }
+
+    private async Task ExportClosedAsync(MediaPoolEntity pool, TapeLibraryEntity library, Guid setId, string holder, IOperationLog log, CancellationToken cancellationToken)
+    {
+        if (pool.Export != TapeExport.WhenSetCloses)
+        {
+            return;
+        }
+
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var barcodes = await db.TapeMedia.Where(m => m.SetId == setId && m.LibraryId == library.Id && m.Location == TapeLocation.Slot).OrderBy(m => m.Sequence).Select(m => m.Barcode)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        await robot.ExportFromSlotsAsync(library, barcodes, holder, log, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<Guid> CloseAsync(AppDbContext db, MediaPoolEntity pool, MediaSetEntity open, IOperationLog log, CancellationToken cancellationToken)
+    {
+        var now = time.GetUtcNow();
+        open.State = MediaSetState.Closed;
+        open.ClosedUtc = now;
+        open.ExpiresUtc = pool.RetentionDays is { } days ? now.AddDays(days) : null;
+        open.IndexSegments = null;
+        foreach (var medium in await db.TapeMedia.Where(m => m.SetId == open.Id && m.State == TapeMediumState.Appendable).ToListAsync(cancellationToken).ConfigureAwait(false))
+        {
+            medium.State = TapeMediumState.Full;
+        }
+
+        OpenSetIndex.Delete(IndexDirectory(open.Id));
+        log.Info($"Set {open.Id} of pool {pool.Name} closed; it is kept {(pool.RetentionDays is { } d ? $"{d} days, until {open.ExpiresUtc:yyyy-MM-dd}" : "for ever")}.");
+        return open.Id;
+    }
+
+    /// <summary>The pool's open set, or a new one when the policy asks for it (the old one closes and is returned).</summary>
+    private async Task<(MediaSetEntity Set, Guid? Closed)> OpenSetAsync(MediaPoolEntity pool, string? fingerprint, IOperationLog log, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var now = time.GetUtcNow();
         var open = await db.MediaSets.FirstOrDefaultAsync(s => s.PoolId == pool.Id && s.State == MediaSetState.Open, cancellationToken).ConfigureAwait(false);
+        Guid? closed = null;
         if (open is not null && (NeedsNewSet(pool, open, now) || open.KeyFingerprint != fingerprint))
         {
-            open.State = MediaSetState.Closed;
-            open.ClosedUtc = now;
-            open.ExpiresUtc = pool.RetentionDays is { } days ? now.AddDays(days) : null;
-            open.IndexSegments = null;
-            foreach (var medium in await db.TapeMedia.Where(m => m.SetId == open.Id && m.State == TapeMediumState.Appendable).ToListAsync(cancellationToken).ConfigureAwait(false))
-            {
-                medium.State = TapeMediumState.Full;
-            }
-
-            OpenSetIndex.Delete(IndexDirectory(open.Id));
-            log.Info($"Set {open.Id} closed ({pool.NewSet} sets); it is kept {(pool.RetentionDays is { } d ? $"{d} days, until {open.ExpiresUtc:yyyy-MM-dd}" : "for ever")}.");
+            closed = await CloseAsync(db, pool, open, log, cancellationToken).ConfigureAwait(false);
             open = null;
         }
 
@@ -172,7 +225,7 @@ public sealed class TapeBackupRunner(
         }
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        return open;
+        return (open, closed);
     }
 
     internal static bool NeedsNewSet(MediaPoolEntity pool, MediaSetEntity open, DateTimeOffset now)

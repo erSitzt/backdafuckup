@@ -34,6 +34,19 @@ public static class TapeCatalogEndpoints
 
         tape.MapGet("/sets", async (Guid? pool, TapeCatalogService catalog, CancellationToken ct) => Results.Ok(await catalog.SetsAsync(pool, ct)));
 
+        // A new set from the next run on: the open set closes now (and its tapes go out by the pool's export rule).
+        tape.MapPost("/pools/{id:guid}/new-set", (Guid id, TapeBackupRunner runner, ILoggerFactory loggers, CancellationToken ct) => Run(async () =>
+        {
+            var log = new TapeLoggerLog(loggers.CreateLogger("Backdafuckup.Tape"));
+            return await runner.CloseOpenSetAsync(id, log, ct) ? Results.NoContent() : Results.Problem("The pool has no open set.", statusCode: StatusCodes.Status409Conflict);
+        }));
+
+        tape.MapPost("/media/{id:guid}/state", (Guid id, TapeMediumStateDto request, TapeCatalogService catalog, CancellationToken ct) => Run(async () =>
+        {
+            await catalog.SetMediumStateAsync(id, request, ct);
+            return Results.NoContent();
+        }));
+
         tape.MapGet("/jobs", async (TapeCatalogService catalog, CancellationToken ct) => Results.Ok(await catalog.JobsAsync(ct)));
         tape.MapPost("/jobs", (TapeJobRequestDto request, TapeCatalogService catalog, CancellationToken ct) => Run(async () => Results.Ok(await catalog.SaveJobAsync(null, request, ct))));
         tape.MapPut("/jobs/{id:guid}", (Guid id, TapeJobRequestDto request, TapeCatalogService catalog, CancellationToken ct) => Run(async () => Results.Ok(await catalog.SaveJobAsync(id, request, ct))));
