@@ -57,9 +57,52 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<ApiTokenEntity> ApiTokens => Set<ApiTokenEntity>();
 
+    public DbSet<TapeLibraryEntity> TapeLibraries => Set<TapeLibraryEntity>();
+
+    public DbSet<TapeDriveEntity> TapeDrives => Set<TapeDriveEntity>();
+
+    public DbSet<TapeMediumEntity> TapeMedia => Set<TapeMediumEntity>();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
+
+        builder.Entity<TapeLibraryEntity>(e =>
+        {
+            e.ToTable("tape_libraries");
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.Host).HasMaxLength(64);
+            e.Property(x => x.ChangerSerial).HasMaxLength(64);
+            e.Property(x => x.Vendor).HasMaxLength(16);
+            e.Property(x => x.Product).HasMaxLength(32);
+            e.HasIndex(x => x.Name).IsUnique();
+            e.HasIndex(x => x.ChangerSerial).IsUnique();
+            e.HasMany(x => x.Drives).WithOne().HasForeignKey(x => x.LibraryId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Version).IsRowVersion();
+        });
+
+        builder.Entity<TapeDriveEntity>(e =>
+        {
+            e.ToTable("tape_drives");
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.Serial).HasMaxLength(64);
+            e.Property(x => x.Vendor).HasMaxLength(16);
+            e.Property(x => x.Product).HasMaxLength(32);
+            e.Property(x => x.Barcode).HasMaxLength(32);
+            e.HasIndex(x => x.Serial).IsUnique();
+        });
+
+        builder.Entity<TapeMediumEntity>(e =>
+        {
+            e.ToTable("tape_media");
+            e.Property(x => x.Barcode).HasMaxLength(32);
+            e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.Location).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.MediumSerial).HasMaxLength(64);
+            e.HasIndex(x => x.Barcode).IsUnique();
+            e.HasIndex(x => x.LibraryId);
+            e.HasOne<TapeLibraryEntity>().WithMany().HasForeignKey(x => x.LibraryId).OnDelete(DeleteBehavior.SetNull);
+        });
 
         builder.Entity<ApiTokenEntity>(e =>
         {

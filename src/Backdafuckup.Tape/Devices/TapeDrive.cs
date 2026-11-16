@@ -64,13 +64,15 @@ public sealed class TapeWriteProtectedException(string message) : IOException(me
 /// </summary>
 public sealed class TapeDrive(ScsiCommandRunner runner, TimeProvider? time = null)
 {
-    private const int PollInterval = 2;
     private readonly TimeProvider _time = time ?? TimeProvider.System;
 
     /// <summary>The logical position (block number) the tape should be at; null when unknown.</summary>
     private long? _expectedBlock;
 
     public ScsiCommandRunner Runner { get; } = runner;
+
+    /// <summary>How often <see cref="WaitReadyAsync"/> asks the drive.</summary>
+    public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(2);
 
     public string Label => Runner.Label;
 
@@ -163,7 +165,7 @@ public sealed class TapeDrive(ScsiCommandRunner runner, TimeProvider? time = nul
                 throw new TimeoutException($"{Label} did not become ready within {max.TotalMinutes:0} minutes.");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(PollInterval), _time, cancellationToken).ConfigureAwait(false);
+            await Task.Delay(PollInterval, _time, cancellationToken).ConfigureAwait(false);
         }
     }
 

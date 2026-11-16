@@ -189,6 +189,7 @@ public sealed class BackupMetrics
         SessionKind.SqlPublish => "sql_publish",
         SessionKind.SqlRestore => "sql_restore",
         SessionKind.SqlExport => "sql_export",
+        SessionKind.TapeMaintenance => "tape_maintenance",
         _ => kind.ToString().ToLowerInvariant(),
     };
 

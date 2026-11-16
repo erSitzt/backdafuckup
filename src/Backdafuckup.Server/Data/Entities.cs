@@ -648,6 +648,9 @@ public enum SessionKind
 
     /// <summary>Objects of an AD explore session restored into the live directory (one task per object).</summary>
     AdRestore,
+
+    /// <summary>A tape library action: load, unload, import, export, a full inventory.</summary>
+    TapeMaintenance,
 }
 
 public enum GuestProcessingMode

@@ -34,6 +34,9 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     private readonly FakeRegistry _registry = new("bdfu-push", "secret-1");
     private readonly Backdafuckup.Testing.Kubernetes.FakeKubernetesApi _cluster = new();
 
+    /// <summary>The tape devices attached to "this server": one fake library with 2 drives, 8 slots and 2 mail slots.</summary>
+    private readonly Backdafuckup.Testing.Tape.FakeTapeHost _tapeHost = new(new Backdafuckup.Testing.Tape.FakeTapeLibrary(drives: 2, slots: 8, mailSlots: 2));
+
     /// <summary>What a test's node agent answers to <c>node-request</c> (by agent pod and standard input); null: none.</summary>
     private volatile Func<string, string, Task<(int, string)>>? _nodeRequests;
 
@@ -71,8 +74,13 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
             // Runs do not wait for agents to reconnect after the start (one test turns the wait on).
             builder.UseSetting("SqlBackup:AgentReconnectGrace", "00:00:00");
             builder.UseSetting("Mover:ImageArchive", Path.Combine(_root, "backdafuckup-mover.tar"));
+            // Mail slots are looked into when a test asks; loading drives are asked often.
+            builder.UseSetting("Tape:MailSlotPoll", "00:00:00");
+            builder.UseSetting("Tape:ReadyPoll", "00:00:00.020");
             builder.ConfigureTestServices(services =>
             {
+                services.RemoveAll<Backdafuckup.Tape.Devices.ITapeHost>();
+                services.AddSingleton<Backdafuckup.Tape.Devices.ITapeHost>(_tapeHost);
                 services.RemoveAll<Backdafuckup.Smb.ISmbShareConnector>();
                 services.AddSingleton<Backdafuckup.Smb.ISmbShareConnector>(_shares);
                 services.RemoveAll<Backdafuckup.Server.Movers.RegistryTransport>();

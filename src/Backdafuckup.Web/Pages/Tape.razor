@@ -1,0 +1,632 @@
+@page "/infrastructure/tape"
+@implements IDisposable
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+@inject NavigationManager Navigation
+
+<PageTitle>Tape – backdafuckup</PageTitle>
+<PageHeader Title="Tape" Description="Tape libraries and standalone drives: their drives, slots and cartridges.">
+    <Actions><MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="StartAddingAsync" Disabled="_adding">Add library</MudButton></Actions>
+</PageHeader>
+
+@if (_adding)
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="2">
+        <MudText Typo="Typo.h6" Class="mb-2">Add library</MudText>
+        <MudText Typo="Typo.body2" Class="mb-3">
+            Changers and drives attached to the host (SAS, Fibre Channel or iSCSI, logged in already). They are known by their
+            serial numbers, so renumbered devices are found again. No vendor driver is needed.
+        </MudText>
+        <div class="d-flex gap-2 align-center flex-wrap">
+            <MudSelect T="string" @bind-Value="_host" Label="Host" Variant="Variant.Outlined" Dense="true" Style="min-width:240px">
+                @foreach (var host in _hosts ?? [])
+                {
+                    <MudSelectItem T="string" Value="@host.Id">@host.Name@(host.Online ? "" : " (offline)")</MudSelectItem>
+                }
+            </MudSelect>
+            <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Search" OnClick="ScanAsync" Disabled="_scanning">Scan for devices</MudButton>
+            @if (_scanning)
+            {
+                <MudProgressCircular Indeterminate="true" Size="Size.Small" />
+            }
+        </div>
+
+        @if (_scan is not null)
+        {
+            @foreach (var problem in _scan.Problems)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-3">@problem</MudAlert>
+            }
+
+            @if (_scan.Changers.Count == 0 && _scan.StandaloneDrives.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Dense="true" Class="mt-3">No changers or tape drives found on this host. Is the iSCSI session logged in, or the cable connected?</MudAlert>
+            }
+
+            <MudRadioGroup T="string" Value="_choice" ValueChanged="Choose" Class="mt-3 d-block">
+                @foreach (var changer in _scan.Changers)
+                {
+                    var taken = changer.Changer.Library is not null;
+                    <MudPaper Outlined="true" Class="pa-3 mb-2">
+                        <MudRadio T="string" Value="@changer.Changer.Serial" Disabled="taken">
+                            <b>@changer.Changer.Vendor @changer.Changer.Product</b> (changer, serial <span class="mono">@changer.Changer.Serial</span>)
+                            · @changer.Slots slots, @changer.MailSlots mail slots, @changer.Drives.Count drive(s)
+                            @if (taken)
+                            {
+                                <span> · in library @changer.Changer.Library</span>
+                            }
+                        </MudRadio>
+                        <span class="cell-sub">@changer.Changer.Connection · @changer.Changer.Path</span>
+                        @if (_choice == changer.Changer.Serial)
+                        {
+                            <MudSimpleTable Dense="true" Elevation="0" Class="mt-2">
+                                <thead><tr><th>Drive element</th><th>Drive</th><th></th></tr></thead>
+                                <tbody>
+                                    @foreach (var element in changer.Drives)
+                                    {
+                                        <tr>
+                                            <td class="num">@element.Element</td>
+                                            <td style="min-width:280px">
+                                                <MudSelect T="string" Value="@(_mapping.GetValueOrDefault(element.Element) ?? "")" ValueChanged="@(v => _mapping[element.Element] = v is { Length: > 0 } ? v : null)" Dense="true" Margin="Margin.Dense" Variant="Variant.Outlined">
+                                                    <MudSelectItem T="string" Value="@("")">(not used)</MudSelectItem>
+                                                    @foreach (var serial in DriveSerials())
+                                                    {
+                                                        <MudSelectItem T="string" Value="@serial">@serial</MudSelectItem>
+                                                    }
+                                                </MudSelect>
+                                            </td>
+                                            <td>
+                                                @if (element.MappedBy == "dvcid")
+                                                {
+                                                    <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Text">named by the changer</MudChip>
+                                                }
+                                                else if (element.MappedBy == "saved")
+                                                {
+                                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Text">as saved</MudChip>
+                                                }
+                                                else if (element.MappedBy == "order")
+                                                {
+                                                    <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Text">guessed: check it</MudChip>
+                                                }
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </MudSimpleTable>
+                        }
+                    </MudPaper>
+                }
+                @foreach (var drive in _scan.StandaloneDrives)
+                {
+                    var taken = drive.Library is not null;
+                    <MudPaper Outlined="true" Class="pa-3 mb-2">
+                        <MudRadio T="string" Value="@("drive:" + drive.Serial)" Disabled="taken">
+                            <b>@drive.Vendor @drive.Product</b> (standalone drive, serial <span class="mono">@drive.Serial</span>)
+                            @if (taken)
+                            {
+                                <span> · in library @drive.Library</span>
+                            }
+                        </MudRadio>
+                        <span class="cell-sub">@drive.Connection · @drive.Path</span>
+                    </MudPaper>
+                }
+            </MudRadioGroup>
+
+            <MudTextField @bind-Value="_name" Label="Name" Variant="Variant.Outlined" Class="mt-2" Style="max-width:400px" />
+        }
+
+        <div class="d-flex gap-2 mt-4">
+            <MudButton OnClick="@(() => _adding = false)">Cancel</MudButton>
+            <MudSpacer />
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || _choice is null || string.IsNullOrWhiteSpace(_name))" OnClick="AddAsync">Add</MudButton>
+        </div>
+    </MudPaper>
+}
+
+@if (_libraries is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <MudTabs Elevation="0" Rounded="true" TabPanelsClass="pt-3" @bind-ActivePanelIndex="_tab">
+        <MudTabPanel Text="Libraries & drives">
+            @if (_libraries.Count == 0)
+            {
+                <MudText>No tape library yet. <em>Add library</em> scans this server for changers and drives.</MudText>
+            }
+            @foreach (var library in _libraries)
+            {
+                var elements = _elements.GetValueOrDefault(library.Id) ?? [];
+                <MudPaper Class="pa-4 mb-4" Elevation="1">
+                    <div class="d-flex align-center gap-2 flex-wrap">
+                        <MudIcon Icon="@AppIcons.Tape" />
+                        @if (_renaming == library.Id)
+                        {
+                            <MudTextField @bind-Value="_newName" Margin="Margin.Dense" Variant="Variant.Outlined" Style="max-width:260px" AutoFocus="true" />
+                            <MudButton Size="Size.Small" OnClick="@(() => _renaming = null)">Cancel</MudButton>
+                            <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" OnClick="@(() => RenameAsync(library))">Save</MudButton>
+                        }
+                        else
+                        {
+                            <MudText Typo="Typo.h6">@library.Name</MudText>
+                        }
+                        <span class="cell-sub" style="display:inline">
+                            @library.Vendor @library.Product · @library.HostName ·
+                            @(library.ChangerSerial is null ? "standalone drive" : $"{library.Slots} slots, {library.MailSlots} mail slots") ·
+                            @library.Media cartridge(s) · inventory @Fmt.Time(library.InventoryUtc)
+                        </span>
+                        <MudSpacer />
+                        <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Refresh" OnClick="@(() => InventoryAsync(library))">Inventory</MudButton>
+                        <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {library.Name}")">
+                            @if (library.ChangerSerial is not null)
+                            {
+                                <MudMenuItem Icon="@Icons.Material.Filled.MoveToInbox" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Import), "Import from the mail slots"))">Import from the mail slots</MudMenuItem>
+                                <MudMenuItem Icon="@Icons.Material.Filled.ManageSearch" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Scan), $"Scan of {library.Name}"))">Scan every element (after the door was open)</MudMenuItem>
+                            }
+                            <MudMenuItem Icon="@Icons.Material.Filled.Edit" OnClick="@(() => { _renaming = library.Id; _newName = library.Name; })">Rename</MudMenuItem>
+                            <MudDivider />
+                            <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => RemoveAsync(library))">Remove from the console</MudMenuItem>
+                        </MudMenu>
+                    </div>
+
+                    @if (library.MailSlotsFull > 0)
+                    {
+                        <MudAlert Severity="Severity.Info" Dense="true" Class="mt-3">
+                            <div class="d-flex align-center gap-3">
+                                <span>@library.MailSlotsFull cartridge(s) wait in the mail slots.</span>
+                                <MudButton Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Import), "Import from the mail slots"))">Import</MudButton>
+                            </div>
+                        </MudAlert>
+                    }
+                    @if (library.LastError is { } error)
+                    {
+                        <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-3">@error</MudAlert>
+                    }
+
+                    <div class="cq mt-3">
+                        <MudSimpleTable Dense="true" Elevation="0" Hover="true">
+                            <thead><tr><th>Drive</th><th>State</th><th>Cartridge</th><th class="c-760">Serial</th><th></th></tr></thead>
+                            <tbody>
+                                @foreach (var drive in library.Drives)
+                                {
+                                    <tr>
+                                        <td class="nowrap">@drive.Name<span class="cell-sub c-560">@drive.Vendor @drive.Product@(drive.Element is { } e ? $" · element {e}" : "")</span></td>
+                                        <td>
+                                            @if (drive.Holder is { } holder)
+                                            {
+                                                <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Text">Busy</MudChip>
+                                                <span class="cell-sub">@holder since @Fmt.Time(drive.HolderSinceUtc)@(drive.Waiting.Count > 0 ? $"; waiting: {string.Join(", ", drive.Waiting)}" : "")</span>
+                                            }
+                                            else
+                                            {
+                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Text">@(drive.Barcode is null ? "Empty" : "Loaded")</MudChip>
+                                            }
+                                        </td>
+                                        <td class="mono nowrap">@(drive.Barcode ?? "–")</td>
+                                        <td class="c-760 mono">@drive.Serial</td>
+                                        <td style="text-align:right; white-space:nowrap">
+                                            @if (drive.Barcode is not null)
+                                            {
+                                                <MudButton Size="Size.Small" StartIcon="@Icons.Material.Filled.Eject" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Unload, DriveId: drive.Id), $"Unload {drive.Name}"))">Unload</MudButton>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                    </div>
+
+                    @if (library.ChangerSerial is not null && elements.Count > 0)
+                    {
+                        <MudText Typo="Typo.subtitle2" Class="mt-4 mb-1">Drives and mail slots</MudText>
+                        <div class="slot-row">
+                            @foreach (var element in elements.Where(e => e.Type != "Slot"))
+                            {
+                                @Tile(library, element)
+                            }
+                        </div>
+                        <MudText Typo="Typo.subtitle2" Class="mt-3 mb-1">Slots</MudText>
+                        <div class="slot-row">
+                            @foreach (var element in elements.Where(e => e.Type == "Slot"))
+                            {
+                                @Tile(library, element)
+                            }
+                        </div>
+                        <div class="slot-legend mt-2">
+                            <span><span class="slot data"></span>Data</span>
+                            <span><span class="slot worm"></span>WORM</span>
+                            <span><span class="slot cleaning"></span>Cleaning</span>
+                            <span><span class="slot empty"></span>Empty</span>
+                        </div>
+
+                        @if (_selected is { } selected && selected.Library == library.Id && elements.FirstOrDefault(e => e.Address == selected.Address && e.Barcode is not null) is { } chosen)
+                        {
+                            var medium = _media?.FirstOrDefault(m => m.Barcode == chosen.Barcode);
+                            <MudPaper Outlined="true" Class="pa-3 mt-3">
+                                <div class="d-flex align-center gap-2 flex-wrap">
+                                    <div>
+                                        <b class="mono">@chosen.Barcode</b>
+                                        <span class="cell-sub">
+                                            @Where(chosen) · @(chosen.MediumKind ?? "Data")
+                                            @if (medium?.CapacityBytes is { } capacity)
+                                            {
+                                                <span> · @Fmt.Bytes(medium.RemainingBytes) free of @Fmt.Bytes(capacity)</span>
+                                            }
+                                            @if (medium?.MediumSerial is { } serial)
+                                            {
+                                                <span> · cartridge serial @serial</span>
+                                            }
+                                        </span>
+                                    </div>
+                                    <MudSpacer />
+                                    @if (chosen.Type == "Drive")
+                                    {
+                                        <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Eject" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Unload, DriveId: chosen.DriveId), $"Unload {chosen.DriveName}"))">Unload</MudButton>
+                                    }
+                                    else if (chosen.MediumKind != "Cleaning")
+                                    {
+                                        @foreach (var drive in library.Drives)
+                                        {
+                                            <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Login" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Load, chosen.Barcode, drive.Id), $"Load {chosen.Barcode}"))">Load into @drive.Name</MudButton>
+                                        }
+                                    }
+                                    @if (chosen.Type != "MailSlot" && library.MailSlots > 0)
+                                    {
+                                        <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Outbox" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Export, chosen.Barcode), $"Export {chosen.Barcode}"))">Export to a mail slot</MudButton>
+                                    }
+                                    <MudIconButton Icon="@Icons.Material.Filled.Close" Size="Size.Small" aria-label="Close" OnClick="@(() => _selected = null)" />
+                                </div>
+                            </MudPaper>
+                        }
+                    }
+                </MudPaper>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="@($"Media ({_media?.Count ?? 0})")">
+            <div class="d-flex gap-3 align-center flex-wrap mb-3">
+                <MudTextField @bind-Value="_search" Immediate="true" Placeholder="Barcode" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Margin="Margin.Dense" Variant="Variant.Outlined" Style="max-width:240px" />
+                @if (_libraries.Count > 1)
+                {
+                    <MudSelect T="Guid?" @bind-Value="_libraryFilter" Label="Library" Dense="true" Margin="Margin.Dense" Variant="Variant.Outlined" Style="max-width:240px">
+                        <MudSelectItem T="Guid?" Value="@((Guid?)null)">All libraries</MudSelectItem>
+                        @foreach (var library in _libraries)
+                        {
+                            <MudSelectItem T="Guid?" Value="@((Guid?)library.Id)">@library.Name</MudSelectItem>
+                        }
+                    </MudSelect>
+                }
+                <MudToggleGroup T="string" @bind-Value="_locationFilter" SelectionMode="SelectionMode.SingleSelection" Size="Size.Small" Outlined="true" Color="Color.Primary" CheckMark="false" Style="width: fit-content">
+                    <MudToggleItem Value="@("all")" Text="All" />
+                    <MudToggleItem Value="@("Slot")" Text="Slots" />
+                    <MudToggleItem Value="@("Drive")" Text="Drives" />
+                    <MudToggleItem Value="@("MailSlot")" Text="Mail slots" />
+                    <MudToggleItem Value="@("Offline")" Text="Offline" />
+                </MudToggleGroup>
+            </div>
+            <div class="cq">
+                <MudTable Items="FilteredMedia()" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
+                    <HeaderContent>
+                        <MudTh>Barcode</MudTh><MudTh>Kind</MudTh><MudTh>Where</MudTh><MudTh Class="c-560">Free</MudTh><MudTh Class="c-760">Seen</MudTh><MudTh></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd Class="mono">@context.Barcode@(context.MediumSerial is { } serial ? (MarkupString)$"<span class=\"cell-sub\">serial {serial}</span>" : default)</MudTd>
+                        <MudTd>@context.Kind</MudTd>
+                        <MudTd>@MediumWhere(context)<span class="cell-sub">@(context.Library ?? "no library")</span></MudTd>
+                        <MudTd Class="c-560">@(context.CapacityBytes is { } capacity ? $"{Fmt.Bytes(context.RemainingBytes)} of {Fmt.Bytes(capacity)}" : "–")</MudTd>
+                        <MudTd Class="c-760">@Fmt.Time(context.SeenUtc)</MudTd>
+                        <MudTd Style="text-align:right; white-space:nowrap">
+                            @if (_libraries.FirstOrDefault(l => l.Id == context.LibraryId) is { ChangerSerial: not null } library && context.Location != "Offline")
+                            {
+                                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Barcode}")">
+                                    @if (context.Location == "Drive")
+                                    {
+                                        var drive = library.Drives.FirstOrDefault(d => d.Barcode == context.Barcode);
+                                        <MudMenuItem Icon="@Icons.Material.Filled.Eject" Disabled="drive is null" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Unload, DriveId: drive?.Id), $"Unload {drive?.Name}"))">Unload</MudMenuItem>
+                                    }
+                                    else if (context.Kind != "Cleaning")
+                                    {
+                                        <MudMenuItem Icon="@Icons.Material.Filled.Login" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Load, context.Barcode), $"Load {context.Barcode}"))">Load into a free drive</MudMenuItem>
+                                    }
+                                    @if (context.Location != "MailSlot" && library.MailSlots > 0)
+                                    {
+                                        <MudMenuItem Icon="@Icons.Material.Filled.Outbox" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Export, context.Barcode), $"Export {context.Barcode}"))">Export to a mail slot</MudMenuItem>
+                                    }
+                                </MudMenu>
+                            }
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText>No cartridges@(_media?.Count > 0 ? " match" : " yet").</MudText></NoRecordsContent>
+                </MudTable>
+            </div>
+        </MudTabPanel>
+    </MudTabs>
+}
+
+@code {
+    private List<TapeLibraryDto>? _libraries;
+    private Dictionary<Guid, List<TapeElementDto>> _elements = [];
+    private List<TapeMediumDto>? _media;
+    private (Guid Library, int Address)? _selected;
+    private int _tab;
+    private Timer? _timer;
+    private int _refreshing;
+
+    private bool _adding;
+    private bool _scanning;
+    private bool _busy;
+    private List<TapeHostDto>? _hosts;
+    private string _host = "local";
+    private TapeScanDto? _scan;
+    private string? _choice;
+    private Dictionary<int, string?> _mapping = [];
+    private string _name = string.Empty;
+
+    private Guid? _renaming;
+    private string _newName = string.Empty;
+
+    private string _search = string.Empty;
+    private Guid? _libraryFilter;
+    private string _locationFilter = "all";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+
+        // Drives load and calibrate, operators fill mail slots: the page follows every 5 s.
+        _timer = new Timer(_ => _ = InvokeAsync(RefreshAsync), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    public void Dispose() => _timer?.Dispose();
+
+    private async Task RefreshAsync()
+    {
+        if (Interlocked.Exchange(ref _refreshing, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            await LoadAsync();
+            StateHasChanged();
+        }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException)
+        {
+            // The next refresh tries again.
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _refreshing, 0);
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        var libraries = await Api.GetAsync<List<TapeLibraryDto>>("api/tape/libraries");
+        var elements = new Dictionary<Guid, List<TapeElementDto>>();
+        foreach (var library in libraries.Where(l => l.ChangerSerial is not null))
+        {
+            elements[library.Id] = await Api.GetAsync<List<TapeElementDto>>($"api/tape/libraries/{library.Id}/elements");
+        }
+
+        _media = await Api.GetAsync<List<TapeMediumDto>>("api/tape/media");
+        _elements = elements;
+        _libraries = libraries;
+    }
+
+    private RenderFragment Tile(TapeLibraryDto library, TapeElementDto element) => __builder =>
+    {
+        var full = element.Barcode is not null;
+        var kind = full ? (element.MediumKind ?? "Data").ToLowerInvariant() : "empty";
+        var drive = element.DriveId is { } id ? library.Drives.FirstOrDefault(d => d.Id == id) : null;
+        var selected = _selected is { } s && s.Library == library.Id && s.Address == element.Address;
+        var css = $"slot {kind}{(full ? " full" : "")}{(element.Type == "Drive" ? " drive" : "")}{(drive?.Holder is not null ? " busy" : "")}{(selected ? " selected" : "")}";
+        var label = element.Type switch { "Drive" => element.DriveName ?? $"Drive {element.Number}", "MailSlot" => $"Mail slot {element.Number}", _ => $"Slot {element.Number}" };
+        <button type="button" class="@css" disabled="@(!full)" title="@($"{label} (element {element.Address}){(full ? ": " + element.Barcode : ", empty")}{(drive?.Holder is { } h ? " – " + h : "")}")"
+                aria-label="@($"{label}: {element.Barcode ?? "empty"}")" @onclick="@(() => _selected = (library.Id, element.Address))">
+            <span class="n">@label</span>
+            <span class="b">@(element.Barcode ?? "")</span>
+        </button>
+    };
+
+    private static string Where(TapeElementDto element) => element.Type switch
+    {
+        "Drive" => $"in {element.DriveName}",
+        "MailSlot" => $"in mail slot {element.Number}",
+        _ => $"in slot {element.Number}",
+    };
+
+    private string MediumWhere(TapeMediumDto medium)
+    {
+        if (medium.Location == "Offline")
+        {
+            return "Offline";
+        }
+
+        if (medium.Location == "Drive")
+        {
+            return medium.Drive ?? "Drive";
+        }
+
+        var number = medium.LibraryId is { } library && medium.Address is { } address
+            ? _elements.GetValueOrDefault(library)?.FirstOrDefault(e => e.Address == address)?.Number
+            : null;
+        return $"{(medium.Location == "MailSlot" ? "Mail slot" : "Slot")} {number?.ToString(System.Globalization.CultureInfo.CurrentCulture) ?? medium.Address?.ToString(System.Globalization.CultureInfo.CurrentCulture)}";
+    }
+
+    private IEnumerable<TapeMediumDto> FilteredMedia() => (_media ?? [])
+        .Where(m => string.IsNullOrWhiteSpace(_search) || m.Barcode.Contains(_search.Trim(), StringComparison.OrdinalIgnoreCase))
+        .Where(m => _libraryFilter is null || m.LibraryId == _libraryFilter)
+        .Where(m => _locationFilter == "all" || m.Location == _locationFilter);
+
+    private async Task ActAsync(TapeLibraryDto library, TapeActionDto action, string what)
+    {
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/tape/libraries/{library.Id}/actions", action);
+            Snackbar.Add($"{what} started.", Severity.Info, options =>
+            {
+                options.Action = "Show session";
+                options.ActionColor = Color.Primary;
+                options.OnClick = _ =>
+                {
+                    Navigation.NavigateTo($"sessions/{started.SessionId}");
+                    return Task.CompletedTask;
+                };
+            });
+            _selected = null;
+            await Task.Delay(500);
+            await RefreshAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task InventoryAsync(TapeLibraryDto library)
+    {
+        try
+        {
+            var now = await Api.PostAsync<TapeLibraryDto>($"api/tape/libraries/{library.Id}/inventory");
+            Snackbar.Add($"Inventory of {library.Name}: {now.Media} cartridge(s).", now.LastError is null ? Severity.Success : Severity.Warning);
+            await RefreshAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task RenameAsync(TapeLibraryDto library)
+    {
+        try
+        {
+            await Api.PutAsync<TapeLibraryDto>($"api/tape/libraries/{library.Id}", new RenameTapeLibraryDto(_newName.Trim()));
+            _renaming = null;
+            await RefreshAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task RemoveAsync(TapeLibraryDto library)
+    {
+        if (await Dialogs.ShowMessageBoxAsync(
+                "Remove library",
+                $"Remove {library.Name} from the console? Nothing on the tapes changes; the cartridges stay known and the library can be added again.",
+                yesText: "Remove",
+                cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await Api.DeleteAsync($"api/tape/libraries/{library.Id}");
+            await RefreshAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task StartAddingAsync()
+    {
+        _adding = true;
+        _scan = null;
+        _choice = null;
+        _name = string.Empty;
+        try
+        {
+            _hosts = await Api.GetAsync<List<TapeHostDto>>("api/tape/hosts");
+            _host = _hosts.FirstOrDefault()?.Id ?? "local";
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task ScanAsync()
+    {
+        _scanning = true;
+        _choice = null;
+        try
+        {
+            _scan = await Api.PostAsync<TapeScanDto>($"api/tape/hosts/{Uri.EscapeDataString(_host)}/scan");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _scanning = false;
+        }
+    }
+
+    private void Choose(string? choice)
+    {
+        _choice = choice;
+        _mapping = [];
+        if (_scan?.Changers.FirstOrDefault(c => c.Changer.Serial == choice) is { } changer)
+        {
+            foreach (var element in changer.Drives)
+            {
+                _mapping[element.Element] = element.Serial;
+            }
+
+            if (string.IsNullOrWhiteSpace(_name))
+            {
+                _name = changer.Changer.Product;
+            }
+        }
+        else if (_scan?.StandaloneDrives.FirstOrDefault(d => "drive:" + d.Serial == choice) is { } drive && string.IsNullOrWhiteSpace(_name))
+        {
+            _name = $"{drive.Product} {drive.Serial}";
+        }
+    }
+
+    /// <summary>Drives a changer element can be mapped to: those the scan found and no library has yet.</summary>
+    private IEnumerable<string> DriveSerials() =>
+        (_scan?.Changers.SelectMany(c => c.Drives).Select(d => d.Serial) ?? [])
+            .Concat(_scan?.StandaloneDrives.Where(d => d.Library is null).Select(d => (string?)d.Serial) ?? [])
+            .OfType<string>()
+            .Distinct()
+            .Order(StringComparer.Ordinal);
+
+    private async Task AddAsync()
+    {
+        if (_choice is null)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var request = _choice.StartsWith("drive:", StringComparison.Ordinal)
+                ? new CreateTapeLibraryDto(_name.Trim(), _host, null, [new TapeDriveMappingDto(_choice["drive:".Length..], null, null)])
+                : new CreateTapeLibraryDto(_name.Trim(), _host, _choice, _mapping.Where(m => m.Value is not null).Select(m => new TapeDriveMappingDto(m.Value!, m.Key, null)).ToList());
+            var created = await Api.PostAsync<TapeLibraryDto>("api/tape/libraries", request);
+            Snackbar.Add($"{created.Name} added: {created.Media} cartridge(s).", created.LastError is null ? Severity.Success : Severity.Warning);
+            _adding = false;
+            await RefreshAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

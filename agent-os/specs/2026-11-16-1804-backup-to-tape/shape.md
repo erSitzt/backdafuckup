@@ -51,6 +51,7 @@ The tapes carry their own label and catalog in a documented format, so a recover
   - the tape page has the tabs *Libraries & drives*, *Media* and *Media pools*;
   - drives are a compact table (drive, library, state, cartridge, job, speed);
   - media are a table with search, pool and location chips, and the actions in a row menu.
+  - **plus the slot map of variant A** (user, the same day): each library also shows its slots, mail slots and drives as a map, coloured by state (free, open set, full, expired, WORM, cleaning, foreign, empty); a click on a slot shows the cartridge with its actions.
 
   The dialogs below the variants (media pool, tape job editor, restore from tape, operator banner, restore points marked *on tape*) apply as drawn.
 - **References:** see `references.md`.

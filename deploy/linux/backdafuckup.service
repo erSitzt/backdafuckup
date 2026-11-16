@@ -10,6 +10,8 @@ After=network-online.target postgresql.service
 Type=notify
 User=backdafuckup
 Group=backdafuckup
+# Tape drives and changers (/dev/sg*) belong to the group tape on most distributions.
+SupplementaryGroups=tape
 WorkingDirectory=/opt/backdafuckup
 ExecStart=/opt/backdafuckup/backdafuckup
 Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1

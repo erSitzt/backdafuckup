@@ -205,6 +205,10 @@ else
             }
         }
     }
+    else if (_session.Kind == "TapeMaintenance")
+    {
+        // A library action has no data to count: its log says what happened.
+    }
     else if (_session.Kind == "Restore")
     {
         <MudGrid Spacing="2" Class="mb-2">
@@ -293,6 +297,8 @@ else
     }
 
     <MudGrid>
+        @if (_session.Kind != "TapeMaintenance")
+        {
         <MudItem xs="12" md="5">
             <MudPaper Class="pa-3" Elevation="1">
                 <MudText Typo="Typo.h6" Class="section-title mb-2">@(_session.Kind == "SqlBackup" ? "VMs" : "Objects")</MudText>
@@ -341,7 +347,8 @@ else
                 }
             </MudPaper>
         </MudItem>
-        <MudItem xs="12" md="7">
+        }
+        <MudItem xs="12" md="@(_session.Kind == "TapeMaintenance" ? 12 : 7)">
             <MudPaper Class="pa-3" Elevation="1">
                 <div class="d-flex align-center mb-2">
                     <MudText Typo="Typo.h6">Log</MudText>

@@ -114,6 +114,9 @@ public sealed class FakeTapeLibrary
 
     public string DriveProduct { get; init; } = "Ultrium 9-SCSI";
 
+    /// <summary>Put in front of the changer's and the drives' serial numbers, to tell several fake libraries apart.</summary>
+    public string SerialPrefix { get; init; } = string.Empty;
+
     /// <summary>Behave like the Holo VTL: no early-warning sense, no ILI or FILEMARK bits, no SECURITY PROTOCOL.</summary>
     public bool HoloQuirks { get; set; }
 
@@ -274,7 +277,7 @@ public sealed class FakeTapeLibrary
 
         public string Path => "fake:changer";
 
-        public string Serial => "LIB0001";
+        public string Serial => library.SerialPrefix + "LIB0001";
 
         public int MaxTransferLength => 1024 * 1024;
 
@@ -488,7 +491,7 @@ public sealed class FakeTapeDrive(FakeTapeLibrary library, int index, ushort ele
 
     public ushort ElementAddress { get; } = elementAddress;
 
-    public string Serial { get; } = $"DRV{index + 1:D4}";
+    public string Serial => library.SerialPrefix + $"DRV{index + 1:D4}";
 
     public string Path => $"fake:drive{index + 1}";
 

@@ -46,6 +46,13 @@ public sealed class MediumChanger(ScsiCommandRunner runner)
         return new ChangerInventory(addresses, drives, slots, mail);
     }
 
+    /// <summary>Only the mail slots: cheap enough to poll for cartridges an operator put in.</summary>
+    public async Task<IReadOnlyList<ChangerElement>> ReadMailSlotsAsync(CancellationToken cancellationToken)
+    {
+        var addresses = _addresses ?? await ReadAddressesAsync(cancellationToken).ConfigureAwait(false);
+        return await ReadElementsAsync(Cdb.ElementType.ImportExport, addresses.FirstImportExport, addresses.ImportExport, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Moves a cartridge with the first robot. The drive must have unloaded it first.</summary>
     public async Task MoveAsync(ushort source, ushort destination, CancellationToken cancellationToken)
     {

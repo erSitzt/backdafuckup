@@ -58,6 +58,9 @@ public static class AppIcons
     /// <summary>A backup repository.</summary>
     public const string Repository = Icons.Material.Filled.Inventory2;
 
+    /// <summary>Tape libraries, drives and cartridges (the two reels of a cassette).</summary>
+    public const string Tape = Icons.Material.Filled.Voicemail;
+
     /// <summary>A guest agent.</summary>
     public const string Agent = Icons.Material.Filled.SettingsInputComponent;
 

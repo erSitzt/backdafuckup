@@ -1080,6 +1080,50 @@ Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-r
 | "Cannot connect to the backup server … 401" (in the agent's log) | The connect token is not the cluster's current one (the cluster was added again or switched). | Apply the current setup manifest with the agent. |
 | "the agent cannot reach the API server …" (server log) | The agent cannot open a TCP connection to `KUBERNETES_SERVICE_HOST`. | Check network policies in `backdafuckup-system`. |
 
+## Tape libraries
+
+backdafuckup drives tape libraries and standalone drives itself, with the SCSI commands of the public standards (SPC, SSC, SMC). No vendor driver or tool is needed. This version adds libraries, drives, cartridges and the library actions; tape jobs follow.
+
+### Attach the devices
+
+- **Linux:** the server talks to the devices through `/dev/sg*` (SCSI generic), never through `/dev/st*`, which rewinds the tape when it is closed. The service user needs the group `tape`; the unit file sets `SupplementaryGroups=tape`. No root is needed. Log in to iSCSI targets with `iscsiadm`.
+- **Windows:** the service (LocalSystem) sends SCSI pass-through commands. When a driver claims the device (`\\.\Tape0`, `\\.\Changer0`), it goes through that driver, otherwise through the adapter; no vendor driver is needed. Log in to iSCSI targets with the Microsoft iSCSI initiator (`New-IscsiTargetPortal`, `Connect-IscsiTarget`).
+- Devices are known by their **serial number**, not by their device name. When a re-login or a reboot renumbers them, they are found again.
+- A device can be open in one program only. Stop other tools that hold it (`mtx`, `tapeinfo`, other backup software); the error then says that the device is open elsewhere.
+
+### Add a library
+
+1. **Scan** a host (*Tape → Add library*; `POST /api/tape/hosts/local/scan`). It lists the changers with their drive elements, the drives, and devices it could not ask.
+2. **Check the drives.** A changer that names its drives (DVCID) maps them itself (*dvcid*). For one that does not, the drives are assigned in serial order and marked *order*: check and correct the mapping.
+3. **Name it** (`POST /api/tape/libraries`). The first inventory runs at once.
+
+A **standalone drive** is added the same way, as one drive without a changer. Its cartridges are put in and taken out by hand; an inventory asks the drive which cartridge it holds (by the barcode in the cartridge memory).
+
+### Cartridges
+
+- Known by their **barcode**, of any length. Until a cartridge has been in a drive, its kind comes from the barcode: `CLN…` and `…CU` are cleaning cartridges, the LTO WORM media ids `LT` to `LZ` WORM. After a load, the cartridge memory decides.
+- **Location:** slot, mail slot, drive, or *offline* (not in the library at the last inventory). The slot a cartridge was in is its home slot; unload and import put it back there when it is free.
+- **Inventory** (`POST /api/tape/libraries/{id}/inventory`) reads where every cartridge is, in seconds. **Scan** lets the robot check every element first (minutes on a large library), e.g. after the door was open.
+- A cartridge without a readable barcode label is moved but not tracked; the inventory names its slot.
+
+### Library actions
+
+Load, unload, import, export and scan run as **tape sessions** (*Sessions*, type *Tape*) with a log (`POST /api/tape/libraries/{id}/actions`):
+
+- **Load** takes a free, empty drive unless one is chosen; a cartridge in that drive goes back to its slot first. The session waits until the drive is ready. **A new LTO-9 cartridge is calibrated on its first load, which takes up to 2 hours.** Cleaning cartridges are not loaded for data.
+- **Unload** rewinds, ejects and puts the cartridge back into its home slot.
+- **Export** moves a cartridge into a free mail slot. **Import** moves every cartridge from the mail slots into a slot (its home slot if free). The mail slots are looked into every 30 seconds; the library then shows how many cartridges wait there.
+- **One thing at a time:** a drive and the robot serve one action at a time. Others wait in order, and the console shows who holds the drive and who waits.
+- **Errors** name the device, its serial, the host and the device path, e.g. "MOVE MEDIUM on the changer of Lab (serial … on this server, /dev/sg1) failed: …". A device that cannot be reached answers the API with 502.
+
+| Setting | Default | |
+|---|---|---|
+| `Tape:MailSlotPoll` | `00:00:30` | How often the mail slots are looked into; `00:00:00` turns it off. |
+| `Tape:LoadTimeout` | `02:30:00` | How long a load may wait for the drive. |
+| `Tape:ReadyPoll` | `00:00:02` | How often a loading drive is asked. |
+
+The lab VTL (`deploy/vtl`, Holo VTL) behaves like an HPE MSL6480 with LTO-9 drives; its README lists what it does differently from a real library.
+
 ## API and API tokens
 
 The console's API is described under *API reference* (`/api-docs`). Scripts and tools use an **API token** instead of a password:

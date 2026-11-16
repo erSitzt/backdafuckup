@@ -12,6 +12,7 @@
     <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
     <ProjectReference Include="..\Backdafuckup.DataMover\Backdafuckup.DataMover.csproj" />
     <ProjectReference Include="..\Backdafuckup.Storage\Backdafuckup.Storage.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Tape\Backdafuckup.Tape.csproj" />
     <ProjectReference Include="..\Backdafuckup.Nbd\Backdafuckup.Nbd.csproj" />
     <ProjectReference Include="..\Backdafuckup.Xen\Backdafuckup.Xen.csproj" />
     <ProjectReference Include="..\Backdafuckup.Kubernetes\Backdafuckup.Kubernetes.csproj" />

@@ -22,6 +22,7 @@ public sealed class SessionRunnerService(
     FileRestore.FileRestoreSessionRunner fileRestores,
     Sql.SqlPublishSessionRunner sqlPublishes,
     Sql.SqlRestoreSessionRunner sqlRestores,
+    Tape.TapeSessionRunner tapes,
     StartupRecovery recovery,
     Telemetry.BackupMetrics metrics,
     IOptions<EngineOptions> options,
@@ -99,6 +100,9 @@ public sealed class SessionRunnerService(
         SessionKind.FileRestore => running.Count(SessionKind.FileRestore) < options.Value.MaxConcurrentFileRestoreSessions,
         SessionKind.SqlPublish or SessionKind.SqlExport => running.Count(SessionKind.SqlPublish) + running.Count(SessionKind.SqlExport) < sqlOptions.Value.MaxConcurrentPublishes,
         SessionKind.SqlRestore => running.Count(SessionKind.SqlRestore) < sqlOptions.Value.MaxConcurrentRestores,
+
+        // Tape sessions wait for their drive and the robot themselves (FIFO, the holder named in the log).
+        SessionKind.TapeMaintenance => true,
         _ => false,
     };
 
@@ -120,6 +124,7 @@ public sealed class SessionRunnerService(
                 SessionKind.SqlPublish => await sqlPublishes.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.SqlRestore => await sqlRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.SqlExport => await sqlPublishes.RunExportAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.TapeMaintenance => await tapes.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 _ => (SessionState.Failed, "Unknown session kind."),
             };
 
@@ -531,6 +536,14 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<BackupSessionRunner>();
         services.AddSingleton<RestoreSessionRunner>();
         services.AddSingleton<MaintenanceSessionRunner>();
+        services.Configure<Tape.TapeOptions>(configuration.GetSection("Tape"));
+        services.TryAddSingleton<Backdafuckup.Tape.Devices.ITapeHost, Backdafuckup.Tape.Devices.LocalTapeHost>();
+        services.AddSingleton<Tape.TapeHosts>();
+        services.AddSingleton<Tape.TapeLocks>();
+        services.AddSingleton<Tape.TapeLibraries>();
+        services.AddSingleton<Tape.TapeSessionRunner>();
+        services.AddSingleton<Tape.TapeMailSlotWatcher>();
+        services.AddHostedService(sp => sp.GetRequiredService<Tape.TapeMailSlotWatcher>());
         services.AddSingleton<StartupRecovery>();
         services.AddHostedService<PendingArtifactRetryService>();
         services.AddSingleton<JobScheduler>();

@@ -1784,6 +1784,215 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.ToTable("ssh_host_keys", (string)null);
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeDriveEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Barcode")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("barcode");
+
+                    b.Property<int?>("ElementAddress")
+                        .HasColumnType("integer")
+                        .HasColumnName("element_address");
+
+                    b.Property<Guid>("LibraryId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("library_id");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("Product")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("product");
+
+                    b.Property<string>("Serial")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("serial");
+
+                    b.Property<string>("Vendor")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("vendor");
+
+                    b.HasKey("Id")
+                        .HasName("pk_tape_drives");
+
+                    b.HasIndex("LibraryId")
+                        .HasDatabaseName("ix_tape_drives_library_id");
+
+                    b.HasIndex("Serial")
+                        .IsUnique()
+                        .HasDatabaseName("ix_tape_drives_serial");
+
+                    b.ToTable("tape_drives", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeLibraryEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("ChangerSerial")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("changer_serial");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<int>("FirstMailSlot")
+                        .HasColumnType("integer")
+                        .HasColumnName("first_mail_slot");
+
+                    b.Property<int>("FirstSlot")
+                        .HasColumnType("integer")
+                        .HasColumnName("first_slot");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("host");
+
+                    b.Property<DateTimeOffset?>("InventoryUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("inventory_utc");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("text")
+                        .HasColumnName("last_error");
+
+                    b.Property<int>("MailSlots")
+                        .HasColumnType("integer")
+                        .HasColumnName("mail_slots");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("Product")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("product");
+
+                    b.Property<int>("Slots")
+                        .HasColumnType("integer")
+                        .HasColumnName("slots");
+
+                    b.Property<string>("Vendor")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("vendor");
+
+                    b.Property<uint>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("xid")
+                        .HasColumnName("xmin");
+
+                    b.HasKey("Id")
+                        .HasName("pk_tape_libraries");
+
+                    b.HasIndex("ChangerSerial")
+                        .IsUnique()
+                        .HasDatabaseName("ix_tape_libraries_changer_serial");
+
+                    b.HasIndex("Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_tape_libraries_name");
+
+                    b.ToTable("tape_libraries", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeMediumEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<int?>("Address")
+                        .HasColumnType("integer")
+                        .HasColumnName("address");
+
+                    b.Property<string>("Barcode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("barcode");
+
+                    b.Property<long?>("CapacityBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("capacity_bytes");
+
+                    b.Property<DateTimeOffset>("FirstSeenUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("first_seen_utc");
+
+                    b.Property<int?>("HomeSlot")
+                        .HasColumnType("integer")
+                        .HasColumnName("home_slot");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("kind");
+
+                    b.Property<Guid?>("LibraryId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("library_id");
+
+                    b.Property<string>("Location")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("location");
+
+                    b.Property<string>("MediumSerial")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("medium_serial");
+
+                    b.Property<long?>("RemainingBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("remaining_bytes");
+
+                    b.Property<DateTimeOffset>("SeenUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("seen_utc");
+
+                    b.HasKey("Id")
+                        .HasName("pk_tape_media");
+
+                    b.HasIndex("Barcode")
+                        .IsUnique()
+                        .HasDatabaseName("ix_tape_media_barcode");
+
+                    b.HasIndex("LibraryId")
+                        .HasDatabaseName("ix_tape_media_library_id");
+
+                    b.ToTable("tape_media", (string)null);
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.VmReplacementEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2284,6 +2493,25 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasConstraintName("fk_sql_backup_sets_sql_databases_sql_database_id");
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeDriveEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.TapeLibraryEntity", null)
+                        .WithMany("Drives")
+                        .HasForeignKey("LibraryId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_tape_drives_tape_libraries_library_id");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeMediumEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.TapeLibraryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("LibraryId")
+                        .OnDelete(DeleteBehavior.SetNull)
+                        .HasConstraintName("fk_tape_media_tape_libraries_library_id");
+                });
+
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<System.Guid>", b =>
                 {
                     b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole<System.Guid>", null)
@@ -2359,6 +2587,11 @@ namespace Backdafuckup.Server.Data.Migrations
             modelBuilder.Entity("Backdafuckup.Server.Data.SessionEntity", b =>
                 {
                     b.Navigation("Tasks");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeLibraryEntity", b =>
+                {
+                    b.Navigation("Drives");
                 });
 #pragma warning restore 612, 618
         }
