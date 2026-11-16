@@ -132,7 +132,8 @@ public static class TapeEndpoints
             }
 
             using var socket = await http.WebSockets.AcceptWebSocketAsync(accept);
-            await agents.RunControlAsync(agent, socket, $"{http.Connection.RemoteIpAddress}:{http.Connection.RemotePort}", ct);
+            var address = http.Connection.RemoteIpAddress is { IsIPv4MappedToIPv6: true } mapped ? mapped.MapToIPv4() : http.Connection.RemoteIpAddress;
+            await agents.RunControlAsync(agent, socket, $"{address}:{http.Connection.RemotePort}", ct);
             return Results.Empty;
         }).AllowAnonymous().ExcludeFromDescription();
     }
