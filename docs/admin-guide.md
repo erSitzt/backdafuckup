@@ -1109,6 +1109,8 @@ A tape agent runs on a Linux host whose drives and changers the backup server ca
 
 The agent shows *Online* while it is connected. When it is gone, actions of its libraries fail with a message that says since when and from where it was last seen; it reconnects by itself. *New connect token* disconnects it until its `agent.env` has the new token. The gauge `bdfu_tape_agent_connected{agent}` is 0 while an agent is gone.
 
+**Speed.** Every SCSI command crosses the network to the agent. So that the drive does not wait for each answer, the server sends writes ahead without waiting, and reads blocks ahead when it brings copies back: up to `Tape:PipelineMiB` (32 MiB) per drive. The agent runs a drive's commands strictly in the order they came; after a command that does not end GOOD (a filemark, the end of data, early warning, an error) it runs none of the commands sent ahead behind it, and the server sends them again once it has seen the answer. Agents and servers of different versions work together (the agent's protocol, 1 or 2): an agent of protocol 1 gets every command on its own, as before. Update agents with the server to get the speed. `Tape:PipelineMiB` 0 turns this off.
+
 ### Add a library
 
 1. **Scan** a host, this server or a tape agent (*Tape → Add library*; `POST /api/tape/hosts/{host}/scan`, `local` for this server). It lists the changers with their drive elements, the drives, and devices it could not ask.
@@ -1142,6 +1144,7 @@ Load, unload, import, export and scan run as **tape sessions** (*Sessions*, type
 | `Tape:OperatorPoll` | `00:00:10` | How often a session waiting for a cartridge in a standalone drive asks the drive. |
 | `Tape:OperatorTimeout` | `12:00:00` | How long such a session waits before it fails. |
 | `Tape:CacheDirectory` | `tape/cache` in the data directory | Where a direct VM restore from tape keeps the chunks it reads. |
+| `Tape:PipelineMiB` | `32` | How much a drive behind a tape agent keeps in flight (writes sent ahead, blocks read ahead); 0 sends every command on its own. |
 
 The lab VTL (`deploy/vtl`, Holo VTL) behaves like an HPE MSL6480 with LTO-9 drives; its README lists what it does differently from a real library.
 

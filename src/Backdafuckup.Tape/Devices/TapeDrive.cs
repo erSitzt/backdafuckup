@@ -62,14 +62,44 @@ public sealed class TapeWriteProtectedException(string message) : IOException(me
 /// A tape drive (SSC): readiness, position, variable-length blocks, filemarks, the cartridge's medium auxiliary memory
 /// and data encryption. It guards WORM cartridges before a command reaches the drive.
 /// </summary>
-public sealed class TapeDrive(ScsiCommandRunner runner, TimeProvider? time = null)
+public sealed class TapeDrive
 {
-    private readonly TimeProvider _time = time ?? TimeProvider.System;
+    private readonly TimeProvider _time;
+
+    /// <summary>Commands posted ahead (writes not yet answered, or reads ahead), oldest first.</summary>
+    private readonly Queue<PostedCommand> _posted = new();
 
     /// <summary>The logical position (block number) the tape should be at; null when unknown.</summary>
     private long? _expectedBlock;
 
-    public ScsiCommandRunner Runner { get; } = runner;
+    private long _postedBytes;
+    private long _chain;
+
+    /// <summary>The last command was a WRITE that ended GOOD: the next may be posted.</summary>
+    private bool _streaming;
+
+    /// <summary>A posted write reported early warning.</summary>
+    private bool _earlyWarning;
+
+    public TapeDrive(ScsiCommandRunner runner, TimeProvider? time = null)
+    {
+        _time = time ?? TimeProvider.System;
+        Runner = runner;
+        runner.BeforeCommand = DrainAsync;
+    }
+
+    public ScsiCommandRunner Runner { get; }
+
+    /// <summary>
+    /// How much a drive whose device takes posted commands (a tape agent) keeps in flight: writes not yet answered, and
+    /// reads ahead. 0 runs every command on its own.
+    /// </summary>
+    public int PipelineBytes { get; set; } = 32 * 1024 * 1024;
+
+    /// <summary>Commands posted ahead so far.</summary>
+    public long PostedCommands { get; private set; }
+
+    private IPipelinedScsiDevice? Posting => PipelineBytes > 0 && Runner.Device is IPipelinedScsiDevice { CanPost: true } device ? device : null;
 
     /// <summary>How often <see cref="WaitReadyAsync"/> asks the drive.</summary>
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromSeconds(2);
@@ -292,22 +322,20 @@ public sealed class TapeDrive(ScsiCommandRunner runner, TimeProvider? time = nul
         await MoveAsync("SPACE", Cdb.Space16(Cdb.SpaceCode.Filemarks, count), ScsiTimeouts.Positioning, positionMatters: true, cancellationToken, start).ConfigureAwait(false);
     }
 
-    /// <summary>Writes one block. Early warning is reported, not thrown; VOLUME OVERFLOW throws <see cref="TapeFullException"/>.</summary>
+    /// <summary>
+    /// Writes one block. Early warning is reported, not thrown; VOLUME OVERFLOW throws <see cref="TapeFullException"/>.
+    /// Through a device that takes posted commands, writes after the first are posted: their answers (early warning, a
+    /// full tape, an error) come with a later write or before the next other command, such as the filemark.
+    /// </summary>
     public async Task<WriteOutcome> WriteBlockAsync(ReadOnlyMemory<byte> block, CancellationToken cancellationToken)
     {
         ThrowIfReadOnly("write");
-        var result = await RunMovingAsync(
-            new ScsiCommand
-            {
-                Name = "WRITE",
-                Cdb = Cdb.Write6Variable(block.Length),
-                Direction = ScsiDataDirection.Out,
-                Buffer = System.Runtime.InteropServices.MemoryMarshal.AsMemory(block),
-                Timeout = ScsiTimeouts.ReadWrite,
-                MovesMedium = true,
-            },
-            positionMatters: true,
-            cancellationToken).ConfigureAwait(false);
+        if (_streaming && Posting is { } posting)
+        {
+            return await PostWriteAsync(posting, block, cancellationToken).ConfigureAwait(false);
+        }
+
+        var result = await RunMovingAsync(WriteCommand(System.Runtime.InteropServices.MemoryMarshal.AsMemory(block)), positionMatters: true, cancellationToken).ConfigureAwait(false);
         if (result.Sense is { Key: SenseKey.IllegalRequest, Asc: 0x24, Ascq: 0x00 } && block.Length > 256 * 1024)
         {
             throw new IOException($"{Label} refuses blocks of {block.Length / 1024} KiB ({result.Sense}), although it reports larger block limits; the drive or its connection (e.g. an iSCSI target) takes less per command. Use a block size of 256 KiB for this library.");
@@ -315,8 +343,29 @@ public sealed class TapeDrive(ScsiCommandRunner runner, TimeProvider? time = nul
 
         var outcome = WriteResult("WRITE", result);
         Advance(1);
+        _streaming = result.IsGood;
         return outcome;
     }
+
+    private static ScsiCommand WriteCommand(Memory<byte> block) => new()
+    {
+        Name = "WRITE",
+        Cdb = Cdb.Write6Variable(block.Length),
+        Direction = ScsiDataDirection.Out,
+        Buffer = block,
+        Timeout = ScsiTimeouts.ReadWrite,
+        MovesMedium = true,
+    };
+
+    private static ScsiCommand ReadCommand(Memory<byte> destination) => new()
+    {
+        Name = "READ",
+        Cdb = Cdb.Read6Variable(destination.Length),
+        Direction = ScsiDataDirection.In,
+        Buffer = destination,
+        Timeout = ScsiTimeouts.ReadWrite,
+        MovesMedium = true,
+    };
 
     /// <summary>Writes filemarks; with <paramref name="immediate"/> off the drive's buffer is on the medium afterwards.</summary>
     public async Task<WriteOutcome> WriteFilemarksAsync(int count, bool immediate, CancellationToken cancellationToken)
@@ -331,19 +380,26 @@ public sealed class TapeDrive(ScsiCommandRunner runner, TimeProvider? time = nul
         return outcome;
     }
 
-    /// <summary>Reads one variable-length block into <paramref name="destination"/>.</summary>
-    public async Task<ReadOutcome> ReadBlockAsync(Memory<byte> destination, CancellationToken cancellationToken)
+    /// <summary>
+    /// Reads one variable-length block into <paramref name="destination"/>. With <paramref name="readAhead"/>, through a
+    /// device that takes posted commands, reads of the same size are posted ahead; they stop at a filemark, the end of
+    /// data or an error. The reads ahead not taken are dropped before the next other command, and the position is then
+    /// unknown: read ahead only where the next move is a locate to a block.
+    /// </summary>
+    public async Task<ReadOutcome> ReadBlockAsync(Memory<byte> destination, CancellationToken cancellationToken, bool readAhead = false)
     {
-        var command = new ScsiCommand
+        if (readAhead && Posting is { } posting)
         {
-            Name = "READ",
-            Cdb = Cdb.Read6Variable(destination.Length),
-            Direction = ScsiDataDirection.In,
-            Buffer = destination,
-            Timeout = ScsiTimeouts.ReadWrite,
-            MovesMedium = true,
-        };
+            return await ReadPostedAsync(posting, destination, cancellationToken).ConfigureAwait(false);
+        }
+
+        var command = ReadCommand(destination);
         var result = await RunMovingAsync(command, positionMatters: true, cancellationToken).ConfigureAwait(false);
+        return ReadResult(command, result, destination.Length);
+    }
+
+    private ReadOutcome ReadResult(ScsiCommand command, ScsiResult result, int length)
+    {
         if (result.IsGood)
         {
             Advance(1);
@@ -359,7 +415,7 @@ public sealed class TapeDrive(ScsiCommandRunner runner, TimeProvider? time = nul
                 return new ReadOutcome(ReadOutcomeKind.Filemark, 0);
             case { Key: SenseKey.NoSense or SenseKey.RecoveredError, IncorrectLength: true, Information: < 0 } longer:
                 _expectedBlock = null;
-                throw new InvalidDataException($"{Label}: the block on tape is {-longer.Information} bytes longer than the {destination.Length} bytes read; the tape was written with larger blocks than this host can read.");
+                throw new InvalidDataException($"{Label}: the block on tape is {-longer.Information} bytes longer than the {length} bytes read; the tape was written with larger blocks than this host can read.");
             case { Key: SenseKey.NoSense or SenseKey.RecoveredError }:
                 Advance(1);
                 return new ReadOutcome(ReadOutcomeKind.Block, result.Transferred(command));
@@ -559,6 +615,214 @@ public sealed class TapeDrive(ScsiCommandRunner runner, TimeProvider? time = nul
             _expectedBlock = null;
             throw new ScsiCommandException(Label, command, result);
         }
+    }
+
+    /// <summary>A write or read posted ahead, with its own copy of the data (a write may have to be posted again).</summary>
+    private sealed record PostedCommand(ScsiCommand Command, Task<ScsiResult> Result, byte[] Buffer, int Length, bool Write);
+
+    private async Task PostAsync(IPipelinedScsiDevice device, ScsiCommand command, byte[] buffer, int length, bool write, CancellationToken cancellationToken)
+    {
+        var result = await device.PostAsync(command, _chain, cancellationToken).ConfigureAwait(false);
+        _posted.Enqueue(new PostedCommand(command, result, buffer, length, write));
+        _postedBytes += length;
+        PostedCommands++;
+    }
+
+    private async Task<WriteOutcome> PostWriteAsync(IPipelinedScsiDevice device, ReadOnlyMemory<byte> block, CancellationToken cancellationToken)
+    {
+        if (_posted.Count > 0 && !_posted.Peek().Write)
+        {
+            await DrainAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(block.Length);
+        block.CopyTo(buffer);
+        try
+        {
+            await PostAsync(device, WriteCommand(buffer.AsMemory(0, block.Length)), buffer, block.Length, write: true, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+            throw;
+        }
+
+        Advance(1);
+        while (_postedBytes > PipelineBytes)
+        {
+            await CompleteOldestWriteAsync(device, cancellationToken).ConfigureAwait(false);
+        }
+
+        return new WriteOutcome(_earlyWarning);
+    }
+
+    /// <summary>
+    /// The oldest posted write's answer. Early warning is noted; the writes after it were skipped (its chain broke) and are
+    /// posted again in a new chain. A full tape or an error throws; the writes after it are dropped.
+    /// </summary>
+    private async Task CompleteOldestWriteAsync(IPipelinedScsiDevice device, CancellationToken cancellationToken)
+    {
+        var oldest = _posted.Dequeue();
+        _postedBytes -= oldest.Length;
+        try
+        {
+            ScsiResult result;
+            try
+            {
+                result = await oldest.Result.ConfigureAwait(false);
+            }
+            catch
+            {
+                await DropPostedAsync().ConfigureAwait(false);
+                _expectedBlock = null;
+                throw;
+            }
+
+            if (result.IsGood)
+            {
+                return;
+            }
+
+            // Its chain broke here: the writes after it did not run.
+            var rest = _posted.ToList();
+            _posted.Clear();
+            _postedBytes = 0;
+            _chain++;
+            foreach (var skipped in rest)
+            {
+                try
+                {
+                    await skipped.Result.ConfigureAwait(false);
+                    _expectedBlock = null;
+                    rest.ForEach(r => System.Buffers.ArrayPool<byte>.Shared.Return(r.Buffer));
+                    throw new IOException($"{Label}: a write ran after the write before it ended {result.Sense?.ToString() ?? ScsiStatus.Describe(result.Status)}; the blocks on tape are not in order.");
+                }
+                catch (ScsiChainSkippedException)
+                {
+                    // As it should be.
+                }
+            }
+
+            WriteOutcome outcome;
+            try
+            {
+                outcome = WriteResult("WRITE", result);
+            }
+            catch
+            {
+                _expectedBlock = null;
+                rest.ForEach(r => System.Buffers.ArrayPool<byte>.Shared.Return(r.Buffer));
+                throw;
+            }
+
+            _earlyWarning |= outcome.EarlyWarning;
+            foreach (var again in rest)
+            {
+                await PostAsync(device, again.Command, again.Buffer, again.Length, write: true, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(oldest.Buffer);
+        }
+    }
+
+    private async Task<ReadOutcome> ReadPostedAsync(IPipelinedScsiDevice device, Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        if (_posted.Count > 0 && (_posted.Peek().Write || _posted.Peek().Length != destination.Length))
+        {
+            await DrainAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var size = destination.Length;
+        while (_posted.Count == 0 || _postedBytes + size <= PipelineBytes)
+        {
+            var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(size);
+            await PostAsync(device, ReadCommand(buffer.AsMemory(0, size)), buffer, size, write: false, cancellationToken).ConfigureAwait(false);
+        }
+
+        var oldest = _posted.Dequeue();
+        _postedBytes -= oldest.Length;
+        try
+        {
+            ScsiResult result;
+            try
+            {
+                result = await oldest.Result.ConfigureAwait(false);
+            }
+            catch
+            {
+                await DropPostedAsync().ConfigureAwait(false);
+                _expectedBlock = null;
+                throw;
+            }
+
+            if (!result.IsGood)
+            {
+                // A filemark, the end of data or an error: the reads after it did not run (its chain broke).
+                await DropPostedAsync().ConfigureAwait(false);
+            }
+
+            var outcome = ReadResult(oldest.Command, result, size);
+            oldest.Buffer.AsSpan(0, outcome.Length).CopyTo(destination.Span);
+            return outcome;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(oldest.Buffer);
+        }
+    }
+
+    /// <summary>
+    /// Before any other command: posted writes must have ended well (early warning, a full tape or an error is reported
+    /// here); reads ahead not taken are dropped, and the tape is then past the block expected.
+    /// </summary>
+    private async Task DrainAsync(CancellationToken cancellationToken)
+    {
+        _streaming = false;
+        if (_posted.Count > 0 && _posted.Peek().Write && Runner.Device is IPipelinedScsiDevice device)
+        {
+            while (_posted.Count > 0)
+            {
+                await CompleteOldestWriteAsync(device, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        if (await DropPostedAsync().ConfigureAwait(false))
+        {
+            _expectedBlock = null;
+        }
+
+        _earlyWarning = false;
+    }
+
+    /// <summary>Drops what is posted; true when some of it ran (the tape moved past what was taken).</summary>
+    private async Task<bool> DropPostedAsync()
+    {
+        var ran = false;
+        while (_posted.TryDequeue(out var posted))
+        {
+            try
+            {
+                await posted.Result.ConfigureAwait(false);
+                ran = true;
+            }
+            catch (ScsiChainSkippedException)
+            {
+            }
+            catch (Exception)
+            {
+                ran = true;
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(posted.Buffer);
+            }
+        }
+
+        _postedBytes = 0;
+        _chain++;
+        return ran;
     }
 
     private void Advance(int objects)

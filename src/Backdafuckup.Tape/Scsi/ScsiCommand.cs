@@ -99,6 +99,24 @@ public interface IScsiDevice : IAsyncDisposable
     ValueTask<ScsiResult> ExecuteAsync(ScsiCommand command, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// A device that takes commands before the earlier ones have answered (a drive behind a tape agent): they run in the
+/// order posted. Posted commands belong to a chain; once a command of a chain ends other than GOOD, the device runs no
+/// further command of that chain and answers them with <see cref="ScsiChainSkippedException"/>. So nothing runs past a
+/// filemark, an error or an early warning before the caller has seen it, and the caller posts the rest again.
+/// </summary>
+public interface IPipelinedScsiDevice : IScsiDevice
+{
+    /// <summary>False while the other side cannot take posted commands (an agent of an older protocol).</summary>
+    bool CanPost { get; }
+
+    /// <summary>Hands the command and its data over (the buffer may be used again afterwards) and returns its result to come.</summary>
+    ValueTask<Task<ScsiResult>> PostAsync(ScsiCommand command, long chain, CancellationToken cancellationToken);
+}
+
+/// <summary>A posted command was not run: an earlier command of its chain did not end GOOD.</summary>
+public sealed class ScsiChainSkippedException(string message) : IOException(message);
+
 /// <summary>The command did not reach the device or no status came back (adapter, path, timeout, agent connection).</summary>
 public sealed class ScsiTransportException(string message, Exception? inner = null) : IOException(message, inner);
 

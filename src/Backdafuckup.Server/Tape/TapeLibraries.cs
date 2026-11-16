@@ -39,6 +39,12 @@ public sealed class TapeOptions
 
     /// <summary>Where a direct VM restore from tape keeps the chunks it reads; empty: <c>tape/cache</c> in the data directory.</summary>
     public string? CacheDirectory { get; set; }
+
+    /// <summary>
+    /// How much a drive behind a tape agent keeps in flight: blocks written but not yet answered, and blocks read ahead.
+    /// 0 sends every command on its own (as before agent protocol 2).
+    /// </summary>
+    public int PipelineMiB { get; set; } = 32;
 }
 
 /// <summary>A changer opened for this process alone; closed on dispose.</summary>
@@ -449,7 +455,7 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
         var host = await hosts.GetAsync(library.Host, cancellationToken).ConfigureAwait(false);
         var device = await host.OpenAsync(drive.Serial, cancellationToken).ConfigureAwait(false);
         var runner = new ScsiCommandRunner(device, $"{drive.Name} of {library.Name} (serial {drive.Serial} on {host.Name}, {device.Path})", time);
-        return new OpenedDrive(device, new TapeDrive(runner, time) { PollInterval = options.Value.ReadyPoll });
+        return new OpenedDrive(device, new TapeDrive(runner, time) { PollInterval = options.Value.ReadyPoll, PipelineBytes = Math.Max(0, options.Value.PipelineMiB) * 1024 * 1024 });
     }
 
     public async Task<IReadOnlyList<TapeLibraryDto>> ListAsync(CancellationToken cancellationToken)
@@ -527,6 +533,12 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
         if (sessions || locks.AnyHeld(library.Drives.Select(d => d.Id), library.Id))
         {
             throw new TapeRequestException($"{library.Name} is in use (a tape session runs or waits for it); try again when it has finished.", StatusCodes.Status409Conflict);
+        }
+
+        var pools = await db.MediaPools.Where(p => p.LibraryId == libraryId).Select(p => p.Name).ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (pools.Count > 0)
+        {
+            throw new TapeRequestException($"Media pool(s) {string.Join(", ", pools)} use {library.Name}: remove their tape jobs and the pools first (a pool stays while its sets are on tape).", StatusCodes.Status409Conflict);
         }
 
         await db.TapeMedia.Where(m => m.LibraryId == libraryId).ExecuteUpdateAsync(

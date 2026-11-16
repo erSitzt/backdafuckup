@@ -75,6 +75,59 @@ public sealed class TapeAgentConnection(WebSocket socket, string name, TapeAgent
         return new AgentScsiDevice(this, opened.Handle, $"{name}: {opened.Path}", opened.MaxTransfer);
     }
 
+    /// <summary>The agent runs posted commands in order and in chains (protocol 2).</summary>
+    public bool CanPost => hello.Protocol >= 2;
+
+    /// <summary>Sends a request and returns its answer to come, once the request (and its data) is on the connection.</summary>
+    internal async Task<Task<(TapeAgentMessage Header, byte[] Data)>> PostAsync(TapeAgentMessage message, ReadOnlyMemory<byte> data, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (_lost is { } lost)
+        {
+            throw new ScsiTransportException(lost);
+        }
+
+        var id = Interlocked.Increment(ref _next);
+        var answer = new TaskCompletionSource<(TapeAgentMessage, byte[])>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pending[id] = answer;
+        try
+        {
+            await TapeAgentProtocol.SendAsync(socket, _send, message with { Id = id }, data, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException)
+        {
+            _pending.TryRemove(id, out _);
+            throw new ScsiTransportException($"The connection to the {name} was lost: {ex.Message}", ex);
+        }
+        catch
+        {
+            _pending.TryRemove(id, out _);
+            throw;
+        }
+
+        if (_lost is { } gone && _pending.TryRemove(id, out _))
+        {
+            throw new ScsiTransportException(gone);
+        }
+
+        return AwaitAsync(id, answer.Task, message, timeout);
+    }
+
+    private async Task<(TapeAgentMessage Header, byte[] Data)> AwaitAsync(long id, Task<(TapeAgentMessage, byte[])> answer, TapeAgentMessage message, TimeSpan timeout)
+    {
+        try
+        {
+            return await answer.WaitAsync(timeout).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            throw new ScsiTransportException($"The {name} did not answer {message.Name ?? message.Type} within {timeout.TotalMinutes:0.#} minutes.");
+        }
+        finally
+        {
+            _pending.TryRemove(id, out _);
+        }
+    }
+
     internal async Task<(TapeAgentMessage Header, byte[] Data)> RequestAsync(TapeAgentMessage message, ReadOnlyMemory<byte> data, TimeSpan timeout, CancellationToken cancellationToken)
     {
         if (_lost is { } lost)
@@ -116,7 +169,7 @@ public sealed class TapeAgentConnection(WebSocket socket, string name, TapeAgent
             : throw new InvalidDataException($"The {name} answered '{reply.Type}' instead of '{type}'.");
 
     /// <summary>A device opened on the agent; commands go through the control connection.</summary>
-    private sealed class AgentScsiDevice(TapeAgentConnection connection, long handle, string path, int maxTransfer) : IScsiDevice
+    private sealed class AgentScsiDevice(TapeAgentConnection connection, long handle, string path, int maxTransfer) : IPipelinedScsiDevice
     {
         private const int MaxData = 1024 * 1024;
         private int _closed;
@@ -125,14 +178,36 @@ public sealed class TapeAgentConnection(WebSocket socket, string name, TapeAgent
 
         public int MaxTransferLength => maxTransfer is > 0 and < MaxData ? maxTransfer : MaxData;
 
+        public bool CanPost => connection.CanPost;
+
         public async ValueTask<ScsiResult> ExecuteAsync(ScsiCommand command, CancellationToken cancellationToken)
+        {
+            var (reply, data) = await connection.RequestAsync(
+                Message(command, null), command.Direction == ScsiDataDirection.Out ? command.Buffer : ReadOnlyMemory<byte>.Empty, command.Timeout + TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            return Result(command, reply, data);
+        }
+
+        public async ValueTask<Task<ScsiResult>> PostAsync(ScsiCommand command, long chain, CancellationToken cancellationToken)
+        {
+            var answer = await connection.PostAsync(
+                Message(command, chain), command.Direction == ScsiDataDirection.Out ? command.Buffer : ReadOnlyMemory<byte>.Empty, command.Timeout + TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            return ResultAsync(command, answer);
+        }
+
+        private async Task<ScsiResult> ResultAsync(ScsiCommand command, Task<(TapeAgentMessage Header, byte[] Data)> answer)
+        {
+            var (reply, data) = await answer.ConfigureAwait(false);
+            return Result(command, reply, data);
+        }
+
+        private TapeAgentMessage Message(ScsiCommand command, long? chain)
         {
             if (command.Buffer.Length > MaxData)
             {
                 throw new ArgumentException($"{command.Name} on {path}: a tape agent takes at most {MaxData / 1024} KiB per command, not {command.Buffer.Length / 1024} KiB.");
             }
 
-            var message = new TapeAgentMessage
+            return new TapeAgentMessage
             {
                 Type = TapeAgentMessageTypes.Scsi,
                 Handle = handle,
@@ -142,14 +217,19 @@ public sealed class TapeAgentConnection(WebSocket socket, string name, TapeAgent
                 Length = command.Buffer.Length,
                 TimeoutMs = (long)command.Timeout.TotalMilliseconds,
                 Sensitive = command.SensitiveData,
+                Chain = chain,
             };
-            var (reply, data) = await connection.RequestAsync(
-                message, command.Direction == ScsiDataDirection.Out ? command.Buffer : ReadOnlyMemory<byte>.Empty, command.Timeout + TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+        }
+
+        private ScsiResult Result(ScsiCommand command, TapeAgentMessage reply, byte[] data)
+        {
             if (reply.Type == TapeAgentMessageTypes.Error)
             {
-                throw reply.Transport
-                    ? new ScsiTransportException($"{command.Name} on {path}: {reply.Error}")
-                    : new IOException($"{command.Name} on {path}: {reply.Error}");
+                throw reply.Skipped
+                    ? new ScsiChainSkippedException($"{command.Name} on {path}: {reply.Error}")
+                    : reply.Transport
+                        ? new ScsiTransportException($"{command.Name} on {path}: {reply.Error}")
+                        : new IOException($"{command.Name} on {path}: {reply.Error}");
             }
 
             if (command.Direction == ScsiDataDirection.In)

@@ -111,6 +111,53 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal(["local"], (await client.GetFromJsonAsync<List<TapeHostDto>>("/api/tape/hosts", Ct))!.Select(h => h.Id).ToArray());
     }
 
+    [Fact]
+    public async Task A_tape_job_and_bringing_back_run_through_an_agent_with_posted_writes_and_reads_ahead()
+    {
+        var client = await SignedInClientAsync();
+        await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://localhost/", Ct);
+        var created = await Read<TapeAgentSecretDto>(client.PostAsJsonAsync("/api/tape/agents", new CreateTapeAgentDto("lab-02"), Ct));
+        var agentId = created.Agent.Id;
+        var control = new Uri(new Uri("http://localhost/"), TapeAgentProtocol.ControlPath(agentId));
+        var remote = new FakeTapeLibrary(drives: 1, slots: 4, mailSlots: 1) { SerialPrefix = "PU", BecomingReadyPolls = 1, HoloQuirks = true };
+        remote.AddCartridge("PUT000L9", 2 * TapeGiB);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var running = new TapeAgentClient(new FakeTapeHost(remote), ct => ConnectAgentSocketAsync(control, Settings(created.EnvironmentFile)["BDFU_TAPE_AGENT_TOKEN"], ct), "the test server", "test", _ => { })
+            .RunAsync(stop.Token);
+        await Until(async () => (await client.GetFromJsonAsync<List<TapeHostDto>>("/api/tape/hosts", Ct))!.Any(h => h.Id == agentId.ToString("D") && h.Online));
+        var library = await Read<TapeLibraryDto>(client.PostAsJsonAsync(
+            "/api/tape/libraries", new CreateTapeLibraryDto("Remote", agentId.ToString("D"), "PULIB0001", [new("PUDRV0001", 256, null)]), Ct));
+
+        // Written and read back through the agent (as Holo: no residual, no early warning), byte for byte.
+        var image = System.Security.Cryptography.RandomNumberGenerator.GetBytes(6 << 20);
+        var point = await BackUpImageAsync(client, "remote01", image);
+        var pool = await Read<MediaPoolDto>(client.PostAsJsonAsync("/api/tape/pools", new MediaPoolRequestDto("Remote pool", library.Id), Ct));
+        var job = await Read<TapeJobDto>(client.PostAsJsonAsync("/api/tape/jobs", new TapeJobRequestDto("To the remote tape", pool.Id, [point.JobId!.Value]), Ct));
+        var written = await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsync($"/api/tape/jobs/{job.Id}/run", null, Ct))).SessionId);
+        Assert.True(written.Session.State == "Succeeded", written.Session.Summary);
+        var copy = Assert.Single((await client.GetFromJsonAsync<List<TapeCopyDto>>("/api/tape/copies", Ct))!);
+        var started = await Read<StartedDto>(client.PostAsJsonAsync($"/api/tape/copies/{copy.Id}/restore-vm", new RestoreRequestDto
+        {
+            RestorePointId = copy.Id,
+            Mode = RestoreModeDto.AlternateLocation,
+            VmName = "remote01-from-tape",
+        }, Ct));
+        var back = await WaitForSessionAsync(client, started.SessionId);
+        Assert.True(back.Session.State == "Succeeded", back.Session.Summary);
+        var vm = _pool.Records("VM").Single(v => v.Str("name_label") == "remote01-from-tape");
+        var disk = _pool.Records("VBD").Where(b => _pool.Uuid("VM", b.Str("VM")) == vm.Str("uuid")).Select(b => b.Str("VDI"))
+            .Select(r => _pool.Records("VDI").Single(v => v.Str("uuid") == _pool.Uuid("VDI", r)))
+            .Single(v => v.Long("virtual_size") == image.LongLength);
+        Assert.Equal(image, _pool.DiskContent(disk.Str("uuid")));
+
+        // A library its pools still use is not removed.
+        var refused = await client.DeleteAsync($"/api/tape/libraries/{library.Id}", Ct);
+        Assert.Equal(HttpStatusCode.Conflict, refused.StatusCode);
+        Assert.Contains("Media pool(s) Remote pool use Remote", await refused.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+        await stop.CancelAsync();
+        await running;
+    }
+
     private static Dictionary<string, string> Settings(string environmentFile) =>
         environmentFile.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(l => !l.StartsWith('#') && l.Contains('='))

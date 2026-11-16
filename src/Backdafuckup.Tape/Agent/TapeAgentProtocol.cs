@@ -13,7 +13,11 @@ namespace Backdafuckup.Tape.Agent;
 /// </summary>
 public static class TapeAgentProtocol
 {
-    public const int Version = 1;
+    /// <summary>2: posted SCSI commands in chains (<see cref="TapeAgentMessage.Chain"/>), run in order per device.</summary>
+    public const int Version = 2;
+
+    /// <summary>The oldest agents the server still takes: they run every command on its own, without posting.</summary>
+    public const int OldestVersion = 1;
 
     /// <summary>Largest data of one command (a block of up to 1 MiB) plus room for the header.</summary>
     public const int MaxMessage = (1024 * 1024) + (64 * 1024);
@@ -151,4 +155,10 @@ public sealed record TapeAgentMessage
     public string? Error { get; init; }
 
     public bool Transport { get; init; }
+
+    /// <summary>A posted command's chain: after one of its commands ended other than GOOD, the rest are not run but answered <see cref="Skipped"/>.</summary>
+    public long? Chain { get; init; }
+
+    /// <summary>With an error: the command was not run because its chain was broken before it.</summary>
+    public bool Skipped { get; init; }
 }

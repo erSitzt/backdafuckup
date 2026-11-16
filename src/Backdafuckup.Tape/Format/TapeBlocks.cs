@@ -92,7 +92,8 @@ public sealed class DriveBlocks(TapeDrive drive) : ITapeBlockWriter, ITapeBlockR
 
     public Task<WriteOutcome> WriteFilemarkAsync(bool synchronize, CancellationToken cancellationToken) => drive.WriteFilemarksAsync(1, immediate: !synchronize, cancellationToken);
 
-    public Task<ReadOutcome> ReadBlockAsync(Memory<byte> destination, CancellationToken cancellationToken) => drive.ReadBlockAsync(destination, cancellationToken);
+    /// <summary>Reads ahead through a tape agent: callers of these blocks locate to a block before they move otherwise.</summary>
+    public Task<ReadOutcome> ReadBlockAsync(Memory<byte> destination, CancellationToken cancellationToken) => drive.ReadBlockAsync(destination, cancellationToken, readAhead: true);
 }
 
 /// <summary>A file was cut off (a filemark or the end of data before its trailer): it is torn and is not used.</summary>

@@ -148,9 +148,11 @@ public sealed class TapeAgents
             return;
         }
 
-        if (hello is not { Header: { Type: TapeAgentMessageTypes.Hello } header } || header.Protocol != TapeAgentProtocol.Version)
+        if (hello is not { Header: { Type: TapeAgentMessageTypes.Hello } header } || header.Protocol is < TapeAgentProtocol.OldestVersion or > TapeAgentProtocol.Version)
         {
-            var reason = hello is { Header.Type: TapeAgentMessageTypes.Hello } ? $"protocol {hello.Value.Header.Protocol} is not {TapeAgentProtocol.Version}: update the tape agent" : "a hello comes first";
+            var reason = hello is { Header.Type: TapeAgentMessageTypes.Hello }
+                ? $"protocol {hello.Value.Header.Protocol} is not between {TapeAgentProtocol.OldestVersion} and {TapeAgentProtocol.Version}: update the tape agent and the server to the same version"
+                : "a hello comes first";
             await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, reason, CancellationToken.None).ConfigureAwait(false);
             _logger.LogWarning("Tape agent {Agent} from {Remote} refused: {Reason}.", agent.Name, remote, reason);
             return;

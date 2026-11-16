@@ -28,9 +28,17 @@ public sealed class ScsiCommandRunner(IScsiDevice device, string label, TimeProv
     /// <summary>Uses the drive's recommended timeouts from now on (REPORT SUPPORTED OPERATION CODES with RCTD).</summary>
     public void UseTimeouts(IReadOnlyDictionary<(byte OpCode, ushort ServiceAction), TimeSpan> timeouts) => _timeouts = timeouts;
 
+    /// <summary>Called before every command: a drive with posted commands in flight completes them first.</summary>
+    public Func<CancellationToken, Task>? BeforeCommand { get; set; }
+
     /// <summary>Runs the command and returns its result, also a CHECK CONDITION (the caller interprets the sense).</summary>
     public async Task<ScsiResult> RunAsync(ScsiCommand command, CancellationToken cancellationToken)
     {
+        if (BeforeCommand is { } before)
+        {
+            await before(cancellationToken).ConfigureAwait(false);
+        }
+
         if (_timeouts.TryGetValue((command.OperationCode, ServiceAction(command)), out var timeout) && timeout > command.Timeout)
         {
             command = new ScsiCommand
