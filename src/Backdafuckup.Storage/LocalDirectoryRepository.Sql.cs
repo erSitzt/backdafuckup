@@ -213,6 +213,28 @@ public sealed partial class LocalDirectoryRepository
 
         public Guid SqlBackupId => Id;
 
+        /// <summary>For imports: a chunk's stored record, checked and kept as it is.</summary>
+        public ValueTask<ChunkPutResult> PutEncodedChunkAsync(ChunkId id, ReadOnlyMemory<byte> stored, CancellationToken cancellationToken) =>
+            StoreEncodedChunkAsync(id, stored, cancellationToken);
+
+        /// <summary>For imports: one of the object's files (a file index) as it was written elsewhere.</summary>
+        public async Task WriteRawFileAsync(string name, ReadOnlyMemory<byte> content, CancellationToken cancellationToken)
+        {
+            ThrowIfClosed();
+            if (name.Length is 0 or > 200 || name is "." or ".." || name.IndexOfAny(['/', '\\', ':', '\0']) >= 0
+                || name.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase) || name.Equals(DeletedManifestFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException($"'{name}' is not a file of a SQL backup.", nameof(name));
+            }
+
+            await AtomicFile.WriteAsync(Repository._tempDirectory, Path.Combine(directory, name), content, overwrite: true, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>For imports: the files the original manifest describes, as if written here (their indexes come raw).</summary>
+        public void RegisterImported(SqlBackupFile file) => _files[file.Key] = new SqlBackupStoredFile(file.Key, file.Length, file.Sha256, file.Index, 0, 0);
+
+        public bool HasFile(string name) => File.Exists(Path.Combine(directory, name));
+
         public async Task<SqlBackupStoredFile> WriteFileAsync(string key, Stream content, CancellationToken cancellationToken)
         {
             ThrowIfClosed();

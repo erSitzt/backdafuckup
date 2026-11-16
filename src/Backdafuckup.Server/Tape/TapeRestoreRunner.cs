@@ -10,7 +10,8 @@ using Microsoft.EntityFrameworkCore;
 namespace Backdafuckup.Server.Tape;
 
 /// <summary>A queued import of a tape copy into a repository (the session's parameters).</summary>
-public sealed record TapeRestoreRequest(Guid CopyId, Guid RepositoryId);
+/// <param name="IncludeSql">Also the SQL Server backups of the VM in the set from this restore point on (point-in-time restores).</param>
+public sealed record TapeRestoreRequest(Guid CopyId, Guid RepositoryId, bool IncludeSql = true);
 
 /// <summary>
 /// Brings a tape copy back into a repository: reads its restore-point file (its files and where its chunks are), then
@@ -24,7 +25,9 @@ public sealed class TapeRestoreRunner(
     TapeSessionRunner robot,
     RepositoryManager repositories,
     CredentialProtector protector,
-    SessionEventWriter events)
+    SessionEventWriter events,
+    Sql.SqlCatalogBackfill sqlBackfill,
+    TimeProvider time)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -35,6 +38,7 @@ public sealed class TapeRestoreRunner(
         MediaPoolEntity pool;
         List<TapeMediumEntity> media;
         List<TapeFileEntity> files;
+        List<TapeCopyEntity> sqlCopies;
         await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
         {
             copy = await db.TapeCopies.AsNoTracking().FirstOrDefaultAsync(c => c.Id == request.CopyId, cancellationToken).ConfigureAwait(false)
@@ -43,10 +47,14 @@ public sealed class TapeRestoreRunner(
             pool = await db.MediaPools.AsNoTracking().FirstAsync(p => p.Id == set.PoolId, cancellationToken).ConfigureAwait(false);
             media = await db.TapeMedia.AsNoTracking().Where(m => m.SetId == set.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
             files = await db.TapeFiles.AsNoTracking().Where(f => f.SetId == set.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+            sqlCopies = !request.IncludeSql || copy.Kind != TapeFileTypes.RestorePoint ? [] : await db.TapeCopies.AsNoTracking()
+                .Where(c => c.SetId == set.Id && c.Kind == TapeFileTypes.Sql && c.VmId == copy.VmId && c.RepositoryId == copy.RepositoryId && c.CreatedUtc >= copy.CreatedUtc)
+                .OrderBy(c => c.CreatedUtc)
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
         }
 
         var library = await libraries.LoadAsync(pool.LibraryId, cancellationToken).ConfigureAwait(false);
-        var missing = copy.NeededSequences.Where(s => media.FirstOrDefault(m => m.Sequence == s) is not { Location: not TapeLocation.Offline } m || m.LibraryId != library.Id).ToList();
+        var missing = copy.NeededSequences.Concat(sqlCopies.SelectMany(c => c.NeededSequences)).Distinct().Where(s => media.FirstOrDefault(m => m.Sequence == s) is not { Location: not TapeLocation.Offline } m || m.LibraryId != library.Id).ToList();
         if (missing.Count > 0)
         {
             var names = missing.Select(s => media.FirstOrDefault(m => m.Sequence == s)?.Barcode ?? $"#{s}");
@@ -73,6 +81,10 @@ public sealed class TapeRestoreRunner(
         var blockSize = pool.BlockSize;
         var tapes = new TapeReaderSession(library, drive, media, libraries, robot, holder, log);
         var newId = Guid.CreateVersion7();
+        (long StartBlock, ulong FileId) FileOf(int sequence, int number) =>
+            files.FirstOrDefault(f => f.Sequence == sequence && f.FileNumber == number) is { } f
+                ? (f.StartBlock, f.FileId)
+                : throw new InvalidDataException($"Tape #{sequence} file {number} is not in the set's catalog.");
         try
         {
             var result = await TapeSetReader.RestoreAsync(
@@ -81,16 +93,32 @@ public sealed class TapeRestoreRunner(
                 cipher,
                 copy.Sequence,
                 copy.FileStartBlock,
-                (sequence, number) => files.FirstOrDefault(f => f.Sequence == sequence && f.FileNumber == number) is { } f
-                    ? (f.StartBlock, f.FileId)
-                    : throw new InvalidDataException($"Tape #{sequence} file {number} is not in the set's catalog."),
+                FileOf,
                 transfer,
                 newId,
                 m => m with { Job = null, BaseRestorePointId = null },
                 message => log.Info(message),
                 cancellationToken).ConfigureAwait(false);
             await CatalogAsync(result.Committed, copy, set, request.RepositoryId, session.Id, cancellationToken).ConfigureAwait(false);
-            var summary = $"{copy.VmName} (restore point of {copy.CreatedUtc:yyyy-MM-dd HH:mm} UTC) is back in the repository as {newId}: {result.Chunks} chunk(s) read from {tapes.Loaded.Count} tape(s).";
+
+            // The SQL Server backups of the VM from this restore point on: logs for a point-in-time restore.
+            foreach (var sqlCopy in sqlCopies)
+            {
+                var (info, _) = await TapeSetReader.RestoreSqlAsync(
+                    tapes, blockSize, cipher, sqlCopy.Sequence, sqlCopy.FileStartBlock, FileOf, transfer, Guid.CreateVersion7(), m => m with { Job = null }, cancellationToken).ConfigureAwait(false);
+                await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+                await Sql.SqlBackupCatalog.RecordSqlBackupAsync(db, request.RepositoryId, info, time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (sqlCopies.Count > 0)
+            {
+                log.Info($"{sqlCopies.Count} SQL Server backup(s) of {copy.VmName} from {copy.CreatedUtc:yyyy-MM-dd HH:mm} to {sqlCopies[^1].CreatedUtc:yyyy-MM-dd HH:mm} UTC brought back with it.");
+            }
+
+            await sqlBackfill.RecordSnapshotFullsAsync(cancellationToken).ConfigureAwait(false);
+            var summary = $"{copy.VmName} (restore point of {copy.CreatedUtc:yyyy-MM-dd HH:mm} UTC) is back in the repository as {newId}" +
+                (sqlCopies.Count > 0 ? $", with {sqlCopies.Count} SQL Server backup(s)" : string.Empty) + $": {result.Chunks} chunk(s) of the restore point read from {tapes.Loaded.Count} tape(s).";
             log.Info(summary);
             return (log.Warned ? SessionState.Warning : SessionState.Succeeded, summary);
         }

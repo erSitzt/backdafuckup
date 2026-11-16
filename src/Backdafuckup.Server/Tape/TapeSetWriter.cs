@@ -26,7 +26,7 @@ internal sealed record TapeWriteContext(
 
 /// <param name="Copied">Restore points copied.</param>
 /// <param name="NewBytes">Bytes of chunks written (the set had the others already).</param>
-internal sealed record TapeWriteResult(int Copied, long NewBytes, long ReusedChunks, IReadOnlyList<string> Tapes);
+internal sealed record TapeWriteResult(int Copied, int SqlCopied, long NewBytes, long ReusedChunks, IReadOnlyList<string> Tapes);
 
 /// <summary>
 /// Writes one run's copies into a media set. It picks tapes (the set's last one if it has room, then expired tapes of the
@@ -52,6 +52,7 @@ internal sealed class TapeSetWriter(
     private int _fileNumber;
     private AesGcmRecordCipher? _cipher;
     private int _copied;
+    private int _copiedSql;
     private long _newBytes;
     private long _reused;
 
@@ -64,14 +65,35 @@ internal sealed class TapeSetWriter(
 
     public async Task CopyRestorePointAsync(RestorePointEntity point, IBackupRepository repository, CancellationToken cancellationToken)
     {
-        if (repository is not IRepositoryTransfer transfer || repository is not IChunkLocator locator)
-        {
-            throw new InvalidOperationException($"The repository of {point.VmName} cannot copy restore points to tape.");
-        }
-
+        var (transfer, locator) = Transfer(repository, point.VmName);
         using var pin = repository.Pin(point.Id);
-        var files = await transfer.ReadRestorePointFilesAsync(point.Id, cancellationToken).ConfigureAwait(false);
-        var ids = await transfer.ListRestorePointChunksAsync(point.Id, cancellationToken).ConfigureAwait(false);
+        var source = new TapeCopySource(
+            TapeFileTypes.RestorePoint, point.Id, point.RepositoryId, point.JobName, point.VmNativeId, point.VmName, point.ObjectKind, point.CreatedUtc,
+            await transfer.ReadRestorePointFilesAsync(point.Id, cancellationToken).ConfigureAwait(false),
+            await transfer.ListRestorePointChunksAsync(point.Id, cancellationToken).ConfigureAwait(false));
+        await CopyAsync(source, locator, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>A SQL Server backup object (log or full) of a VM whose restore points go to the set.</summary>
+    public async Task CopySqlBackupAsync(SqlBackupEntity backup, IBackupRepository repository, CancellationToken cancellationToken)
+    {
+        var (transfer, locator) = Transfer(repository, backup.VmName);
+        var source = new TapeCopySource(
+            TapeFileTypes.Sql, backup.Id, backup.RepositoryId, null, backup.VmNativeId, backup.VmName, $"sql-{backup.Kind}".ToLowerInvariant(), backup.CreatedUtc,
+            await transfer.ReadSqlBackupFilesAsync(backup.Id, cancellationToken).ConfigureAwait(false),
+            await transfer.ListSqlBackupChunksAsync(backup.Id, cancellationToken).ConfigureAwait(false));
+        await CopyAsync(source, locator, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static (IRepositoryTransfer Transfer, IChunkLocator Locator) Transfer(IBackupRepository repository, string vmName) =>
+        repository is IRepositoryTransfer transfer && repository is IChunkLocator locator
+            ? (transfer, locator)
+            : throw new InvalidOperationException($"The repository of {vmName} cannot copy to tape.");
+
+    private async Task CopyAsync(TapeCopySource source, IChunkLocator locator, CancellationToken cancellationToken)
+    {
+        var files = source.Files;
+        var ids = source.Chunks;
         var locations = new Dictionary<ChunkId, ChunkLocation>(ids.Count);
         var queue = new List<ChunkId>();
         foreach (var id in ids)
@@ -143,7 +165,7 @@ internal sealed class TapeSetWriter(
         // The restore-point file: its files, then where every chunk is. Built first, started only where it fits whole.
         var copyId = Guid.CreateVersion7();
         var manifest = files[0].Content;
-        var info = new TapeCopyInfo(copyId, point.Id, point.RepositoryId, point.JobName, point.VmNativeId, point.VmName, point.CreatedUtc, Set.Id, context.Pool.Name);
+        var info = new TapeCopyInfo(copyId, source.OriginalId, source.RepositoryId, source.JobName, source.VmId, source.VmName, source.CreatedUtc, Set.Id, context.Pool.Name);
         var records = new List<(string Type, byte[] Body)> { (TapeFormat.Entry, TapeEntries.Encode(TapeCopyInfo.FileName, TapeJson.Serialize(info))) };
         records.AddRange(files.Select(f => (TapeFormat.Entry, TapeEntries.Encode(f.Name, f.Content))));
         records.Add((TapeFormat.Locations, ChunkLocations.Encode(ids.Select(id => locations[id]))));
@@ -153,17 +175,17 @@ internal sealed class TapeSetWriter(
         {
             if (attempt > 3)
             {
-                throw new IOException($"The restore-point file of {point.VmName} ({Format(size)}) did not fit on {attempt} tapes.");
+                throw new IOException($"The {source.Kind} file of {source.VmName} ({Format(size)}) did not fit on {attempt} tapes.");
             }
 
             await EnsureTapeAsync(cancellationToken).ConfigureAwait(false);
             if (Available < size)
             {
-                await ChangeTapeAsync($"the restore-point file of {point.VmName} ({Format(size)}) does not fit on {_tape!.Barcode} ({Format(Available)} left)", cancellationToken).ConfigureAwait(false);
+                await ChangeTapeAsync($"the {source.Kind} file of {source.VmName} ({Format(size)}) does not fit on {_tape!.Barcode} ({Format(Available)} left)", cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
-            var (file, start, number) = await BeginFileAsync(TapeFileTypes.RestorePoint, copyId, cancellationToken).ConfigureAwait(false);
+            var (file, start, number) = await BeginFileAsync(source.Kind, copyId, cancellationToken).ConfigureAwait(false);
             try
             {
                 foreach (var (type, body) in records)
@@ -172,11 +194,11 @@ internal sealed class TapeSetWriter(
                 }
 
                 var summary = await file.FinishAsync(synchronize: true, cancellationToken).ConfigureAwait(false);
-                restorePointFile = Finished(summary, TapeFileTypes.RestorePoint, start, number, copyId);
+                restorePointFile = Finished(summary, source.Kind, start, number, copyId);
             }
             catch (TapeFullException ex)
             {
-                await TapeFullAsync($"{ex.Message} The restore-point file of {point.VmName} is cut off and is written again on the next tape.", cancellationToken).ConfigureAwait(false);
+                await TapeFullAsync($"{ex.Message} The {source.Kind} file of {source.VmName} is cut off and is written again on the next tape.", cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -189,14 +211,14 @@ internal sealed class TapeSetWriter(
                 Id = copyId,
                 SetId = Set.Id,
                 PoolId = context.Pool.Id,
-                Kind = TapeFileTypes.RestorePoint,
-                OriginalId = point.Id,
-                RepositoryId = point.RepositoryId,
-                JobName = point.JobName,
-                VmId = point.VmNativeId,
-                VmName = point.VmName,
-                ObjectKind = point.ObjectKind,
-                CreatedUtc = point.CreatedUtc,
+                Kind = source.Kind,
+                OriginalId = source.OriginalId,
+                RepositoryId = source.RepositoryId,
+                JobName = source.JobName,
+                VmId = source.VmId,
+                VmName = source.VmName,
+                ObjectKind = source.ObjectKind,
+                CreatedUtc = source.CreatedUtc,
                 CopiedUtc = time.GetUtcNow(),
                 SessionId = context.SessionId,
                 Sequence = restorePointFile.Sequence,
@@ -216,10 +238,18 @@ internal sealed class TapeSetWriter(
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        _copied++;
+        if (source.Kind == TapeFileTypes.Sql)
+        {
+            _copiedSql++;
+        }
+        else
+        {
+            _copied++;
+        }
+
         _newBytes += newBytes;
         _reused += reused;
-        Log.Info($"{point.VmName} (restore point of {point.CreatedUtc:yyyy-MM-dd HH:mm} UTC) is on tape: {Format(newBytes)} of new chunks, {reused} chunk(s) the set had already; tapes {string.Join(", ", needed.Select(s => $"#{s}"))}.");
+        Log.Info($"{source.VmName} ({(source.Kind == TapeFileTypes.Sql ? $"SQL Server backup ({source.ObjectKind})" : "restore point")} of {source.CreatedUtc:yyyy-MM-dd HH:mm} UTC) is on tape: {Format(newBytes)} of new chunks, {reused} chunk(s) the set had already; tapes {string.Join(", ", needed.Select(s => $"#{s}"))}.");
     }
 
     /// <summary>The catalog on the current tape, then the tape back into its slot.</summary>
@@ -231,7 +261,7 @@ internal sealed class TapeSetWriter(
             await UnloadAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        return new TapeWriteResult(_copied, _newBytes, _reused, _tapesUsed);
+        return new TapeWriteResult(_copied, _copiedSql, _newBytes, _reused, _tapesUsed);
     }
 
     public async ValueTask DisposeAsync()
@@ -544,6 +574,11 @@ internal sealed class TapeSetWriter(
         return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(bytes) | 1;
     }
 }
+
+/// <summary>What one copy takes from its repository.</summary>
+internal sealed record TapeCopySource(
+    string Kind, Guid OriginalId, Guid RepositoryId, string? JobName, string VmId, string VmName, string? ObjectKind, DateTimeOffset CreatedUtc,
+    IReadOnlyList<RepositoryFile> Files, IReadOnlyList<ChunkId> Chunks);
 
 /// <summary><c>copy.json</c>, the first entry of a restore-point file: what was copied, from where.</summary>
 public sealed record TapeCopyInfo(

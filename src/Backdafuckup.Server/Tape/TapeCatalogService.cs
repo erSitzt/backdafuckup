@@ -340,7 +340,8 @@ public sealed class TapeCatalogService(IDbContextFactory<AppDbContext> dbFactory
             sets[c.SetId].KeyFingerprint is not null,
             c.NeededSequences.Select(s => media.FirstOrDefault(m => m.SetId == c.SetId && m.Sequence == s) is { } m
                 ? new TapeNeededDto(s, m.Barcode, m.Location.ToString(), m.LibraryId is { } l ? libraries.GetValueOrDefault(l) : null)
-                : new TapeNeededDto(s, $"#{s}", nameof(TapeLocation.Offline), null)).ToList())).ToList();
+                : new TapeNeededDto(s, $"#{s}", nameof(TapeLocation.Offline), null)).ToList(),
+            c.Kind)).ToList();
     }
 
     private static async Task<List<MediaSetDto>> SetsAsync(AppDbContext db, Guid? poolId, CancellationToken cancellationToken)

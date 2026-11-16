@@ -100,6 +100,52 @@ public static class TapeSetReader
         Action<string> log,
         CancellationToken cancellationToken)
     {
+        var (entries, locations) = await ReadCopyFileAsync(tapes, blockSize, cipher, sequence, startBlock, cancellationToken).ConfigureAwait(false);
+        var manifestJson = entries.FirstOrDefault(e => e.Name == "manifest.json").Content ?? throw new InvalidDataException("The restore-point file has no manifest.");
+        var manifest = JsonSerializer.Deserialize(manifestJson, CoreJsonContext.Default.RestorePointManifest)!;
+        log($"Restore-point file of {manifest.Vm.Name} read from tape #{sequence}: {entries.Count} entries, {locations.Count} chunk(s) on tape(s) {string.Join(", ", locations.Select(l => l.Sequence).Distinct().Order().Select(s => $"#{s}"))}.");
+
+        await using var import = target.BeginImport(newId, manifest);
+        var chunks = await ReadChunksAsync(tapes, blockSize, cipher, locations, fileOf, import.PutEncodedChunkAsync, manifest.Vm.Name, cancellationToken).ConfigureAwait(false);
+        foreach (var (name, content) in entries.Where(e => e.Name is not ("copy.json" or "manifest.json")))
+        {
+            await import.WriteFileAsync(name, content, cancellationToken).ConfigureAwait(false);
+        }
+
+        var committed = await import.CommitAsync(adjust, cancellationToken).ConfigureAwait(false);
+        return new TapeRestoreResult(committed, chunks, locations.Select(l => l.Sequence).Distinct().Count());
+    }
+
+    /// <summary>Brings a copy of a SQL Server backup object back, like <see cref="RestoreAsync"/>.</summary>
+    public static async Task<(SqlBackupInfo Committed, long Chunks)> RestoreSqlAsync(
+        ITapeVolumes tapes,
+        int blockSize,
+        ITapeRecordCipher? cipher,
+        int sequence,
+        long startBlock,
+        Func<int, int, (long StartBlock, ulong FileId)> fileOf,
+        IRepositoryTransfer target,
+        Guid newId,
+        Func<SqlBackupManifest, SqlBackupManifest>? adjust,
+        CancellationToken cancellationToken)
+    {
+        var (entries, locations) = await ReadCopyFileAsync(tapes, blockSize, cipher, sequence, startBlock, cancellationToken).ConfigureAwait(false);
+        var manifestJson = entries.FirstOrDefault(e => e.Name == "manifest.json").Content ?? throw new InvalidDataException("The SQL backup file has no manifest.");
+        var manifest = JsonSerializer.Deserialize(manifestJson, SqlBackupJsonContext.Default.SqlBackupManifest)!;
+        await using var import = target.BeginSqlImport(newId, manifest);
+        var chunks = await ReadChunksAsync(tapes, blockSize, cipher, locations, fileOf, import.PutEncodedChunkAsync, $"SQL backup {manifest.SqlBackupId}", cancellationToken).ConfigureAwait(false);
+        foreach (var (name, content) in entries.Where(e => e.Name is not ("copy.json" or "manifest.json")))
+        {
+            await import.WriteFileAsync(name, content, cancellationToken).ConfigureAwait(false);
+        }
+
+        return (await import.CommitAsync(adjust, cancellationToken).ConfigureAwait(false), chunks);
+    }
+
+    /// <summary>A copy's file: its entries (files byte for byte) and where its chunks are.</summary>
+    private static async Task<(List<(string Name, byte[] Content)> Entries, IReadOnlyList<ChunkLocation> Locations)> ReadCopyFileAsync(
+        ITapeVolumes tapes, int blockSize, ITapeRecordCipher? cipher, int sequence, long startBlock, CancellationToken cancellationToken)
+    {
         var entries = new List<(string Name, byte[] Content)>();
         IReadOnlyList<ChunkLocation> locations = [];
         var reader = await tapes.AtAsync(sequence, startBlock, cancellationToken).ConfigureAwait(false);
@@ -115,11 +161,20 @@ public static class TapeSetReader
             }
         }
 
-        var manifestJson = entries.FirstOrDefault(e => e.Name == "manifest.json").Content ?? throw new InvalidDataException("The restore-point file has no manifest.");
-        var manifest = JsonSerializer.Deserialize(manifestJson, CoreJsonContext.Default.RestorePointManifest)!;
-        log($"Restore-point file of {manifest.Vm.Name} read from tape #{sequence}: {entries.Count} entries, {locations.Count} chunk(s) on tape(s) {string.Join(", ", locations.Select(l => l.Sequence).Distinct().Order().Select(s => $"#{s}"))}.");
+        return (entries, locations);
+    }
 
-        await using var import = target.BeginImport(newId, manifest);
+    /// <summary>The chunks at <paramref name="locations"/>, tape by tape and file by file, from the first needed record of a file to its last.</summary>
+    private static async Task<long> ReadChunksAsync(
+        ITapeVolumes tapes,
+        int blockSize,
+        ITapeRecordCipher? cipher,
+        IReadOnlyList<ChunkLocation> locations,
+        Func<int, int, (long StartBlock, ulong FileId)> fileOf,
+        Func<ChunkId, ReadOnlyMemory<byte>, CancellationToken, ValueTask<ChunkPutResult>> put,
+        string what,
+        CancellationToken cancellationToken)
+    {
         long chunks = 0;
         foreach (var group in locations.GroupBy(l => (l.Sequence, l.FileNumber)).OrderBy(g => g.Key.Sequence).ThenBy(g => g.Key.FileNumber))
         {
@@ -137,7 +192,7 @@ public static class TapeSetReader
                 var (id, stored) = TapeEntries.DecodeChunk(record.Body);
                 if (needed.Remove(id))
                 {
-                    await import.PutEncodedChunkAsync(id, stored, cancellationToken).ConfigureAwait(false);
+                    await put(id, stored, cancellationToken).ConfigureAwait(false);
                     chunks++;
                     if (needed.Count == 0)
                     {
@@ -148,17 +203,11 @@ public static class TapeSetReader
 
             if (needed.Count > 0)
             {
-                throw new InvalidDataException($"{needed.Count} chunk(s) of {manifest.Vm.Name} were not in tape #{group.Key.Sequence} file {group.Key.FileNumber}.");
+                throw new InvalidDataException($"{needed.Count} chunk(s) of {what} were not in tape #{group.Key.Sequence} file {group.Key.FileNumber}.");
             }
         }
 
-        foreach (var (name, content) in entries.Where(e => e.Name is not ("copy.json" or "manifest.json")))
-        {
-            await import.WriteFileAsync(name, content, cancellationToken).ConfigureAwait(false);
-        }
-
-        var committed = await import.CommitAsync(adjust, cancellationToken).ConfigureAwait(false);
-        return new TapeRestoreResult(committed, chunks, locations.Select(l => l.Sequence).Distinct().Count());
+        return chunks;
     }
 
     /// <summary>The header record of a file from its first block, or null when the block is not ours.</summary>

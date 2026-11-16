@@ -604,7 +604,7 @@ else
                         <MudTh>VM</MudTh><MudTh>Restore point</MudTh><MudTh Class="c-560">Tapes</MudTh><MudTh Class="c-760">Set</MudTh><MudTh></MudTh>
                     </HeaderContent>
                     <RowTemplate>
-                        <MudTd>@context.VmName<span class="cell-sub">@context.JobName</span></MudTd>
+                        <MudTd>@context.VmName<span class="cell-sub">@(context.Kind == "sql" ? $"SQL Server backup ({context.ObjectKind?.Replace("sql-", "")})" : context.JobName)</span></MudTd>
                         <MudTd>@Fmt.Time(context.CreatedUtc)<span class="cell-sub">copied @Fmt.Time(context.CopiedUtc) · @Fmt.Bytes(context.StoredBytes)@(context.Encrypted ? " · encrypted" : "")</span></MudTd>
                         <MudTd Class="c-560">@foreach (var t in context.Tapes)
                             {
@@ -612,7 +612,10 @@ else
                             }</MudTd>
                         <MudTd Class="c-760">@context.Pool<span class="cell-sub">@context.SetState</span></MudTd>
                         <MudTd Style="text-align:right; white-space:nowrap">
-                            <MudButton Size="Size.Small" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(async () => { await LoadFormsDataAsync(); _restoring = context; })">Bring back…</MudButton>
+                            @if (context.Kind == "restore-point")
+                            {
+                                <MudButton Size="Size.Small" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(async () => { await LoadFormsDataAsync(); _restoring = context; })">Bring back…</MudButton>
+                            }
                         </MudTd>
                     </RowTemplate>
                     <NoRecordsContent><MudText>Nothing on tape yet.</MudText></NoRecordsContent>
@@ -624,7 +627,7 @@ else
                     <MudText Typo="Typo.h6" Class="mb-2">Bring @copy.VmName (@Fmt.Time(copy.CreatedUtc)) back into a repository</MudText>
                     <MudText Typo="Typo.body2" Class="mb-3">
                         It becomes a restore point of its own, belonging to no job (job retention never deletes it); from there it is restored like
-                        any other. Tapes needed: @string.Join(", ", copy.Tapes.Select(t => $"{t.Barcode} ({(t.Location == "Offline" ? "offline: import it first" : t.Library)})")).
+                        any other. The VM's SQL Server backups on tape from this restore point on come with it. Tapes needed: @string.Join(", ", copy.Tapes.Select(t => $"{t.Barcode} ({(t.Location == "Offline" ? "offline: import it first" : t.Library)})")).
                     </MudText>
                     <div class="d-flex gap-2 align-center flex-wrap">
                         <MudSelect T="Guid?" @bind-Value="_restoreRepository" Label="Into repository" Variant="Variant.Outlined" Style="min-width:280px">

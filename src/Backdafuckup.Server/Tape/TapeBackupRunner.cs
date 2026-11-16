@@ -58,12 +58,13 @@ public sealed class TapeBackupRunner(
         }
 
         var points = await SelectAsync(job, set, log, cancellationToken).ConfigureAwait(false);
-        if (points.Count == 0)
+        var sqlBackups = job.IncludeSqlBackups ? await SelectSqlAsync(set, points, cancellationToken).ConfigureAwait(false) : [];
+        if (points.Count == 0 && sqlBackups.Count == 0)
         {
             return (log.Warned ? SessionState.Warning : SessionState.Succeeded, "Nothing to copy: the set has every restore point the job asks for.");
         }
 
-        log.Info($"{points.Count} restore point(s) to copy into set {set.Id} of pool {pool.Name} ({string.Join(", ", points.Select(p => p.VmName).Distinct())}).");
+        log.Info($"{points.Count} restore point(s) and {sqlBackups.Count} SQL Server backup(s) to copy into set {set.Id} of pool {pool.Name} ({string.Join(", ", points.Select(p => p.VmName).Concat(sqlBackups.Select(s => s.VmName)).Distinct())}).");
         var holder = $"Tape job {job.Name}";
         var drive = library.Drives.OrderBy(d => d.ElementAddress).First();
         foreach (var candidate in library.Drives.OrderBy(d => d.ElementAddress))
@@ -100,6 +101,25 @@ public sealed class TapeBackupRunner(
                 await writer.CopyRestorePointAsync(point, repository, cancellationToken).ConfigureAwait(false);
             }
 
+            // SQL Server backups after the restore points they belong to, oldest first, so that a log chain on tape grows in order.
+            foreach (var backup in sqlBackups)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Core.Repository.IBackupRepository repository;
+                try
+                {
+                    repository = await repositories.GetAsync(backup.RepositoryId, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is IOException or InvalidOperationException or KeyNotFoundException)
+                {
+                    log.Warning($"{backup.VmName}: the repository of its SQL Server backups cannot be read ({ex.Message}); they are copied with the next run.");
+                    failed++;
+                    break;
+                }
+
+                await writer.CopySqlBackupAsync(backup, repository, cancellationToken).ConfigureAwait(false);
+            }
+
             result = await writer.FinishAsync(cancellationToken).ConfigureAwait(false);
         }
 
@@ -108,7 +128,7 @@ public sealed class TapeBackupRunner(
             await robot.ExportFromSlotsAsync(library, result.Tapes.Distinct().ToList(), holder, log, cancellationToken).ConfigureAwait(false);
         }
 
-        var summary = $"{result.Copied} restore point(s) copied to {string.Join(", ", result.Tapes.Distinct())}: {VmBackupTask.Format(result.NewBytes)} new, {result.ReusedChunks} chunk(s) the set had already." +
+        var summary = $"{result.Copied} restore point(s){(result.SqlCopied > 0 ? $" and {result.SqlCopied} SQL Server backup(s)" : string.Empty)} copied to {string.Join(", ", result.Tapes.Distinct())}: {VmBackupTask.Format(result.NewBytes)} new, {result.ReusedChunks} chunk(s) the set had already." +
             (failed > 0 ? $" {failed} not copied." : string.Empty);
         log.Info(summary);
         return (log.Warned || failed > 0 ? SessionState.Warning : SessionState.Succeeded, summary);
@@ -251,6 +271,35 @@ public sealed class TapeBackupRunner(
         };
         var startUtc = new DateTimeOffset(start, zone.GetUtcOffset(start));
         return open.CreatedUtc < startUtc;
+    }
+
+    /// <summary>
+    /// The SQL Server backups (logs and fulls) of the VMs whose restore points are in the set or come with this run, from
+    /// the oldest of those restore points on, that the set does not have yet: each run adds the newer logs, so that a
+    /// restore from tape reaches as far as the last run.
+    /// </summary>
+    private async Task<List<SqlBackupEntity>> SelectSqlAsync(MediaSetEntity set, IReadOnlyList<RestorePointEntity> points, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var inSet = await db.TapeCopies.AsNoTracking().Where(c => c.SetId == set.Id).Select(c => new { c.Kind, c.OriginalId, c.VmId, c.RepositoryId, c.CreatedUtc })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var vms = inSet.Where(c => c.Kind == TapeFileTypes.RestorePoint).Select(c => (c.VmId, c.RepositoryId, c.CreatedUtc))
+            .Concat(points.Select(p => (VmId: p.VmNativeId, p.RepositoryId, p.CreatedUtc)))
+            .GroupBy(v => (v.VmId, v.RepositoryId))
+            .Select(g => (g.Key.VmId, g.Key.RepositoryId, Since: g.Min(v => v.CreatedUtc)))
+            .ToList();
+        var copied = inSet.Where(c => c.Kind == TapeFileTypes.Sql).Select(c => c.OriginalId).ToHashSet();
+        var result = new List<SqlBackupEntity>();
+        foreach (var (vmId, repositoryId, since) in vms)
+        {
+            var backups = await db.SqlBackups.AsNoTracking()
+                .Where(b => b.VmNativeId == vmId && b.RepositoryId == repositoryId && b.State == SqlBackupState.Available && b.CreatedUtc >= since)
+                .OrderBy(b => b.CreatedUtc)
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+            result.AddRange(backups.Where(b => !copied.Contains(b.Id)));
+        }
+
+        return [.. result.OrderBy(b => b.CreatedUtc)];
     }
 
     /// <summary>The restore points of the source jobs that the set does not have: the newest per VM, or every one.</summary>

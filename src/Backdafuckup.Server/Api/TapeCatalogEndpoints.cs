@@ -76,6 +76,11 @@ public static class TapeCatalogEndpoints
         {
             var copy = await db.TapeCopies.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id, ct)
                 ?? throw new TapeRequestException($"Tape copy {id} does not exist.", StatusCodes.Status404NotFound);
+            if (copy.Kind != Backdafuckup.Tape.Format.TapeFileTypes.RestorePoint)
+            {
+                throw new TapeRequestException("SQL Server backups come back with the restore point of their VM: bring that one back.");
+            }
+
             var repository = await db.Repositories.AsNoTracking().FirstOrDefaultAsync(r => r.Id == request.RepositoryId, ct)
                 ?? throw new TapeRequestException($"Repository {request.RepositoryId} does not exist.", StatusCodes.Status404NotFound);
             var manifest = System.Text.Json.JsonSerializer.Deserialize(copy.Manifest, Core.Repository.CoreJsonContext.Default.RestorePointManifest)!;

@@ -20,6 +20,27 @@ public interface IRepositoryTransfer
     /// manifest it was copied with; its chunk size must be this repository's.
     /// </summary>
     IRestorePointImport BeginImport(Guid restorePointId, RestorePointManifest original);
+
+    /// <summary>A SQL Server backup object's files: its manifest first, then its file indexes.</summary>
+    Task<IReadOnlyList<RepositoryFile>> ReadSqlBackupFilesAsync(Guid sqlBackupId, CancellationToken cancellationToken);
+
+    /// <summary>Every chunk a SQL Server backup object needs, each once, zero chunks left out.</summary>
+    Task<IReadOnlyList<ChunkId>> ListSqlBackupChunksAsync(Guid sqlBackupId, CancellationToken cancellationToken);
+
+    /// <summary>Starts bringing a SQL Server backup object in under <paramref name="sqlBackupId"/>.</summary>
+    ISqlBackupImport BeginSqlImport(Guid sqlBackupId, SqlBackupManifest original);
+}
+
+/// <summary>One SQL Server backup object coming in, like <see cref="IRestorePointImport"/>.</summary>
+public interface ISqlBackupImport : IAsyncDisposable
+{
+    Guid SqlBackupId { get; }
+
+    ValueTask<ChunkPutResult> PutEncodedChunkAsync(ChunkId id, ReadOnlyMemory<byte> stored, CancellationToken cancellationToken);
+
+    Task WriteFileAsync(string name, ReadOnlyMemory<byte> content, CancellationToken cancellationToken);
+
+    Task<SqlBackupInfo> CommitAsync(Func<SqlBackupManifest, SqlBackupManifest>? adjust, CancellationToken cancellationToken);
 }
 
 /// <summary>

@@ -196,7 +196,8 @@ public sealed record TapeCopyDto(
     string Pool,
     long StoredBytes,
     bool Encrypted,
-    IReadOnlyList<TapeNeededDto> Tapes);
+    IReadOnlyList<TapeNeededDto> Tapes,
+    string Kind = "restore-point");
 
 public sealed record TapeRestoreRequestDto(Guid RepositoryId);
 

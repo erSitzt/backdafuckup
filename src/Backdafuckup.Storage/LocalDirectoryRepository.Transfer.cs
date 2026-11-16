@@ -52,6 +52,90 @@ public sealed partial class LocalDirectoryRepository : IRepositoryTransfer
         return new Import(this, (Writer)BeginWrite(restorePointId, original.Vm.VmId, null), original);
     }
 
+    public async Task<IReadOnlyList<RepositoryFile>> ReadSqlBackupFilesAsync(Guid sqlBackupId, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        var directory = GetSqlBackupDirectory(sqlBackupId);
+        var result = new List<RepositoryFile> { new(ManifestFileName, await File.ReadAllBytesAsync(Path.Combine(directory, ManifestFileName), cancellationToken).ConfigureAwait(false)) };
+        foreach (var path in Directory.EnumerateFiles(directory).Order(StringComparer.Ordinal))
+        {
+            var name = Path.GetFileName(path);
+            if (name is not (ManifestFileName or DeletedManifestFileName) && !name.EndsWith(".tmp", StringComparison.Ordinal))
+            {
+                result.Add(new RepositoryFile(name, await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false)));
+            }
+        }
+
+        return result;
+    }
+
+    public async Task<IReadOnlyList<ChunkId>> ListSqlBackupChunksAsync(Guid sqlBackupId, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        var directory = GetSqlBackupDirectory(sqlBackupId);
+        var manifest = await TryReadSqlBackupManifestAsync(directory, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidDataException($"SQL backup {sqlBackupId} in '{Root}' has no readable manifest.");
+        var ids = new List<ChunkId>();
+        var seen = new HashSet<ChunkId>();
+        foreach (var file in manifest.Files)
+        {
+            var index = await ReadSqlBackupIndexAsync(directory, manifest, file, cancellationToken).ConfigureAwait(false);
+            foreach (var id in index.Entries)
+            {
+                if (!id.IsZero && seen.Add(id))
+                {
+                    ids.Add(id);
+                }
+            }
+        }
+
+        return ids;
+    }
+
+    public ISqlBackupImport BeginSqlImport(Guid sqlBackupId, SqlBackupManifest original)
+    {
+        ArgumentNullException.ThrowIfNull(original);
+        if (original.Chunking.ChunkSize != _descriptor.ChunkSize)
+        {
+            throw new InvalidOperationException(
+                $"The SQL backup was written with chunks of {original.Chunking.ChunkSize / 1024} KiB; the repository '{Root}' uses {_descriptor.ChunkSize / 1024} KiB.");
+        }
+
+        var writer = (SqlBackupWriter)BeginSqlBackup(sqlBackupId, original.Source.VmId);
+        foreach (var file in original.Files)
+        {
+            writer.RegisterImported(file);
+        }
+
+        return new SqlImport(this, writer, original);
+    }
+
+    private sealed class SqlImport(LocalDirectoryRepository repository, SqlBackupWriter writer, SqlBackupManifest original) : ISqlBackupImport
+    {
+        public Guid SqlBackupId => writer.SqlBackupId;
+
+        public ValueTask<ChunkPutResult> PutEncodedChunkAsync(ChunkId id, ReadOnlyMemory<byte> stored, CancellationToken cancellationToken) =>
+            writer.PutEncodedChunkAsync(id, stored, cancellationToken);
+
+        public Task WriteFileAsync(string name, ReadOnlyMemory<byte> content, CancellationToken cancellationToken) =>
+            writer.WriteRawFileAsync(name, content, cancellationToken);
+
+        public Task<SqlBackupInfo> CommitAsync(Func<SqlBackupManifest, SqlBackupManifest>? adjust, CancellationToken cancellationToken)
+        {
+            var missing = original.Files.Select(f => f.Index.File).Where(f => !writer.HasFile(f)).ToList();
+            if (missing.Count > 0)
+            {
+                throw new InvalidDataException($"The SQL backup being brought into '{repository.Root}' lacks {string.Join(", ", missing)}.");
+            }
+
+            var manifest = original with { SqlBackupId = writer.SqlBackupId, RepositoryId = repository.Info.RepositoryId };
+            manifest = (adjust?.Invoke(manifest) ?? manifest) with { SqlBackupId = writer.SqlBackupId, RepositoryId = repository.Info.RepositoryId };
+            return writer.CommitAsync(manifest, cancellationToken);
+        }
+
+        public ValueTask DisposeAsync() => writer.DisposeAsync();
+    }
+
     /// <summary>
     /// Every non-zero chunk a restore point needs: its disks and memory image, and its file trees with their listings.
     /// Listings in <paramref name="walkedListings"/> are not walked again (GC shares the set across restore points).

@@ -29,6 +29,37 @@ public sealed partial class ApiIntegrationTests
         Array.Clear(image, 4 << 20, 2 << 20);
         var point = await BackUpImageAsync(client, "web01", image);
 
+        // A SQL Server log backup of the VM after its restore point: it goes to tape with it and comes back with it.
+        var log = RandomNumberGenerator.GetBytes(3 << 20);
+        var sqlRepository = (Backdafuckup.Storage.LocalDirectoryRepository)await _factory!.Services.GetRequiredService<RepositoryManager>().GetAsync(point.RepositoryId, Ct);
+        var sqlId = Guid.CreateVersion7();
+        await using (var writer = sqlRepository.BeginSqlBackup(sqlId, point.VmNativeId))
+        {
+            using var stream = new MemoryStream(log);
+            var stored = await writer.WriteFileAsync("shop", stream, Ct);
+            var info = await writer.CommitAsync(new SqlBackupManifest
+            {
+                SqlBackupId = sqlId, RepositoryId = sqlRepository.Info.RepositoryId, CreatedUtc = DateTimeOffset.UtcNow, Kind = SqlBackupKind.Log,
+                Source = new ManifestSource(Core.Hypervisor.HypervisorKind.XenServer, "pool-1", point.VmNativeId, "web01", null), Instance = "SQLEXPRESS",
+                Chunking = new ManifestChunking(sqlRepository.Info.ChunkSize, "sha256", "zstd"),
+                Files =
+                [
+                    new SqlBackupFile
+                    {
+                        Key = stored.Key, Database = "shop", FileName = "shop.trn", Length = stored.Length, Sha256 = stored.Sha256, Index = stored.Index,
+                        BackupSet = new SqlBackupSet
+                        {
+                            BackupSetUuid = Guid.NewGuid(), Type = "L", FirstLsn = 42000000027200212m, LastLsn = 42000000040800001m, CheckpointLsn = 42000000027200212m,
+                            FamilyGuid = Guid.NewGuid(), DatabaseGuid = Guid.NewGuid(), StartUtc = DateTimeOffset.UtcNow, FinishUtc = DateTimeOffset.UtcNow, UtcOffsetMinutes = 60,
+                        },
+                    },
+                ],
+            }, Ct);
+            await using var db = await _factory.Services.GetRequiredService<Microsoft.EntityFrameworkCore.IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>().CreateDbContextAsync(Ct);
+            await Backdafuckup.Server.Sql.SqlBackupCatalog.RecordSqlBackupAsync(db, point.RepositoryId, info, DateTimeOffset.UtcNow, Ct);
+            await db.SaveChangesAsync(Ct);
+        }
+
         var library = await Read<TapeLibraryDto>(client.PostAsJsonAsync("/api/tape/libraries", new CreateTapeLibraryDto("Lab", "local", "LIB0001", [new("DRV0001", 256, null), new("DRV0002", 257, null)]), Ct));
         var key = await Read<TapeKeyDto>(client.PostAsJsonAsync("/api/tape/keys", new CreateTapeKeyDto("Lab key", "correct horse battery staple"), Ct));
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/tape/keys", new CreateTapeKeyDto("Short", "too short"), Ct)).StatusCode);
@@ -46,8 +77,10 @@ public sealed partial class ApiIntegrationTests
         // The first run: one restore point, spread over the 12 MiB tapes, each labelled for the set.
         var first = await RunAsync();
         Assert.True(first.Session.State == "Succeeded", first.Session.Summary + string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{first.Session.Id}/log", Ct))!.Select(l => l.Message)));
-        Assert.Contains("1 restore point(s) copied", first.Session.Summary, StringComparison.Ordinal);
-        var copy = Assert.Single((await client.GetFromJsonAsync<List<TapeCopyDto>>("/api/tape/copies", Ct))!);
+        Assert.Contains("1 restore point(s) and 1 SQL Server backup(s) copied", first.Session.Summary, StringComparison.Ordinal);
+        var copy = Assert.Single((await client.GetFromJsonAsync<List<TapeCopyDto>>("/api/tape/copies", Ct))!, c => c.Kind == "restore-point");
+        var sqlCopy = Assert.Single((await client.GetFromJsonAsync<List<TapeCopyDto>>("/api/tape/copies", Ct))!, c => c.Kind == "sql");
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync($"/api/tape/copies/{sqlCopy.Id}/restore", new TapeRestoreRequestDto(point.RepositoryId), Ct)).StatusCode);
         Assert.Equal(("web01", point.Id, true, "Open"), (copy.VmName, copy.OriginalId, copy.Encrypted, copy.SetState));
         Assert.True(copy.Tapes.Count >= 2, $"tapes: {string.Join(", ", copy.Tapes.Select(t => t.Barcode))}");
         var media = (await client.GetFromJsonAsync<List<TapeMediumDto>>("/api/tape/media", Ct))!;
@@ -80,7 +113,7 @@ public sealed partial class ApiIntegrationTests
         Assert.True(second.Session.State == "Succeeded", second.Session.Summary);
         Assert.Contains("1 restore point(s) copied", second.Session.Summary, StringComparison.Ordinal);
         Assert.Contains("chunk(s) the set had already", second.Session.Summary, StringComparison.Ordinal);
-        var copies = (await client.GetFromJsonAsync<List<TapeCopyDto>>("/api/tape/copies", Ct))!;
+        var copies = (await client.GetFromJsonAsync<List<TapeCopyDto>>("/api/tape/copies", Ct))!.Where(c => c.Kind == "restore-point").ToList();
         Assert.Equal(2, copies.Count);
 
         // Back into another repository with the same block size: byte for byte, belonging to no job.
@@ -88,6 +121,7 @@ public sealed partial class ApiIntegrationTests
         var restore = await Read<StartedDto>(client.PostAsJsonAsync($"/api/tape/copies/{copy.Id}/restore", new TapeRestoreRequestDto(target.Id), Ct));
         var restored = await WaitForSessionAsync(client, restore.SessionId);
         Assert.True(restored.Session.State == "Succeeded", restored.Session.Summary + string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{restore.SessionId}/log", Ct))!.Select(l => l.Message)));
+        Assert.Contains("with 1 SQL Server backup(s)", restored.Session.Summary, StringComparison.Ordinal);
         var imported = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>("/api/restore-points", Ct))!, r => r.RepositoryId == target.Id);
         Assert.Null(imported.JobId);
         Assert.StartsWith("Imported from tape", imported.JobName, StringComparison.Ordinal);
@@ -109,6 +143,15 @@ public sealed partial class ApiIntegrationTests
             }
 
             Assert.True(image.AsSpan().SequenceEqual(disk), "the disk read back from tape differs");
+        }
+
+        var sqlBack = Assert.Single(await repository.ListSqlBackupsAsync(Ct).ToListAsync(Ct));
+        await using (var sqlReader = await repository.OpenSqlBackupAsync(sqlBack.SqlBackupId, Ct))
+        await using (var sqlFile = await sqlReader.OpenFileAsync("shop", Ct))
+        {
+            var back = new MemoryStream();
+            await sqlFile.CopyToAsync(back, Ct);
+            Assert.True(log.AsSpan().SequenceEqual(back.ToArray()), "the SQL log backup from tape differs");
         }
 
         var verify = await repository.VerifyAsync(imported.Id, VerifyDepth.Full, null, Ct);
