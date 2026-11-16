@@ -33,6 +33,7 @@ internal sealed class VolumeFilesImport : IFileLevelDiskWriter
     private string? _reducedFrom;
     private string? _volume;
     private string? _reclaimPolicy;
+    private Guid? _handOver;
     private bool _bound;
     private int _disposed;
 
@@ -246,6 +247,11 @@ internal sealed class VolumeFilesImport : IFileLevelDiskWriter
         var pv = await _flow.CallAsync($"reading the PV {volume}", () => client.CoreV1.ReadPersistentVolumeAsync(volume, cancellationToken: cancellationToken)).ConfigureAwait(false);
         _reclaimPolicy = pv.Spec?.PersistentVolumeReclaimPolicy ?? "Delete";
         _volume = volume;
+
+        // Recorded before the policy changes: should the server stop now, its cleanup gives the policy back (GiveBackAsync).
+        _handOver = await _flow.Ledger.RecordAsync(
+            KubernetesArtifactKinds.VolumeHandOver, volume, null, new System.Text.Json.Nodes.JsonObject { ["reclaimPolicy"] = _reclaimPolicy }.ToJsonString(), CancellationToken.None)
+            .ConfigureAwait(false);
         await PatchVolumeAsync($"keeping the PV {volume} (Retain) while it changes its PVC", ReclaimPolicy("Retain"), cancellationToken).ConfigureAwait(false);
 
         var ledger = _created.Single(c => c.Kind == KubernetesArtifactKinds.PersistentVolumeClaim);
@@ -308,6 +314,7 @@ internal sealed class VolumeFilesImport : IFileLevelDiskWriter
 
         _bound = true;
         await PatchVolumeAsync($"giving the PV {volume} its reclaim policy {_reclaimPolicy} back", ReclaimPolicy(_reclaimPolicy!), cancellationToken).ConfigureAwait(false);
+        await HandedOverAsync().ConfigureAwait(false);
         _flow.Log.Info($"PVC {targetNamespace}/{claim}: bound to its restored volume {volume} (StorageClass {StorageClass}).");
     }
 
@@ -368,6 +375,66 @@ internal sealed class VolumeFilesImport : IFileLevelDiskWriter
             await _flow.CallAsync($"deleting the PV {volume}", () => _flow.Client.CoreV1.DeletePersistentVolumeAsync(volume, cancellationToken: cancellationToken)).ConfigureAwait(false);
             _flow.Log.Warning($"The restored volume {volume} of {_source} did not reach its PVC; it is deleted again (cluster {_flow.Cluster}).");
             _volume = null;
+            await HandedOverAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The cleanup of a hand-over the server did not finish (it stopped in between): the PV gets its reclaim policy back.
+    /// Bound to a PVC, or reserved for one that exists, it stays that PVC's volume; otherwise it is deleted, as
+    /// <see cref="ReleaseAsync"/> does.
+    /// </summary>
+    internal static async Task GiveBackAsync(VolumeSnapshotFlow flow, string volume, string? data, CancellationToken cancellationToken)
+    {
+        var policy = (data is { Length: > 0 } ? (string?)System.Text.Json.Nodes.JsonNode.Parse(data)?["reclaimPolicy"] : null) is { Length: > 0 } recorded ? recorded : "Delete";
+        V1PersistentVolume pv;
+        try
+        {
+            pv = await flow.Client.CoreV1.ReadPersistentVolumeAsync(volume, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpOperationException ex) when (ex.Response?.StatusCode == HttpStatusCode.NotFound)
+        {
+            return;
+        }
+
+        if (pv.Spec?.PersistentVolumeReclaimPolicy != policy)
+        {
+            await flow.CallAsync($"giving the PV {volume} its reclaim policy {policy} back", () => flow.Client.CoreV1.PatchPersistentVolumeAsync(
+                new V1Patch(ReclaimPolicy(policy), V1Patch.PatchType.MergePatch), volume, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        }
+
+        var claim = pv.Spec?.ClaimRef;
+        var where = claim is null ? null : $"{claim.NamespaceProperty}/{claim.Name}";
+        if (pv.Status?.Phase == "Bound" || (claim is { NamespaceProperty: { Length: > 0 } ns, Name: { Length: > 0 } name }
+                && await ClaimExistsAsync(flow.Client, ns, name, cancellationToken).ConfigureAwait(false)))
+        {
+            flow.Log.Info($"The restored volume {volume} of PVC {where} has its reclaim policy {policy} back (cluster {flow.Cluster}; its restore stopped during the hand-over).");
+            return;
+        }
+
+        await flow.CallAsync($"deleting the PV {volume}", () => flow.Client.CoreV1.DeletePersistentVolumeAsync(volume, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        flow.Log.Info($"The restored volume {volume} did not reach its PVC{(where is null ? string.Empty : $" {where}")} before its restore stopped; it is deleted (cluster {flow.Cluster}).");
+    }
+
+    private static async Task<bool> ClaimExistsAsync(IKubernetes client, string ns, string name, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await client.CoreV1.ReadNamespacedPersistentVolumeClaimAsync(name, ns, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (HttpOperationException ex) when (ex.Response?.StatusCode == HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+    }
+
+    private async Task HandedOverAsync()
+    {
+        if (_handOver is { } id)
+        {
+            await _flow.Ledger.UpdateAsync(id, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);
+            _handOver = null;
         }
     }
 

@@ -41,6 +41,9 @@ public sealed class FakeKubernetesApi
     /// <summary>Called after an object was deleted, with its plural and the object.</summary>
     public Action<string, JsonObject>? Deleted { get; set; }
 
+    /// <summary>When it gives a message for (plural, object), creating that object is answered with 422 Invalid and the message.</summary>
+    public Func<string, JsonObject, string?>? Refuse { get; set; }
+
     /// <summary>What a SelfSubjectAccessReview answers for (verb, resource); everything by default.</summary>
     public Func<string, string, bool> Allowed { get; set; } = (_, _) => true;
 
@@ -337,6 +340,14 @@ public sealed class FakeKubernetesApi
         if (ns is not null)
         {
             metadata["namespace"] = ns;
+        }
+
+        if (Refuse?.Invoke(plural, item) is { } refusal)
+        {
+            return Json(HttpStatusCode.UnprocessableEntity, new JsonObject
+            {
+                ["kind"] = "Status", ["apiVersion"] = "v1", ["status"] = "Failure", ["reason"] = "Invalid", ["code"] = 422, ["message"] = refusal,
+            });
         }
 
         lock (_lock)

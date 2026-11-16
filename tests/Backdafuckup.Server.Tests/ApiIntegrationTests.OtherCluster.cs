@@ -85,6 +85,14 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal(["fast-csi", "nfs-client"], plan.StorageClasses);
         Assert.Equal(("missing", "vsphere-csi"), (Assert.Single(plan.Volumes).Path, plan.Volumes[0].TargetStorageClass));
         Assert.Contains(plan.Errors, e => e.Contains("map vsphere-csi to one of them", StringComparison.Ordinal));
+
+        // Of a chosen part only: a ConfigMap alone is not stopped by the PVC's class; the PVC chosen is.
+        var part = await Read<KubernetesRestorePlanDto>(client.PostAsJsonAsync($"/api/restore-points/{point.Id}/kubernetes/restore-plan",
+            new KubernetesRestorePlanRequestDto { TargetConnectionId = target.Id, Objects = ["ConfigMap/redis-config"] }, Ct));
+        Assert.Equal((0, 0), (part.Volumes.Count, part.Errors.Count));
+        part = await Read<KubernetesRestorePlanDto>(client.PostAsJsonAsync($"/api/restore-points/{point.Id}/kubernetes/restore-plan",
+            new KubernetesRestorePlanRequestDto { TargetConnectionId = target.Id, OnlyClaims = ["data-redis-test-0"] }, Ct));
+        Assert.Equal(("missing", 1), (Assert.Single(part.Volumes).Path, part.Errors.Count));
         plan = await PlanAsync(new() { ["vsphere-csi"] = "fast-csi" });
         Assert.Equal(("block", "fast-csi"), (Assert.Single(plan.Volumes).Path, plan.Volumes[0].TargetStorageClass));
         Assert.Empty(plan.Errors);
@@ -209,6 +217,14 @@ public sealed partial class ApiIntegrationTests
         Assert.DoesNotContain(nfs.All("persistentvolumeclaims"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
         Assert.DoesNotContain(nfs.All("pods"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
         Assert.DoesNotContain(nfs.All("secrets"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
+
+        // The hand-over was in the ledger while the PV was kept (Retain), and is done.
+        await using (var db = await _factory!.Services.GetRequiredService<Microsoft.EntityFrameworkCore.IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>().CreateDbContextAsync(Ct))
+        {
+            var handOver = Assert.Single(db.Artifacts.Where(a => a.Kind == KubernetesArtifactKinds.VolumeHandOver).ToList());
+            Assert.Equal((restoredVolume["metadata"]!["name"]!.ToString(), Backdafuckup.Core.Operations.ArtifactState.Done, """{"reclaimPolicy":"Delete"}"""),
+                (handOver.NativeId, handOver.State, handOver.Data));
+        }
 
         // The files of the volume are in its folder on the export, without lost+found; the root has the backed-up mode.
         var export = (string)restoredVolume["spec"]!["nfs"]!["path"]!;

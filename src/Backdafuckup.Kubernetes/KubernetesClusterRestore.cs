@@ -161,7 +161,10 @@ internal static class KubernetesClusterRestore
                     continue;
                 }
 
-                await PutAsync(item).ConfigureAwait(false);
+                if (await PutAsync(item).ConfigureAwait(false) && DefaultKey(item) is { } marked)
+                {
+                    defaults.TryAdd(marked, name); // the backup's second default of this kind stays out as well
+                }
             }
         }
 
@@ -260,9 +263,12 @@ internal static class KubernetesClusterRestore
     }
 
     /// <summary>The target's other default of the same kind, when <paramref name="item"/> is marked as default too.</summary>
-    private static string? SecondDefault(JsonObject item, Dictionary<string, string> defaults)
+    private static string? SecondDefault(JsonObject item, Dictionary<string, string> defaults) =>
+        DefaultKey(item) is { } key && defaults.TryGetValue(key, out var other) && other != KubernetesObjects.Name(item) ? other : null;
+
+    /// <summary>The default <paramref name="item"/> is marked as (a snapshot class per driver), or null when it is none.</summary>
+    private static string? DefaultKey(JsonObject item)
     {
-        var name = KubernetesObjects.Name(item);
         var annotations = item["metadata"]?["annotations"] as JsonObject;
         var (marked, key) = KubernetesObjects.Kind(item) switch
         {
@@ -272,7 +278,7 @@ internal static class KubernetesClusterRestore
             "VolumeSnapshotClass" => (IsMarked(annotations, DefaultSnapshotClass), $"VolumeSnapshotClass/{(string?)item["driver"]}"),
             _ => (false, string.Empty),
         };
-        return marked && defaults.TryGetValue(key, out var other) && other != name ? other : null;
+        return marked ? key : null;
     }
 
     private static bool IsMarked(IDictionary<string, string>? annotations, string key) =>

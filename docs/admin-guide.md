@@ -926,7 +926,7 @@ Kubernetes distributions, cluster managers and addons make objects of their own,
 
 **Into another cluster:** choose the cluster under *Where*.
 - **StorageClasses:** classes the target lacks start on its default class. Choose another one per class under *Volumes in the target*.
-- **Preview:** before anything is written, it shows each PVC's class and data path in the target, and what stops the restore. It warns about:
+- **Preview:** before anything is written, it shows each PVC's class and data path in the target, and what stops the restore. It covers what you chose: with apps or single PVCs, a PVC left out cannot stop the restore. It warns about:
   - owners on NFS;
   - what the files path loses;
   - CRDs whose operators are not part of the restore;
@@ -965,7 +965,7 @@ Kubernetes distributions, cluster managers and addons make objects of their own,
   - VolumeSnapshotClasses, when the target does not serve the snapshot API (its volumes then come back as files);
   - webhook configurations: with a stale CA and `failurePolicy: Fail` they would block the whole cluster. They are listed with the services they call; their operators make them again once their namespaces are back.
 - **A namespace whose backup failed in the run** comes from its newest older restore point, with a warning.
-- **When the cluster-scoped objects fail,** the namespaces are not restored.
+- **When the cluster-scoped step fails** (no right to bind roles, an unreadable restore point, the cluster out of reach), the namespaces are not restored. Objects that fail on their own are warnings: the namespaces follow, and the session ends as *Warning* at least.
 
 **Objects: compare and pick:**
 - **Compare:** the restore point against the live namespace. Each object is *same*, *changed*, *deleted since* or *new since*. The deployment revision annotation and a PVC's `volumeName` do not count as changes.

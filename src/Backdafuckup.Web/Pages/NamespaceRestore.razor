@@ -30,7 +30,7 @@ else
 
     <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
         <MudText Typo="Typo.subtitle1" Class="section-title mb-2">What to restore</MudText>
-        <MudToggleGroup T="string" @bind-Value="_what" SelectionMode="SelectionMode.SingleSelection" Color="Color.Primary" Outlined="true" CheckMark="false" Class="mb-3">
+        <MudToggleGroup T="string" Value="_what" ValueChanged="OnWhatChanged" SelectionMode="SelectionMode.SingleSelection" Color="Color.Primary" Outlined="true" CheckMark="false" Class="mb-3">
             <MudToggleItem T="string" Value="@WhatNamespace" Text="Whole namespace" />
             <MudToggleItem T="string" Value="@WhatApps" Text="Apps and workloads" />
             <MudToggleItem T="string" Value="@WhatClaims" Text="Single PVCs" />
@@ -252,6 +252,7 @@ else
     private readonly Dictionary<string, string> _map = new(StringComparer.Ordinal);
     private KubernetesRestorePlanDto? _plan;
     private bool _planning;
+    private int _planVersion;
     private string? _planError;
     private string _what = WhatNamespace;
     private string _target = string.Empty;
@@ -310,7 +311,30 @@ else
     private static string Summary(IEnumerable<string> kinds) =>
         string.Join(", ", kinds.GroupBy(k => k).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Count()} {g.Key}"));
 
-    private void Toggle(string key, bool on)
+    // The preview covers what is chosen: a PVC left out cannot stop the restore.
+    private async Task OnWhatChanged(string what)
+    {
+        _what = what;
+        await LoadPlanAsync();
+    }
+
+    private async Task Toggle(string key, bool on)
+    {
+        Choose(key, on);
+        await LoadPlanAsync();
+    }
+
+    private async Task ToggleApp(List<KubernetesObjectDto> workloads, bool on)
+    {
+        foreach (var workload in workloads)
+        {
+            Choose(Key(workload), on);
+        }
+
+        await LoadPlanAsync();
+    }
+
+    private void Choose(string key, bool on)
     {
         if (on)
         {
@@ -322,15 +346,7 @@ else
         }
     }
 
-    private void ToggleApp(List<KubernetesObjectDto> workloads, bool on)
-    {
-        foreach (var workload in workloads)
-        {
-            Toggle(Key(workload), on);
-        }
-    }
-
-    private void OnReplaceChanged(bool on)
+    private async Task OnReplaceChanged(bool on)
     {
         _replaceClaims = on;
         _confirm = string.Empty;
@@ -341,10 +357,12 @@ else
             {
                 _claims[claim] = claim;
             }
+
+            await LoadPlanAsync();
         }
     }
 
-    private void ToggleClaim(string claim, bool on)
+    private async Task ToggleClaim(string claim, bool on)
     {
         if (on)
         {
@@ -354,6 +372,8 @@ else
         {
             _claims.Remove(claim);
         }
+
+        await LoadPlanAsync();
     }
 
     /// <summary>The StorageClasses the restore point's PVCs come from.</summary>
@@ -422,23 +442,37 @@ else
             return;
         }
 
+        // Each change asks again; only the answer to the last one counts.
+        var version = ++_planVersion;
         _planning = true;
         _planError = null;
         try
         {
-            _plan = await Api.PostAsync<KubernetesRestorePlanDto>($"api/restore-points/{Id}/kubernetes/restore-plan", new KubernetesRestorePlanRequestDto
+            var plan = await Api.PostAsync<KubernetesRestorePlanDto>($"api/restore-points/{Id}/kubernetes/restore-plan", new KubernetesRestorePlanRequestDto
             {
                 TargetConnectionId = _cluster, TargetNamespace = _target.Trim(), StorageClassMap = new Dictionary<string, string>(_map),
+                Objects = _what == WhatApps ? [.. _objects] : null,
+                OnlyClaims = _what == WhatClaims ? [.. _claims.Keys] : null,
             });
+            if (version == _planVersion)
+            {
+                _plan = plan;
+            }
         }
         catch (ApiException ex)
         {
-            _plan = null;
-            _planError = ex.Message;
+            if (version == _planVersion)
+            {
+                _plan = null;
+                _planError = ex.Message;
+            }
         }
         finally
         {
-            _planning = false;
+            if (version == _planVersion)
+            {
+                _planning = false;
+            }
         }
     }
 

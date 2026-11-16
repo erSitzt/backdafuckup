@@ -68,11 +68,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
         _applier = new KubernetesApplier(client, plurals);
         var claims = _objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim").Select(KubernetesObjects.Key);
-        _selected = _options.OnlyClaims is { } only
-            ? [.. only.Select(c => $"PersistentVolumeClaim/{c}")]
-            : _options.Objects is { } chosen
-                ? _options.ExactObjects ? chosen.ToHashSet(StringComparer.Ordinal) : KubernetesObjects.Expand(chosen, _objects)
-                : [.. _objects.Where(o => KubernetesObjects.Namespace(o) is not null).Select(KubernetesObjects.Key)];
+        _selected = KubernetesObjects.Selection(_objects, _options.OnlyClaims, _options.Objects, _options.ExactObjects);
     }
 
     private IOperationLog Log => _flow.Log;

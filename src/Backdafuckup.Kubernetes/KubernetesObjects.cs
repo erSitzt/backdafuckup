@@ -202,6 +202,17 @@ internal static class KubernetesObjects
         return [.. keys.Order(StringComparer.Ordinal)];
     }
 
+    /// <summary>
+    /// The namespaced objects (<c>Kind/name</c>) a restore brings back: only the PVCs named, or the objects chosen (and what
+    /// their workloads need, unless <paramref name="exact"/>), or all of them.
+    /// </summary>
+    public static HashSet<string> Selection(IReadOnlyList<JsonObject> all, IEnumerable<string>? onlyClaims, IEnumerable<string>? chosen, bool exact = false) =>
+        onlyClaims is not null
+            ? onlyClaims.Select(c => $"PersistentVolumeClaim/{c}").ToHashSet(StringComparer.Ordinal)
+            : chosen is not null
+                ? exact ? chosen.ToHashSet(StringComparer.Ordinal) : Expand(chosen, all)
+                : all.Where(o => Namespace(o) is not null).Select(Key).ToHashSet(StringComparer.Ordinal);
+
     /// <summary>The selected objects and everything their workloads need.</summary>
     public static HashSet<string> Expand(IEnumerable<string> selected, IReadOnlyList<JsonObject> all)
     {

@@ -27,9 +27,11 @@ public sealed record KubernetesVolumePlan(string Claim, string? SourceStorageCla
 /// <summary>Plans a namespace restore into a cluster (read only): what a restore would check, and what to look at first.</summary>
 public interface IKubernetesRestorePlanner
 {
+    /// <param name="chosen">Only these objects and what they need, as the restore's <c>Objects</c>; null: all.</param>
+    /// <param name="onlyClaims">Only these PVCs, as the restore's <c>OnlyClaims</c>; null: all.</param>
     Task<KubernetesRestorePlan> PlanRestoreAsync(
         KubernetesNamespaceDescriptor descriptor, byte[] objects, string targetNamespace, IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster,
-        CancellationToken cancellationToken);
+        IReadOnlyCollection<string>? chosen, IReadOnlyCollection<string>? onlyClaims, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -43,8 +45,12 @@ internal static class KubernetesRestorePlanner
 
     public static async Task<KubernetesRestorePlan> PlanAsync(
         IKubernetes client, string cluster, KubernetesNamespaceDescriptor descriptor, IReadOnlyList<JsonObject> objects, string targetNamespace,
-        IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster, CancellationToken cancellationToken)
+        IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster, IReadOnlyCollection<string>? chosen, IReadOnlyCollection<string>? onlyClaims,
+        CancellationToken cancellationToken)
     {
+        // What the restore brings back, as it chooses: a PVC or workload left out cannot stop it.
+        var selected = KubernetesObjects.Selection(objects, onlyClaims, chosen);
+        objects = [.. objects.Where(o => KubernetesObjects.Namespace(o) is null || selected.Contains(KubernetesObjects.Key(o)))];
         var rewrite = new ObjectRewrite(storageClassMap, otherCluster, KubernetesPlatformSet.Recorded(descriptor.Platforms));
         var storage = await KubernetesTargetStorage.ReadAsync(client, cancellationToken).ConfigureAwait(false);
         var warnings = new List<string>();

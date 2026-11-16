@@ -81,9 +81,10 @@ internal sealed class KubernetesSession(
 
     public Task<KubernetesRestorePlan> PlanRestoreAsync(
         KubernetesNamespaceDescriptor descriptor, byte[] objects, string targetNamespace, IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster,
-        CancellationToken cancellationToken) =>
+        IReadOnlyCollection<string>? chosen, IReadOnlyCollection<string>? onlyClaims, CancellationToken cancellationToken) =>
         KubernetesRestorePlanner.PlanAsync(
-            client, settings.ClusterName(), descriptor, [.. KubernetesResources.Read(objects)], targetNamespace, storageClassMap, otherCluster, cancellationToken);
+            client, settings.ClusterName(), descriptor, [.. KubernetesResources.Read(objects)], targetNamespace, storageClassMap, otherCluster, chosen, onlyClaims,
+            cancellationToken);
 
     public async Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken)
     {
@@ -294,6 +295,12 @@ internal sealed class KubernetesSession(
         {
             await WorkloadPause.ResumeAsync(flow, artifact.NativeId, artifact.Data, cancellationToken).ConfigureAwait(false);
             log.Info($"Workload {artifact.NativeId} scaled back in cluster {settings.ClusterName()} (a PVC swap did not finish).");
+            return;
+        }
+
+        if (artifact.Kind == KubernetesArtifactKinds.VolumeHandOver)
+        {
+            await VolumeFilesImport.GiveBackAsync(flow, artifact.NativeId, artifact.Data, cancellationToken).ConfigureAwait(false);
             return;
         }
 

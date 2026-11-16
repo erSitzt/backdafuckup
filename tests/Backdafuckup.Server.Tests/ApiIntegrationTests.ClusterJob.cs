@@ -73,6 +73,19 @@ public sealed partial class ApiIntegrationTests
         });
         _cluster.Add("apis/rbac.authorization.k8s.io/v1", "clusterroles", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "system:node" } });
         _cluster.Add("apis/scheduling.k8s.io/v1", "priorityclasses", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "batch-low" }, ["value"] = 100 });
+
+        // A RuntimeClass the target refuses: a warning, and the namespaces still follow.
+        _cluster.Add("apis/node.k8s.io/v1", "runtimeclasses", new JsonObject { ["metadata"] = new JsonObject { ["name"] = "gvisor" }, ["handler"] = "runsc" });
+
+        // Two default IngressClasses, which Kubernetes allows: the target gets one default only.
+        foreach (var name in new[] { "nginx-a", "nginx-b" })
+        {
+            _cluster.Add("apis/networking.k8s.io/v1", "ingressclasses", new JsonObject
+            {
+                ["metadata"] = new JsonObject { ["name"] = name, ["annotations"] = new JsonObject { ["ingressclass.kubernetes.io/is-default-class"] = "true" } },
+                ["spec"] = new JsonObject { ["controller"] = "k8s.io/ingress-nginx" },
+            });
+        }
         _cluster.Add("apis/admissionregistration.k8s.io/v1", "validatingwebhookconfigurations", new JsonObject
         {
             ["metadata"] = new JsonObject { ["name"] = "cert-manager-webhook" },
@@ -111,6 +124,7 @@ public sealed partial class ApiIntegrationTests
         // The target: a cluster with only NFS. Its classes take the volumes; the run comes back there.
         var nfs = NfsCluster("uid-kube-system-dr", Path.Combine(_root, "dr-export"));
         _clusters["10.26.4.10"] = nfs;
+        nfs.Refuse = (plural, _) => plural == "runtimeclasses" ? "RuntimeClass.node.k8s.io \"gvisor\" is invalid: handler: Invalid value: \"runsc\": no such handler" : null;
         var target = await AddClusterAsync(client, "rke2-dr", "10.26.4.10");
         var started = await Read<StartedDto>(client.PostAsJsonAsync("/api/kubernetes/cluster-restores", new ClusterRestoreRequestDto
         {
@@ -118,13 +132,15 @@ public sealed partial class ApiIntegrationTests
         }, Ct));
         var session = await WaitForSessionAsync(client, started.SessionId);
         var log = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{started.SessionId}/log", Ct))!.Select(l => $"{l.Severity}: {l.Message}"));
-        Assert.True(session.Session.State is "Succeeded" or "Warning", log);
+        Assert.True(session.Session.State == "Warning", log);
+        Assert.StartsWith("Cluster-scoped objects restored, 1 failed; ", session.Session.Summary, StringComparison.Ordinal);
+        Assert.True(log.Contains("RuntimeClass/gvisor could not be restored in cluster 10.26.4.10:", StringComparison.Ordinal), log);
         Assert.Equal(["@cluster", "bdfu-spike", "web"], session.Tasks.OrderBy(t => t.StartedUtc).Select(t => t.ObjectNativeId));
         Assert.Contains("StorageClass vsphere-csi is not created: its volumes go into the StorageClass nfs-client of cluster", log, StringComparison.Ordinal);
         Assert.Contains("Webhook configurations are not restored", log, StringComparison.Ordinal);
         Assert.True(log.Contains("VolumeSnapshotClass vsphere-snapshots is not created: cluster 10.26.4.10 does not serve the snapshot API (snapshot.storage.k8s.io/v1)", StringComparison.Ordinal), log);
         Assert.True(log.Contains("1 made by Rancher left out", StringComparison.Ordinal), log);
-        Assert.Equal("Succeeded", session.Tasks.Single(t => t.ObjectNativeId == "@cluster").State);
+        Assert.Equal("Warning", session.Tasks.Single(t => t.ObjectNativeId == "@cluster").State);
         Assert.Contains("ValidatingWebhookConfiguration/cert-manager-webhook (calls cert-manager/cert-manager-webhook)", log, StringComparison.Ordinal);
 
         // Cluster-scoped first: the CRD and its object, the role, the class; never the webhook, the system role or the mapped class.
@@ -132,6 +148,9 @@ public sealed partial class ApiIntegrationTests
         Assert.NotNull(nfs.Find("clusterissuers", null, "letsencrypt"));
         Assert.NotNull(nfs.Find("clusterroles", null, "monitoring-reader"));
         Assert.NotNull(nfs.Find("priorityclasses", null, "batch-low"));
+        Assert.NotNull(nfs.Find("ingressclasses", null, "nginx-a"));
+        Assert.Null(nfs.Find("ingressclasses", null, "nginx-b"));
+        Assert.True(log.Contains("IngressClass/nginx-b is not created: it is marked as the default, and cluster 10.26.4.10 has its default IngressClass nginx-a already.", StringComparison.Ordinal), log);
         Assert.Null(nfs.Find("clusterroles", null, "system:node"));
         Assert.Null(nfs.Find("validatingwebhookconfigurations", null, "cert-manager-webhook"));
         Assert.Null(nfs.Find("storageclasses", null, "vsphere-csi"));

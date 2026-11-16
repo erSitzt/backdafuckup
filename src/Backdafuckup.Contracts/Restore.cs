@@ -131,6 +131,12 @@ public sealed record KubernetesRestorePlanRequestDto
     public string? TargetNamespace { get; init; }
 
     public Dictionary<string, string> StorageClassMap { get; init; } = [];
+
+    /// <summary>As the restore's: only these objects (<c>Kind/name</c>) and what they need. Null: the whole namespace.</summary>
+    public List<string>? Objects { get; init; }
+
+    /// <summary>As the restore's: only these PVCs.</summary>
+    public List<string>? OnlyClaims { get; init; }
 }
 
 /// <summary>How a restore would go: each PVC's class and data path in the target, what to look at first, and what stops it.</summary>

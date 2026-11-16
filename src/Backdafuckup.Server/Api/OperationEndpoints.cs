@@ -374,7 +374,8 @@ public static class OperationEndpoints
             try
             {
                 await using var session = await connections.OpenAsync(cluster, ct);
-                var plan = await ((Backdafuckup.Kubernetes.IKubernetesRestorePlanner)session).PlanRestoreAsync(space!, content!, target, request.StorageClassMap, other, ct);
+                var plan = await ((Backdafuckup.Kubernetes.IKubernetesRestorePlanner)session).PlanRestoreAsync(
+                    space!, content!, target, request.StorageClassMap, other, request.Objects, request.OnlyClaims, ct);
                 return Results.Ok(new KubernetesRestorePlanDto(
                     cluster, plan.Cluster, plan.TargetNamespace, plan.OtherCluster, plan.NamespaceExists, plan.StorageClasses, plan.DefaultStorageClass,
                     [.. plan.Volumes.Select(v => new KubernetesVolumePlanDto(v.Claim, v.SourceStorageClass, v.TargetStorageClass, v.Path, v.Reason, v.SizeBytes))],
@@ -384,7 +385,7 @@ public static class OperationEndpoints
             {
                 return Results.Problem($"Cluster {connection.DisplayName} could not be read for the plan: {ex.Message}", statusCode: StatusCodes.Status502BadGateway);
             }
-        }).WithDescription("Previews a namespace restore into a cluster (the restore point's or another one, with StorageClasses mapped): each PVC's class and data path there (block, files, objects only, missing), warnings and what would stop it. Writes nothing.");
+        }).WithDescription("Previews a namespace restore into a cluster (the restore point's or another one, with StorageClasses mapped): each PVC's class and data path there (block, files, objects only, missing), warnings and what would stop it; with Objects or OnlyClaims, of what that restore brings back only. Writes nothing.");
 
         points.MapGet("/{id:guid}/kubernetes/object", async (Guid id, string kind, string name, bool? live, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, CancellationToken ct) =>
         {

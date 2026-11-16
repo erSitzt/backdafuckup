@@ -24,6 +24,12 @@ public static class KubernetesArtifactKinds
     /// <summary>A read-only copy of a PV for reading its volume file by file (cluster-scoped; id: its name).</summary>
     public const string PersistentVolume = "k8s.PersistentVolume";
 
+    /// <summary>
+    /// A restored volume's PV kept (Retain) while it changes from the work PVC to the target PVC (id: its name, data: its
+    /// reclaim policy); its cleanup gives the policy back, and deletes the PV when no PVC took it.
+    /// </summary>
+    public const string VolumeHandOver = "k8s.VolumeHandOver";
+
     /// <summary>A workload scaled to 0 for a PVC swap (id <c>namespace/Kind/name</c>, data: its replicas); its cleanup scales it back.</summary>
     public const string ScaledWorkload = "k8s.ScaledWorkload";
 }
