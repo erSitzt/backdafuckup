@@ -368,9 +368,18 @@ public sealed partial class CoreJsonContext : JsonSerializerContext;
 /// <summary>Contents of <c>repo.json</c>, which makes a repository self-describing.</summary>
 public sealed record RepositoryDescriptor
 {
-    public const int CurrentFormatVersion = 1;
+    /// <summary>One file per chunk under <c>chunks/</c>.</summary>
+    public const int LooseFormatVersion = 1;
+
+    /// <summary>Chunks in pack files with an index (<c>packs/</c>, <c>index/</c>); loose chunks stay readable.</summary>
+    public const int PackFormatVersion = 2;
+
+    public const int CurrentFormatVersion = PackFormatVersion;
 
     public int FormatVersion { get; init; } = CurrentFormatVersion;
+
+    /// <summary>Pack settings; set exactly when <see cref="FormatVersion"/> is <see cref="PackFormatVersion"/>.</summary>
+    public RepositoryPacks? Packs { get; init; }
 
     public required Guid RepositoryId { get; init; }
 
@@ -384,3 +393,6 @@ public sealed record RepositoryDescriptor
 }
 
 public sealed record RepositoryCompression(string Codec, int Level);
+
+/// <param name="TargetSize">Size at which a pack is sealed and the next one begins, in bytes.</param>
+public sealed record RepositoryPacks(long TargetSize);

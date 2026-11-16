@@ -21,9 +21,12 @@ internal static class ApiMapping
 
     public static InventoryItemDto ToDto(this InventoryEntry e) => new(e.Kind.ToString(), e.NativeId, e.Name, e.ParentNativeId, e.Properties);
 
-    public static RepositoryDto ToDto(this BackupRepositoryEntity r, int restorePoints, long logicalBytes) => new(
+    /// <param name="format">Format version from the repository's repo.json (0 = unknown).</param>
+    /// <param name="packSize">Pack size of a format 2 repository.</param>
+    /// <param name="packingUnfinished">Format 2 with loose chunks left from format 1.</param>
+    public static RepositoryDto ToDto(this BackupRepositoryEntity r, int restorePoints, long logicalBytes, int format = 0, long packSize = 0, bool packingUnfinished = false) => new(
         r.Id, r.Name, r.Kind.ToString(), r.Path, r.RepositoryUuid, r.ChunkSize, r.CompressionLevel, r.MaxConcurrentTasks,
-        r.State.ToString(), r.TotalBytes, r.FreeBytes, restorePoints, logicalBytes, r.LastError);
+        r.State.ToString(), r.TotalBytes, r.FreeBytes, restorePoints, logicalBytes, r.LastError, format, packSize, packingUnfinished);
 
     public static ScheduleDto ToDto(this JobSchedule s) => new(
         s.Kind.ToString(),

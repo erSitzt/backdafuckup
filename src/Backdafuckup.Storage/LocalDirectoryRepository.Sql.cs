@@ -309,6 +309,7 @@ public sealed partial class LocalDirectoryRepository
                 }
             }
 
+            await SealForCommitAsync(cancellationToken).ConfigureAwait(false);
             FileSystemSync.SyncFileSystem(Repository.Root);
             var json = JsonSerializer.SerializeToUtf8Bytes(manifest, SqlBackupJsonContext.Default.SqlBackupManifest);
             await AtomicFile.WriteAsync(Repository._tempDirectory, Path.Combine(directory, ManifestFileName), json, overwrite: false, cancellationToken).ConfigureAwait(false);
@@ -319,13 +320,14 @@ public sealed partial class LocalDirectoryRepository
             return new SqlBackupInfo(SqlBackupId, directory, manifest);
         }
 
-        public override ValueTask DisposeAsync()
+        public override async ValueTask DisposeAsync()
         {
             if (!Close())
             {
-                return ValueTask.CompletedTask;
+                return;
             }
 
+            await FlushPacksAsync().ConfigureAwait(false);
             if (!IsCommitted)
             {
                 try
@@ -345,7 +347,6 @@ public sealed partial class LocalDirectoryRepository
 
             _writeLock.Dispose();
             Repository.OnWriterClosed(this);
-            return ValueTask.CompletedTask;
         }
 
         private static async Task<int> FillAsync(Stream content, Memory<byte> buffer, CancellationToken cancellationToken)

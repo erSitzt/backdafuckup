@@ -144,8 +144,11 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Queues garbage collection of a repository unless one is already waiting.</summary>
-    public async Task<Guid> EnqueueMaintenanceAsync(Guid repositoryId, string repositoryName, string triggeredBy, CancellationToken cancellationToken)
+    /// <summary>
+    /// Queues garbage collection of a repository unless one is already waiting; <paramref name="request"/> adds the
+    /// conversion to pack files (also to a session that is already waiting).
+    /// </summary>
+    public async Task<Guid> EnqueueMaintenanceAsync(Guid repositoryId, string repositoryName, string triggeredBy, CancellationToken cancellationToken, MaintenanceRequest? request = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var queued = await db.Sessions.FirstOrDefaultAsync(
@@ -153,6 +156,12 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
             cancellationToken).ConfigureAwait(false);
         if (queued is not null)
         {
+            if (request is not null)
+            {
+                queued.Parameters = JsonSerializer.Serialize(request);
+                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return queued.Id;
         }
 
@@ -160,10 +169,11 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         {
             Kind = SessionKind.RepositoryMaintenance,
             RepositoryId = repositoryId,
-            Name = $"Maintenance {repositoryName}",
+            Name = request?.ConvertToPacks == true ? $"Convert {repositoryName} to pack files" : $"Maintenance {repositoryName}",
             TriggeredBy = triggeredBy,
             State = SessionState.Queued,
             CreatedUtc = time.GetUtcNow(),
+            Parameters = request is null ? null : JsonSerializer.Serialize(request),
         };
         return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
     }

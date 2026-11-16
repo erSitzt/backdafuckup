@@ -9,20 +9,25 @@ namespace Backdafuckup.Storage;
 /// <summary>
 /// Backup repository in a directory on a local (or locally mounted) volume.
 /// <code>
-/// &lt;root&gt;/repo.json                         self-description (format, chunk size, compression)
+/// &lt;root&gt;/repo.json                         self-description (format, chunk size, compression, pack size)
 /// &lt;root&gt;/.owner.lock                       held exclusively by the owning server process
-/// &lt;root&gt;/chunks/&lt;hex[0..4]&gt;/&lt;sha256hex&gt;    write-once chunk files (see ChunkCodec)
+/// &lt;root&gt;/packs/&lt;hh&gt;/&lt;id&gt;.pack            format 2: sealed, immutable packs of chunks (see PackFormat)
+/// &lt;root&gt;/incoming/                         format 2: packs being written (removed when the repository opens)
+/// &lt;root&gt;/index/                            format 2: index segments, chunk id → pack and offset (see PackStore)
+/// &lt;root&gt;/chunks/&lt;hex[0..4]&gt;/&lt;sha256hex&gt;    format 1 (and not yet packed chunks of a converted repository): one file per chunk
 /// &lt;root&gt;/restore-points/&lt;vm&gt;/&lt;ts&gt;_&lt;id&gt;/   manifest.json (commit point), disk-*.idx, blobs
 /// &lt;root&gt;/sql-backups/&lt;vm&gt;/&lt;ts&gt;_&lt;id&gt;/      manifest.json (commit point), file-*.idx (SQL Server backup files)
 /// &lt;root&gt;/tmp/                              staging for atomic writes
 /// </code>
 /// Garbage collection is mark-and-sweep: chunks referenced by committed manifests, by active writers or by
-/// writers that committed while GC was running are kept; deletions of restore points wait for GC.
+/// writers that committed while GC was running are kept; deletions of restore points wait for GC. In format 2 it
+/// deletes packs without referenced chunks and repacks packs that are mostly unreferenced.
 /// </summary>
 public sealed partial class LocalDirectoryRepository : IBackupRepository
 {
     public const int DefaultChunkSize = 1024 * 1024;
     public const int DefaultCompressionLevel = 3;
+    public const long DefaultPackTargetSize = 64L * 1024 * 1024;
     public const string DescriptorFileName = "repo.json";
     public const string ManifestFileName = "manifest.json";
     private const string DeletedManifestFileName = "manifest.deleted";
@@ -34,7 +39,9 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
     private readonly string _sqlBackupsDirectory;
     private readonly string _tempDirectory;
     private readonly FileStream _ownerLock;
-    private readonly RepositoryDescriptor _descriptor;
+    private RepositoryDescriptor _descriptor;
+    private volatile PackStore? _packs;
+    private volatile bool _looseMayExist = true;
     private readonly TimeProvider _time;
     private readonly Lock[] _stripes = Enumerable.Range(0, StripeCount).Select(_ => new Lock()).ToArray();
     private readonly ConcurrentDictionary<Guid, string> _restorePoints = new();
@@ -73,7 +80,8 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
         CancellationToken cancellationToken,
         int chunkSize = DefaultChunkSize,
         int compressionLevel = DefaultCompressionLevel,
-        TimeProvider? time = null)
+        TimeProvider? time = null,
+        long packTargetSize = DefaultPackTargetSize)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         if (chunkSize < 64 * 1024 || chunkSize > 16 * 1024 * 1024 || (chunkSize % (64 * 1024)) != 0)
@@ -83,6 +91,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
 
         ArgumentOutOfRangeException.ThrowIfLessThan(compressionLevel, 0);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(compressionLevel, 19);
+        CheckPackTargetSize(packTargetSize, chunkSize, allowLoose: true);
 
         var root = Path.GetFullPath(path);
         Directory.CreateDirectory(root);
@@ -91,17 +100,28 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
             throw new InvalidOperationException($"'{root}' already contains a backup repository. Import it instead of creating a new one.");
         }
 
-        foreach (var sub in new[] { "chunks", "restore-points", "sql-backups", "tmp" })
+        var packed = packTargetSize > 0;
+        foreach (var sub in new[] { packed ? null : "chunks", "restore-points", "sql-backups", "tmp" })
         {
-            Directory.CreateDirectory(Path.Combine(root, sub));
+            if (sub is not null)
+            {
+                Directory.CreateDirectory(Path.Combine(root, sub));
+            }
+        }
+
+        if (packed)
+        {
+            PackStore.CreateDirectories(root);
         }
 
         var descriptor = new RepositoryDescriptor
         {
+            FormatVersion = packed ? RepositoryDescriptor.PackFormatVersion : RepositoryDescriptor.LooseFormatVersion,
             RepositoryId = Guid.CreateVersion7(),
             CreatedUtc = (time ?? TimeProvider.System).GetUtcNow(),
             ChunkSize = chunkSize,
             Compression = new RepositoryCompression(compressionLevel > 0 ? "zstd" : "none", compressionLevel),
+            Packs = packed ? new RepositoryPacks(packTargetSize) : null,
         };
         var json = JsonSerializer.SerializeToUtf8Bytes(descriptor, CoreJsonContext.Default.RepositoryDescriptor);
         await AtomicFile.WriteAsync(Path.Combine(root, "tmp"), Path.Combine(root, DescriptorFileName), json, overwrite: false, cancellationToken).ConfigureAwait(false);
@@ -121,9 +141,14 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
 
         var descriptor = JsonSerializer.Deserialize(await File.ReadAllBytesAsync(descriptorPath, cancellationToken).ConfigureAwait(false), CoreJsonContext.Default.RepositoryDescriptor)
             ?? throw new InvalidDataException($"Invalid {DescriptorFileName}.");
-        if (descriptor.FormatVersion != RepositoryDescriptor.CurrentFormatVersion)
+        if (descriptor.FormatVersion is not (RepositoryDescriptor.LooseFormatVersion or RepositoryDescriptor.PackFormatVersion))
         {
-            throw new NotSupportedException($"Repository format version {descriptor.FormatVersion} is not supported.");
+            throw new NotSupportedException($"Repository format version {descriptor.FormatVersion} of '{root}' is not supported by this version.");
+        }
+
+        if (descriptor.FormatVersion == RepositoryDescriptor.PackFormatVersion && descriptor.Packs is null)
+        {
+            throw new InvalidDataException($"{DescriptorFileName} of '{root}' has format version 2 but no pack settings.");
         }
 
         FileStream ownerLock;
@@ -140,6 +165,10 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
         try
         {
             repository.Recover();
+            if (descriptor.FormatVersion == RepositoryDescriptor.PackFormatVersion)
+            {
+                await repository.OpenPacksAsync(cancellationToken).ConfigureAwait(false);
+            }
         }
         catch
         {
@@ -247,7 +276,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
 
             // Mark: every chunk referenced by a committed manifest. Deletions cannot run concurrently (GC mutex),
             // and pinned base restore points of running backups are therefore always included.
-            var marked = new HashSet<ChunkId>();
+            var marked = new ChunkMarkSet();
 
             // File trees: listings already walked (identical subtrees are one listing). Kept apart from the marked chunks on
             // purpose: a file whose bytes equal a listing marks that chunk, which must not stop its subtree from being walked.
@@ -313,52 +342,69 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
                 }
             }
 
-            // Sweep.
+            // Sweep loose chunk files (format 1, and chunks of a converted repository that are not packed yet).
             long scanned = 0, deleted = 0, freed = 0;
             var cutoff = startedUtc - GcSafetyWindow;
-            foreach (var file in Directory.EnumerateFiles(_chunksDirectory, "*", SearchOption.AllDirectories))
+            if (_packs is null || _looseMayExist)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                scanned++;
-                var name = Path.GetFileName(file);
-                if (name.Length != ChunkId.Size * 2 || !IsHex(name))
+                foreach (var file in Directory.EnumerateFiles(_chunksDirectory, "*", SearchOption.AllDirectories))
                 {
-                    continue;
-                }
-
-                var id = ChunkId.Parse(name);
-                if (marked.Contains(id))
-                {
-                    continue;
-                }
-
-                lock (_stripes[id.Stripe(StripeCount)])
-                {
-                    if (IsProtected(id))
+                    cancellationToken.ThrowIfCancellationRequested();
+                    scanned++;
+                    var name = Path.GetFileName(file);
+                    if (name.Length != ChunkId.Size * 2 || !IsHex(name))
                     {
                         continue;
                     }
 
-                    var info = new FileInfo(file);
-                    if (!info.Exists || info.LastWriteTimeUtc > cutoff)
+                    var id = ChunkId.Parse(name);
+                    if (marked.Contains(id))
                     {
                         continue;
                     }
 
-                    freed += info.Length;
-                    info.Delete();
-                    deleted++;
-                }
+                    lock (_stripes[id.Stripe(StripeCount)])
+                    {
+                        if (IsProtected(id))
+                        {
+                            continue;
+                        }
 
-                if (deleted % 10_000 == 1)
-                {
-                    progress?.Report($"Deleted {deleted} unreferenced chunks ({scanned} scanned)");
+                        var info = new FileInfo(file);
+                        if (!info.Exists || info.LastWriteTimeUtc > cutoff)
+                        {
+                            continue;
+                        }
+
+                        freed += info.Length;
+                        info.Delete();
+                        deleted++;
+                    }
+
+                    if (deleted % 10_000 == 1)
+                    {
+                        progress?.Report($"Deleted {deleted} unreferenced chunk files in '{_chunksDirectory}' ({scanned} scanned)");
+                    }
                 }
             }
 
+            var packResult = _packs is { } packs
+                ? await CollectPacksAsync(packs, marked, cutoff, progress, cancellationToken).ConfigureAwait(false)
+                : default;
+
             PurgeTemp(olderThan: TimeSpan.FromHours(1));
-            progress?.Report($"Garbage collection finished: {deleted} of {scanned} chunks deleted, {freed} bytes freed.");
-            return new GcResult(scanned, deleted, freed, marked.Count);
+            var result = new GcResult(
+                scanned + packResult.Scanned,
+                deleted + packResult.Dropped,
+                freed + packResult.Freed,
+                marked.Count,
+                packResult.PacksDeleted,
+                packResult.BytesRepacked,
+                packResult.UnusedBytes);
+            progress?.Report(
+                $"Garbage collection finished: {result.DeletedChunks} of {result.ScannedChunks} chunks removed, {result.FreedBytes} bytes freed" +
+                (_packs is null ? "." : $", {result.PacksDeleted} pack(s) deleted, {result.BytesRepacked} bytes repacked, {result.UnusedBytes} unused bytes left in packs."));
+            return result;
         }
         finally
         {
@@ -473,6 +519,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
             await writer.DisposeAsync().ConfigureAwait(false);
         }
 
+        _packs?.Dispose();
         await _ownerLock.DisposeAsync().ConfigureAwait(false);
         _gcMutex.Dispose();
     }
@@ -571,10 +618,38 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
 
     private async Task CheckChunkHeaderAsync(ChunkId id, CancellationToken cancellationToken)
     {
-        var path = ChunkPath(id.ToHex());
-        if (!File.Exists(path))
+        if (_packs is { } packs && packs.TryLocate(id, out var location))
         {
-            throw new ChunkMissingException(id);
+            var packed = new byte[ChunkCodec.HeaderSize];
+            try
+            {
+                await packs.ReadRangeAsync(location.Pack, location.Offset, packed, cancellationToken).ConfigureAwait(false);
+                var (_, raw, payloadLength) = ChunkCodec.ReadHeader(id, packed);
+                if (ChunkCodec.HeaderSize + payloadLength != location.StoredLength || raw != location.RawLength)
+                {
+                    throw new ChunkCorruptException(id, $"header does not match the index (pack '{location.Pack.Path}', offset {location.Offset})");
+                }
+            }
+            catch (ChunkCorruptException ex) when (!ex.Reason.Contains("(pack '", StringComparison.Ordinal))
+            {
+                throw new ChunkCorruptException(id, $"{ex.Reason} (pack '{location.Pack.Path}', offset {location.Offset})");
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+            {
+                throw new ChunkMissingException(id, Root, $"pack '{location.Pack.Path}' is gone");
+            }
+            catch (InvalidDataException ex)
+            {
+                throw new ChunkCorruptException(id, $"{ex.Message} (pack '{location.Pack.Path}', offset {location.Offset})");
+            }
+
+            return;
+        }
+
+        var path = ChunkPath(id.ToHex());
+        if ((_packs is not null && !_looseMayExist) || !File.Exists(path))
+        {
+            throw new ChunkMissingException(id, Root);
         }
 
         var header = new byte[ChunkCodec.HeaderSize];
@@ -583,7 +658,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
         var (_, _, payload) = ChunkCodec.ReadHeader(id, header);
         if (stream.Length != ChunkCodec.HeaderSize + payload)
         {
-            throw new ChunkCorruptException(id, "truncated");
+            throw new ChunkCorruptException(id, $"truncated (file '{path}')");
         }
     }
 

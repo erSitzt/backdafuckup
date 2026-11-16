@@ -66,6 +66,15 @@ public sealed class StateMetrics
         meter.CreateObservableGauge("bdfu_repository_stored_bytes", () => Repositories(r => r.StoredBytes), "By",
             "New data stored by the repository's VM restore points (sum at creation; deduplicated data counts once).");
         meter.CreateObservableGauge("bdfu_repository_restore_points", () => Repositories(r => r.Points), description: "VM restore points in the repository.");
+        meter.CreateObservableGauge("bdfu_repository_format", () => Repositories(r => r.Format), description: "On-disk format of the repository: 1 = one file per chunk, 2 = pack files.");
+        meter.CreateObservableGauge("bdfu_repository_packs", () => Repositories(r => r.Packs?.Packs), description: "Pack files of the repository (format 2).");
+        meter.CreateObservableGauge("bdfu_repository_pack_bytes", () => Repositories(r => r.Packs?.PackBytes), "By", "Size of the repository's pack files (format 2).");
+        meter.CreateObservableGauge("bdfu_repository_unused_bytes", () => Repositories(r => r.Packs?.UnusedBytes), "By",
+            "Unreferenced bytes left in packs after the last garbage collection (not worth repacking yet).");
+        meter.CreateObservableGauge("bdfu_repository_index_entries", () => Repositories(r => r.Packs?.IndexEntries), description: "Chunks in the repository's pack index.");
+        meter.CreateObservableGauge("bdfu_repository_index_memory_bytes", () => Repositories(r => r.Packs?.IndexMemoryBytes), "By", "Memory the repository's pack index uses (approximate).");
+        meter.CreateObservableGauge("bdfu_repository_packing_unfinished", () => Repositories(r => r.Packs is null ? null : r.Packs.LooseChunksMayExist ? 1 : 0),
+            description: "1 while a converted repository still has loose chunks of format 1 to pack.");
 
         meter.CreateObservableGauge("bdfu_agents", () =>
             new[] { new Measurement<int>(_catalog.AgentsOnline, Tag("state", "online")), new Measurement<int>(_catalog.AgentsOffline, Tag("state", "offline")) },
@@ -177,7 +186,7 @@ public sealed class StateMetrics
 
     internal sealed record ResultRow(string Job, string Vm, string Result);
 
-    internal sealed record RepositoryRow(string Name, long? SizeBytes, long? FreeBytes, long StoredBytes, long Points);
+    internal sealed record RepositoryRow(string Name, long? SizeBytes, long? FreeBytes, long StoredBytes, long Points, long? Format = null, Backdafuckup.Storage.RepositoryPackStats? Packs = null);
 
     internal sealed record AgentRow(string Name, long LastContactUnix);
 
@@ -286,11 +295,18 @@ public sealed class MetricsStateService(
         var repositoryRows = new List<StateMetrics.RepositoryRow>();
         foreach (var repository in await db.Repositories.AsNoTracking().ToListAsync(cancellationToken).ConfigureAwait(false))
         {
-            long? size = null, free = null;
+            long? size = null, free = null, format = null;
+            Backdafuckup.Storage.RepositoryPackStats? packs = null;
             try
             {
-                var stats = (await repositories.GetAsync(repository.Id, cancellationToken).ConfigureAwait(false)).GetStorageStats();
+                var open = await repositories.GetAsync(repository.Id, cancellationToken).ConfigureAwait(false);
+                var stats = open.GetStorageStats();
                 (size, free) = (stats.TotalBytes, stats.FreeBytes);
+                if (open is Backdafuckup.Storage.LocalDirectoryRepository local)
+                {
+                    format = local.FormatVersion;
+                    packs = local.GetPackStats();
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or KeyNotFoundException)
             {
@@ -298,7 +314,7 @@ public sealed class MetricsStateService(
             }
 
             pointsByRepository.TryGetValue(repository.Id, out var points);
-            repositoryRows.Add(new StateMetrics.RepositoryRow(repository.Name, size, free, points?.Stored ?? 0, points?.Count ?? 0));
+            repositoryRows.Add(new StateMetrics.RepositoryRow(repository.Name, size, free, points?.Stored ?? 0, points?.Count ?? 0, format, packs));
         }
 
         var agents = await db.Agents.AsNoTracking().Select(a => new { a.HostName, a.LastContactUtc }).ToListAsync(cancellationToken).ConfigureAwait(false);

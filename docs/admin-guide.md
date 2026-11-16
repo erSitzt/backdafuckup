@@ -242,6 +242,47 @@ Restore points show their consistency under *Backups & Restore*:
 
 **Endpoint protection:** a push installation looks like lateral movement to EDR products (file copied to an admin share, service created remotely). See [Microsoft Defender for Endpoint](defender.md).
 
+## Repositories
+
+A repository is a directory on a volume mounted on the backup server. It describes itself (`repo.json`), so it can be added to another installation and its restore points are imported again.
+
+### Repository format and pack files
+
+New repositories keep their chunks (the deduplicated, compressed pieces of disks, file trees and SQL Server backups) in **pack files** of 64 MiB (format 2). Repositories made by versions before pack files keep one file per chunk (format 1). About 20 million chunk files per 10 TB make garbage collection, verify, copies and tape slow; packs bring that down to a few hundred thousand files.
+
+| Path in the repository | Content |
+|---|---|
+| `packs/<hh>/<id>.pack` | Chunks, written once. Each pack ends with a list of its chunks, so the index can always be rebuilt from the packs. |
+| `index/` | Which chunk is in which pack and where. Rebuilt from the packs when it is damaged or missing. |
+| `incoming/` | Packs being written; removed when the repository opens after a crash (nothing refers to them yet). |
+| `chunks/` | Format 1: one file per chunk. In a converted repository, chunks that are not packed yet. |
+| `restore-points/`, `sql-backups/` | Manifests and indexes, as in format 1. |
+
+- **Pack size:** chosen when the repository is added (*Pack file size*, 16–512 MiB, `PackSizeMiB` in the API). 64 MiB suits most repositories; 256 MiB means fewer files for repositories that are copied to tape or network storage.
+- **Memory:** the index keeps about 1.6 bytes per chunk in memory (about 32 MiB for 20 million chunks). A garbage collection needs about 16 bytes per referenced chunk while it runs.
+- **Older versions:** a repository in format 2 cannot be opened by a version of backdafuckup that does not know pack files. That version refuses it at open ("Repository format version 2 … is not supported") and changes nothing in it.
+
+**Converting an older repository.** *Backup Infrastructure → Repositories → ⋮ → Convert to pack files…* (`POST /api/repositories/{id}/packs`) starts a maintenance session:
+1. It switches the repository to format 2. New backups write packs from then on and reuse the existing chunks.
+2. It runs a garbage collection.
+3. It moves the chunks that restore points and SQL backups use into packs, newest restore points first, so that each restore point's chunks lie together. A chunk file is deleted only after its packed copy is on disk.
+
+One run packs for at most 4 hours (`Engine:PackLooseMaxDuration`) and queues the next run when it is not finished; backups go on meanwhile. The repository's *Storage* column says "packing old chunks" until it is done. There is no way back to format 1. Convert a copy of the repository first when it matters.
+
+**Garbage collection with packs.**
+- It deletes packs that hold no chunk in use.
+- It repacks packs where at least 20 % of the bytes are no longer used (`Engine:RepackUnusedPercent`): the chunks still in use are copied into a new pack, then the old pack is deleted. At most 256 GiB are copied per run (`Engine:RepackMaxBytesPerRun`); the rest waits for the next run.
+- It combines small packs (left by frequent SQL log backups).
+- The session log and `bdfu_repository_unused_bytes` show what stays unused until a later run. Restores and backups keep running while it works.
+
+**Damage and recovery.** The server log (and Loki) has a warning for each problem found when a repository is opened:
+- a damaged index, which is rebuilt from the packs;
+- packs that the index did not cover yet, which are indexed (after a crash);
+- a pack whose list of chunks is damaged. Its chunks are not used, and the pack is kept for inspection: no data is deleted for this reason;
+- packs that the index names but that are gone. Their chunks are missing.
+
+A verify of the restore points names the chunks that are damaged or missing, with the pack file and the offset.
+
 ## Backups & Restore
 
 The page lists every VM and Kubernetes namespace with restore points once, with its newest restore point. Expanding one loads all its restore points (Restore, Verify, Delete); its *Restore* button restores from its newest one.
@@ -1096,6 +1137,9 @@ What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the S
 | `bdfu_pool_vm_disks` {pool, cbt} | gauge | Regular disks with and without changed block tracking |
 | `bdfu_pool_poll_success`, `bdfu_pool_poll_seconds` {pool} | gauge | The last read of the pool. On failure the storage values stay as last read |
 | `bdfu_repository_size_bytes`, `bdfu_repository_free_bytes`, `bdfu_repository_stored_bytes`, `bdfu_repository_restore_points` {repository} | gauge | Volume of each repository, and what its VM restore points stored |
+| `bdfu_repository_format`, `bdfu_repository_packs`, `bdfu_repository_pack_bytes`, `bdfu_repository_index_entries`, `bdfu_repository_index_memory_bytes` {repository} | gauge | Format (1 = one file per chunk, 2 = pack files) and the packs and index of each repository |
+| `bdfu_repository_unused_bytes`, `bdfu_repository_packing_unfinished` {repository} | gauge | Unused bytes left in packs after the last garbage collection; 1 while a converted repository still has chunk files to pack |
+| `bdfu_repository_repacked_bytes_total`, `bdfu_repository_packed_loose_chunks_total` {repository} | counter | Bytes copied out of sparse packs by garbage collection; chunk files moved into packs after a conversion |
 | `bdfu_agents` {state}, `bdfu_agent_last_contact_timestamp_seconds` {agent} | gauge | Guest agents online and offline |
 | `bdfu_sql_last_log_backup_timestamp_seconds`, `bdfu_sql_log_backup_interval_seconds` {vm, sql_instance, database} | gauge | Newest log backup per database and the job's interval. A database that the newest run of its VM no longer saw (dropped) is left out |
 | `bdfu_artifacts_pending` | gauge | Snapshots and disks still to be removed or reduced (retried every 10 minutes) |

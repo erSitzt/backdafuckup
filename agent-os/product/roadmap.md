@@ -59,7 +59,10 @@
 
 - **Users, roles and audit (user request 2026-11-06):** more than one administrator; roles (e.g. administrator, operator who runs jobs and restores, read-only) checked on every endpoint, also for API tokens (a token acts with its user's roles; scopes per token later); an audit log of who did what (sign-ins, changes to jobs, credentials and repositories, restores, publishes, downloads, token use), kept in the catalog and shown in the console. API tokens (2026-11-06) are the first step: they already act as their user and mark each request as a token request.
 - **Active Directory, follow-ups:** WMI filters and site links of group policies; security descriptors of objects; AD-integrated DNS zones and the configuration partition; authoritative restore through the product (`ntdsutil` in DSRM on an isolated copy); passwords from the backup (would need the backup's boot key; not planned unless asked); compare and restore across domains
-- **Tape out:** move or copy backups to tape on an HPE MSL tape library
+- **Tape out (user request 2026-11-16; specs `2026-11-16-1804-tape-device-layer` and `2026-11-16-1804-backup-to-tape`):** copy backups to tape on an HPE MSL tape library (production: MSL6480, LTO-9), tested on a virtual tape library first
+  - Device layer: SCSI commands from the public T10 standards, Windows pass-through and Linux SG_IO on the server, and a Linux tape agent for libraries on other hosts; libraries and standalone drives; WORM; LTO hardware encryption
+  - Tape jobs: media pools and media sets with deduplication inside a set, our own documented format with a label and a catalog on every tape, software encryption by passphrase, SQL log backups along with their restore points
+  - Restore: back into a repository, or a VM directly through a temporary cache; a recovery command that works without the server
 - **Offsite / immutable copy:** backup copies to a secondary site, S3 or immutable storage
 - **SQL Server, follow-ups:** differential backups; automatic restore tests (restore to a point in time into a test instance and `DBCC CHECKDB` on a schedule); mail/webhook alerts for chain breaks and RPO; availability groups and failover cluster instances; streaming fulls without staging space in the VM (VDI); resumable uploads; repository pack files for the many small log backup objects
 - **Publish for file-level restore:** mount a restore point's volumes into a VM over the same loopback iSCSI as the SQL publish
@@ -84,7 +87,7 @@
 
 ## Backlog (technical)
 
-- **Repository pack files (before the SMB/NFS/S3 targets and tape out):**
+- **Repository pack files (before the SMB/NFS/S3 targets and tape out; spec `2026-11-16-1804-repository-pack-files`, started 2026-11-16):**
   - **Problem:** today every chunk is its own file, about 500 KB compressed on average. A 10 TB repository holds about 20 million files.
     - Inodes are not the problem.
     - Operations over all files are slow: GC, verify, copying a repository offsite or to tape, SMB/NFS targets, S3 request costs.

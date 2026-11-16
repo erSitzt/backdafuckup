@@ -522,18 +522,95 @@ public sealed partial class RestoreSessionRunner(
     }
 }
 
-/// <summary>Garbage collection of a repository (after retention or on demand).</summary>
-public sealed class MaintenanceSessionRunner(RepositoryManager repositories, SessionEventWriter events)
+/// <param name="ConvertToPacks">Switch a format 1 repository to pack files before the garbage collection.</param>
+/// <param name="PackTargetSize">Size of the packs, in bytes.</param>
+public sealed record MaintenanceRequest(bool ConvertToPacks, long PackTargetSize);
+
+/// <summary>
+/// Garbage collection of a repository (after retention or on demand); in a repository with pack files also the
+/// packing of loose chunks left from format 1, in runs of limited length.
+/// </summary>
+public sealed class MaintenanceSessionRunner(
+    RepositoryManager repositories,
+    SessionEventWriter events,
+    SessionQueue queue,
+    IDbContextFactory<AppDbContext> dbFactory,
+    Microsoft.Extensions.Options.IOptions<EngineOptions> options,
+    Telemetry.BackupMetrics metrics)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
-        var log = events.CreateLog(session.Id, null);
-        var repository = await repositories.GetAsync(session.RepositoryId ?? throw new InvalidOperationException("No repository."), cancellationToken).ConfigureAwait(false);
+        var log = new WarningTrackingLog(events.CreateLog(session.Id, null));
+        var repositoryId = session.RepositoryId ?? throw new InvalidOperationException("No repository.");
+        var repository = await repositories.GetAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var request = session.Parameters is { Length: > 0 } json ? JsonSerializer.Deserialize<MaintenanceRequest>(json) : null;
+        var local = repository as Backdafuckup.Storage.LocalDirectoryRepository;
+        var parts = new List<string>();
+
+        if (request is { ConvertToPacks: true } && local is { FormatVersion: 1 })
+        {
+            log.Info(
+                $"Converting '{local.Root}' to pack files of {VmBackupTask.Format(request.PackTargetSize)}. New chunks go into packs from now on; " +
+                "the existing ones are packed below. Versions of backdafuckup older than this one can no longer open the repository.");
+            await local.UpgradeToPacksAsync(request.PackTargetSize, cancellationToken).ConfigureAwait(false);
+            parts.Add("converted to pack files");
+        }
+
         log.Info("Removing data that is no longer referenced by any restore point.");
         var progress = new Progress<string>(message => log.Info(message, "gc"));
         var result = await repository.CollectGarbageAsync(progress, cancellationToken).ConfigureAwait(false);
-        var summary = $"{result.DeletedChunks} unreferenced chunk(s) removed, {VmBackupTask.Format(result.FreedBytes)} freed.";
-        log.Info(summary, "gc");
-        return (SessionState.Succeeded, summary);
+        var gc = $"{result.DeletedChunks} unreferenced chunk(s) removed, {VmBackupTask.Format(result.FreedBytes)} freed";
+        if (result.PacksDeleted > 0 || result.BytesRepacked > 0)
+        {
+            gc += $" ({result.PacksDeleted} pack(s) deleted, {VmBackupTask.Format(result.BytesRepacked)} of chunks still in use repacked)";
+        }
+
+        log.Info(gc + ".", "gc");
+        parts.Add(gc);
+        var repositoryName = await RepositoryNameAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        metrics.RecordPacks(repositoryName, result.BytesRepacked, 0);
+
+        if (local is { FormatVersion: 2, LooseChunksMayExist: true })
+        {
+            var max = options.Value.PackLooseMaxDuration;
+            log.Info($"Packing the loose chunks in '{local.Root}' that restore points and SQL backups use, newest first (at most {max.TotalHours:0.#} h in this run).");
+            var packing = await local.PackLooseChunksAsync(max, new Progress<string>(message => log.Info(message, "pack")), cancellationToken).ConfigureAwait(false);
+            metrics.RecordPacks(repositoryName, 0, packing.Packed);
+            var text = $"{packing.Packed} loose chunk(s) packed";
+            if (packing.RemovedDuplicates > 0)
+            {
+                text += $", {packing.RemovedDuplicates} loose copies of packed chunks removed";
+            }
+
+            if (packing.KeptDamaged > 0)
+            {
+                log.Warning($"{packing.KeptDamaged} loose chunk file(s) in '{local.Root}' could not be read and stay where they are. Verify the restore points to see which are affected.");
+            }
+
+            if (!packing.Finished)
+            {
+                log.Info($"{text}. Not finished in this run; the next maintenance run continues, it is queued now.");
+                await queue.EnqueueMaintenanceAsync(repositoryId, repositoryName, "Packing continues", CancellationToken.None).ConfigureAwait(false);
+            }
+            else if (packing.LooseChunksRemain)
+            {
+                log.Info($"{text}. The loose files left are not referenced; the next garbage collection removes them.");
+            }
+            else
+            {
+                log.Info($"{text}. '{local.Root}' has no loose chunks any more.");
+            }
+
+            parts.Add(text);
+        }
+
+        var summary = string.Join("; ", parts) + ".";
+        return (log.Warned ? SessionState.Warning : SessionState.Succeeded, summary);
+    }
+
+    private async Task<string> RepositoryNameAsync(Guid repositoryId, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await db.Repositories.Where(r => r.Id == repositoryId).Select(r => r.Name).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? repositoryId.ToString();
     }
 }

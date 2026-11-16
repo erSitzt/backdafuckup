@@ -29,6 +29,13 @@
             </MudItem>
             <MudItem xs="12" md="4"><MudNumericField @bind-Value="_compression" Label="Compression level (0 = off)" Min="0" Max="19" Variant="Variant.Outlined" /></MudItem>
             <MudItem xs="12" md="4"><MudNumericField @bind-Value="_maxTasks" Label="Max concurrent tasks" Min="1" Max="32" Variant="Variant.Outlined" /></MudItem>
+            <MudItem xs="12" md="4">
+                <MudSelect T="int" @bind-Value="_packMiB" Label="Pack file size" Variant="Variant.Outlined" HelperText="Chunks are stored in files of this size.">
+                    <MudSelectItem T="int" Value="64">64 MiB (recommended)</MudSelectItem>
+                    <MudSelectItem T="int" Value="256">256 MiB (copied to tape or network storage)</MudSelectItem>
+                    <MudSelectItem T="int" Value="16">16 MiB (small repositories)</MudSelectItem>
+                </MudSelect>
+            </MudItem>
         </MudGrid>
         <div class="d-flex gap-2 mt-4">
             <MudButton OnClick="@(() => _adding = false)">Cancel</MudButton>
@@ -47,7 +54,7 @@ else
     <div class="cq">
     <MudTable Items="_items" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
         <HeaderContent>
-            <MudTh>Name</MudTh><MudTh>State</MudTh><MudTh Class="c-560">Capacity</MudTh><MudTh Class="c-760">Restore points</MudTh><MudTh Class="c-950 num">Block size</MudTh><MudTh></MudTh>
+            <MudTh>Name</MudTh><MudTh>State</MudTh><MudTh Class="c-560">Capacity</MudTh><MudTh Class="c-760">Restore points</MudTh><MudTh Class="c-950 num">Block size</MudTh><MudTh Class="c-950">Storage</MudTh><MudTh></MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd>@context.Name<span class="cell-sub mono">@context.Path</span></MudTd>
@@ -59,10 +66,28 @@ else
             </MudTd>
             <MudTd Class="c-760">@context.RestorePoints<span class="cell-sub">@Fmt.Bytes(context.LogicalBytes) of VM disks</span></MudTd>
             <MudTd Class="c-950 num">@Fmt.Bytes(context.ChunkSize)</MudTd>
+            <MudTd Class="c-950">
+                @if (context.Format == 2)
+                {
+                    <span>Pack files</span><span class="cell-sub">@Fmt.Bytes(context.PackSize) each@(context.PackingUnfinished ? ", packing old chunks" : "")</span>
+                }
+                else if (context.Format == 1)
+                {
+                    <span>One file per chunk</span><span class="cell-sub">convert to pack files</span>
+                }
+            </MudTd>
             <MudTd Style="text-align:right; white-space:nowrap">
                 <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
                     <MudMenuItem Icon="@Icons.Material.Filled.CleaningServices" OnClick="@(() => CollectGarbageAsync(context))">Remove unreferenced data now</MudMenuItem>
                     <MudMenuItem Icon="@Icons.Material.Filled.Sync" OnClick="@(() => RescanAsync(context))">Import restore points missing in the catalog</MudMenuItem>
+                    @if (context.Format == 1)
+                    {
+                        <MudMenuItem Icon="@Icons.Material.Filled.Inventory2" OnClick="@(() => ConvertAsync(context))">Convert to pack files…</MudMenuItem>
+                    }
+                    else if (context.PackingUnfinished)
+                    {
+                        <MudMenuItem Icon="@Icons.Material.Filled.Inventory2" OnClick="@(() => ConvertAsync(context))">Continue packing old chunks</MudMenuItem>
+                    }
                     <MudDivider />
                     <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => RemoveAsync(context))">Remove from the console (data is kept)</MudMenuItem>
                 </MudMenu>
@@ -82,6 +107,7 @@ else
     private int _chunkKiB = 1024;
     private int _compression = 3;
     private int _maxTasks = 4;
+    private int _packMiB = 64;
 
     protected override Task OnInitializedAsync() => LoadAsync();
 
@@ -92,7 +118,7 @@ else
         _busy = true;
         try
         {
-            await Api.PostAsync("api/repositories", new CreateRepositoryDto { Name = _name.Trim(), Path = _path.Trim(), ChunkSizeKiB = _chunkKiB, CompressionLevel = _compression, MaxConcurrentTasks = _maxTasks });
+            await Api.PostAsync("api/repositories", new CreateRepositoryDto { Name = _name.Trim(), Path = _path.Trim(), ChunkSizeKiB = _chunkKiB, CompressionLevel = _compression, MaxConcurrentTasks = _maxTasks, PackSizeMiB = _packMiB });
             Snackbar.Add($"Repository {_name} added.", Severity.Success);
             _adding = false;
             _name = string.Empty;
@@ -114,6 +140,30 @@ else
         try
         {
             var started = await Api.PostAsync<StartedDto>($"api/repositories/{repository.Id}/gc");
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task ConvertAsync(RepositoryDto repository)
+    {
+        if (repository.Format == 1 && await Dialogs.ShowMessageBoxAsync(
+                "Convert to pack files",
+                $"Store the chunks of {repository.Name} in pack files of 64 MiB instead of one file each? New backups use pack files at once; " +
+                "the existing chunks are packed in maintenance runs of up to 4 hours, newest restore points first, while backups go on. " +
+                "Older versions of backdafuckup can no longer open the repository afterwards.",
+                yesText: "Convert",
+                cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/repositories/{repository.Id}/packs", new ConvertRepositoryDto());
             Navigation.NavigateTo($"/sessions/{started.SessionId}");
         }
         catch (ApiException ex)

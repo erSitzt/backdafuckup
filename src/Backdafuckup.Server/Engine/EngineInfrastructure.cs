@@ -27,6 +27,15 @@ public sealed class EngineOptions
 
     public int SessionHistoryDays { get; set; } = 180;
 
+    /// <summary>Pack files: GC repacks a pack once at least this share of its bytes is no longer referenced.</summary>
+    public int RepackUnusedPercent { get; set; } = 20;
+
+    /// <summary>Pack files: GC copies at most this many still referenced bytes out of packs per run.</summary>
+    public long RepackMaxBytesPerRun { get; set; } = 256L * 1024 * 1024 * 1024;
+
+    /// <summary>Converting a repository to pack files: how long one maintenance run packs loose chunks before it pauses.</summary>
+    public TimeSpan PackLooseMaxDuration { get; set; } = TimeSpan.FromHours(4);
+
     /// <summary>
     /// Lab spike only: freeze the guest with VSS around a snapshot with memory too. Off by default: a VM backed up with
     /// memory gets no guest processing, the checkpoint pauses the whole VM instead.
@@ -153,7 +162,11 @@ public sealed class ConnectionManager(IEnumerable<IHypervisorProvider> providers
 }
 
 /// <summary>Owns the open backup repositories (each repository directory is locked by this process).</summary>
-public sealed class RepositoryManager(IDbContextFactory<AppDbContext> dbFactory, TimeProvider time) : IAsyncDisposable
+public sealed class RepositoryManager(
+    IDbContextFactory<AppDbContext> dbFactory,
+    TimeProvider time,
+    Microsoft.Extensions.Options.IOptions<EngineOptions> options,
+    Microsoft.Extensions.Logging.ILogger<RepositoryManager> logger) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<Guid, Lazy<Task<IBackupRepository>>> _open = new();
 
@@ -170,6 +183,12 @@ public sealed class RepositoryManager(IDbContextFactory<AppDbContext> dbFactory,
             throw;
         }
     }
+
+    /// <summary>The repository if this process has it open already (never opens it).</summary>
+    public LocalDirectoryRepository? TryGetOpen(Guid repositoryId) =>
+        _open.TryGetValue(repositoryId, out var lazy) && lazy.IsValueCreated && lazy.Value.IsCompletedSuccessfully
+            ? lazy.Value.Result as LocalDirectoryRepository
+            : null;
 
     public async Task CloseAsync(Guid repositoryId)
     {
@@ -203,6 +222,13 @@ public sealed class RepositoryManager(IDbContextFactory<AppDbContext> dbFactory,
         {
             await repository.DisposeAsync().ConfigureAwait(false);
             throw new InvalidOperationException($"The directory {entity.Path} contains a different repository ({repository.Info.RepositoryId}).");
+        }
+
+        repository.RepackUnusedPercent = options.Value.RepackUnusedPercent;
+        repository.RepackMaxBytesPerRun = options.Value.RepackMaxBytesPerRun;
+        foreach (var line in repository.OpenReport)
+        {
+            logger.LogWarning("Repository {Name} ({Path}): {Report}", entity.Name, entity.Path, line);
         }
 
         return repository;

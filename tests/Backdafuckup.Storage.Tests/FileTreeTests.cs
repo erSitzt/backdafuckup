@@ -80,16 +80,16 @@ public sealed class FileTreeTests : IDisposable
         var content = RandomNumberGenerator.GetBytes(ChunkSize * 3);
         var (id, _) = await WriteTreeAsync(repo, async (w, put) =>
             await ListingAsync(put, Dir("d", await ListingAsync(put, FileEntry("f", await ContentAsync(content, put))), 1, content.Length)));
-        var before = CountChunkFiles();
+        var before = repo.CountStoredChunks();
 
         var gc = await repo.CollectGarbageAsync(null, Ct);
         Assert.Equal(0, gc.DeletedChunks);
-        Assert.Equal(before, CountChunkFiles());
+        Assert.Equal(before, repo.CountStoredChunks());
 
         await repo.DeleteRestorePointAsync(id, Ct);
         gc = await repo.CollectGarbageAsync(null, Ct);
         Assert.Equal(before, gc.DeletedChunks);
-        Assert.Equal(0, CountChunkFiles());
+        Assert.Equal(0, repo.CountStoredChunks());
     }
 
     /// <summary>
@@ -141,24 +141,23 @@ public sealed class FileTreeTests : IDisposable
         static int ReadVersion(string directory) => JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "manifest.json"))).RootElement.GetProperty("formatVersion").GetInt32();
     }
 
-    private int CountChunkFiles() => Directory.EnumerateFiles(Path.Combine(_root, "chunks"), "*", SearchOption.AllDirectories).Count();
 
-    private static FileTreeEntry FileEntry(string name, ChunkStreamRef content) =>
+    internal static FileTreeEntry FileEntry(string name, ChunkStreamRef content) =>
         new() { Name = Encoding.UTF8.GetBytes(name), Type = FileTreeEntryType.File, Mode = 0644, Size = content.Length, Content = content };
 
-    private static FileTreeEntry Dir(string name, ChunkStreamRef listing, long files, long bytes) =>
+    internal static FileTreeEntry Dir(string name, ChunkStreamRef listing, long files, long bytes) =>
         new() { Name = Encoding.UTF8.GetBytes(name), Type = FileTreeEntryType.Directory, Mode = 0755, Listing = listing, SubtreeFiles = files, SubtreeBytes = bytes };
 
-    private static async Task<ChunkStreamRef> ContentAsync(byte[] data, ChunkStreams.PutChunk put) =>
+    internal static async Task<ChunkStreamRef> ContentAsync(byte[] data, ChunkStreams.PutChunk put) =>
         await ChunkStreams.WriteAsync(data, ChunkSize, put, allowInline: true, Ct);
 
-    private static async Task<ChunkStreamRef> ListingAsync(ChunkStreams.PutChunk put, params FileTreeEntry[] entries) =>
+    internal static async Task<ChunkStreamRef> ListingAsync(ChunkStreams.PutChunk put, params FileTreeEntry[] entries) =>
         await ChunkStreams.WriteAsync(FileTreeListing.Serialize(entries), ChunkSize, put, allowInline: false, Ct);
 
     private static byte[] Content(FileTreeEntry entry, IChunkReader chunks) => ChunkStreams.ReadAll(entry.Content!, chunks, ChunkSize);
 
     /// <summary>Writes a restore point with one file tree (<paramref name="build"/> returns its root listing; null: no tree).</summary>
-    private static async Task<(Guid Id, string Directory)> WriteTreeAsync(LocalDirectoryRepository repo, Func<IRepositoryWriter, ChunkStreams.PutChunk, Task<ChunkStreamRef>>? build)
+    internal static async Task<(Guid Id, string Directory)> WriteTreeAsync(LocalDirectoryRepository repo, Func<IRepositoryWriter, ChunkStreams.PutChunk, Task<ChunkStreamRef>>? build)
     {
         var id = Guid.CreateVersion7();
         await using var writer = repo.BeginWrite(id, "redis", null);

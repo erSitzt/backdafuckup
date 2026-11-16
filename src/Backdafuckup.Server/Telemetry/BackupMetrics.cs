@@ -40,6 +40,8 @@ public sealed class BackupMetrics
     private readonly Histogram<double> _sessionDuration;
     private readonly Counter<long> _vmBackups;
     private readonly Counter<long> _restoredBytes;
+    private readonly Counter<long> _repackedBytes;
+    private readonly Counter<long> _packedLoose;
     private readonly ConcurrentDictionary<(string Pool, string Vm), VmLast> _last = new();
 
     public BackupMetrics(IMeterFactory meterFactory, RunningSessions running)
@@ -62,6 +64,8 @@ public sealed class BackupMetrics
         _sessionDuration = Seconds(meter, "bdfu_session_duration_seconds", "Duration of finished sessions by kind and result.", SessionBuckets);
         _vmBackups = meter.CreateCounter<long>("bdfu_vm_backups_total", description: "Backups of single VMs (each attempt) by job and result.");
         _restoredBytes = meter.CreateCounter<long>("bdfu_restore_bytes_total", "By", "Bytes written by VM restores.");
+        _repackedBytes = meter.CreateCounter<long>("bdfu_repository_repacked_bytes_total", "By", "Bytes of chunks still in use that garbage collection copied out of sparse packs.");
+        _packedLoose = meter.CreateCounter<long>("bdfu_repository_packed_loose_chunks_total", description: "Loose chunks of format 1 moved into packs after a conversion.");
 
         meter.CreateObservableGauge("bdfu_sessions_running", () =>
             Enum.GetValues<SessionKind>().Select(kind => new Measurement<int>(running.Count(kind), new KeyValuePair<string, object?>("kind", Kind(kind)))),
@@ -151,6 +155,19 @@ public sealed class BackupMetrics
     {
         _sessions.Add(1, Tag("kind", Kind(kind)), Tag("result", Result(result)));
         _sessionDuration.Record(duration.TotalSeconds, Tag("kind", Kind(kind)), Tag("result", Result(result)));
+    }
+
+    public void RecordPacks(string repository, long repackedBytes, long packedLoose)
+    {
+        if (repackedBytes > 0)
+        {
+            _repackedBytes.Add(repackedBytes, Tag("repository", repository));
+        }
+
+        if (packedLoose > 0)
+        {
+            _packedLoose.Add(packedLoose, Tag("repository", repository));
+        }
     }
 
     public void RecordRestoredBytes(string pool, long bytes)

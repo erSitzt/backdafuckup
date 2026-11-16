@@ -335,13 +335,18 @@ public static class InfrastructureEndpoints
 
         var repositories = app.MapGroup("/api/repositories");
 
-        repositories.MapGet("/", async (AppDbContext db, CancellationToken ct) => await ListRepositoriesAsync(db, ct));
+        repositories.MapGet("/", async (AppDbContext db, RepositoryManager manager, CancellationToken ct) => await ListRepositoriesAsync(db, manager, ct));
 
         repositories.MapPost("/", async (CreateRepositoryDto request, AppDbContext db, TimeProvider time, Sql.SqlCatalogBackfill backfill, CancellationToken ct) =>
         {
             if (await db.Repositories.AnyAsync(r => r.Name == request.Name, ct))
             {
                 return Results.Problem($"A repository named '{request.Name}' already exists.", statusCode: StatusCodes.Status409Conflict);
+            }
+
+            if (request.PackSizeMiB is < 16 or > 512)
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]> { [nameof(CreateRepositoryDto.PackSizeMiB)] = ["The pack size must be between 16 and 512 MiB."] });
             }
 
             var path = Path.GetFullPath(request.Path.Trim());
@@ -351,7 +356,7 @@ public static class InfrastructureEndpoints
             {
                 repository = import
                     ? await LocalDirectoryRepository.OpenAsync(path, ct, time)
-                    : await LocalDirectoryRepository.CreateAsync(path, ct, request.ChunkSizeKiB * 1024, request.CompressionLevel, time);
+                    : await LocalDirectoryRepository.CreateAsync(path, ct, request.ChunkSizeKiB * 1024, request.CompressionLevel, time, request.PackSizeMiB * 1024L * 1024);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or NotSupportedException)
             {
@@ -395,13 +400,41 @@ public static class InfrastructureEndpoints
                 await backfill.RecordSnapshotFullsAsync(ct);
             }
 
-            return Results.Created($"/api/repositories/{created.Id}", created.ToDto(0, 0));
+            var (format, packSize) = ReadFormat(created.Path);
+            return Results.Created($"/api/repositories/{created.Id}", created.ToDto(0, 0, format, packSize));
         });
 
         repositories.MapPost("/{id:guid}/gc", async (Guid id, AppDbContext db, SessionQueue queue, CancellationToken ct) =>
             await db.Repositories.FindAsync([id], ct) is { } repository
                 ? Results.Ok(new StartedDto(await queue.EnqueueMaintenanceAsync(id, repository.Name, "User", ct)))
                 : Results.NotFound());
+
+        repositories.MapPost("/{id:guid}/packs", async (Guid id, ConvertRepositoryDto request, AppDbContext db, RepositoryManager manager, SessionQueue queue, CancellationToken ct) =>
+        {
+            if (await db.Repositories.FindAsync([id], ct) is not { } repository)
+            {
+                return Results.NotFound();
+            }
+
+            if (request.PackSizeMiB is < 16 or > 512)
+            {
+                return Results.ValidationProblem(new Dictionary<string, string[]> { [nameof(ConvertRepositoryDto.PackSizeMiB)] = ["The pack size must be between 16 and 512 MiB."] });
+            }
+
+            var (format, _) = ReadFormat(repository.Path);
+            var open = manager.TryGetOpen(id);
+            if (format == 2 && open is { LooseChunksMayExist: false })
+            {
+                return Results.Problem($"Repository '{repository.Name}' ({repository.Path}) already uses pack files.", statusCode: StatusCodes.Status409Conflict);
+            }
+
+            var session = await queue.EnqueueMaintenanceAsync(id, repository.Name, "User", ct, new MaintenanceRequest(ConvertToPacks: true, request.PackSizeMiB * 1024L * 1024));
+            return Results.Ok(new StartedDto(session));
+        })
+        .WithDescription(
+            "Converts a repository with one file per chunk (format 1) to pack files (format 2) in a maintenance session: new chunks go into packs at once, " +
+            "the existing ones are packed in runs of at most Engine:PackLooseMaxDuration, newest restore points first. Older versions of backdafuckup cannot open " +
+            "a converted repository. On a converted repository whose packing is not finished it queues the next run.");
 
         repositories.MapPost("/{id:guid}/rescan", async (Guid id, AppDbContext db, RepositoryManager manager, TimeProvider time, Sql.SqlCatalogBackfill backfill, CancellationToken ct) =>
         {
@@ -440,7 +473,7 @@ public static class InfrastructureEndpoints
         });
     }
 
-    public static async Task<List<RepositoryDto>> ListRepositoriesAsync(AppDbContext db, CancellationToken ct)
+    public static async Task<List<RepositoryDto>> ListRepositoriesAsync(AppDbContext db, RepositoryManager manager, CancellationToken ct)
     {
         var repositories = await db.Repositories.OrderBy(r => r.Name).ToListAsync(ct);
         var stats = await db.RestorePoints.Where(r => r.State == RestorePointState.Available)
@@ -463,8 +496,25 @@ public static class InfrastructureEndpoints
         return repositories.Select(r =>
         {
             var s = stats.FirstOrDefault(x => x.Key == r.Id);
-            return r.ToDto(s?.Count ?? 0, s?.Bytes ?? 0);
+            var (format, packSize) = ReadFormat(r.Path);
+            var packing = format == 2 && manager.TryGetOpen(r.Id) is { LooseChunksMayExist: true };
+            return r.ToDto(s?.Count ?? 0, s?.Bytes ?? 0, format, packSize, packing);
         }).ToList();
+    }
+
+    /// <summary>Format version and pack size from a repository's repo.json, read without opening it; (0, 0) when unreadable.</summary>
+    private static (int Format, long PackSize) ReadFormat(string root)
+    {
+        try
+        {
+            var descriptor = System.Text.Json.JsonSerializer.Deserialize(
+                File.ReadAllBytes(Path.Combine(root, LocalDirectoryRepository.DescriptorFileName)), Backdafuckup.Core.Repository.CoreJsonContext.Default.RepositoryDescriptor);
+            return descriptor is null ? (0, 0) : (descriptor.FormatVersion, descriptor.Packs?.TargetSize ?? 0);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            return (0, 0);
+        }
     }
 
     /// <summary>

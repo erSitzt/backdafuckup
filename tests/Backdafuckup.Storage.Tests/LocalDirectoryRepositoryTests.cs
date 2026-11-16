@@ -6,16 +6,19 @@ using Microsoft.Extensions.Time.Testing;
 
 namespace Backdafuckup.Storage.Tests;
 
-[Trait("Category", "Unit")]
-public sealed class LocalDirectoryRepositoryTests : IDisposable
+/// <summary>Runs every test against a format 1 repository (one file per chunk) and a format 2 repository (packs).</summary>
+public abstract class LocalDirectoryRepositoryTests : IDisposable
 {
-    private const int ChunkSize = 64 * 1024;
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "bdfu-repo-tests", Guid.NewGuid().ToString("N"));
+    internal const int ChunkSize = 64 * 1024;
+    protected readonly string _root = Path.Combine(Path.GetTempPath(), "bdfu-repo-tests", Guid.NewGuid().ToString("N"));
 
     // GC only deletes chunks older than its safety window; tests run "in the future" so that window is passed.
-    private readonly FakeTimeProvider _time = new(DateTimeOffset.UtcNow.AddHours(1));
+    protected readonly FakeTimeProvider _time = new(DateTimeOffset.UtcNow.AddHours(1));
 
-    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+    /// <summary>0 for format 1; small packs for format 2, so that writers fill several of them.</summary>
+    protected abstract long PackTargetSize { get; }
+
+    internal static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     public void Dispose()
     {
@@ -58,7 +61,7 @@ public sealed class LocalDirectoryRepositoryTests : IDisposable
         Assert.Equal(1, stats.Stored);
         Assert.Equal(1, stats.Deduplicated);
         Assert.Equal(2, stats.Zero);
-        Assert.Single(Directory.EnumerateFiles(Path.Combine(_root, "chunks"), "*", SearchOption.AllDirectories));
+        Assert.Equal(1, repo.CountStoredChunks());
     }
 
     [Fact]
@@ -92,29 +95,6 @@ public sealed class LocalDirectoryRepositoryTests : IDisposable
     }
 
     [Fact]
-    public async Task Detects_corrupt_and_missing_chunks()
-    {
-        await using var repo = await CreateAsync();
-        var (rpId, _) = await BackupAsync(repo, "vm-1", RandomDisk(3));
-        var chunks = Directory.EnumerateFiles(Path.Combine(_root, "chunks"), "*", SearchOption.AllDirectories).Order().ToList();
-
-        var bytes = await File.ReadAllBytesAsync(chunks[0], Ct);
-        bytes[^1] ^= 0xFF;
-        await File.WriteAllBytesAsync(chunks[0], bytes, Ct);
-        File.Delete(chunks[1]);
-
-        var full = await repo.VerifyAsync(rpId, VerifyDepth.Full, null, Ct);
-        Assert.False(full.Ok);
-        Assert.Equal(2, full.Problems.Count);
-
-        var quick = await repo.VerifyAsync(rpId, VerifyDepth.Quick, null, Ct);
-        Assert.Contains(quick.Problems, p => p.Contains("missing", StringComparison.Ordinal));
-
-        var id = ChunkId.Parse(Path.GetFileName(chunks[0]));
-        await Assert.ThrowsAsync<ChunkCorruptException>(async () => await repo.Chunks.ReadAsync(id, new byte[ChunkSize], Ct));
-    }
-
-    [Fact]
     public async Task Pinned_restore_points_cannot_be_deleted()
     {
         await using var repo = await CreateAsync();
@@ -138,13 +118,13 @@ public sealed class LocalDirectoryRepositoryTests : IDisposable
         RandomNumberGenerator.Fill(second.AsSpan(0, ChunkSize)); // one chunk differs
         var (rp1, _) = await BackupAsync(repo, "vm-1", first);
         var (rp2, _) = await BackupAsync(repo, "vm-1", second);
-        Assert.Equal(5, CountChunkFiles());
+        Assert.Equal(5, repo.CountStoredChunks());
 
         await repo.DeleteRestorePointAsync(rp1, Ct);
         var gc = await repo.CollectGarbageAsync(null, Ct);
 
         Assert.Equal(1, gc.DeletedChunks);
-        Assert.Equal(4, CountChunkFiles());
+        Assert.Equal(4, repo.CountStoredChunks());
         Assert.True((await repo.VerifyAsync(rp2, VerifyDepth.Full, null, Ct)).Ok);
     }
 
@@ -170,6 +150,7 @@ public sealed class LocalDirectoryRepositoryTests : IDisposable
     public async Task Gc_running_concurrently_with_backups_never_deletes_referenced_chunks()
     {
         await using var repo = await CreateAsync();
+        repo.RepackUnusedPercent = 0; // the final count expects every unreferenced chunk gone
 
         // A small pool of chunk contents so that writers constantly deduplicate against each other.
         var pool = Enumerable.Range(0, 24).Select(_ => RandomNumberGenerator.GetBytes(ChunkSize)).ToArray();
@@ -235,19 +216,17 @@ public sealed class LocalDirectoryRepositoryTests : IDisposable
             referenced.UnionWith((await reader.ReadDiskIndexAsync("0", Ct)).Entries.Where(e => !e.IsZero));
         }
 
-        Assert.Equal(referenced.Count, CountChunkFiles());
+        Assert.Equal(referenced.Count, repo.CountStoredChunks());
     }
 
-    private async Task<LocalDirectoryRepository> CreateAsync() =>
-        await LocalDirectoryRepository.CreateAsync(_root, Ct, ChunkSize, 3, _time);
+    protected async Task<LocalDirectoryRepository> CreateAsync() =>
+        await LocalDirectoryRepository.CreateAsync(_root, Ct, ChunkSize, 3, _time, PackTargetSize);
 
-    private int CountChunkFiles() => Directory.EnumerateFiles(Path.Combine(_root, "chunks"), "*", SearchOption.AllDirectories).Count();
+    internal static byte[] RandomDisk(int chunks) => RandomNumberGenerator.GetBytes(ChunkSize * chunks);
 
-    private static byte[] RandomDisk(int chunks) => RandomNumberGenerator.GetBytes(ChunkSize * chunks);
+    internal sealed record PutStats(int Stored, int Deduplicated, int Zero);
 
-    private sealed record PutStats(int Stored, int Deduplicated, int Zero);
-
-    private static async Task<(Guid RestorePointId, PutStats Stats)> BackupAsync(LocalDirectoryRepository repo, string vm, byte[] disk, bool commit = true)
+    internal static async Task<(Guid RestorePointId, PutStats Stats)> BackupAsync(LocalDirectoryRepository repo, string vm, byte[] disk, bool commit = true)
     {
         var rpId = Guid.CreateVersion7();
         await using var writer = repo.BeginWrite(rpId, vm, null);
@@ -309,7 +288,7 @@ public sealed class LocalDirectoryRepositoryTests : IDisposable
         return (rpId, new PutStats(stored, deduplicated, zero));
     }
 
-    private static async Task<byte[]> RestoreAsync(IChunkReader chunks, ChunkIndex index)
+    internal static async Task<byte[]> RestoreAsync(IChunkReader chunks, ChunkIndex index)
     {
         var disk = new byte[index.DiskSize];
         for (var i = 0; i < index.Entries.Length; i++)
@@ -323,7 +302,7 @@ public sealed class LocalDirectoryRepositoryTests : IDisposable
         return disk;
     }
 
-    private static async Task<List<T>> ToListAsync<T>(IAsyncEnumerable<T> source)
+    internal static async Task<List<T>> ToListAsync<T>(IAsyncEnumerable<T> source)
     {
         var list = new List<T>();
         await foreach (var item in source)
@@ -333,4 +312,40 @@ public sealed class LocalDirectoryRepositoryTests : IDisposable
 
         return list;
     }
+}
+
+[Trait("Category", "Unit")]
+public sealed class LooseRepositoryTests : LocalDirectoryRepositoryTests
+{
+    protected override long PackTargetSize => 0;
+
+    [Fact]
+    public async Task Detects_corrupt_and_missing_chunks()
+    {
+        await using var repo = await CreateAsync();
+        var (rpId, _) = await BackupAsync(repo, "vm-1", RandomDisk(3));
+        var chunks = Directory.EnumerateFiles(Path.Combine(_root, "chunks"), "*", SearchOption.AllDirectories).Order().ToList();
+
+        var bytes = await File.ReadAllBytesAsync(chunks[0], Ct);
+        bytes[^1] ^= 0xFF;
+        await File.WriteAllBytesAsync(chunks[0], bytes, Ct);
+        File.Delete(chunks[1]);
+
+        var full = await repo.VerifyAsync(rpId, VerifyDepth.Full, null, Ct);
+        Assert.False(full.Ok);
+        Assert.Equal(2, full.Problems.Count);
+
+        var quick = await repo.VerifyAsync(rpId, VerifyDepth.Quick, null, Ct);
+        Assert.Contains(quick.Problems, p => p.Contains("missing", StringComparison.Ordinal));
+
+        var id = ChunkId.Parse(Path.GetFileName(chunks[0]));
+        await Assert.ThrowsAsync<ChunkCorruptException>(async () => await repo.Chunks.ReadAsync(id, new byte[ChunkSize], Ct));
+    }
+}
+
+[Trait("Category", "Unit")]
+public sealed class PackedRepositoryTests : LocalDirectoryRepositoryTests
+{
+    // Four 64 KiB chunks per pack: writers seal several packs, GC repacks and deletes them.
+    protected override long PackTargetSize => 4 * (ChunkSize + 1024);
 }

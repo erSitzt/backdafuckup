@@ -175,6 +175,15 @@ public sealed record CreateRepositoryDto
     public int CompressionLevel { get; init; } = 3;
 
     public int MaxConcurrentTasks { get; init; } = 4;
+
+    /// <summary>Size of the pack files new chunks are stored in, 16–512 MiB.</summary>
+    public int PackSizeMiB { get; init; } = 64;
+}
+
+/// <summary>Converts a repository with one file per chunk to pack files of <see cref="PackSizeMiB"/>.</summary>
+public sealed record ConvertRepositoryDto
+{
+    public int PackSizeMiB { get; init; } = 64;
 }
 
 public sealed record RepositoryDto(
@@ -191,7 +200,10 @@ public sealed record RepositoryDto(
     long? FreeBytes,
     int RestorePoints,
     long LogicalBytes,
-    string? LastError);
+    string? LastError,
+    int Format = 0,
+    long PackSize = 0,
+    bool PackingUnfinished = false);
 
 // ---- Jobs ----
 public sealed record ScheduleDto(string Kind, string TimeOfDay, IReadOnlyList<DayOfWeek> Days, string TimeZoneId);

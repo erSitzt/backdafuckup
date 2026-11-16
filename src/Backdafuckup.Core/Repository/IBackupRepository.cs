@@ -55,7 +55,14 @@ public enum VerifyDepth
 
 public sealed record VerifyResult(bool Ok, long CheckedChunks, IReadOnlyList<string> Problems);
 
-public sealed record GcResult(long ScannedChunks, long DeletedChunks, long FreedBytes, long MarkedChunks);
+/// <param name="ScannedChunks">Chunks looked at (loose files and pack records).</param>
+/// <param name="DeletedChunks">Chunks no longer referenced that were removed (loose files deleted, records dropped from packs).</param>
+/// <param name="FreedBytes">Space given back to the volume.</param>
+/// <param name="MarkedChunks">Chunks referenced by restore points and SQL backups.</param>
+/// <param name="PacksDeleted">Packs deleted (unreferenced or repacked).</param>
+/// <param name="BytesRepacked">Bytes of still referenced chunks copied out of repacked packs.</param>
+/// <param name="UnusedBytes">Bytes of unreferenced chunks left in packs that were not worth repacking yet.</param>
+public sealed record GcResult(long ScannedChunks, long DeletedChunks, long FreedBytes, long MarkedChunks, long PacksDeleted = 0, long BytesRepacked = 0, long UnusedBytes = 0);
 
 public sealed record StorageStats(long TotalBytes, long FreeBytes);
 
@@ -165,10 +172,52 @@ public sealed class ChunkCorruptException(ChunkId id, string reason)
     : IOException($"Chunk {id} is corrupt: {reason}")
 {
     public ChunkId ChunkId { get; } = id;
+
+    public string Reason { get; } = reason;
 }
 
-public sealed class ChunkMissingException(ChunkId id)
-    : IOException($"Chunk {id} is missing from the repository.")
+/// <param name="repository">The repository's location, named in the message when known.</param>
+/// <param name="detail">Where it was expected, e.g. a pack that is gone.</param>
+public sealed class ChunkMissingException(ChunkId id, string? repository = null, string? detail = null)
+    : IOException((repository is null ? $"Chunk {id} is missing from the repository" : $"Chunk {id} is missing from the repository '{repository}'") + (detail is null ? "." : $" ({detail})."))
 {
     public ChunkId ChunkId { get; } = id;
 }
+
+/// <summary>
+/// Reads many chunks in the order they are stored (pack by pack), as stored records without decompressing them: for
+/// copies (tape), verify and packing. Zero ids are never part of a plan.
+/// </summary>
+public interface IChunkLocator
+{
+    /// <summary>Plans reading <paramref name="ids"/> (duplicates and zero ids are dropped); missing chunks are listed.</summary>
+    ChunkReadPlan PlanRead(IEnumerable<ChunkId> ids);
+
+    /// <summary>
+    /// Reads the planned chunks in plan order. Each <see cref="StoredChunk.Record"/> is only valid until the next item
+    /// is requested.
+    /// </summary>
+    IAsyncEnumerable<StoredChunk> ReadStoredAsync(ChunkReadPlan plan, CancellationToken cancellationToken);
+}
+
+/// <param name="Id">The chunk.</param>
+/// <param name="Source">Index into <see cref="ChunkReadPlan.Sources"/>.</param>
+/// <param name="Offset">Offset of the chunk's stored record in its source (0 for a loose chunk file).</param>
+/// <param name="StoredLength">Length of the stored record (header and compressed payload).</param>
+/// <param name="RawLength">Length of the chunk's content.</param>
+public readonly record struct PlannedChunk(ChunkId Id, int Source, long Offset, int StoredLength, int RawLength);
+
+/// <param name="Chunks">Chunks in storage order: grouped by source, by offset within a source.</param>
+/// <param name="Sources">Where the chunks lie (pack paths; loose chunks have a source of their own each).</param>
+/// <param name="Missing">Requested chunks the repository does not have.</param>
+public sealed record ChunkReadPlan(IReadOnlyList<PlannedChunk> Chunks, IReadOnlyList<string> Sources, IReadOnlyList<ChunkId> Missing)
+{
+    public long StoredBytes { get; } = Chunks.Sum(c => (long)c.StoredLength);
+
+    public long RawBytes { get; } = Chunks.Sum(c => (long)c.RawLength);
+}
+
+/// <param name="Id">The chunk.</param>
+/// <param name="Record">Its stored record (16-byte header and payload, see the repository's chunk codec).</param>
+/// <param name="RawLength">Length of the chunk's content.</param>
+public readonly record struct StoredChunk(ChunkId Id, ReadOnlyMemory<byte> Record, int RawLength);

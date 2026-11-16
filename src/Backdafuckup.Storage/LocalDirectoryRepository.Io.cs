@@ -11,72 +11,167 @@ public sealed partial class LocalDirectoryRepository
     {
         public async ValueTask<int> ReadAsync(ChunkId id, Memory<byte> destination, CancellationToken cancellationToken)
         {
-            using var handle = Open(id, FileOptions.Asynchronous);
+            ThrowIfZero(id);
+            if (repository._packs is { } packs)
+            {
+                for (var attempt = 0; attempt < 2 && packs.TryLocate(id, out var location); attempt++)
+                {
+                    var buffer = ArrayPool<byte>.Shared.Rent((int)location.StoredLength);
+                    try
+                    {
+                        try
+                        {
+                            await packs.ReadStoredAsync(location, buffer, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+                        {
+                            if (attempt == 0)
+                            {
+                                continue; // Repacked meanwhile: look it up again.
+                            }
+
+                            throw new ChunkMissingException(id, repository.Root, $"pack '{location.Pack.Path}' is gone");
+                        }
+
+                        return DecodePacked(id, location, buffer.AsSpan(0, (int)location.StoredLength), destination.Span);
+                    }
+                    catch (InvalidDataException ex)
+                    {
+                        throw new ChunkCorruptException(id, $"{ex.Message} (pack '{location.Pack.Path}', offset {location.Offset})");
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    }
+                }
+
+                if (!repository._looseMayExist)
+                {
+                    throw new ChunkMissingException(id, repository.Root);
+                }
+            }
+
+            using var handle = OpenLoose(id, FileOptions.Asynchronous);
             var length = CheckedLength(id, handle);
-            var buffer = ArrayPool<byte>.Shared.Rent(length);
+            var loose = ArrayPool<byte>.Shared.Rent(length);
             try
             {
                 var read = 0;
                 while (read < length)
                 {
-                    var n = await RandomAccess.ReadAsync(handle, buffer.AsMemory(read, length - read), read, cancellationToken).ConfigureAwait(false);
+                    var n = await RandomAccess.ReadAsync(handle, loose.AsMemory(read, length - read), read, cancellationToken).ConfigureAwait(false);
                     if (n == 0)
                     {
-                        throw new ChunkCorruptException(id, "truncated");
+                        throw new ChunkCorruptException(id, $"truncated (file '{repository.ChunkPath(id.ToHex())}')");
                     }
 
                     read += n;
                 }
 
-                return ChunkCodec.Decode(id, buffer.AsSpan(0, length), destination.Span);
+                return ChunkCodec.Decode(id, loose.AsSpan(0, length), destination.Span);
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                ArrayPool<byte>.Shared.Return(loose);
             }
         }
 
         public int Read(ChunkId id, Span<byte> destination)
         {
-            using var handle = Open(id, FileOptions.None);
+            ThrowIfZero(id);
+            if (repository._packs is { } packs)
+            {
+                for (var attempt = 0; attempt < 2 && packs.TryLocate(id, out var location); attempt++)
+                {
+                    var buffer = ArrayPool<byte>.Shared.Rent((int)location.StoredLength);
+                    try
+                    {
+                        try
+                        {
+                            packs.ReadStored(location, buffer);
+                        }
+                        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+                        {
+                            if (attempt == 0)
+                            {
+                                continue; // Repacked meanwhile: look it up again.
+                            }
+
+                            throw new ChunkMissingException(id, repository.Root, $"pack '{location.Pack.Path}' is gone");
+                        }
+
+                        return DecodePacked(id, location, buffer.AsSpan(0, (int)location.StoredLength), destination);
+                    }
+                    catch (InvalidDataException ex)
+                    {
+                        throw new ChunkCorruptException(id, $"{ex.Message} (pack '{location.Pack.Path}', offset {location.Offset})");
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    }
+                }
+
+                if (!repository._looseMayExist)
+                {
+                    throw new ChunkMissingException(id, repository.Root);
+                }
+            }
+
+            using var handle = OpenLoose(id, FileOptions.None);
             var length = CheckedLength(id, handle);
-            var buffer = ArrayPool<byte>.Shared.Rent(length);
+            var loose = ArrayPool<byte>.Shared.Rent(length);
             try
             {
                 var read = 0;
                 while (read < length)
                 {
-                    var n = RandomAccess.Read(handle, buffer.AsSpan(read, length - read), read);
+                    var n = RandomAccess.Read(handle, loose.AsSpan(read, length - read), read);
                     if (n == 0)
                     {
-                        throw new ChunkCorruptException(id, "truncated");
+                        throw new ChunkCorruptException(id, $"truncated (file '{repository.ChunkPath(id.ToHex())}')");
                     }
 
                     read += n;
                 }
 
-                return ChunkCodec.Decode(id, buffer.AsSpan(0, length), destination);
+                return ChunkCodec.Decode(id, loose.AsSpan(0, length), destination);
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                ArrayPool<byte>.Shared.Return(loose);
             }
         }
 
-        private SafeFileHandle Open(ChunkId id, FileOptions options)
+        private static void ThrowIfZero(ChunkId id)
         {
             if (id.IsZero)
             {
                 throw new ArgumentException("The zero chunk is never stored; fill zeros instead.", nameof(id));
             }
+        }
 
+        private static int DecodePacked(ChunkId id, PackLocation location, ReadOnlySpan<byte> record, Span<byte> destination)
+        {
+            try
+            {
+                return ChunkCodec.Decode(id, record, destination);
+            }
+            catch (ChunkCorruptException ex)
+            {
+                throw new ChunkCorruptException(id, $"{ex.Reason} (pack '{location.Pack.Path}', offset {location.Offset})");
+            }
+        }
+
+        private SafeFileHandle OpenLoose(ChunkId id, FileOptions options)
+        {
             try
             {
                 return File.OpenHandle(repository.ChunkPath(id.ToHex()), FileMode.Open, FileAccess.Read, FileShare.Read, options);
             }
             catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
             {
-                throw new ChunkMissingException(id);
+                throw new ChunkMissingException(id, repository.Root);
             }
         }
 
@@ -85,7 +180,7 @@ public sealed partial class LocalDirectoryRepository
             var length = RandomAccess.GetLength(handle);
             if (length > ChunkCodec.HeaderSize + (long)repository._descriptor.ChunkSize + 1024)
             {
-                throw new ChunkCorruptException(id, "file too large");
+                throw new ChunkCorruptException(id, $"file too large (file '{repository.ChunkPath(id.ToHex())}')");
             }
 
             return (int)length;
@@ -158,6 +253,8 @@ public sealed partial class LocalDirectoryRepository
     {
         private readonly Lock _protectedLock = new();
         private readonly HashSet<ChunkId> _protected = [];
+        private readonly HashSet<PackFile> _dependencies = [];
+        private PackAppender? _appender;
         private int _committed;
         private int _closed;
 
@@ -213,6 +310,133 @@ public sealed partial class LocalDirectoryRepository
                 throw new ArgumentException("Zero chunks are not stored.", nameof(id));
             }
 
+            return Repository._packs is { } packs
+                ? await StorePackedAsync(packs, id, plaintext).ConfigureAwait(false)
+                : await StoreLooseAsync(id, plaintext, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Seals this writer's packs and every open pack it deduplicated against, then indexes them: everything its
+        /// manifest refers to is durable before the manifest is written.
+        /// </summary>
+        protected async Task SealForCommitAsync(CancellationToken cancellationToken)
+        {
+            if (Repository._packs is not { } packs)
+            {
+                return;
+            }
+
+            if (_appender is { } appender)
+            {
+                await appender.FlushAsync().ConfigureAwait(false);
+            }
+
+            PackFile[] dependencies;
+            lock (_protectedLock)
+            {
+                dependencies = [.. _dependencies];
+            }
+
+            foreach (var pack in dependencies)
+            {
+                try
+                {
+                    await (pack.Owner is { } owner ? owner.SealIfCurrentAsync(pack) : pack.Sealed.Task).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    throw new IOException($"Pack '{pack.Path}', which this backup shares chunks with, could not be sealed: {ex.Message}", ex);
+                }
+            }
+
+            await packs.PersistAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>Seals what this writer appended (writers that deduplicated against it may commit later).</summary>
+        protected async Task FlushPacksAsync()
+        {
+            if (_appender is { } appender)
+            {
+                try
+                {
+                    await appender.FlushAsync().ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
+                    // The pack is marked dead; writers depending on it fail their commit with the reason.
+                }
+            }
+        }
+
+        private async ValueTask<ChunkPutResult> StorePackedAsync(PackStore packs, ChunkId id, ReadOnlyMemory<byte> plaintext)
+        {
+            var repository = Repository;
+            var stripe = repository._stripes[id.Stripe(StripeCount)];
+            lock (stripe)
+            {
+                lock (_protectedLock)
+                {
+                    _protected.Add(id);
+                }
+
+                if (TryDeduplicate(packs, id))
+                {
+                    return new ChunkPutResult(ChunkPutOutcome.Deduplicated, 0);
+                }
+            }
+
+            var compressStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var (buffer, length) = ChunkCodec.Encode(plaintext.Span, repository._descriptor.Compression.Level);
+            var compressTicks = System.Diagnostics.Stopwatch.GetTimestamp() - compressStart;
+            OpenPack? full;
+            try
+            {
+                lock (stripe)
+                {
+                    if (TryDeduplicate(packs, id))
+                    {
+                        return new ChunkPutResult(ChunkPutOutcome.Deduplicated, 0);
+                    }
+
+                    var appender = _appender ??= packs.CreateAppender();
+                    var location = appender.Append(id, buffer.AsMemory(0, length), (uint)plaintext.Length, out full);
+                    packs.AddLive(id, location);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+
+            if (full is not null)
+            {
+                await _appender!.SealAsync(full).ConfigureAwait(false);
+            }
+
+            return new ChunkPutResult(ChunkPutOutcome.Stored, length, compressTicks);
+        }
+
+        /// <summary>Under the chunk's stripe lock: is there a copy to reuse? Records open packs as dependencies.</summary>
+        private bool TryDeduplicate(PackStore packs, ChunkId id)
+        {
+            if (packs.TryLocateForDedup(id, out var location))
+            {
+                if (location.Pack.State == PackState.Open && location.Pack.Owner != _appender)
+                {
+                    lock (_protectedLock)
+                    {
+                        _dependencies.Add(location.Pack);
+                    }
+                }
+
+                return true;
+            }
+
+            return Repository._looseMayExist && File.Exists(Repository.ChunkPath(id.ToHex()));
+        }
+
+        private async ValueTask<ChunkPutResult> StoreLooseAsync(ChunkId id, ReadOnlyMemory<byte> plaintext, CancellationToken cancellationToken)
+        {
             var repository = Repository;
             var hex = id.ToHex();
             var path = repository.ChunkPath(hex);
@@ -344,6 +568,7 @@ public sealed partial class LocalDirectoryRepository
             };
 
             // Make all chunk/index/blob data durable before the manifest (the commit point) appears.
+            await SealForCommitAsync(cancellationToken).ConfigureAwait(false);
             FileSystemSync.SyncFileSystem(Repository.Root);
             var json = JsonSerializer.SerializeToUtf8Bytes(manifest, CoreJsonContext.Default.RestorePointManifest);
             await AtomicFile.WriteAsync(Repository._tempDirectory, Path.Combine(directory, ManifestFileName), json, overwrite: false, cancellationToken).ConfigureAwait(false);
@@ -354,13 +579,14 @@ public sealed partial class LocalDirectoryRepository
             return new ManifestInfo(RestorePointId, directory, manifest);
         }
 
-        public override ValueTask DisposeAsync()
+        public override async ValueTask DisposeAsync()
         {
             if (!Close())
             {
-                return ValueTask.CompletedTask;
+                return;
             }
 
+            await FlushPacksAsync().ConfigureAwait(false);
             if (!IsCommitted)
             {
                 try
@@ -379,7 +605,6 @@ public sealed partial class LocalDirectoryRepository
             }
 
             Repository.OnWriterClosed(this);
-            return ValueTask.CompletedTask;
         }
     }
 }

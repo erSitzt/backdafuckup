@@ -112,7 +112,7 @@ public static class OperationEndpoints
             return Results.Ok(new StartedDto(id));
         }).WithDescription("Restores a whole-cluster job's run into a cluster (its own or another, with StorageClasses mapped): the cluster-scoped objects first (CRDs, ClusterRoles and bindings, classes; webhooks are only listed), then the chosen namespaces, each as a task.");
 
-        app.MapGet("/api/dashboard", async (AppDbContext db, TimeProvider time, CancellationToken ct) =>
+        app.MapGet("/api/dashboard", async (AppDbContext db, TimeProvider time, RepositoryManager repositories, CancellationToken ct) =>
         {
             var since = time.GetUtcNow().AddHours(-24);
             var recent = await db.Sessions.Where(s => s.Kind == SessionKind.Backup && s.EndedUtc >= since).ToListAsync(ct);
@@ -129,7 +129,7 @@ public static class OperationEndpoints
                 vms.Count(v => !protectedVms.Contains(v)),
                 running.Select(s => s.ToDto()).ToList(),
                 latest.Select(s => s.ToDto()).ToList(),
-                await InfrastructureEndpoints.ListRepositoriesAsync(db, ct));
+                await InfrastructureEndpoints.ListRepositoriesAsync(db, repositories, ct));
         });
     }
 

@@ -49,7 +49,7 @@ public sealed class SqlBackupObjectTests : IDisposable
         Assert.Equal(log, ReadAllSync(await reader.OpenFileAsync("0", Ct)));
 
         // Two data chunks of the log plus the small file; the zero chunk is not stored.
-        Assert.Equal(3, CountChunkFiles());
+        Assert.Equal(3, repo.CountStoredChunks());
         Assert.True((await repo.VerifySqlBackupAsync(id, VerifyDepth.Full, null, Ct)).Ok);
         Assert.True((await repo.VerifySqlBackupAsync(id, VerifyDepth.Quick, null, Ct)).Ok);
     }
@@ -83,7 +83,7 @@ public sealed class SqlBackupObjectTests : IDisposable
         var shared = RandomNumberGenerator.GetBytes(ChunkSize);
         var first = await WriteAsync(repo, "vm-1", ("0", "shop", [.. shared, .. RandomNumberGenerator.GetBytes(ChunkSize)]));
         var second = await WriteAsync(repo, "vm-1", ("0", "shop", [.. shared, .. RandomNumberGenerator.GetBytes(100)]));
-        Assert.Equal(3, CountChunkFiles());
+        Assert.Equal(3, repo.CountStoredChunks());
 
         Assert.Equal(0, (await repo.CollectGarbageAsync(null, Ct)).DeletedChunks);
 
@@ -165,9 +165,7 @@ public sealed class SqlBackupObjectTests : IDisposable
     private async Task<LocalDirectoryRepository> CreateAsync() =>
         await LocalDirectoryRepository.CreateAsync(_root, Ct, ChunkSize, 3, _time);
 
-    private int CountChunkFiles() => Directory.EnumerateFiles(Path.Combine(_root, "chunks"), "*", SearchOption.AllDirectories).Count();
-
-    private static async Task<Guid> WriteAsync(LocalDirectoryRepository repo, string vm, params (string Key, string Database, byte[] Content)[] files)
+    internal static async Task<Guid> WriteAsync(LocalDirectoryRepository repo, string vm, params (string Key, string Database, byte[] Content)[] files)
     {
         var id = Guid.CreateVersion7();
         await using var writer = repo.BeginSqlBackup(id, vm);
@@ -182,7 +180,7 @@ public sealed class SqlBackupObjectTests : IDisposable
         return id;
     }
 
-    private static SqlBackupManifest Manifest(LocalDirectoryRepository repo, Guid id, IReadOnlyList<SqlBackupFile> files) => new()
+    internal static SqlBackupManifest Manifest(LocalDirectoryRepository repo, Guid id, IReadOnlyList<SqlBackupFile> files) => new()
     {
         SqlBackupId = id,
         RepositoryId = repo.Info.RepositoryId,
@@ -195,7 +193,7 @@ public sealed class SqlBackupObjectTests : IDisposable
         Files = files,
     };
 
-    private static SqlBackupFile Described(SqlBackupStoredFile stored, string database) => new()
+    internal static SqlBackupFile Described(SqlBackupStoredFile stored, string database) => new()
     {
         Key = stored.Key,
         Database = database,
@@ -218,7 +216,7 @@ public sealed class SqlBackupObjectTests : IDisposable
         },
     };
 
-    private static async Task<byte[]> ReadAllAsync(Stream stream)
+    internal static async Task<byte[]> ReadAllAsync(Stream stream)
     {
         await using (stream)
         {

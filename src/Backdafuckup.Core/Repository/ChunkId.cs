@@ -7,7 +7,7 @@ namespace Backdafuckup.Core.Repository;
 /// Content address of a chunk: SHA-256 of the uncompressed chunk data.
 /// <see cref="Zero"/> (all 32 bytes zero) is reserved as the sentinel for an all-zero chunk, which is never stored.
 /// </summary>
-public readonly struct ChunkId : IEquatable<ChunkId>
+public readonly struct ChunkId : IEquatable<ChunkId>, IComparable<ChunkId>
 {
     public const int Size = 32;
 
@@ -81,6 +81,28 @@ public readonly struct ChunkId : IEquatable<ChunkId>
     /// <summary>Cheap stripe selector for lock striping.</summary>
     public int Stripe(int stripes) => (int)(_a % (ulong)stripes);
 
+    /// <summary>The id as four big-endian words; their order is the order of the id's bytes.</summary>
+    public (ulong A, ulong B, ulong C, ulong D) Words => (_a, _b, _c, _d);
+
+    /// <summary>Orders ids like their bytes (lexicographically).</summary>
+    public int CompareTo(ChunkId other)
+    {
+        var c = _a.CompareTo(other._a);
+        if (c != 0)
+        {
+            return c;
+        }
+
+        c = _b.CompareTo(other._b);
+        if (c != 0)
+        {
+            return c;
+        }
+
+        c = _c.CompareTo(other._c);
+        return c != 0 ? c : _d.CompareTo(other._d);
+    }
+
     public bool Equals(ChunkId other) => _a == other._a && _b == other._b && _c == other._c && _d == other._d;
 
     public override bool Equals(object? obj) => obj is ChunkId other && Equals(other);
@@ -90,6 +112,14 @@ public readonly struct ChunkId : IEquatable<ChunkId>
     public static bool operator ==(ChunkId left, ChunkId right) => left.Equals(right);
 
     public static bool operator !=(ChunkId left, ChunkId right) => !left.Equals(right);
+
+    public static bool operator <(ChunkId left, ChunkId right) => left.CompareTo(right) < 0;
+
+    public static bool operator >(ChunkId left, ChunkId right) => left.CompareTo(right) > 0;
+
+    public static bool operator <=(ChunkId left, ChunkId right) => left.CompareTo(right) <= 0;
+
+    public static bool operator >=(ChunkId left, ChunkId right) => left.CompareTo(right) >= 0;
 
     public override string ToString() => IsZero ? "zero" : ToHex();
 }
