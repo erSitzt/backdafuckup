@@ -29,7 +29,8 @@ public sealed class TapeBackupRunner(
     ServerPaths paths,
     IOptions<TapeOptions> options,
     TimeProvider time,
-    Telemetry.BackupMetrics metrics)
+    Telemetry.BackupMetrics metrics,
+    TapeOperatorRequests requests)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -45,11 +46,6 @@ public sealed class TapeBackupRunner(
         }
 
         var library = await libraries.LoadAsync(pool.LibraryId, cancellationToken).ConfigureAwait(false);
-        if (library.ChangerSerial is null)
-        {
-            throw new InvalidOperationException($"Pool {pool.Name} uses the standalone drive {library.Name}; tape jobs need a library with a changer in this version.");
-        }
-
         var (kek, kdf, fingerprint) = await KeyAsync(pool, cancellationToken).ConfigureAwait(false);
         await ExpireSetsAsync(pool, log, cancellationToken).ConfigureAwait(false);
         var (set, closed) = await OpenSetAsync(pool, fingerprint, log, cancellationToken).ConfigureAwait(false);
@@ -82,7 +78,7 @@ public sealed class TapeBackupRunner(
         var context = new TapeWriteContext(library, drive, pool, set, kek, kdf, fingerprint, index, holder, session.Id, log);
         TapeWriteResult result;
         var failed = 0;
-        await using (var writer = new TapeSetWriter(context, dbFactory, libraries, robot, options.Value, time))
+        await using (var writer = new TapeSetWriter(context, dbFactory, libraries, robot, requests, options.Value, time))
         {
             foreach (var point in points)
             {

@@ -77,6 +77,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<TapeFileEntity> TapeFiles => Set<TapeFileEntity>();
 
+    public DbSet<TapeOperatorRequestEntity> TapeOperatorRequests => Set<TapeOperatorRequestEntity>();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
@@ -108,6 +110,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
         builder.Entity<TapeMediumEntity>(e =>
         {
+            e.Property(x => x.LabelEncryption).HasMaxLength(1000);
             e.ToTable("tape_media");
             e.Property(x => x.Barcode).HasMaxLength(32);
             e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(16);
@@ -188,6 +191,13 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.Type).HasMaxLength(16);
             e.HasIndex(x => new { x.SetId, x.Sequence, x.FileNumber }).IsUnique();
             e.HasOne<MediaSetEntity>().WithMany().HasForeignKey(x => x.SetId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TapeOperatorRequestEntity>(e =>
+        {
+            e.ToTable("tape_operator_requests");
+            e.Property(x => x.Message).HasMaxLength(1000);
+            e.HasIndex(x => x.ResolvedUtc);
         });
 
         builder.Entity<TapeAgentEntity>(e =>

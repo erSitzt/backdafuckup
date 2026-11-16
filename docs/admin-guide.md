@@ -1115,7 +1115,7 @@ The agent shows *Online* while it is connected. When it is gone, actions of its 
 2. **Check the drives.** A changer that names its drives (DVCID) maps them itself (*dvcid*). For one that does not, the drives are assigned in serial order and marked *order*: check and correct the mapping.
 3. **Name it** (`POST /api/tape/libraries`). The first inventory runs at once.
 
-A **standalone drive** is added the same way, as one drive without a changer. Its cartridges are put in and taken out by hand; an inventory asks the drive which cartridge it holds (by the barcode in the cartridge memory).
+A **standalone drive** is added the same way, as one drive without a changer. Its cartridges are put in and taken out by hand; an inventory asks the drive which cartridge it holds (by the barcode in the cartridge memory). Jobs on it ask for cartridges, see [Standalone drives](#standalone-drives).
 
 ### Cartridges
 
@@ -1139,6 +1139,9 @@ Load, unload, import, export and scan run as **tape sessions** (*Sessions*, type
 | `Tape:MailSlotPoll` | `00:00:30` | How often the mail slots are looked into; `00:00:00` turns it off. |
 | `Tape:LoadTimeout` | `02:30:00` | How long a load may wait for the drive. |
 | `Tape:ReadyPoll` | `00:00:02` | How often a loading drive is asked. |
+| `Tape:OperatorPoll` | `00:00:10` | How often a session waiting for a cartridge in a standalone drive asks the drive. |
+| `Tape:OperatorTimeout` | `12:00:00` | How long such a session waits before it fails. |
+| `Tape:CacheDirectory` | `tape/cache` in the data directory | Where a direct VM restore from tape keeps the chunks it reads. |
 
 The lab VTL (`deploy/vtl`, Holo VTL) behaves like an HPE MSL6480 with LTO-9 drives; its README lists what it does differently from a real library.
 
@@ -1159,6 +1162,7 @@ A **media pool** is the tapes of one library used for one purpose (*Tape → Med
 - **By the drive** (*Hardware*, LTO, application-managed encryption): the drive encrypts; the MSL6480 must be set to application-managed encryption.
 - **Keys.** A key comes from a **passphrase** (*Tape → Media pools → Keys*), which is never stored. The server keeps only the derived key (Argon2id, protected with its key ring) and shows its fingerprint, e.g. `3F2A-91C0-7B11-02DE`. Every set gets its own key from it, and every tape's label names the fingerprint.
 - **Key file.** Download the key file once, right after creating the key, and keep it apart from the tapes. Without the passphrase or the key file, encrypted tapes cannot be read, not even by backdafuckup. A key cannot be removed while a pool or a kept set uses it.
+- **Existing keys** (tapes of another server, a lost database): *Existing key* with the key file's content, or with the passphrase once a tape's label has been read here (the label says how the key was made).
 
 ### Tape jobs
 
@@ -1174,6 +1178,35 @@ A tape job copies restore points of backup jobs into a pool (*Tape → Tape jobs
 ### Bring a copy back
 
 *Tape → On tape → Bring back…* (`POST /api/tape/copies/{id}/restore`) reads the copy into a repository with the same block size. It loads the tapes it needs in order and reads only the needed parts of each file. The copy becomes a restore point of its own, named *Imported from tape*, that belongs to no job: job retention never deletes it. From there it is restored like any other (VM, files, SQL Server, Active Directory). The VM's SQL Server backups on tape from that restore point on come back with it, for point-in-time restores. The tapes it needs must be in the library; offline ones are named.
+
+### Restore a VM directly from tape
+
+*Tape → On tape → Restore VM…* opens the usual restore wizard for the copy (`GET /api/tape/copies/{id}/restore-point`, `POST /api/tape/copies/{id}/restore-vm`):
+
+- The server reads only that restore point's chunks into a **cache** on its own disk (`Tape:CacheDirectory`, by default `tape/cache` in the data directory), then frees the drive and restores the VM from the cache to the pool, as from a repository: original or alternate location, storage and networks, with memory.
+- The cache needs the copy's size plus 5 %; with less free space the session fails at once and says so. The cache is deleted at the end, and at the next start after a crash.
+- Nothing is added to a repository. To keep the restore point, or for Kubernetes namespaces and clusters, bring the copy back instead.
+
+### Standalone drives
+
+A pool can use a standalone drive. Jobs and restores then ask a person for each cartridge:
+
+- **The request** shows on every page of the console (*Tape: Insert …*) and in the session's log, until the right cartridge is in the drive (`GET /api/tape/requests`). After 30 minutes the alert *BackdafuckupTapeOperatorWaiting* fires; after `Tape:OperatorTimeout` the session fails.
+- **Writing** asks for the set's last tape by name while it has room, otherwise for a blank, free or expired cartridge. A cartridge that does not fit is ejected, and the request says why: a tape of another set that is kept, other data, the wrong kind (WORM or not).
+- **Names.** A new tape gets a name such as `Weekly-3F2A91-2` (pool, set, number in the set). The name is in its label and its cartridge memory, and the log says to **write it on the cartridge**. Cartridges are told apart by the serial number in their memory.
+- **When it is full,** or the run ends, the drive ejects the tape: take it out.
+- **Bringing a copy back** asks for each tape it needs by name, in order. A wrong one is ejected and named.
+
+### A lost database: rebuild the catalog from the tapes
+
+The tapes describe themselves, so a new server (or one whose database was restored from an older state) gets its tape catalog back from them:
+
+1. **Keys first,** for encrypted sets: *Tape → Media pools → Keys → Existing key*, with its key file (paste its content) or its passphrase. A passphrase works once the tapes' labels have been read here (step 3 reads them; add the key, then run step 3 again).
+2. **The library:** add it again (*Add library*) and put the tapes in; the inventory finds them.
+3. **Rebuild the catalog** (the library's menu; `POST /api/tape/libraries/{id}/actions` with `rebuild`). A tape session reads the label of every tape the catalog does not know, then for each set it does not know the newest catalog on the set's highest tape in the library, and the copies written after that catalog.
+4. **What comes back:** the pool (under its own id; created with default rules if it is gone: check when it starts new sets and how long it keeps them), the set (closed, kept for the pool's retention from now), its tapes (those not in the library as *offline*), and its copies under *On tape*. Tape jobs are not on tape: create them again.
+
+A set whose highest tape is not in the library comes back as far as the tapes there know it; import the others and rebuild again. A set encrypted with a key this server does not have is named in the log with the key's fingerprint. For a standalone drive, read the tapes with `bdfu-tape-recover`.
 
 ### Without the server: bdfu-tape-recover
 
@@ -1265,6 +1298,7 @@ What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the S
 | `bdfu_tape_media` {pool, state} | gauge | Tapes of a pool by state (Appendable, Full, Expired, Damaged, …) |
 | `bdfu_tape_media_sets` {pool, state} | gauge | Media sets by state (Open, Closed, Expired) |
 | `bdfu_tape_pool_usable_media` {pool} | gauge | Tapes the pool can write to now (its open set's appendable tape, and expired, free, blank or unread tapes in its library) |
+| `bdfu_tape_operator_requests_pending` | gauge | Requests to the operator a session waits for (a cartridge into a standalone drive) |
 
 Kubernetes namespaces count in the session metrics (`bdfu_sessions_total` and the others) and per job in `bdfu_vm_*` like VMs; `cluster` in the `bdfu_k8s_*` metrics is the cluster's address, or its connection's name when it is reached through its agent.
 

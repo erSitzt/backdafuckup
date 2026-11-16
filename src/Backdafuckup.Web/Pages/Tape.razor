@@ -165,6 +165,7 @@ else
                             {
                                 <MudMenuItem Icon="@Icons.Material.Filled.MoveToInbox" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Import), "Import from the mail slots"))">Import from the mail slots</MudMenuItem>
                                 <MudMenuItem Icon="@Icons.Material.Filled.ManageSearch" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Scan), $"Scan of {library.Name}"))">Scan every element (after the door was open)</MudMenuItem>
+                                <MudMenuItem Icon="@Icons.Material.Filled.LibraryBooks" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Rebuild), $"Rebuild of the catalog from the tapes in {library.Name}"))">Rebuild the catalog from the tapes (lost database, tapes of another server)</MudMenuItem>
                             }
                             <MudMenuItem Icon="@Icons.Material.Filled.Edit" OnClick="@(() => { _renaming = library.Id; _newName = library.Name; })">Rename</MudMenuItem>
                             <MudDivider />
@@ -494,12 +495,32 @@ else
                     }
                 </tbody>
             </MudSimpleTable>
-            <div class="d-flex gap-2 align-center flex-wrap">
-                <MudTextField @bind-Value="_keyName" Label="Key name" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:220px" />
-                <MudTextField @bind-Value="_passphrase" Label="Passphrase (12 characters or more)" InputType="InputType.Password" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:280px" />
-                <MudTextField @bind-Value="_passphrase2" Label="Again" InputType="InputType.Password" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:200px" />
-                <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Key" Disabled="@(_busy || string.IsNullOrWhiteSpace(_keyName) || _passphrase.Length < 12 || _passphrase != _passphrase2)" OnClick="CreateKeyAsync">Create key</MudButton>
-            </div>
+            <MudRadioGroup T="bool" @bind-Value="_existingKey" Class="mb-1">
+                <MudRadio Value="false" Dense="true">New key</MudRadio>
+                <MudRadio Value="true" Dense="true">Existing key (tapes of another server, or after a lost database)</MudRadio>
+            </MudRadioGroup>
+            @if (!_existingKey)
+            {
+                <div class="d-flex gap-2 align-center flex-wrap">
+                    <MudTextField @bind-Value="_keyName" Label="Key name" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:220px" />
+                    <MudTextField @bind-Value="_passphrase" Label="Passphrase (12 characters or more)" InputType="InputType.Password" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:280px" />
+                    <MudTextField @bind-Value="_passphrase2" Label="Again" InputType="InputType.Password" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:200px" />
+                    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Key" Disabled="@(_busy || string.IsNullOrWhiteSpace(_keyName) || _passphrase.Length < 12 || _passphrase != _passphrase2)" OnClick="CreateKeyAsync">Create key</MudButton>
+                </div>
+            }
+            else
+            {
+                <MudText Typo="Typo.body2" Class="mb-2">
+                    With its key file: paste the file's content. With its passphrase: the tapes' labels must have been read here first
+                    (<i>Rebuild the catalog</i>, or <i>Read its label</i>), so the server knows how the key was made.
+                </MudText>
+                <div class="d-flex gap-2 align-start flex-wrap">
+                    <MudTextField @bind-Value="_keyName" Label="Key name" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:220px" />
+                    <MudTextField @bind-Value="_passphrase" Label="Passphrase" InputType="InputType.Password" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:240px" Disabled="@(_keyFile.Length > 0)" />
+                    <MudTextField @bind-Value="_keyFile" Label="or the key file's content" Lines="2" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:360px" Class="mono" Disabled="@(_passphrase.Length > 0)" />
+                    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Key" Class="mt-1" Disabled="@(_busy || string.IsNullOrWhiteSpace(_keyName) || (_passphrase.Length == 0 && _keyFile.Trim().Length == 0))" OnClick="AddExistingKeyAsync">Add key</MudButton>
+                </div>
+            }
         </MudTabPanel>
 
         <MudTabPanel Text="Tape jobs">
@@ -614,6 +635,10 @@ else
                         <MudTd Style="text-align:right; white-space:nowrap">
                             @if (context.Kind == "restore-point")
                             {
+                                @if (context.ObjectKind is null or "Vm")
+                                {
+                                    <MudButton Size="Size.Small" StartIcon="@Icons.Material.Filled.Restore" Href="@($"/restore/{context.Id}?tape=true")">Restore VM…</MudButton>
+                                }
                                 <MudButton Size="Size.Small" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(async () => { await LoadFormsDataAsync(); _restoring = context; })">Bring back…</MudButton>
                             }
                         </MudTd>
@@ -734,6 +759,8 @@ else
     private string _keyName = string.Empty;
     private string _passphrase = string.Empty;
     private string _passphrase2 = string.Empty;
+    private bool _existingKey;
+    private string _keyFile = string.Empty;
     private TapeAgentSecretDto? _agentSecret;
     private string _agentName = string.Empty;
 
@@ -1024,6 +1051,17 @@ else
             var key = await Api.PostAsync<TapeKeyDto>("api/tape/keys", new CreateTapeKeyDto(_keyName.Trim(), _passphrase));
             Snackbar.Add($"Key {key.Name} created: fingerprint {key.Fingerprint}. Download its key file now and keep it apart from the tapes.", Severity.Success);
             _keyName = _passphrase = _passphrase2 = string.Empty;
+        });
+    }
+
+    private async Task AddExistingKeyAsync()
+    {
+        await SaveAsync(async () =>
+        {
+            var file = _keyFile.Trim();
+            var key = await Api.PostAsync<TapeKeyDto>("api/tape/keys", new CreateTapeKeyDto(_keyName.Trim(), file.Length > 0 ? null : _passphrase, file.Length > 0 ? file : null, Existing: true));
+            Snackbar.Add($"Key {key.Name} added: fingerprint {key.Fingerprint}. Rebuild the catalog to read the sets encrypted with it.", Severity.Success);
+            _keyName = _passphrase = _passphrase2 = _keyFile = string.Empty;
         });
     }
 

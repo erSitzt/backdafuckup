@@ -3,7 +3,7 @@
 @inject NavigationManager Navigation
 
 <PageTitle>Restore VM – backdafuckup</PageTitle>
-<PageHeader Title="Restore Entire VM" Back="/backups" />
+<PageHeader Title="@(FromTape ? "Restore Entire VM from Tape" : "Restore Entire VM")" Back="@(FromTape ? "/infrastructure/tape" : "/backups")" />
 
 @if (_point is null || _pools is null)
 {
@@ -35,6 +35,13 @@ else
                         This VM was a domain controller@(string.IsNullOrEmpty(_point.AdDomain) ? string.Empty : $" of {_point.AdDomain}"). The restored VM gets a new VM generation id,
                         so at its first start Windows restores Active Directory non-authoritatively and takes the newer changes from the other domain controllers.
                         Objects deleted since the backup do not come back this way.
+                    </MudAlert>
+                }
+                @if (FromTape)
+                {
+                    <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">
+                        The restore point is on tape. The server reads it into a cache on its own disk (up to @Fmt.Bytes(_point.NewStoredBytes)), frees the drive, restores the VM
+                        from there, and deletes the cache. A tape that is not in the library is asked for.
                     </MudAlert>
                 }
                 <MudRadioGroup T="RestoreModeDto" @bind-Value="_mode">
@@ -182,6 +189,9 @@ else
 
     [Parameter] public Guid Id { get; set; }
 
+    /// <summary>Id is a tape copy: restored directly from tape, through a cache.</summary>
+    [SupplyParameterFromQuery(Name = "tape")] public bool FromTape { get; set; }
+
     private RestorePointDto? _point;
     private List<ConnectionDto>? _pools;
     private List<InventoryItemDto> _inventory = [];
@@ -205,7 +215,7 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        _point = await Api.GetAsync<RestorePointDto>($"api/restore-points/{Id}");
+        _point = await Api.GetAsync<RestorePointDto>(FromTape ? $"api/tape/copies/{Id}/restore-point" : $"api/restore-points/{Id}");
         _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer");
         _vmName = $"{_point.VmName}_restored";
         _targetPool = _point.ConnectionId ?? _pools.FirstOrDefault()?.Id ?? Guid.Empty;
@@ -253,7 +263,7 @@ else
         try
         {
             var alternate = _mode == RestoreModeDto.AlternateLocation;
-            var started = await Api.PostAsync<StartedDto>("api/restores", new RestoreRequestDto
+            var started = await Api.PostAsync<StartedDto>(FromTape ? $"api/tape/copies/{Id}/restore-vm" : "api/restores", new RestoreRequestDto
             {
                 RestorePointId = Id,
                 Mode = _mode,

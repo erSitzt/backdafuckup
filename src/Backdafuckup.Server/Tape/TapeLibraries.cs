@@ -30,6 +30,15 @@ public sealed class TapeOptions
     public int KdfIterations { get; set; } = 3;
 
     public int KdfParallelism { get; set; } = 4;
+
+    /// <summary>How often a waiting session looks whether the operator did what it asked (a cartridge in a standalone drive).</summary>
+    public TimeSpan OperatorPoll { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>How long a session waits for the operator before it gives up.</summary>
+    public TimeSpan OperatorTimeout { get; set; } = TimeSpan.FromHours(12);
+
+    /// <summary>Where a direct VM restore from tape keeps the chunks it reads; empty: <c>tape/cache</c> in the data directory.</summary>
+    public string? CacheDirectory { get; set; }
 }
 
 /// <summary>A changer opened for this process alone; closed on dispose.</summary>
@@ -379,6 +388,7 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
             medium.FileCount = read.Label is null ? 0 : 1;
             medium.MediumId = read.Label?.MediumId;
             medium.LabelName = read.Label?.Name;
+            medium.LabelEncryption = null;
             text = read.Blank ? $"{barcode} is blank." : read.Foreign ? $"{barcode} holds data that is not backdafuckup's ({read.Reason}); it is never written to." : $"{barcode} is labelled and free.";
         }
         else
@@ -403,6 +413,7 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
             medium.Sequence = labelSet.Sequence;
             medium.MediumId = label.MediumId;
             medium.LabelName = label.Name;
+            medium.LabelEncryption = label.Encryption is { } encryption ? Backdafuckup.Tape.Format.TapeJson.ToText(encryption) : null;
             text = set is null
                 ? $"{barcode} is tape #{labelSet.Sequence} of set {labelSet.Id} of pool {labelSet.PoolName}, which this server does not know: it is not written to."
                 : $"{barcode} is tape #{labelSet.Sequence} of set {labelSet.Id} (pool {labelSet.PoolName}, {set.State.ToString().ToLowerInvariant()}): {medium.State.ToString().ToLowerInvariant()}.";

@@ -220,6 +220,8 @@ public static class TapeJson
 
     public static byte[] Serialize<T>(T value) => JsonSerializer.SerializeToUtf8Bytes(value, Options);
 
+    public static string ToText<T>(T value) => JsonSerializer.Serialize(value, Options);
+
     public static T Deserialize<T>(ReadOnlySpan<byte> json) => JsonSerializer.Deserialize<T>(json, Options) ?? throw new InvalidDataException($"An empty {typeof(T).Name}.");
 
     public static byte[] SerializeCompressed<T>(T value) => TapeCompression.Compress(Serialize(value));

@@ -3,15 +3,18 @@ using Backdafuckup.Core.Operations;
 using Backdafuckup.Core.Repository;
 using Backdafuckup.Server.Data;
 using Backdafuckup.Server.Engine;
+using Backdafuckup.Storage;
 using Backdafuckup.Tape.Crypto;
+using Backdafuckup.Tape.Devices;
 using Backdafuckup.Tape.Format;
 using Microsoft.EntityFrameworkCore;
 
 namespace Backdafuckup.Server.Tape;
 
-/// <summary>A queued import of a tape copy into a repository (the session's parameters).</summary>
+/// <summary>A queued import of a tape copy into a repository, or a direct VM restore from it (the session's parameters).</summary>
 /// <param name="IncludeSql">Also the SQL Server backups of the VM in the set from this restore point on (point-in-time restores).</param>
-public sealed record TapeRestoreRequest(Guid CopyId, Guid RepositoryId, bool IncludeSql = true);
+/// <param name="Vm">A direct VM restore: where and how; the copy goes through a cache instead of a repository.</param>
+public sealed record TapeRestoreRequest(Guid CopyId, Guid RepositoryId, bool IncludeSql = true, Contracts.RestoreRequestDto? Vm = null);
 
 /// <summary>
 /// Brings a tape copy back into a repository: reads its restore-point file (its files and where its chunks are), then
@@ -28,8 +31,36 @@ public sealed class TapeRestoreRunner(
     SessionEventWriter events,
     Sql.SqlCatalogBackfill sqlBackfill,
     TimeProvider time,
-    Telemetry.BackupMetrics metrics)
+    Telemetry.BackupMetrics metrics,
+    TapeOperatorRequests requests,
+    RestoreSessionRunner vmRestore,
+    Hosting.ServerPaths paths,
+    Microsoft.Extensions.Options.IOptions<TapeOptions> options)
 {
+    /// <summary>Where direct VM restores keep the chunks they read (one directory per session, deleted at the end and at start).</summary>
+    internal string CacheRoot => options.Value.CacheDirectory is { Length: > 0 } directory ? Path.GetFullPath(directory) : Path.Combine(paths.DataDirectory, "tape", "cache");
+
+    /// <summary>At start: caches of direct restores a crash or restart left behind.</summary>
+    public void DeleteLeftoverCaches(Action<string> warn)
+    {
+        if (!Directory.Exists(CacheRoot))
+        {
+            return;
+        }
+
+        foreach (var directory in Directory.EnumerateDirectories(CacheRoot))
+        {
+            try
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                warn($"The tape cache {directory} could not be deleted: {ex.Message}");
+            }
+        }
+    }
+
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
         var log = new WarningTrackingLog(events.CreateLog(session.Id, null));
@@ -48,39 +79,68 @@ public sealed class TapeRestoreRunner(
             pool = await db.MediaPools.AsNoTracking().FirstAsync(p => p.Id == set.PoolId, cancellationToken).ConfigureAwait(false);
             media = await db.TapeMedia.AsNoTracking().Where(m => m.SetId == set.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
             files = await db.TapeFiles.AsNoTracking().Where(f => f.SetId == set.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
-            sqlCopies = !request.IncludeSql || copy.Kind != TapeFileTypes.RestorePoint ? [] : await db.TapeCopies.AsNoTracking()
+            sqlCopies = !request.IncludeSql || request.Vm is not null || copy.Kind != TapeFileTypes.RestorePoint ? [] : await db.TapeCopies.AsNoTracking()
                 .Where(c => c.SetId == set.Id && c.Kind == TapeFileTypes.Sql && c.VmId == copy.VmId && c.RepositoryId == copy.RepositoryId && c.CreatedUtc >= copy.CreatedUtc)
                 .OrderBy(c => c.CreatedUtc)
                 .ToListAsync(cancellationToken).ConfigureAwait(false);
         }
 
         var library = await libraries.LoadAsync(pool.LibraryId, cancellationToken).ConfigureAwait(false);
-        var missing = copy.NeededSequences.Concat(sqlCopies.SelectMany(c => c.NeededSequences)).Distinct().Where(s => media.FirstOrDefault(m => m.Sequence == s) is not { Location: not TapeLocation.Offline } m || m.LibraryId != library.Id).ToList();
+        var missing = library.ChangerSerial is null ? [] : copy.NeededSequences.Concat(sqlCopies.SelectMany(c => c.NeededSequences)).Distinct().Where(s => media.FirstOrDefault(m => m.Sequence == s) is not { Location: not TapeLocation.Offline } m || m.LibraryId != library.Id).ToList();
         if (missing.Count > 0)
         {
             var names = missing.Select(s => media.FirstOrDefault(m => m.Sequence == s)?.Barcode ?? $"#{s}");
             throw new IOException($"{copy.VmName} needs tape(s) {string.Join(", ", names)}, which are not in {library.Name}: import them from the mail slots first.");
         }
 
-        var repository = await repositories.GetAsync(request.RepositoryId, cancellationToken).ConfigureAwait(false);
-        if (repository is not IRepositoryTransfer transfer)
+        var original = JsonSerializer.Deserialize(copy.Manifest, CoreJsonContext.Default.RestorePointManifest)!;
+        IRepositoryTransfer transfer;
+        LocalDirectoryRepository? cache = null;
+        string? cacheDirectory = null;
+        if (request.Vm is null)
         {
-            throw new InvalidOperationException("This repository cannot take copies from tape.");
+            var repository = await repositories.GetAsync(request.RepositoryId, cancellationToken).ConfigureAwait(false);
+            transfer = repository as IRepositoryTransfer ?? throw new InvalidOperationException("This repository cannot take copies from tape.");
+            var free = repository.GetStorageStats().FreeBytes;
+            if (free < copy.StoredBytes + (copy.StoredBytes / 20))
+            {
+                throw new IOException($"The repository has {VmBackupTask.Format(free)} free; {copy.VmName} needs up to {VmBackupTask.Format(copy.StoredBytes)} (+5 %).");
+            }
+        }
+        else
+        {
+            // Directly: only this restore point's chunks, into a cache that is deleted at the end.
+            Directory.CreateDirectory(CacheRoot);
+            var free = new DriveInfo(CacheRoot).AvailableFreeSpace;
+            if (free < copy.StoredBytes + (copy.StoredBytes / 20))
+            {
+                throw new IOException($"The tape cache {CacheRoot} has {VmBackupTask.Format(free)} free; {copy.VmName} needs {VmBackupTask.Format(copy.StoredBytes)} (+5 %). " +
+                    "Set Tape:CacheDirectory to a larger disk, or bring the copy back into a repository.");
+            }
+
+            cacheDirectory = Path.Combine(CacheRoot, session.Id.ToString("N"));
+            cache = await LocalDirectoryRepository.CreateAsync(cacheDirectory, cancellationToken, chunkSize: original.Chunking.ChunkSize, time: time).ConfigureAwait(false);
+            transfer = cache;
+            log.Info($"{copy.VmName} is read from tape into the cache {cacheDirectory} (up to {VmBackupTask.Format(copy.StoredBytes)}), then restored from there.");
         }
 
-        var free = repository.GetStorageStats().FreeBytes;
-        if (free < copy.StoredBytes + (copy.StoredBytes / 20))
-        {
-            throw new IOException($"The repository has {VmBackupTask.Format(free)} free; {copy.VmName} needs up to {VmBackupTask.Format(copy.StoredBytes)} (+5 %).");
-        }
-
-        var cipher = await CipherAsync(set, cancellationToken).ConfigureAwait(false);
+        var kek = await KekAsync(set, cancellationToken).ConfigureAwait(false);
+        var cipher = kek is null ? null : new AesGcmRecordCipher(TapeKeys.SetKey(kek, set.Id, TapeKeys.SoftwarePurpose), set.Id);
+        // Encrypted by the drive: every tape needs the set's key in the drive after its load (the drive forgets it at unload).
+        Func<TapeDrive, CancellationToken, Task>? afterLoad = kek is not null && pool.Encryption == TapeEncryption.Hardware
+            ? async (tape, token) =>
+            {
+                var capabilities = await tape.ReadEncryptionCapabilitiesAsync(token).ConfigureAwait(false)
+                    ?? throw new IOException($"{copy.VmName} was encrypted by the drive, but this drive cannot decrypt.");
+                await tape.SetEncryptionAsync(capabilities, TapeKeys.SetKey(kek, set.Id, TapeKeys.HardwarePurpose), TapeKeys.KeyAssociatedData(set.KeyFingerprint!, set.Id), token).ConfigureAwait(false);
+            }
+            : null;
         var holder = $"Restore {copy.VmName} from tape";
         var drive = library.Drives.OrderBy(d => locks.Drive(d.Id).Snapshot().Holder is null ? 0 : 1).ThenBy(d => d.ElementAddress).First();
-        await using var lease = await locks.Drive(drive.Id).AcquireAsync(holder, h => log.Info($"Waiting for {drive.Name}: '{h}' uses it."), cancellationToken).ConfigureAwait(false);
+        var lease = await locks.Drive(drive.Id).AcquireAsync(holder, h => log.Info($"Waiting for {drive.Name}: '{h}' uses it."), cancellationToken).ConfigureAwait(false);
         // Blocks are never larger than the pool's block size; a larger buffer only costs transfer where no residual is reported.
         var blockSize = pool.BlockSize;
-        var tapes = new TapeReaderSession(library, drive, media, libraries, robot, holder, log);
+        var tapes = new TapeReaderSession(library, drive, media, libraries, robot, holder, log, requests, session.Id, set.Id, afterLoad);
         var newId = Guid.CreateVersion7();
         (long StartBlock, ulong FileId) FileOf(int sequence, int number) =>
             files.FirstOrDefault(f => f.Sequence == sequence && f.FileNumber == number) is { } f
@@ -100,8 +160,18 @@ public sealed class TapeRestoreRunner(
                 m => m with { Job = null, BaseRestorePointId = null },
                 message => log.Info(message),
                 cancellationToken).ConfigureAwait(false);
-            await CatalogAsync(result.Committed, copy, set, request.RepositoryId, session.Id, cancellationToken).ConfigureAwait(false);
             metrics.RecordTape(pool.Name, 0, copy.StoredBytes);
+            if (request.Vm is { } vm)
+            {
+                // The drive is free again before the VM goes to the pool.
+                var tapeCount = tapes.Loaded.Count;
+                await tapes.DisposeAsync().ConfigureAwait(false);
+                await lease.DisposeAsync().ConfigureAwait(false);
+                log.Info($"{result.Chunks} chunk(s) read from {tapeCount} tape(s) into the cache; {drive.Name} is free again.");
+                return await RestoreVmAsync(session, vm, copy, set, result.Committed, cache!, log, cancellationToken).ConfigureAwait(false);
+            }
+
+            await CatalogAsync(result.Committed, copy, set, request.RepositoryId, session.Id, cancellationToken).ConfigureAwait(false);
 
             // The SQL Server backups of the VM from this restore point on: logs for a point-in-time restore.
             foreach (var sqlCopy in sqlCopies)
@@ -127,10 +197,56 @@ public sealed class TapeRestoreRunner(
         finally
         {
             await tapes.DisposeAsync().ConfigureAwait(false);
+            await lease.DisposeAsync().ConfigureAwait(false);
+            if (cache is not null)
+            {
+                await cache.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    Directory.Delete(cacheDirectory!, recursive: true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    log.Warning($"The tape cache {cacheDirectory} could not be deleted: {ex.Message}. It is deleted at the next start.");
+                }
+            }
         }
     }
 
-    private async Task<ITapeRecordCipher?> CipherAsync(MediaSetEntity set, CancellationToken cancellationToken)
+    /// <summary>The VM restore of a copy read into <paramref name="cache"/>, as from a repository; its restore point exists only there.</summary>
+    private async Task<(SessionState State, string Summary)> RestoreVmAsync(
+        SessionEntity session, Contracts.RestoreRequestDto vm, TapeCopyEntity copy, MediaSetEntity set, ManifestInfo committed, LocalDirectoryRepository cache, WarningTrackingLog log, CancellationToken cancellationToken)
+    {
+        var manifest = committed.Manifest;
+        RestorePointEntity point;
+        await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            point = new RestorePointEntity
+            {
+                Id = committed.RestorePointId,
+                RepositoryId = Guid.Empty,
+                JobName = $"On tape (set of {set.CreatedUtc:yyyy-MM-dd})",
+                SessionId = session.Id,
+                ImportedFromTapeCopyId = copy.Id,
+                ConnectionId = await db.Connections.Where(c => c.PlatformId == manifest.Source.PlatformId).Select(c => (Guid?)c.Id).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false),
+                PlatformId = manifest.Source.PlatformId,
+                VmNativeId = manifest.Source.VmId,
+                VmName = manifest.Vm.Name,
+            };
+        }
+
+        VmBackupTask.ApplyManifest(point, manifest, null);
+        var (state, summary) = await vmRestore.RestoreAsync(
+            session,
+            vm with { RestorePointId = point.Id },
+            point,
+            async token => new OpenedRestorePoint(await cache.OpenRestorePointAsync(point.Id, token).ConfigureAwait(false), null),
+            cancellationToken).ConfigureAwait(false);
+        return (state == SessionState.Succeeded && log.Warned ? SessionState.Warning : state, summary);
+    }
+
+    /// <summary>The set's key-encryption key, when it is encrypted (records by the server, or the tapes by the drive).</summary>
+    private async Task<byte[]?> KekAsync(MediaSetEntity set, CancellationToken cancellationToken)
     {
         if (set.KeyFingerprint is null)
         {
@@ -139,9 +255,8 @@ public sealed class TapeRestoreRunner(
 
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var key = await db.TapeKeys.AsNoTracking().FirstOrDefaultAsync(k => k.Fingerprint == set.KeyFingerprint, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException($"The set is encrypted with key {set.KeyFingerprint}, which this server does not have: add it under Tape → Keys with its passphrase or key file.");
-        var kek = Convert.FromBase64String(protector.Unprotect(key.ProtectedKek));
-        return new AesGcmRecordCipher(TapeKeys.SetKey(kek, set.Id, TapeKeys.SoftwarePurpose), set.Id);
+            ?? throw new InvalidOperationException($"The set is encrypted with key {set.KeyFingerprint}, which this server does not have: add it under Tape → Media pools → Keys (existing key, with its passphrase or key file).");
+        return Convert.FromBase64String(protector.Unprotect(key.ProtectedKek));
     }
 
     private async Task CatalogAsync(ManifestInfo committed, TapeCopyEntity copy, MediaSetEntity set, Guid repositoryId, Guid sessionId, CancellationToken cancellationToken)
@@ -169,10 +284,21 @@ public sealed class TapeRestoreRunner(
 
 /// <summary>The tapes of a set for reading: loads the one asked for into the held drive and places it at a block.</summary>
 internal sealed class TapeReaderSession(
-    TapeLibraryEntity library, TapeDriveEntity drive, IReadOnlyList<TapeMediumEntity> media, TapeLibraries libraries, TapeSessionRunner robot, string holder, IOperationLog log) : ITapeVolumes, IAsyncDisposable
+    TapeLibraryEntity library,
+    TapeDriveEntity drive,
+    IReadOnlyList<TapeMediumEntity> media,
+    TapeLibraries libraries,
+    TapeSessionRunner robot,
+    string holder,
+    IOperationLog log,
+    TapeOperatorRequests requests,
+    Guid sessionId,
+    Guid setId,
+    Func<TapeDrive, CancellationToken, Task>? afterLoad = null) : ITapeVolumes, IAsyncDisposable
 {
     private OpenedDrive? _drive;
     private int? _sequence;
+    private bool _disposed;
 
     public HashSet<int> Loaded { get; } = [];
 
@@ -182,9 +308,48 @@ internal sealed class TapeReaderSession(
         {
             await UnloadAsync(cancellationToken).ConfigureAwait(false);
             var medium = media.First(m => m.Sequence == sequence);
-            await robot.LoadHeldAsync(library, drive, medium.Barcode, holder, log, cancellationToken).ConfigureAwait(false);
-            _drive = await libraries.OpenDriveAsync(library, drive, cancellationToken).ConfigureAwait(false);
-            await _drive.Drive.PrepareAsync(cancellationToken).ConfigureAwait(false);
+            if (library.ChangerSerial is null)
+            {
+                // A standalone drive: the operator inserts the tape; a wrong one is ejected and named.
+                _drive ??= await libraries.OpenDriveAsync(library, drive, cancellationToken).ConfigureAwait(false);
+                var name = medium.LabelName ?? medium.Barcode;
+                var message = $"Insert tape {name} (#{sequence} of the set) into {drive.Name} of {library.Name}.";
+                log.Info($"Waiting for the operator: {message}");
+                await requests.WaitAsync(sessionId, library.Id, drive.Id, message, async (say, token) =>
+                {
+                    if (await _drive.Drive.TestReadyAsync(token).ConfigureAwait(false) != DriveReadiness.Ready)
+                    {
+                        return false;
+                    }
+
+                    await _drive.Drive.PrepareAsync(token).ConfigureAwait(false);
+                    var label = await TapeLabelReader.ReadAsync(_drive.Drive, token).ConfigureAwait(false);
+                    if (label.Label?.Set is { } set && set.Id == setId && set.Sequence == sequence)
+                    {
+                        if (afterLoad is not null)
+                        {
+                            await afterLoad(_drive.Drive, token).ConfigureAwait(false);
+                        }
+
+                        return true;
+                    }
+
+                    say($"The cartridge inserted is {label.Label?.Name ?? (label.Blank ? "blank" : "not a backdafuckup tape")}, not tape {name}; it was ejected.");
+                    await _drive.Drive.UnloadAsync(token).ConfigureAwait(false);
+                    return false;
+                }, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await robot.LoadHeldAsync(library, drive, medium.Barcode, holder, log, cancellationToken).ConfigureAwait(false);
+                _drive = await libraries.OpenDriveAsync(library, drive, cancellationToken).ConfigureAwait(false);
+                await _drive.Drive.PrepareAsync(cancellationToken).ConfigureAwait(false);
+                if (afterLoad is not null)
+                {
+                    await afterLoad(_drive.Drive, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
             _sequence = sequence;
             Loaded.Add(sequence);
         }
@@ -193,12 +358,37 @@ internal sealed class TapeReaderSession(
         return new DriveBlocks(_drive.Drive);
     }
 
-    public async ValueTask DisposeAsync() => await UnloadAsync(CancellationToken.None).ConfigureAwait(false);
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        await UnloadAsync(CancellationToken.None).ConfigureAwait(false);
+        if (_drive is not null)
+        {
+            await _drive.DisposeAsync().ConfigureAwait(false);
+        }
+    }
 
     private async Task UnloadAsync(CancellationToken cancellationToken)
     {
         if (_drive is null)
         {
+            return;
+        }
+
+        if (library.ChangerSerial is null)
+        {
+            if (_sequence is not null)
+            {
+                await _drive.Drive.UnloadAsync(cancellationToken).ConfigureAwait(false);
+                log.Info($"Tape #{_sequence} ejected from {drive.Name}: take it out.");
+            }
+
+            _sequence = null;
             return;
         }
 

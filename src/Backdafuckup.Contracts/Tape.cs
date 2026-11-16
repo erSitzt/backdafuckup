@@ -90,7 +90,13 @@ public static class TapeActions
     /// <summary>Load a cartridge, read its label, set what the catalog knows of it (blank, free, which set, foreign).</summary>
     public const string Identify = "identify";
 
-    public static readonly IReadOnlyList<string> All = [Load, Unload, Import, Export, Scan, Identify];
+    /// <summary>
+    /// Rebuild the catalog from the tapes (a lost database, tapes of another server): every tape it does not know is read,
+    /// and the sets on them come back with their copies.
+    /// </summary>
+    public const string Rebuild = "rebuild";
+
+    public static readonly IReadOnlyList<string> All = [Load, Unload, Import, Export, Scan, Identify, Rebuild];
 }
 
 /// <summary>A tape agent for the console.</summary>
@@ -118,8 +124,11 @@ public sealed record TapeAgentSecretDto(TapeAgentDto Agent, string EnvironmentFi
 /// <param name="Pools">Pools that encrypt with it.</param>
 public sealed record TapeKeyDto(Guid Id, string Name, string Fingerprint, DateTimeOffset CreatedUtc, bool KeyFileDownloaded, IReadOnlyList<string> Pools);
 
-/// <summary>A key from a passphrase (at least 12 characters); the passphrase is never stored.</summary>
-public sealed record CreateTapeKeyDto(string Name, string Passphrase);
+/// <summary>
+/// A new key from a passphrase (at least 12 characters; never stored), or an existing one: from its key file (its text),
+/// or with <paramref name="Existing"/> from its passphrase and the parameters a tape's label names (read the label first).
+/// </summary>
+public sealed record CreateTapeKeyDto(string Name, string? Passphrase, string? KeyFile = null, bool Existing = false);
 
 /// <param name="NewSet"><c>EveryRun</c>, <c>Daily</c>, <c>Weekly</c>, <c>Monthly</c> or <c>Never</c>.</param>
 /// <param name="RetentionDays">How long a set is kept after it closed; null for ever.</param>
@@ -203,4 +212,7 @@ public sealed record TapeRestoreRequestDto(Guid RepositoryId);
 
 /// <summary>Marks a cartridge <c>Free</c> (written over on its next use) or <c>Damaged</c> (never used); its barcode typed to confirm.</summary>
 public sealed record TapeMediumStateDto(string State, string Barcode);
+
+/// <summary>Something a person has to do at a drive; the session named waits for it.</summary>
+public sealed record TapeOperatorRequestDto(Guid Id, Guid SessionId, string SessionName, Guid LibraryId, string Library, string? Drive, string Message, DateTimeOffset CreatedUtc);
 

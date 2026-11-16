@@ -69,6 +69,38 @@ else
         <NoRecordsContent><MudText>No backup job yet.</MudText></NoRecordsContent>
     </MudTable>
     </div>
+
+    @if (_tapeJobs is { Count: > 0 })
+    {
+        <div class="d-flex align-center mt-6 mb-2">
+            <MudText Typo="Typo.h6">Tape jobs</MudText>
+            <MudSpacer />
+            <MudButton Size="Size.Small" Variant="Variant.Text" StartIcon="@AppIcons.Tape" Href="/infrastructure/tape">Tape</MudButton>
+        </div>
+        <div class="cq">
+        <MudTable Items="_tapeJobs" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
+            <HeaderContent>
+                <MudTh>Name</MudTh><MudTh Class="c-760">Copies</MudTh><MudTh Class="c-560">Runs</MudTh><MudTh>Last result</MudTh><MudTh Class="c-760">Last run</MudTh><MudTh Class="c-560">Next run</MudTh><MudTh></MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd>
+                    <MudIcon Icon="@AppIcons.Tape" Size="Size.Small" Style="vertical-align: middle" />
+                    <MudLink Href="/infrastructure/tape">@context.Name</MudLink>
+                    @if (!context.Enabled) { <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Icon="@Icons.Material.Filled.PauseCircle">disabled</MudChip> }
+                    <span class="cell-sub n-560">@TapeRuns(context)</span>
+                </MudTd>
+                <MudTd Class="c-760">@string.Join(", ", context.SourceJobs)<span class="cell-sub">to pool @context.Pool</span></MudTd>
+                <MudTd Class="c-560">@TapeRuns(context)</MudTd>
+                <MudTd>@if (context.LastResult is not null) { <StateChip State="@context.LastResult" /> }</MudTd>
+                <MudTd Class="c-760 nowrap">@Fmt.Time(context.LastRunUtc)</MudTd>
+                <MudTd Class="c-560 nowrap">@Fmt.Time(context.NextRunUtc)</MudTd>
+                <MudTd Style="white-space:nowrap; text-align:right">
+                    <MudTooltip Text="Run now"><MudIconButton Icon="@Icons.Material.Filled.PlayArrow" Color="Color.Primary" OnClick="@(() => RunTapeAsync(context))" aria-label="@($"Run {context.Name} now")" /></MudTooltip>
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+        </div>
+    }
 }
 
 @code {
@@ -109,14 +141,44 @@ else
         return $"{named} {(named == 1 ? "namespace" : "namespaces")}{byLabels}";
     }
 
+    private List<TapeJobDto>? _tapeJobs;
+
     private async Task LoadAsync()
     {
+        _tapeJobs = await Api.GetAsync<List<TapeJobDto>>("api/tape/jobs");
         _jobs = await Api.GetAsync<List<JobDto>>("api/jobs");
         _clusters = [.. (await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=Kubernetes")).Select(c => c.Id)];
     }
 
+    /// <summary>When a tape job runs: its schedule, after a backup job, or only on demand.</summary>
+    private string TapeRuns(TapeJobDto job)
+    {
+        var after = job.AfterJobId is { } id ? $"after {_jobs?.FirstOrDefault(j => j.Id == id)?.Name ?? "a backup job"}" : null;
+        var scheduled = job.Schedule.Kind is "Daily" or "Weekly" ? Describe(job.Schedule) : null;
+        return string.Join(", ", new[] { scheduled, after }.Where(s => s is not null)) is { Length: > 0 } text ? text : "On demand";
+    }
+
+    private async Task RunTapeAsync(TapeJobDto job)
+    {
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/tape/jobs/{job.Id}/run");
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
     private void OnSessionUpdated(SessionSummaryDto session)
     {
+        if (session.Kind == "TapeBackup" && session.State is not "Running")
+        {
+            _ = InvokeAsync(async () => { await LoadAsync(); StateHasChanged(); });
+            return;
+        }
+
         if (session.JobId is not null && (session.State is not "Running" || _jobs?.Any(j => j.Id == session.JobId && !j.IsRunning) == true))
         {
             _ = InvokeAsync(async () => { await LoadAsync(); StateHasChanged(); });

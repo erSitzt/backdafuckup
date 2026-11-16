@@ -79,6 +79,7 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
             builder.UseSetting("Tape:ReadyPoll", "00:00:00.020");
             // Small fake cartridges: a reserve of 1 MiB before their end; tape keys cheap to derive.
             builder.UseSetting("Tape:ReserveMiB", "1");
+            builder.UseSetting("Tape:OperatorPoll", "00:00:00.050");
             builder.UseSetting("Tape:KdfMemoryKiB", "8192");
             builder.UseSetting("Tape:KdfIterations", "1");
             builder.UseSetting("Tape:KdfParallelism", "1");

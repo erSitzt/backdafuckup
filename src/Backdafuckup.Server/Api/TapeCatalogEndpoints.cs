@@ -71,6 +71,8 @@ public static class TapeCatalogEndpoints
             }
         }));
 
+        tape.MapGet("/requests", async (TapeOperatorRequests requests, CancellationToken ct) => Results.Ok(await requests.PendingAsync(ct)));
+
         tape.MapGet("/copies", async (string? vm, Guid? restorePoint, TapeCatalogService catalog, CancellationToken ct) => Results.Ok(await catalog.CopiesAsync(vm, restorePoint, ct)));
         tape.MapPost("/copies/{id:guid}/restore", (Guid id, TapeRestoreRequestDto request, AppDbContext db, SessionQueue queue, HttpContext http, CancellationToken ct) => Run(async () =>
         {
@@ -91,6 +93,56 @@ public static class TapeCatalogEndpoints
 
             return Results.Ok(new StartedDto(await queue.EnqueueTapeRestoreAsync(id, repository.Id, copy.VmName, http.User.Identity?.Name ?? "user", ct)));
         }));
+
+        // A direct VM restore: the restore wizard shows the copy as a restore point (from its manifest), then starts it here.
+        tape.MapGet("/copies/{id:guid}/restore-point", (Guid id, AppDbContext db, CancellationToken ct) => Run(async () =>
+        {
+            var (copy, manifest) = await VmCopyAsync(db, id, ct);
+            var point = new RestorePointEntity
+            {
+                Id = copy.Id,
+                RepositoryId = Guid.Empty,
+                JobName = copy.JobName ?? "On tape",
+                ConnectionId = await db.Connections.Where(c => c.PlatformId == manifest.Source.PlatformId).Select(c => (Guid?)c.Id).FirstOrDefaultAsync(ct),
+                PlatformId = manifest.Source.PlatformId,
+                VmNativeId = manifest.Source.VmId,
+                VmName = manifest.Vm.Name,
+            };
+            VmBackupTask.ApplyManifest(point, manifest, null);
+            point.NewStoredBytes = copy.StoredBytes; // What the cache takes: every chunk of the restore point.
+            return Results.Ok(point.ToDto());
+        }));
+        tape.MapPost("/copies/{id:guid}/restore-vm", (Guid id, RestoreRequestDto request, AppDbContext db, SessionQueue queue, HttpContext http, CancellationToken ct) => Run(async () =>
+        {
+            var (copy, manifest) = await VmCopyAsync(db, id, ct);
+            var target = request.TargetConnectionId
+                ?? await db.Connections.Where(c => c.PlatformId == manifest.Source.PlatformId).Select(c => (Guid?)c.Id).FirstOrDefaultAsync(ct)
+                ?? throw new TapeRequestException($"The pool {copy.VmName} was backed up in is not known here: choose a target pool.");
+            if (!await db.Connections.AnyAsync(c => c.Id == target, ct))
+            {
+                throw new TapeRequestException($"Connection {target} does not exist.", StatusCodes.Status404NotFound);
+            }
+
+            return Results.Ok(new StartedDto(await queue.EnqueueTapeVmRestoreAsync(id, request with { RestorePointId = copy.Id, TargetConnectionId = target, KubernetesCluster = null, Kubernetes = null }, copy.VmName, http.User.Identity?.Name ?? "user", ct)));
+        }));
+    }
+
+    /// <summary>A tape copy of a VM's restore point, for a direct restore (not a namespace or a cluster, not SQL Server backups).</summary>
+    private static async Task<(TapeCopyEntity Copy, Core.Repository.RestorePointManifest Manifest)> VmCopyAsync(AppDbContext db, Guid id, CancellationToken ct)
+    {
+        var copy = await db.TapeCopies.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id, ct)
+            ?? throw new TapeRequestException($"Tape copy {id} does not exist.", StatusCodes.Status404NotFound);
+        if (copy.Kind != Backdafuckup.Tape.Format.TapeFileTypes.RestorePoint)
+        {
+            throw new TapeRequestException("SQL Server backups come back with the restore point of their VM: bring that one back.");
+        }
+
+        if (copy.ObjectKind is not (null or RestorePointObjectKinds.Vm))
+        {
+            throw new TapeRequestException($"{copy.VmName} is a Kubernetes backup: bring it back into a repository and restore it from there.");
+        }
+
+        return (copy, System.Text.Json.JsonSerializer.Deserialize(copy.Manifest, Core.Repository.CoreJsonContext.Default.RestorePointManifest)!);
     }
 
     private static async Task<IResult> Run(Func<Task<IResult>> action)

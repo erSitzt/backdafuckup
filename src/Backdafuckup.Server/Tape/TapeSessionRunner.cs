@@ -414,7 +414,7 @@ public sealed class TapeSessionRunner(TapeLibraries libraries, TapeLocks locks, 
     }
 
     /// <summary>The drive asked for, else a free empty one, else a free one, else the first (waiting for it).</summary>
-    private async Task<(TapeDriveEntity Drive, IAsyncDisposable Lease)> ChooseDriveAsync(TapeLibraryEntity library, Guid? driveId, string holder, IOperationLog log, CancellationToken cancellationToken)
+    internal async Task<(TapeDriveEntity Drive, IAsyncDisposable Lease)> ChooseDriveAsync(TapeLibraryEntity library, Guid? driveId, string holder, IOperationLog log, CancellationToken cancellationToken)
     {
         if (driveId is not null)
         {

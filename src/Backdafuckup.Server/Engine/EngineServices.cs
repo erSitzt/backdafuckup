@@ -25,6 +25,7 @@ public sealed class SessionRunnerService(
     Tape.TapeSessionRunner tapes,
     Tape.TapeBackupRunner tapeBackups,
     Tape.TapeRestoreRunner tapeRestores,
+    Tape.TapeCatalogRebuild tapeRebuild,
     StartupRecovery recovery,
     Telemetry.BackupMetrics metrics,
     IOptions<EngineOptions> options,
@@ -126,7 +127,9 @@ public sealed class SessionRunnerService(
                 SessionKind.SqlPublish => await sqlPublishes.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.SqlRestore => await sqlRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.SqlExport => await sqlPublishes.RunExportAsync(session, cancellationToken).ConfigureAwait(false),
-                SessionKind.TapeMaintenance => await tapes.RunAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.TapeMaintenance => Tape.TapeCatalogRebuild.IsRebuild(session)
+                    ? await tapeRebuild.RunAsync(session, cancellationToken).ConfigureAwait(false)
+                    : await tapes.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.TapeBackup => await tapeBackups.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.TapeRestore => await tapeRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 _ => (SessionState.Failed, "Unknown session kind."),
@@ -330,12 +333,17 @@ public sealed class StartupRecovery(
     RepositoryManager repositories,
     IOptions<EngineOptions> options,
     TimeProvider time,
-    ILogger<StartupRecovery> logger)
+    ILogger<StartupRecovery> logger,
+    Tape.TapeRestoreRunner tapeRestores)
 {
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var instance = options.Value.ServerInstanceId;
+
+        // Tape: nothing waits for an operator after a restart.
+        await db.TapeOperatorRequests.Where(r => r.ResolvedUtc == null).ExecuteUpdateAsync(s => s.SetProperty(r => r.ResolvedUtc, time.GetUtcNow()), cancellationToken).ConfigureAwait(false);
+        tapeRestores.DeleteLeftoverCaches(message => logger.LogWarning("{Message}", message));
 
         var stale = await db.Sessions.Include(s => s.Tasks)
             .Where(s => (s.State == SessionState.Running || s.State == SessionState.Stopping) && s.ServerInstanceId != instance)
@@ -603,6 +611,8 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Tape.TapeBackupRunner>();
         services.AddSingleton<Tape.TapeRestoreRunner>();
         services.AddSingleton<Tape.TapeCatalogService>();
+        services.AddSingleton<Tape.TapeOperatorRequests>();
+        services.AddSingleton<Tape.TapeCatalogRebuild>();
         services.AddSingleton<Tape.TapeMailSlotWatcher>();
         services.AddHostedService(sp => sp.GetRequiredService<Tape.TapeMailSlotWatcher>());
         services.AddSingleton<StartupRecovery>();

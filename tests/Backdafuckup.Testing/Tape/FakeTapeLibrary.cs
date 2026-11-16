@@ -542,6 +542,15 @@ public sealed class FakeTapeDrive(FakeTapeLibrary library, int index, ushort ele
         Inserted();
     }
 
+    /// <summary>A standalone drive: an operator takes the (ejected) cartridge out.</summary>
+    public FakeCartridge? OperatorRemove()
+    {
+        var cartridge = Cartridge;
+        Cartridge = null;
+        Loaded = false;
+        return cartridge;
+    }
+
     public ValueTask<ScsiResult> ExecuteAsync(ScsiCommand command, CancellationToken cancellationToken) =>
         ValueTask.FromResult(library.Run(this, command, () => Handle(command)));
 

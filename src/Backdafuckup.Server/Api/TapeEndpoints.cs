@@ -76,7 +76,7 @@ public static class TapeEndpoints
             }
 
             var standalone = library.ChangerSerial is null;
-            if (standalone && action is TapeActions.Load or TapeActions.Import or TapeActions.Export or TapeActions.Identify)
+            if (standalone && action is TapeActions.Load or TapeActions.Import or TapeActions.Export or TapeActions.Identify or TapeActions.Rebuild)
             {
                 throw new TapeRequestException($"{library.Name} is a standalone drive without a robot or mail slots: put cartridges in and take them out by hand.");
             }

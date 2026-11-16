@@ -40,6 +40,7 @@ internal sealed class TapeSetWriter(
     IDbContextFactory<AppDbContext> dbFactory,
     TapeLibraries libraries,
     TapeSessionRunner robot,
+    TapeOperatorRequests requests,
     TapeOptions options,
     TimeProvider time) : IAsyncDisposable
 {
@@ -312,6 +313,12 @@ internal sealed class TapeSetWriter(
         _cipher ??= context.Pool.Encryption == TapeEncryption.Software
             ? new AesGcmRecordCipher(TapeKeys.SetKey(context.Kek ?? throw new InvalidOperationException($"Pool {context.Pool.Name} encrypts, but has no key."), Set.Id, TapeKeys.SoftwarePurpose), Set.Id)
             : null;
+        if (context.Library.ChangerSerial is null)
+        {
+            await EnsureStandaloneTapeAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         while (_tape is null)
         {
             var (candidate, appending) = await ChooseAsync(cancellationToken).ConfigureAwait(false);
@@ -340,16 +347,6 @@ internal sealed class TapeSetWriter(
                     await UnloadAsync(cancellationToken).ConfigureAwait(false);
                     continue;
                 }
-
-                await _drive.Drive.SpaceToEndOfDataAsync(cancellationToken).ConfigureAwait(false);
-                var position = await _drive.Drive.ReadPositionAsync(cancellationToken).ConfigureAwait(false);
-                if (position.File is { } files && files != candidate.FileCount)
-                {
-                    Log.Info($"{barcode} has {files} complete file(s), the catalog knows {candidate.FileCount}: files of a run that did not finish are left in place and ignored.");
-                    candidate.FileCount = (int)files;
-                }
-
-                _remaining = medium.RemainingBytes ?? ((medium.CapacityBytes ?? candidate.CapacityBytes ?? 0) - candidate.BytesWritten);
             }
             else
             {
@@ -369,21 +366,181 @@ internal sealed class TapeSetWriter(
                     continue;
                 }
 
-                await LabelAsync(candidate, medium, cancellationToken).ConfigureAwait(false);
             }
 
-            if (context.Pool.Encryption == TapeEncryption.Hardware)
-            {
-                var capabilities = await _drive.Drive.ReadEncryptionCapabilitiesAsync(cancellationToken).ConfigureAwait(false)
-                    ?? throw new IOException($"{context.Drive.Name} cannot encrypt, but pool {context.Pool.Name} asks the drive to.");
-                await _drive.Drive.SetEncryptionAsync(capabilities, TapeKeys.SetKey(context.Kek!, Set.Id, TapeKeys.HardwarePurpose), TapeKeys.KeyAssociatedData(context.Fingerprint!, Set.Id), cancellationToken).ConfigureAwait(false);
-            }
-
-            _tape = candidate;
-            _fileNumber = candidate.FileCount;
-            _tapesUsed.Add(barcode);
-            Log.Info($"Writing to {barcode} (tape #{candidate.Sequence} of the set) in {context.Drive.Name}: {Format(Math.Max(0, Available))} available.");
+            await StartOnTapeAsync(candidate, medium, appending, candidate.Barcode, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>The tape in the drive is the one to write: at its end of data, or labelled for the set first.</summary>
+    private async Task StartOnTapeAsync(TapeMediumEntity candidate, MediumInfo medium, bool appending, string name, CancellationToken cancellationToken)
+    {
+        if (appending)
+        {
+            await _drive!.Drive.SpaceToEndOfDataAsync(cancellationToken).ConfigureAwait(false);
+            var position = await _drive.Drive.ReadPositionAsync(cancellationToken).ConfigureAwait(false);
+            if (position.File is { } files && files != candidate.FileCount)
+            {
+                Log.Info($"{name} has {files} complete file(s), the catalog knows {candidate.FileCount}: files of a run that did not finish are left in place and ignored.");
+                candidate.FileCount = (int)files;
+            }
+
+            _remaining = medium.RemainingBytes ?? ((medium.CapacityBytes ?? candidate.CapacityBytes ?? 0) - candidate.BytesWritten);
+        }
+        else
+        {
+            name = await LabelAsync(candidate, medium, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (context.Pool.Encryption == TapeEncryption.Hardware)
+        {
+            var capabilities = await _drive!.Drive.ReadEncryptionCapabilitiesAsync(cancellationToken).ConfigureAwait(false)
+                ?? throw new IOException($"{context.Drive.Name} cannot encrypt, but pool {context.Pool.Name} asks the drive to.");
+            await _drive.Drive.SetEncryptionAsync(capabilities, TapeKeys.SetKey(context.Kek!, Set.Id, TapeKeys.HardwarePurpose), TapeKeys.KeyAssociatedData(context.Fingerprint!, Set.Id), cancellationToken).ConfigureAwait(false);
+        }
+
+        _tape = candidate;
+        _fileNumber = candidate.FileCount;
+        _tapesUsed.Add(name);
+        Log.Info($"Writing to {name} (tape #{candidate.Sequence} of the set) in {context.Drive.Name}: {Format(Math.Max(0, Available))} available.");
+    }
+
+    /// <summary>
+    /// A standalone drive: asks the operator for the set's last tape, or for a blank, free or expired cartridge, and waits
+    /// until one is in the drive. A wrong cartridge is ejected and named in the request.
+    /// </summary>
+    private async Task EnsureStandaloneTapeAsync(CancellationToken cancellationToken)
+    {
+        TapeMediumEntity? wanted;
+        await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            wanted = await db.TapeMedia.AsNoTracking().Where(m => m.SetId == Set.Id && m.State == TapeMediumState.Appendable).OrderByDescending(m => m.Sequence)
+                .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (wanted is not null && _skipped.Contains(wanted.Id))
+        {
+            wanted = null;
+        }
+
+        _drive ??= await libraries.OpenDriveAsync(context.Library, context.Drive, cancellationToken).ConfigureAwait(false);
+        var where = $"{context.Drive.Name} of {context.Library.Name}";
+        var message = wanted is not null
+            ? $"Insert tape {wanted.LabelName ?? wanted.Barcode} (#{wanted.Sequence} of the set of pool {context.Pool.Name}) into {where}."
+            : $"Insert a blank, free or expired {(context.Pool.WormOnly ? "WORM " : string.Empty)}cartridge for pool {context.Pool.Name} into {where}; it becomes tape #{Set.Media + 1} of the set.";
+        TapeMediumEntity? chosen = null;
+        MediumInfo? info = null;
+        Log.Info($"Waiting for the operator: {message}");
+        await requests.WaitAsync(context.SessionId, context.Library.Id, context.Drive.Id, message, async (say, token) =>
+        {
+            if (await _drive.Drive.TestReadyAsync(token).ConfigureAwait(false) != DriveReadiness.Ready)
+            {
+                return false; // Empty, loading, or a cartridge ejected and not taken out yet.
+            }
+
+            info = await _drive.Drive.ReadMediumAsync(token).ConfigureAwait(false);
+            await _drive.Drive.PrepareAsync(token).ConfigureAwait(false);
+            var label = await TapeLabelReader.ReadAsync(_drive.Drive, token).ConfigureAwait(false);
+            var medium = await StandaloneMediumAsync(info, label, token).ConfigureAwait(false);
+            string? refusal;
+            if (wanted is not null)
+            {
+                refusal = label.Label?.Set is { } set && set.Id == Set.Id && set.Sequence == wanted.Sequence
+                    ? null
+                    : $"The cartridge inserted is {Describe(label, medium)}, not tape {wanted.LabelName ?? wanted.Barcode}; it was ejected.";
+                medium = refusal is null ? wanted : medium;
+            }
+            else
+            {
+                refusal = await UsableAsync(label, info, medium, token).ConfigureAwait(false);
+            }
+
+            if (refusal is not null)
+            {
+                Log.Info(refusal);
+                say(refusal);
+                await _drive.Drive.UnloadAsync(token).ConfigureAwait(false);
+                return false;
+            }
+
+            chosen = medium;
+            return true;
+        }, cancellationToken).ConfigureAwait(false);
+
+        await StartOnTapeAsync(chosen!, info!, wanted is not null, chosen!.LabelName ?? chosen.Barcode, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Why a cartridge in a standalone drive cannot become a new tape of the set, or null when it can.</summary>
+    private async Task<string?> UsableAsync(TapeLabelRead label, MediumInfo info, TapeMediumEntity medium, CancellationToken cancellationToken)
+    {
+        if (info.Worm != context.Pool.WormOnly)
+        {
+            return $"The cartridge inserted is {(info.Worm ? "a WORM cartridge" : "no WORM cartridge")}, pool {context.Pool.Name} takes {(context.Pool.WormOnly ? "WORM cartridges only" : "rewritable cartridges")}; it was ejected.";
+        }
+
+        if (label.Blank || (medium.State == TapeMediumState.Free && medium.SetId is null && !info.Worm))
+        {
+            return null;
+        }
+
+        if (label.Foreign)
+        {
+            return $"The cartridge inserted holds data that is not backdafuckup's ({label.Reason}); it was ejected. Mark it free in the console to use it.";
+        }
+
+        if (info.Worm)
+        {
+            return "The WORM cartridge inserted has data on it; it was ejected.";
+        }
+
+        if (label.Label!.Set is not { } old)
+        {
+            return null;
+        }
+
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var set = await db.MediaSets.AsNoTracking().FirstOrDefaultAsync(s => s.Id == old.Id, cancellationToken).ConfigureAwait(false);
+        return set is { State: MediaSetState.Expired or MediaSetState.Overwritten } && set.PoolId == context.Pool.Id
+            ? null
+            : $"The cartridge inserted is {label.Label.Name}, tape #{old.Sequence} of a set of pool {old.PoolName} that is kept; it was ejected.";
+    }
+
+    private static string Describe(TapeLabelRead label, TapeMediumEntity medium) =>
+        label.Blank ? "blank" : label.Label is { } l ? $"{l.Name}{(l.Set is { } s ? $" (tape #{s.Sequence} of set {s.Id} of pool {s.PoolName})" : string.Empty)}" : $"{medium.Barcode} with other data";
+
+    /// <summary>The catalog's entry of the cartridge in a standalone drive, found by the serial in its memory (or created).</summary>
+    private async Task<TapeMediumEntity> StandaloneMediumAsync(MediumInfo info, TapeLabelRead label, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var serial = info.MediumSerial ?? throw new IOException($"The cartridge in {context.Drive.Name} has no serial in its memory; it cannot be told apart from others.");
+        var medium = await db.TapeMedia.FirstOrDefaultAsync(m => m.MediumSerial == serial, cancellationToken).ConfigureAwait(false);
+        if (medium is null)
+        {
+            var name = label.Label?.Name ?? $"SN-{serial}";
+            if (await db.TapeMedia.AnyAsync(m => m.Barcode == name, cancellationToken).ConfigureAwait(false))
+            {
+                name = $"{name}-{serial}";
+            }
+
+            medium = new TapeMediumEntity
+            {
+                Barcode = name,
+                MediumSerial = serial,
+                Kind = info.Cleaning ? TapeMediumKind.Cleaning : info.Worm ? TapeMediumKind.Worm : TapeMediumKind.Data,
+                State = label.Blank ? TapeMediumState.Blank : label.Foreign ? TapeMediumState.Foreign : label.Label?.Set is null ? TapeMediumState.Free : TapeMediumState.Full,
+                LabelName = label.Label?.Name,
+                FirstSeenUtc = time.GetUtcNow(),
+            };
+            db.TapeMedia.Add(medium);
+        }
+
+        medium.LibraryId = context.Library.Id;
+        medium.Location = TapeLocation.Drive;
+        medium.CapacityBytes = info.CapacityBytes ?? medium.CapacityBytes;
+        medium.RemainingBytes = info.RemainingBytes ?? medium.RemainingBytes;
+        medium.SeenUtc = time.GetUtcNow();
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return medium;
     }
 
     /// <summary>The set's last tape if it can take more, else a new one: expired tapes of the pool, free, blank, unread.</summary>
@@ -413,16 +570,19 @@ internal sealed class TapeSetWriter(
         return (choice, false);
     }
 
-    private async Task LabelAsync(TapeMediumEntity candidate, MediumInfo medium, CancellationToken cancellationToken)
+    /// <summary>Labels the tape in the drive as the set's next one; returns its name (its barcode, or a name to write on a standalone cartridge).</summary>
+    private async Task<string> LabelAsync(TapeMediumEntity candidate, MediumInfo medium, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var set = await db.MediaSets.FirstAsync(s => s.Id == Set.Id, cancellationToken).ConfigureAwait(false);
         var sequence = set.Media + 1;
+        var standalone = context.Library.ChangerSerial is null;
+        var name = standalone ? $"{string.Concat(context.Pool.Name.Where(char.IsLetterOrDigit))}-{Set.Id.ToString("N")[^6..].ToUpperInvariant()}-{sequence}" : candidate.Barcode;
         var label = new TapeLabel
         {
             MediumId = Guid.CreateVersion7(),
-            Barcode = candidate.Barcode,
-            Name = candidate.Barcode,
+            Barcode = standalone ? null : candidate.Barcode,
+            Name = name,
             BlockSize = context.Pool.BlockSize,
             Worm = medium.Worm,
             CreatedUtc = time.GetUtcNow(),
@@ -436,8 +596,19 @@ internal sealed class TapeSetWriter(
         var writer = await TapeFileWriter.BeginAsync(new DriveBlocks(_drive.Drive), context.Pool.BlockSize, header, null, cancellationToken).ConfigureAwait(false);
         await writer.WriteRecordAsync(TapeFormat.Label, TapeJson.Serialize(label), encrypt: false, cancellationToken).ConfigureAwait(false);
         var summary = await writer.FinishAsync(synchronize: true, cancellationToken).ConfigureAwait(false);
+        if (standalone)
+        {
+            // The name in the cartridge memory too: an inventory of the drive finds the tape by it.
+            await _drive.Drive.WriteAttributesAsync([(Backdafuckup.Tape.Scsi.MamAttributes.Barcode, 1, System.Text.Encoding.ASCII.GetBytes(name.PadRight(32)[..32]))], cancellationToken).ConfigureAwait(false);
+        }
 
         var tracked = await db.TapeMedia.FirstAsync(m => m.Id == candidate.Id, cancellationToken).ConfigureAwait(false);
+        if (standalone && tracked.Barcode != name && !await db.TapeMedia.AnyAsync(m => m.Barcode == name && m.Id != tracked.Id, cancellationToken).ConfigureAwait(false))
+        {
+            tracked.Barcode = name;
+            candidate.Barcode = name;
+        }
+
         tracked.State = TapeMediumState.Appendable;
         tracked.SetId = Set.Id;
         tracked.PoolId = context.Pool.Id;
@@ -459,8 +630,11 @@ internal sealed class TapeSetWriter(
         candidate.FileCount = 1;
         candidate.BytesWritten = summary.Bytes;
         candidate.CapacityBytes = tracked.CapacityBytes;
+        candidate.LabelName = name;
         _remaining = (medium.RemainingBytes ?? medium.CapacityBytes ?? 0) - summary.Bytes;
-        Log.Info($"{candidate.Barcode} labelled as tape #{sequence} of set {Set.Id} (pool {context.Pool.Name}{(medium.Worm ? ", WORM" : string.Empty)}).");
+        Log.Info($"{name} labelled as tape #{sequence} of set {Set.Id} (pool {context.Pool.Name}{(medium.Worm ? ", WORM" : string.Empty)})." +
+            (standalone ? $" Write \"{name}\" on the cartridge." : string.Empty));
+        return name;
     }
 
     private async Task ChangeTapeAsync(string reason, CancellationToken cancellationToken)
@@ -547,6 +721,24 @@ internal sealed class TapeSetWriter(
 
     private async Task UnloadAsync(CancellationToken cancellationToken)
     {
+        if (context.Library.ChangerSerial is null)
+        {
+            if (_drive is not null)
+            {
+                await _drive.Drive.UnloadAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (_tape is not null)
+            {
+                await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+                await db.TapeMedia.Where(m => m.Id == _tape.Id).ExecuteUpdateAsync(s => s.SetProperty(m => m.Location, TapeLocation.Offline), cancellationToken).ConfigureAwait(false);
+                Log.Info($"{_tape.LabelName ?? _tape.Barcode} ejected from {context.Drive.Name}: take it out.");
+            }
+
+            _tape = null;
+            return;
+        }
+
         if (_drive is not null)
         {
             if (context.Pool.Encryption == TapeEncryption.Hardware)

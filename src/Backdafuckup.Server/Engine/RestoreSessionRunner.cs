@@ -41,6 +41,29 @@ public sealed partial class RestoreSessionRunner(
                 ?? throw new KeyNotFoundException("The restore point no longer exists.");
         }
 
+        return await RestoreAsync(session, request, point, async token =>
+        {
+            var repository = await repositories.GetAsync(point.RepositoryId, token).ConfigureAwait(false);
+            var pin = repository.Pin(point.Id);
+            try
+            {
+                return new OpenedRestorePoint(await repository.OpenRestorePointAsync(point.Id, token).ConfigureAwait(false), pin);
+            }
+            catch
+            {
+                pin.Dispose();
+                throw;
+            }
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Restores a VM or namespace from a restore point that <paramref name="open"/> opens: from its repository, or from
+    /// the cache a tape copy was read into.
+    /// </summary>
+    internal async Task<(SessionState State, string Summary)> RestoreAsync(
+        SessionEntity session, RestoreRequestDto request, RestorePointEntity point, Func<CancellationToken, Task<OpenedRestorePoint>> open, CancellationToken cancellationToken)
+    {
         var targetConnection = request.TargetConnectionId ?? point.ConnectionId
             ?? throw new InvalidOperationException("No target pool selected.");
         var task = await tracker.AddTaskAsync(session.Id, point.VmNativeId, point.VmName, cancellationToken).ConfigureAwait(false);
@@ -49,9 +72,8 @@ public sealed partial class RestoreSessionRunner(
 
         try
         {
-            var repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
-            using var pin = repository.Pin(point.Id);
-            await using var reader = await repository.OpenRestorePointAsync(point.Id, cancellationToken).ConfigureAwait(false);
+            await using var opened = await open(cancellationToken).ConfigureAwait(false);
+            var reader = opened.Reader;
             var manifest = reader.Manifest;
             var resume = request.ResumeWithMemory;
             if (resume)
@@ -612,5 +634,17 @@ public sealed class MaintenanceSessionRunner(
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         return await db.Repositories.Where(r => r.Id == repositoryId).Select(r => r.Name).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? repositoryId.ToString();
+    }
+}
+
+/// <summary>An opened restore point and what keeps it (a pin against retention), released together.</summary>
+internal sealed class OpenedRestorePoint(IRestorePointReader reader, IDisposable? keep) : IAsyncDisposable
+{
+    public IRestorePointReader Reader => reader;
+
+    public async ValueTask DisposeAsync()
+    {
+        await reader.DisposeAsync().ConfigureAwait(false);
+        keep?.Dispose();
     }
 }

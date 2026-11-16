@@ -28,18 +28,20 @@ public sealed class TapeCatalogService(IDbContextFactory<AppDbContext> dbFactory
             throw new TapeRequestException("The name must have 1 to 100 characters.");
         }
 
-        if (request.Passphrase is not { Length: >= 12 })
-        {
-            throw new TapeRequestException("The passphrase needs at least 12 characters. Without it (or the key file) nothing on the tapes can be read.");
-        }
-
-        var parameters = new TapeKdfParameters(options.Value.KdfMemoryKiB, options.Value.KdfIterations, options.Value.KdfParallelism, System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
-        var kek = await Task.Run(() => TapeKeys.DeriveKek(request.Passphrase, parameters), cancellationToken).ConfigureAwait(false);
-        var fingerprint = TapeKeys.Fingerprint(kek);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         if (await db.TapeKeys.AnyAsync(k => k.Name == name, cancellationToken).ConfigureAwait(false))
         {
             throw new TapeRequestException($"A tape key named '{name}' exists already.", StatusCodes.Status409Conflict);
+        }
+
+        var (kek, parameters) = request.KeyFile is { Length: > 0 } file ? FromKeyFile(file)
+            : request.Existing ? await FromTapesAsync(db, request.Passphrase, cancellationToken).ConfigureAwait(false)
+            : await NewAsync(request.Passphrase, cancellationToken).ConfigureAwait(false);
+        var fingerprint = TapeKeys.Fingerprint(kek);
+        if (await db.TapeKeys.FirstOrDefaultAsync(k => k.Fingerprint == fingerprint, cancellationToken).ConfigureAwait(false) is { } same)
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(kek);
+            throw new TapeRequestException($"This key ({fingerprint}) is here already, as '{same.Name}'.", StatusCodes.Status409Conflict);
         }
 
         var key = new TapeKeyEntity
@@ -52,11 +54,70 @@ public sealed class TapeCatalogService(IDbContextFactory<AppDbContext> dbFactory
             Parallelism = parameters.Parallelism,
             Salt = Convert.ToBase64String(parameters.Salt),
             CreatedUtc = time.GetUtcNow(),
+            KeyFileDownloaded = request.KeyFile is { Length: > 0 },
         };
         db.TapeKeys.Add(key);
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         System.Security.Cryptography.CryptographicOperations.ZeroMemory(kek);
-        return new TapeKeyDto(key.Id, key.Name, key.Fingerprint, key.CreatedUtc, false, []);
+        return new TapeKeyDto(key.Id, key.Name, key.Fingerprint, key.CreatedUtc, key.KeyFileDownloaded, []);
+    }
+
+    private async Task<(byte[] Kek, TapeKdfParameters Parameters)> NewAsync(string? passphrase, CancellationToken cancellationToken)
+    {
+        if (passphrase is not { Length: >= 12 })
+        {
+            throw new TapeRequestException("The passphrase needs at least 12 characters. Without it (or the key file) nothing on the tapes can be read.");
+        }
+
+        var parameters = new TapeKdfParameters(options.Value.KdfMemoryKiB, options.Value.KdfIterations, options.Value.KdfParallelism, System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        return (await Task.Run(() => TapeKeys.DeriveKek(passphrase, parameters), cancellationToken).ConfigureAwait(false), parameters);
+    }
+
+    private static (byte[] Kek, TapeKdfParameters Parameters) FromKeyFile(string text)
+    {
+        try
+        {
+            var file = Backdafuckup.Tape.Format.TapeJson.Deserialize<TapeKeyFile>(System.Text.Encoding.UTF8.GetBytes(text));
+            return (file.ReadKek(), new TapeKdfParameters(file.MemoryKiB, file.Iterations, file.Parallelism, Convert.FromBase64String(file.Salt)));
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidDataException or FormatException)
+        {
+            throw new TapeRequestException($"This is not a readable tape key file: {ex.Message}");
+        }
+    }
+
+    /// <summary>An existing key from its passphrase: tried with the parameters of every key the tapes' labels name that is not here.</summary>
+    private async Task<(byte[] Kek, TapeKdfParameters Parameters)> FromTapesAsync(AppDbContext db, string? passphrase, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(passphrase))
+        {
+            throw new TapeRequestException("An existing key needs its passphrase, or its key file.");
+        }
+
+        var here = await db.TapeKeys.Select(k => k.Fingerprint).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var named = (await db.TapeMedia.Where(m => m.LabelEncryption != null).Select(m => m.LabelEncryption!).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false))
+            .Select(json => Backdafuckup.Tape.Format.TapeJson.Deserialize<Backdafuckup.Tape.Format.TapeLabelEncryption>(System.Text.Encoding.UTF8.GetBytes(json)))
+            .Where(e => !here.Contains(e.Fingerprint))
+            .DistinctBy(e => e.Fingerprint)
+            .ToList();
+        if (named.Count == 0)
+        {
+            throw new TapeRequestException("No tape read here names a key this server does not have. Read the tapes' labels first (Rebuild catalog, or Read its label), or add the key by its key file.");
+        }
+
+        foreach (var encryption in named)
+        {
+            var parameters = new TapeKdfParameters(encryption.MemoryKiB, encryption.Iterations, encryption.Parallelism, Convert.FromBase64String(encryption.Salt));
+            var kek = await Task.Run(() => TapeKeys.DeriveKek(passphrase, parameters), cancellationToken).ConfigureAwait(false);
+            if (TapeKeys.Fingerprint(kek) == encryption.Fingerprint)
+            {
+                return (kek, parameters);
+            }
+
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(kek);
+        }
+
+        throw new TapeRequestException($"The passphrase matches none of the keys the tapes here name ({string.Join(", ", named.Select(e => e.Fingerprint))}).");
     }
 
     /// <summary>The key file, once: afterwards only the passphrase can bring the key to another server.</summary>

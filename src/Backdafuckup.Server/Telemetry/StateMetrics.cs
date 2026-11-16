@@ -86,6 +86,9 @@ public sealed class StateMetrics
             (_catalog.TapePools ?? []).Select(p => new Measurement<int>(p.Usable, Tag("pool", p.Pool))),
             description: "Tapes a pool can write to now: its open set's appendable tape, and expired, free, blank or unread tapes in its library.");
 
+        meter.CreateObservableGauge("bdfu_tape_operator_requests_pending", () => _catalog.TapeRequestsPending,
+            description: "Requests to the operator (a cartridge into a standalone drive) that a session waits for.");
+
         meter.CreateObservableGauge("bdfu_agents", () =>
             new[] { new Measurement<int>(_catalog.AgentsOnline, Tag("state", "online")), new Measurement<int>(_catalog.AgentsOffline, Tag("state", "offline")) },
             description: "Guest agents by state (offline: no contact for 10 minutes).");
@@ -214,7 +217,8 @@ public sealed class StateMetrics
         IReadOnlyList<SqlLogRow> SqlLogs,
         IReadOnlyList<TapeCountRow>? TapeMedia = null,
         IReadOnlyList<TapeCountRow>? TapeSets = null,
-        IReadOnlyList<TapePoolRow>? TapePools = null)
+        IReadOnlyList<TapePoolRow>? TapePools = null,
+        int TapeRequestsPending = 0)
     {
         public static CatalogSnapshot Empty { get; } = new([], [], new Dictionary<string, int>(), 0, [], [], 0, 0, []);
     }
@@ -380,7 +384,8 @@ public sealed class MetricsStateService(
             sqlLogs,
             tapeMediaRows,
             tapeSetRows,
-            tapePoolRows);
+            tapePoolRows,
+            await db.TapeOperatorRequests.CountAsync(r => r.ResolvedUtc == null, cancellationToken).ConfigureAwait(false));
     }
 
     internal async Task ReadPoolsAsync(CancellationToken cancellationToken)

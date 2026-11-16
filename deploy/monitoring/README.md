@@ -119,6 +119,7 @@ Both contain the same 15 alerts:
 | BackdafuckupTapeAgentDisconnected | a tape agent is gone for 15 minutes |
 | BackdafuckupTapeNoUsableMedia | a media pool has had no tape it can write to for 30 minutes |
 | BackdafuckupTapeJobFailed | a tape job failed in the last 6 hours |
+| BackdafuckupTapeOperatorWaiting | a tape session has waited 30 minutes for a cartridge in a standalone drive |
 | BackdafuckupClusterSnapshotLongLived | a volume snapshot of a Kubernetes cluster lived over 2 hours (in the last day) |
 
 After changing `backdafuckup.rules.yml`, check it and regenerate the `PrometheusRule`:

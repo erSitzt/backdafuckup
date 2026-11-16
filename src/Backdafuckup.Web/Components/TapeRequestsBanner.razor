@@ -1,0 +1,41 @@
+@implements IDisposable
+@inject ApiClient Api
+@inject NavigationManager Navigation
+
+@* What a waiting tape session needs from a person (a cartridge into a standalone drive), on every page. *@
+@foreach (var request in _requests)
+{
+    <MudAlert Severity="Severity.Warning" Icon="@AppIcons.Tape" Class="mb-3" Dense="true">
+        <div class="d-flex align-center gap-2 flex-wrap">
+            <span><b>Tape:</b> @request.Message</span>
+            <MudSpacer />
+            <span class="cell-sub" style="display:inline">waiting since @Fmt.Time(request.CreatedUtc)</span>
+            <MudButton Size="Size.Small" OnClick="@(() => Navigation.NavigateTo($"/sessions/{request.SessionId}"))">Show session</MudButton>
+        </div>
+    </MudAlert>
+}
+
+@code {
+    private List<TapeOperatorRequestDto> _requests = [];
+    private Timer? _timer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshAsync();
+        _timer = new Timer(_ => _ = InvokeAsync(async () => { await RefreshAsync(); StateHasChanged(); }), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+    }
+
+    public void Dispose() => _timer?.Dispose();
+
+    private async Task RefreshAsync()
+    {
+        try
+        {
+            _requests = await Api.GetAsync<List<TapeOperatorRequestDto>>("api/tape/requests");
+        }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException)
+        {
+            // Not signed in yet, or the server restarts: the next refresh tries again.
+        }
+    }
+}

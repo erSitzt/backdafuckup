@@ -2438,6 +2438,11 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(16)")
                         .HasColumnName("kind");
 
+                    b.Property<string>("LabelEncryption")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("label_encryption");
+
                     b.Property<string>("LabelName")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)")
@@ -2515,6 +2520,47 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasDatabaseName("ix_tape_media_set_id");
 
                     b.ToTable("tape_media", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeOperatorRequestEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<Guid?>("DriveId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("drive_id");
+
+                    b.Property<Guid>("LibraryId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("library_id");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("message");
+
+                    b.Property<DateTimeOffset?>("ResolvedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("resolved_utc");
+
+                    b.Property<Guid>("SessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("session_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_tape_operator_requests");
+
+                    b.HasIndex("ResolvedUtc")
+                        .HasDatabaseName("ix_tape_operator_requests_resolved_utc");
+
+                    b.ToTable("tape_operator_requests", (string)null);
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.VmReplacementEntity", b =>

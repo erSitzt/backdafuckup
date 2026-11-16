@@ -142,6 +142,11 @@ public static class TapeSetReader
         return (await import.CommitAsync(adjust, cancellationToken).ConfigureAwait(false), chunks);
     }
 
+    /// <summary>A copy's file on its own (a catalog rebuild): its entries (<c>copy.json</c>, the manifest, …) and where its chunks are.</summary>
+    public static Task<(List<(string Name, byte[] Content)> Entries, IReadOnlyList<ChunkLocation> Locations)> ReadCopyAsync(
+        ITapeVolumes tapes, int blockSize, ITapeRecordCipher? cipher, int sequence, long startBlock, CancellationToken cancellationToken) =>
+        ReadCopyFileAsync(tapes, blockSize, cipher, sequence, startBlock, cancellationToken);
+
     /// <summary>A copy's file: its entries (files byte for byte) and where its chunks are.</summary>
     private static async Task<(List<(string Name, byte[] Content)> Entries, IReadOnlyList<ChunkLocation> Locations)> ReadCopyFileAsync(
         ITapeVolumes tapes, int blockSize, ITapeRecordCipher? cipher, int sequence, long startBlock, CancellationToken cancellationToken)

@@ -153,6 +153,22 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
     }
 
     /// <summary>Queues bringing a tape copy back into a repository (recorded, so that the repository cannot be removed meanwhile).</summary>
+    /// <summary>Queues a direct VM restore from a tape copy (through a cache, without a repository).</summary>
+    public async Task<Guid> EnqueueTapeVmRestoreAsync(Guid copyId, RestoreRequestDto restore, string vmName, string triggeredBy, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var session = new SessionEntity
+        {
+            Kind = SessionKind.TapeRestore,
+            Name = $"Restore {vmName} directly from tape",
+            TriggeredBy = triggeredBy,
+            State = SessionState.Queued,
+            CreatedUtc = time.GetUtcNow(),
+            Parameters = JsonSerializer.Serialize(new Tape.TapeRestoreRequest(copyId, Guid.Empty, IncludeSql: false, Vm: restore)),
+        };
+        return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<Guid> EnqueueTapeRestoreAsync(Guid copyId, Guid repositoryId, string vmName, string triggeredBy, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);

@@ -379,7 +379,8 @@ public sealed record RestorePointDto(
     bool ConsistencyWarning = false,
     int? SqlUserDatabaseCount = null,
     string ObjectKind = RestorePointObjectKinds.Vm,
-    Guid? SessionId = null);
+    Guid? SessionId = null,
+    IReadOnlyList<string>? OnTape = null);
 
 /// <summary>What a restore point holds: a VM, or a Kubernetes namespace (its objects and volumes).</summary>
 public static class RestorePointObjectKinds

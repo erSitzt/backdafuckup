@@ -147,6 +147,9 @@ public sealed class TapeMediumEntity
     /// <summary>The name in its label (the barcode, or what to write on a cartridge without one).</summary>
     public string? LabelName { get; set; }
 
+    /// <summary>How its label says it is encrypted (JSON: mode, fingerprint, KDF parameters): an existing key is added by its passphrase from it.</summary>
+    public string? LabelEncryption { get; set; }
+
     public Guid? PoolId { get; set; }
 
     public Guid? SetId { get; set; }
@@ -424,3 +427,22 @@ public sealed class TapeFileEntity
 
     public Guid? CopyId { get; set; }
 }
+
+/// <summary>Something only a person can do (a cartridge into a standalone drive); a session waits for it.</summary>
+public sealed class TapeOperatorRequestEntity
+{
+    public Guid Id { get; set; } = Guid.CreateVersion7();
+
+    public Guid SessionId { get; set; }
+
+    public Guid LibraryId { get; set; }
+
+    public Guid? DriveId { get; set; }
+
+    public required string Message { get; set; }
+
+    public DateTimeOffset CreatedUtc { get; set; }
+
+    public DateTimeOffset? ResolvedUtc { get; set; }
+}
+

@@ -156,6 +156,15 @@ groups:
           summary: "A tape job failed"
           description: "Its session log (History, type Backup to tape) names the tape, drive and error. What it committed before is on tape; the next run goes on."
 
+      - alert: BackdafuckupTapeOperatorWaiting
+        expr: bdfu_tape_operator_requests_pending > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A tape session has waited 30 minutes for a cartridge"
+          description: "The console shows what it needs on every page (a tape into a standalone drive). The session gives up after 12 hours."
+
       - alert: BackdafuckupClusterSnapshotLongLived
         expr: histogram_quantile(1, sum by (cluster, le) (rate(bdfu_k8s_snapshot_lifetime_seconds_bucket[1d]))) > 7200
         for: 0m

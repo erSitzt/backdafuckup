@@ -434,7 +434,14 @@ public static class OperationEndpoints
                 query = query.Where(r => r.PlatformId == platformId);
             }
 
-            return (await query.OrderBy(r => r.VmName).ThenByDescending(r => r.CreatedUtc).ToListAsync(ct)).Select(r => r.ToDto());
+            var list = await query.OrderBy(r => r.VmName).ThenByDescending(r => r.CreatedUtc).ToListAsync(ct);
+
+            // On tape: the pools whose sets hold a copy of it.
+            var ids = list.Select(r => r.Id).ToList();
+            var copies = await db.TapeCopies.AsNoTracking().Where(c => c.Kind == Backdafuckup.Tape.Format.TapeFileTypes.RestorePoint && ids.Contains(c.OriginalId))
+                .Join(db.MediaPools, c => c.PoolId, p => p.Id, (c, p) => new { c.OriginalId, p.Name }).ToListAsync(ct);
+            var onTape = copies.GroupBy(c => c.OriginalId).ToDictionary(g => g.Key, g => (IReadOnlyList<string>)g.Select(c => c.Name).Distinct().Order().ToList());
+            return list.Select(r => r.ToDto() with { OnTape = onTape.GetValueOrDefault(r.Id) });
         });
 
         points.MapGet("/vms", async (AppDbContext db, TimeProvider time, string? q, Guid[]? jobId, Guid? repositoryId, string[]? content, string? consistency,
