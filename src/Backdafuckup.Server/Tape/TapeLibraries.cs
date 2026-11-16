@@ -361,6 +361,57 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// What the label says about a cartridge, in the catalog: blank, free, foreign, or a tape of a set (appendable when it
+    /// is the last tape of an open set, expired with its set, otherwise full). Returns it in words.
+    /// </summary>
+    public async Task<string> ApplyLabelAsync(string barcode, Backdafuckup.Tape.Format.TapeLabelRead read, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var medium = await db.TapeMedia.FirstAsync(m => m.Barcode == barcode, cancellationToken).ConfigureAwait(false);
+        string text;
+        if (read.Blank || read.Foreign || read.Label?.Set is null)
+        {
+            medium.State = read.Blank ? TapeMediumState.Blank : read.Foreign ? TapeMediumState.Foreign : TapeMediumState.Free;
+            medium.SetId = null;
+            medium.PoolId = null;
+            medium.Sequence = null;
+            medium.FileCount = read.Label is null ? 0 : 1;
+            medium.MediumId = read.Label?.MediumId;
+            medium.LabelName = read.Label?.Name;
+            text = read.Blank ? $"{barcode} is blank." : read.Foreign ? $"{barcode} holds data that is not backdafuckup's ({read.Reason}); it is never written to." : $"{barcode} is labelled and free.";
+        }
+        else
+        {
+            var label = read.Label;
+            var labelSet = label.Set!;
+            var set = await db.MediaSets.AsNoTracking().FirstOrDefaultAsync(s => s.Id == labelSet.Id, cancellationToken).ConfigureAwait(false);
+            var last = await db.TapeMedia.Where(m => m.SetId == labelSet.Id).MaxAsync(m => m.Sequence, cancellationToken).ConfigureAwait(false);
+            medium.State = set?.State switch
+            {
+                MediaSetState.Open when last is null || labelSet.Sequence >= last => TapeMediumState.Appendable,
+                MediaSetState.Expired or MediaSetState.Overwritten when medium.Kind != TapeMediumKind.Worm => TapeMediumState.Expired,
+                _ => TapeMediumState.Full,
+            };
+            if (medium.SetId != labelSet.Id)
+            {
+                medium.FileCount = 0;
+            }
+
+            medium.SetId = labelSet.Id;
+            medium.PoolId = labelSet.PoolId;
+            medium.Sequence = labelSet.Sequence;
+            medium.MediumId = label.MediumId;
+            medium.LabelName = label.Name;
+            text = set is null
+                ? $"{barcode} is tape #{labelSet.Sequence} of set {labelSet.Id} of pool {labelSet.PoolName}, which this server does not know: it is not written to."
+                : $"{barcode} is tape #{labelSet.Sequence} of set {labelSet.Id} (pool {labelSet.PoolName}, {set.State.ToString().ToLowerInvariant()}): {medium.State.ToString().ToLowerInvariant()}.";
+        }
+
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return text;
+    }
+
     public async Task RecordErrorAsync(Guid libraryId, string? error, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);

@@ -314,7 +314,7 @@ else
                     </HeaderContent>
                     <RowTemplate>
                         <MudTd Class="mono">@context.Barcode@(context.MediumSerial is { } serial ? (MarkupString)$"<span class=\"cell-sub\">serial {serial}</span>" : default)</MudTd>
-                        <MudTd>@context.Kind</MudTd>
+                        <MudTd>@context.Kind<span class="cell-sub">@MediumState(context)</span></MudTd>
                         <MudTd>@MediumWhere(context)<span class="cell-sub">@(context.Library ?? "no library")</span></MudTd>
                         <MudTd Class="c-560">@(context.CapacityBytes is { } capacity ? $"{Fmt.Bytes(context.RemainingBytes)} of {Fmt.Bytes(capacity)}" : "–")</MudTd>
                         <MudTd Class="c-760">@Fmt.Time(context.SeenUtc)</MudTd>
@@ -334,6 +334,10 @@ else
                                     @if (context.Location != "MailSlot" && library.MailSlots > 0)
                                     {
                                         <MudMenuItem Icon="@Icons.Material.Filled.Outbox" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Export, context.Barcode), $"Export {context.Barcode}"))">Export to a mail slot</MudMenuItem>
+                                    }
+                                    @if (context.Kind != "Cleaning")
+                                    {
+                                        <MudMenuItem Icon="@Icons.Material.Filled.Label" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Identify, context.Barcode), $"Reading the label of {context.Barcode}"))">Read its label</MudMenuItem>
                                     }
                                 </MudMenu>
                             }
@@ -795,6 +799,16 @@ else
             : null;
         return $"{(medium.Location == "MailSlot" ? "Mail slot" : "Slot")} {number?.ToString(System.Globalization.CultureInfo.CurrentCulture) ?? medium.Address?.ToString(System.Globalization.CultureInfo.CurrentCulture)}";
     }
+
+    private static string MediumState(TapeMediumDto medium) => medium.State switch
+    {
+        "Appendable" => $"{medium.Pool} #{medium.Sequence}, appendable",
+        "Full" => $"{medium.Pool} #{medium.Sequence}, full",
+        "Expired" => $"{medium.Pool}, expired",
+        "Unknown" => "not read yet",
+        "Foreign" => "other data",
+        _ => medium.State.ToLowerInvariant(),
+    };
 
     private IEnumerable<TapeMediumDto> FilteredMedia() => (_media ?? [])
         .Where(m => string.IsNullOrWhiteSpace(_search) || m.Barcode.Contains(_search.Trim(), StringComparison.OrdinalIgnoreCase))

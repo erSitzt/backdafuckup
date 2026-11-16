@@ -422,12 +422,16 @@ public sealed class TapeFileReader(ITapeBlockReader source, int maxBlockSize, IT
                 throw new NotSupportedException($"The tape was written in format {block[4]}; this version reads up to {TapeFormat.Version}. Update backdafuckup to read it.");
             }
 
+            // The block's length is its header's: some paths (a virtual library over iSCSI) report no residual, so a
+            // short block arrives as long as the buffer. The CRC below covers exactly the header's length.
             var payload = (int)BinaryPrimitives.ReadUInt32BigEndian(block[20..]);
             var crc = BinaryPrimitives.ReadUInt32BigEndian(block[24..]);
-            if (TapeFormat.BlockHeaderSize + payload != block.Length)
+            if (payload < 0 || TapeFormat.BlockHeaderSize + payload > block.Length)
             {
-                throw new InvalidDataException($"Block {_nextBlock} of file {FileId:X16}: length {block.Length} does not match its header.");
+                throw new InvalidDataException($"Block {_nextBlock} of file {FileId:X16}: {block.Length} bytes read, its header says {TapeFormat.BlockHeaderSize + payload}.");
             }
+
+            block = block[..(TapeFormat.BlockHeaderSize + payload)];
 
             BinaryPrimitives.WriteUInt32BigEndian(block[24..], 0);
             if (Crc32.Compute(block) != crc)

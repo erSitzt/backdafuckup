@@ -287,10 +287,10 @@ internal sealed class TapeSetWriter(
             var (_, medium) = await robot.LoadHeldAsync(context.Library, context.Drive, barcode, context.Holder, Log, cancellationToken).ConfigureAwait(false);
             _drive = await libraries.OpenDriveAsync(context.Library, context.Drive, cancellationToken).ConfigureAwait(false);
             await _drive.Drive.PrepareAsync(cancellationToken).ConfigureAwait(false);
-            var label = await ReadLabelAsync(cancellationToken).ConfigureAwait(false);
-            if (label is { Foreign: true })
+            var label = await TapeLabelReader.ReadAsync(_drive.Drive, cancellationToken).ConfigureAwait(false);
+            if (label.Foreign)
             {
-                Log.Warning($"{barcode} holds data that is not backdafuckup's; it is never written to.");
+                Log.Warning($"{barcode} holds data that is not backdafuckup's ({label.Reason}); it is never written to.");
                 await MarkAsync(candidate.Id, TapeMediumState.Foreign, cancellationToken).ConfigureAwait(false);
                 await UnloadAsync(cancellationToken).ConfigureAwait(false);
                 continue;
@@ -298,7 +298,7 @@ internal sealed class TapeSetWriter(
 
             if (appending)
             {
-                if (label?.Label?.Set is not { } set || set.Id != Set.Id || set.Sequence != candidate.Sequence)
+                if (label.Label?.Set is not { } set || set.Id != Set.Id || set.Sequence != candidate.Sequence)
                 {
                     Log.Warning($"{barcode} should be tape #{candidate.Sequence} of the set, but its label says otherwise; it is not written to.");
                     await MarkAsync(candidate.Id, TapeMediumState.Foreign, cancellationToken).ConfigureAwait(false);
@@ -318,7 +318,7 @@ internal sealed class TapeSetWriter(
             }
             else
             {
-                if (label?.Label is { } old && old.Set is not null && !(candidate.State == TapeMediumState.Expired && old.Set.PoolId == context.Pool.Id))
+                if (label.Label is { } old && old.Set is not null && !(candidate.State == TapeMediumState.Expired && old.Set.PoolId == context.Pool.Id))
                 {
                     Log.Warning($"{barcode} belongs to set {old.Set.Id} of pool {old.Set.PoolName} that has not expired; it is not written to.");
                     await MarkAsync(candidate.Id, TapeMediumState.Full, cancellationToken).ConfigureAwait(false);
@@ -326,7 +326,7 @@ internal sealed class TapeSetWriter(
                     continue;
                 }
 
-                if (medium.Worm && label is not null)
+                if (medium.Worm && !label.Blank)
                 {
                     Log.Warning($"{barcode} is a WORM tape with data on it; it cannot be labelled again.");
                     await MarkAsync(candidate.Id, TapeMediumState.Full, cancellationToken).ConfigureAwait(false);
@@ -426,31 +426,6 @@ internal sealed class TapeSetWriter(
         candidate.CapacityBytes = tracked.CapacityBytes;
         _remaining = (medium.RemainingBytes ?? medium.CapacityBytes ?? 0) - summary.Bytes;
         Log.Info($"{candidate.Barcode} labelled as tape #{sequence} of set {Set.Id} (pool {context.Pool.Name}{(medium.Worm ? ", WORM" : string.Empty)}).");
-    }
-
-    /// <summary>The label of the tape in the drive: null when blank, <see cref="LabelRead.Foreign"/> when it holds other data.</summary>
-    private async Task<LabelRead?> ReadLabelAsync(CancellationToken cancellationToken)
-    {
-        var drive = _drive!.Drive;
-        await drive.RewindAsync(cancellationToken).ConfigureAwait(false);
-        var probe = new byte[Math.Max(context.Pool.BlockSize, 1024 * 1024)];
-        var first = await drive.ReadBlockAsync(probe, cancellationToken).ConfigureAwait(false);
-        if (first.Kind == ReadOutcomeKind.EndOfData)
-        {
-            return null;
-        }
-
-        await drive.RewindAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var records = await new TapeFileReader(new DriveBlocks(drive), probe.Length).ReadAllAsync(cancellationToken).ToListAsync(cancellationToken).ConfigureAwait(false);
-            var label = records.FirstOrDefault(r => r.Type == TapeFormat.Label) is { } record ? TapeJson.Deserialize<TapeLabel>(record.Body) : null;
-            return label is { Format: TapeLabel.FormatName } ? new LabelRead(label, false) : new LabelRead(null, true);
-        }
-        catch (Exception ex) when (ex is InvalidDataException or TornFileException or System.Text.Json.JsonException)
-        {
-            return new LabelRead(null, true);
-        }
     }
 
     private async Task ChangeTapeAsync(string reason, CancellationToken cancellationToken)
@@ -565,8 +540,6 @@ internal sealed class TapeSetWriter(
         RandomNumberGenerator.Fill(bytes);
         return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(bytes) | 1;
     }
-
-    private sealed record LabelRead(TapeLabel? Label, bool Foreign);
 }
 
 /// <summary><c>copy.json</c>, the first entry of a restore-point file: what was copied, from where.</summary>

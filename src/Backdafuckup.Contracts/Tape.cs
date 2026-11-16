@@ -87,7 +87,10 @@ public static class TapeActions
     public const string Export = "export";
     public const string Scan = "scan";
 
-    public static readonly IReadOnlyList<string> All = [Load, Unload, Import, Export, Scan];
+    /// <summary>Load a cartridge, read its label, set what the catalog knows of it (blank, free, which set, foreign).</summary>
+    public const string Identify = "identify";
+
+    public static readonly IReadOnlyList<string> All = [Load, Unload, Import, Export, Scan, Identify];
 }
 
 /// <summary>A tape agent for the console.</summary>

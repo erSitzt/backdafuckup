@@ -18,6 +18,7 @@ public sealed partial class ApiIntegrationTests
         var client = await SignedInClientAsync();
         var fake = _tapeHost.Libraries[0];
         fake.BecomingReadyPolls = 1;
+        fake.HoloQuirks = true; // short blocks read as long as the buffer, unit attentions at the first write
         for (var i = 0; i < 6; i++)
         {
             fake.AddCartridge($"BDF00{i}L9", 12L << 20);
@@ -54,6 +55,13 @@ public sealed partial class ApiIntegrationTests
         Assert.Contains(media, m => m.State == "Full");
         Assert.Contains(media, m => m.State == "Appendable");
         Assert.All(media.Where(m => m.State is "Full" or "Appendable"), m => Assert.Equal(1024 + int.Parse(m.Barcode[3..6], System.Globalization.CultureInfo.InvariantCulture), m.Address));
+
+        // Reading a tape's label tells the catalog what it is: the set's last tape stays appendable, a blank one blank.
+        async Task<string> IdentifyAsync(string barcode) =>
+            (await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync($"/api/tape/libraries/{library.Id}/actions", new TapeActionDto("identify", barcode), Ct))).SessionId)).Session.Summary!;
+        var last = media.Single(m => m.State == "Appendable");
+        Assert.EndsWith(": appendable.", await IdentifyAsync(last.Barcode), StringComparison.Ordinal);
+        Assert.Equal("BDF005L9 is blank.", await IdentifyAsync("BDF005L9"));
 
         // Encrypted: nothing of the VM's name or its manifest on the tapes; the label and the file headers stay readable.
         var raw = fake.Cartridges.SelectMany(c => c.Records).Where(r => r.Data is not null).SelectMany(r => r.Data!).ToArray();

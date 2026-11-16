@@ -31,6 +31,7 @@ public sealed class TapeSessionRunner(TapeLibraries libraries, TapeLocks locks, 
             TapeActions.Export => await ExportAsync(library, request.Barcode, log, cancellationToken).ConfigureAwait(false),
             TapeActions.Import => await ImportAsync(library, log, cancellationToken).ConfigureAwait(false),
             TapeActions.Scan => await ScanAsync(library, log, cancellationToken).ConfigureAwait(false),
+            TapeActions.Identify => await IdentifyAsync(library, request.Barcode, log, cancellationToken).ConfigureAwait(false),
             _ => throw new TapeRequestException($"Unknown tape action '{request.Action}'."),
         };
         return (log.Warned ? SessionState.Warning : SessionState.Succeeded, summary);
@@ -304,6 +305,28 @@ public sealed class TapeSessionRunner(TapeLibraries libraries, TapeLocks locks, 
         }
 
         return $"{imported} of {waiting.Count} cartridge(s) imported into {library.Name}.";
+    }
+
+    private async Task<string> IdentifyAsync(TapeLibraryEntity library, string? requested, IOperationLog log, CancellationToken cancellationToken)
+    {
+        var barcode = requested?.Trim() is { Length: > 0 } b ? b : throw new TapeRequestException("Reading a label needs the barcode of the cartridge.");
+        var holder = $"Read the label of {barcode}";
+        var (drive, lease) = await ChooseDriveAsync(library, null, holder, log, cancellationToken).ConfigureAwait(false);
+        await using (lease.ConfigureAwait(false))
+        {
+            await LoadHeldAsync(library, drive, barcode, holder, log, cancellationToken).ConfigureAwait(false);
+            Backdafuckup.Tape.Format.TapeLabelRead read;
+            await using (var opened = await libraries.OpenDriveAsync(library, drive, cancellationToken).ConfigureAwait(false))
+            {
+                await opened.Drive.PrepareAsync(cancellationToken).ConfigureAwait(false);
+                read = await Backdafuckup.Tape.Format.TapeLabelReader.ReadAsync(opened.Drive, cancellationToken).ConfigureAwait(false);
+            }
+
+            var text = await libraries.ApplyLabelAsync(barcode, read, cancellationToken).ConfigureAwait(false);
+            log.Info(text);
+            await UnloadHeldAsync(library, drive, export: false, holder, log, cancellationToken).ConfigureAwait(false);
+            return text;
+        }
     }
 
     private async Task<string> ScanAsync(TapeLibraryEntity library, IOperationLog log, CancellationToken cancellationToken)

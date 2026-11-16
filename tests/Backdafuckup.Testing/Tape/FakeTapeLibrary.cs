@@ -937,7 +937,8 @@ public sealed class FakeTapeDrive(FakeTapeLibrary library, int index, ushort ele
             return FakeTapeLibrary.Check(SenseKey.NoSense, 0x00, 0x00, ili: !library.HoloQuirks, information: requested - data.Length, residual: requested - data.Length);
         }
 
-        return FakeTapeLibrary.Good(requested - data.Length);
+        // Holo over iSCSI reports no residual: a short block reads as long as the buffer.
+        return FakeTapeLibrary.Good(library.HoloQuirks ? 0 : requested - data.Length);
     }
 
     private ScsiResult Write(byte[] data) => Append(data, 1);

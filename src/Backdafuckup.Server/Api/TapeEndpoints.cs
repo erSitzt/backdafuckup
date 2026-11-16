@@ -76,12 +76,12 @@ public static class TapeEndpoints
             }
 
             var standalone = library.ChangerSerial is null;
-            if (standalone && action is TapeActions.Load or TapeActions.Import or TapeActions.Export)
+            if (standalone && action is TapeActions.Load or TapeActions.Import or TapeActions.Export or TapeActions.Identify)
             {
                 throw new TapeRequestException($"{library.Name} is a standalone drive without a robot or mail slots: put cartridges in and take them out by hand.");
             }
 
-            if (action is TapeActions.Load or TapeActions.Export && string.IsNullOrWhiteSpace(request.Barcode))
+            if (action is TapeActions.Load or TapeActions.Export or TapeActions.Identify && string.IsNullOrWhiteSpace(request.Barcode))
             {
                 throw new TapeRequestException($"A {action} needs the barcode of the cartridge.");
             }
@@ -101,6 +101,7 @@ public static class TapeEndpoints
                 TapeActions.Unload => $"Unload {drive!.Name} ({library.Name})",
                 TapeActions.Export => $"Export {barcode} ({library.Name})",
                 TapeActions.Import => $"Import from the mail slots ({library.Name})",
+                TapeActions.Identify => $"Read the label of {barcode} ({library.Name})",
                 _ => $"Scan {library.Name}",
             };
             var session = await queue.EnqueueTapeAsync(new TapeSessionRequest(library.Id, action, barcode, drive?.Id), name, http.User.Identity?.Name ?? "user", ct);

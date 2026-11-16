@@ -100,6 +100,7 @@ Seen on Holo 1.0.7 (runbook rows T1–T6):
 - **Mail slots never hold a cartridge.** A move into a mail slot exports the cartridge at once (it leaves the library). `POST /v1/cartridges/{id}/import` puts it straight back into its slot, not into a mail slot.
 - **UNIT ATTENTION 28/00 at the next command.** After a load it does not come with TEST UNIT READY but with the next command, e.g. the first WRITE.
 - **INQUIRY reads only the low byte of the allocation length,** as in SCSI-2.
+- **No residual on reads.** A block shorter than the read buffer arrives as long as the buffer (Linux SG_IO over iSCSI reports a residual of 0). backdafuckup takes a block's length from its own block header, so this does no harm.
 - **Not emulated:** hardware encryption (SECURITY PROTOCOL IN/OUT), ILI and the FILEMARK bit in sense data, and TapeAlert entries.
 
 backdafuckup handles each of these; the real library covers what Holo cannot (runbook row T31).

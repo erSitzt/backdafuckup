@@ -71,6 +71,19 @@ public sealed class TapeFormatTests
     }
 
     [Fact]
+    public async Task Blocks_read_as_long_as_the_buffer_are_cut_to_their_header()
+    {
+        // Holo over iSCSI reports no residual: a short block comes back as long as the read buffer.
+        var tape = new MemoryTape { PadReadsToBuffer = true };
+        var writer = await TapeFileWriter.BeginAsync(tape, BlockSize, Header(TapeFileTypes.Label, 3), null, Ct);
+        await writer.WriteRecordAsync(TapeFormat.Label, "{}"u8.ToArray(), encrypt: false, Ct);
+        await writer.FinishAsync(synchronize: true, Ct);
+        tape.Rewind();
+        var records = await new TapeFileReader(tape, 1024 * 1024).ReadAllAsync(Ct).ToListAsync(Ct);
+        Assert.Equal([TapeFormat.FileHeader, TapeFormat.Label], records.Select(r => r.Type));
+    }
+
+    [Fact]
     public async Task Chunk_locations_entries_and_the_catalog_round_trip()
     {
         var locations = Enumerable.Range(0, 1000).Select(i => new ChunkLocation(ChunkId.Compute(BitConverter.GetBytes(i)), 1 + (i % 3), i % 17, (uint)i * 3, i % 4000, 70_000 + i)).ToList();
@@ -143,6 +156,9 @@ internal sealed class MemoryTape : ITapeBlockWriter, ITapeBlockReader
 
     public long Written { get; private set; }
 
+    /// <summary>Reports every block as long as the read buffer (no residual), as Holo over iSCSI does.</summary>
+    public bool PadReadsToBuffer { get; set; }
+
     public Task<WriteOutcome> WriteBlockAsync(ReadOnlyMemory<byte> block, CancellationToken cancellationToken)
     {
         Files[^1].Add(block.ToArray());
@@ -171,8 +187,9 @@ internal sealed class MemoryTape : ITapeBlockWriter, ITapeBlockReader
         }
 
         var block = Files[_file][_block++];
+        destination.Span.Clear();
         block.CopyTo(destination);
-        return Task.FromResult(new ReadOutcome(ReadOutcomeKind.Block, block.Length));
+        return Task.FromResult(new ReadOutcome(ReadOutcomeKind.Block, PadReadsToBuffer ? destination.Length : block.Length));
     }
 
     public void Rewind() => Locate(0, 0);
