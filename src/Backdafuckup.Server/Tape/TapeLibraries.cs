@@ -17,6 +17,19 @@ public sealed class TapeOptions
 
     /// <summary>How often a loading drive is asked whether it is ready.</summary>
     public TimeSpan ReadyPoll { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Kept free before the end of a tape (at least; 0.25 % of a larger cartridge): a file is started only where it fits.
+    /// Drives warn before their end; a virtual library may not.
+    /// </summary>
+    public int ReserveMiB { get; set; } = 128;
+
+    /// <summary>Argon2id cost of new tape keys: 256 MiB, 3 passes, 4 lanes (written into every tape's label).</summary>
+    public int KdfMemoryKiB { get; set; } = 256 * 1024;
+
+    public int KdfIterations { get; set; } = 3;
+
+    public int KdfParallelism { get; set; } = 4;
 }
 
 /// <summary>A changer opened for this process alone; closed on dispose.</summary>
@@ -408,13 +421,14 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
         }
 
         var media = await query.OrderBy(m => m.Barcode).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var pools = await db.MediaPools.AsNoTracking().ToDictionaryAsync(p => p.Id, p => p.Name, cancellationToken).ConfigureAwait(false);
         return media.Select(m =>
         {
             var library = m.LibraryId is { } id && libraries.TryGetValue(id, out var l) ? l : null;
             var drive = m.Location == TapeLocation.Drive ? library?.Drives.FirstOrDefault(d => d.ElementAddress == m.Address || (d.ElementAddress is null && d.Barcode == m.Barcode)) : null;
             return new TapeMediumDto(
                 m.Id, m.Barcode, m.LibraryId, library?.Name, m.Kind.ToString(), m.Location.ToString(), m.Address, drive?.Name, m.HomeSlot,
-                m.MediumSerial, m.CapacityBytes, m.RemainingBytes, m.SeenUtc);
+                m.MediumSerial, m.CapacityBytes, m.RemainingBytes, m.SeenUtc, m.State.ToString(), m.PoolId is { } pool ? pools.GetValueOrDefault(pool) : null, m.SetId, m.Sequence, m.BytesWritten);
         }).ToList();
     }
 

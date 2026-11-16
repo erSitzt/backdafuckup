@@ -172,6 +172,18 @@ public sealed class FakeTapeLibrary
         }
     }
 
+    /// <summary>Every cartridge in the library: slots, mail slots, drives.</summary>
+    public IReadOnlyList<FakeCartridge> Cartridges
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return [.. _slots.Values.Concat(_mail.Values).Concat(Drives.Select(d => d.Cartridge)).OfType<FakeCartridge>()];
+            }
+        }
+    }
+
     /// <summary>Where a cartridge is: a slot, mail slot or drive address; null when it left the library.</summary>
     public ushort? LocationOf(string barcode)
     {

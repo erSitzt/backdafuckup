@@ -496,6 +496,9 @@ public sealed class RestorePointEntity
 
     public Guid RepositoryId { get; set; }
 
+    /// <summary>The tape copy it was brought back from (an import from tape); null for backups.</summary>
+    public Guid? ImportedFromTapeCopyId { get; set; }
+
     public Guid? JobId { get; set; }
 
     public required string JobName { get; set; }
@@ -651,6 +654,12 @@ public enum SessionKind
 
     /// <summary>A tape library action: load, unload, import, export, a full inventory.</summary>
     TapeMaintenance,
+
+    /// <summary>A tape job's run: restore points copied to tape.</summary>
+    TapeBackup,
+
+    /// <summary>A copy brought back from tape into a repository.</summary>
+    TapeRestore,
 }
 
 public enum GuestProcessingMode

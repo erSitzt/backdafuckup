@@ -127,6 +127,48 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Queues a run of a tape job; refused while one of it is queued or running.</summary>
+    public async Task<Guid> EnqueueTapeBackupAsync(Guid jobId, string triggeredBy, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var job = await db.TapeJobs.FindAsync([jobId], cancellationToken).ConfigureAwait(false) ?? throw new KeyNotFoundException($"Tape job {jobId} does not exist.");
+        var parameters = JsonSerializer.Serialize(new Tape.TapeBackupRequest(jobId));
+        if (await db.Sessions.AnyAsync(
+                s => s.Kind == SessionKind.TapeBackup && s.Parameters == parameters && (s.State == SessionState.Queued || s.State == SessionState.Running || s.State == SessionState.Stopping),
+                cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidOperationException($"Tape job '{job.Name}' is already queued or running.");
+        }
+
+        var session = new SessionEntity
+        {
+            Kind = SessionKind.TapeBackup,
+            Name = job.Name,
+            TriggeredBy = triggeredBy,
+            State = SessionState.Queued,
+            CreatedUtc = time.GetUtcNow(),
+            Parameters = parameters,
+        };
+        return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Queues bringing a tape copy back into a repository (recorded, so that the repository cannot be removed meanwhile).</summary>
+    public async Task<Guid> EnqueueTapeRestoreAsync(Guid copyId, Guid repositoryId, string vmName, string triggeredBy, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var session = new SessionEntity
+        {
+            Kind = SessionKind.TapeRestore,
+            Name = $"Restore {vmName} from tape",
+            TriggeredBy = triggeredBy,
+            RepositoryId = repositoryId,
+            State = SessionState.Queued,
+            CreatedUtc = time.GetUtcNow(),
+            Parameters = JsonSerializer.Serialize(new Tape.TapeRestoreRequest(copyId, repositoryId)),
+        };
+        return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Queues a file-level restore (files and folders of one restore point to a target).</summary>
     public async Task<Guid> EnqueueFileRestoreAsync(FileRestoreRequestDto request, string vmName, string triggeredBy, CancellationToken cancellationToken)
     {

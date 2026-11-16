@@ -62,7 +62,12 @@ public sealed record TapeMediumDto(
     string? MediumSerial,
     long? CapacityBytes,
     long? RemainingBytes,
-    DateTimeOffset SeenUtc);
+    DateTimeOffset SeenUtc,
+    string State = "Unknown",
+    string? Pool = null,
+    Guid? SetId = null,
+    int? Sequence = null,
+    long BytesWritten = 0);
 
 /// <summary>One element of a library for the slot map: a slot, mail slot or drive, with what is in it.</summary>
 /// <param name="Type"><c>Slot</c>, <c>MailSlot</c> or <c>Drive</c>.</param>
@@ -105,3 +110,89 @@ public sealed record CreateTapeAgentDto(string Name);
 /// <param name="EnvironmentFile">The content of /etc/backdafuckup-tape-agent/agent.env (mode 600, owner root).</param>
 public sealed record TapeAgentSecretDto(TapeAgentDto Agent, string EnvironmentFile);
 
+
+/// <summary>A tape key: only its fingerprint is ever shown.</summary>
+/// <param name="Pools">Pools that encrypt with it.</param>
+public sealed record TapeKeyDto(Guid Id, string Name, string Fingerprint, DateTimeOffset CreatedUtc, bool KeyFileDownloaded, IReadOnlyList<string> Pools);
+
+/// <summary>A key from a passphrase (at least 12 characters); the passphrase is never stored.</summary>
+public sealed record CreateTapeKeyDto(string Name, string Passphrase);
+
+/// <param name="NewSet"><c>EveryRun</c>, <c>Daily</c>, <c>Weekly</c>, <c>Monthly</c> or <c>Never</c>.</param>
+/// <param name="RetentionDays">How long a set is kept after it closed; null for ever.</param>
+/// <param name="Encryption"><c>None</c>, <c>Software</c> or <c>Hardware</c>.</param>
+/// <param name="Export"><c>Never</c>, <c>WhenSetCloses</c> or <c>AfterEveryRun</c>.</param>
+public sealed record MediaPoolRequestDto(
+    string Name,
+    Guid LibraryId,
+    string NewSet = "Weekly",
+    string TimeZoneId = "UTC",
+    int? RetentionDays = 28,
+    bool WormOnly = false,
+    string Encryption = "None",
+    Guid? KeyId = null,
+    string Export = "Never",
+    int BlockSizeKiB = 256);
+
+/// <param name="Media">Tapes in the pool's sets, by state.</param>
+public sealed record MediaPoolDto(
+    Guid Id,
+    string Name,
+    Guid LibraryId,
+    string Library,
+    string NewSet,
+    string TimeZoneId,
+    int? RetentionDays,
+    bool WormOnly,
+    string Encryption,
+    Guid? KeyId,
+    string? KeyFingerprint,
+    string Export,
+    int BlockSizeKiB,
+    MediaSetDto? OpenSet,
+    IReadOnlyDictionary<string, int> Media);
+
+/// <param name="State"><c>Open</c>, <c>Closed</c>, <c>Expired</c> or <c>Overwritten</c>.</param>
+public sealed record MediaSetDto(Guid Id, Guid PoolId, string Pool, string State, DateTimeOffset CreatedUtc, DateTimeOffset? ClosedUtc, DateTimeOffset? ExpiresUtc, int Media, long Bytes, int Copies, string? KeyFingerprint);
+
+/// <param name="Mode"><c>NewestPerVm</c> or <c>EveryNew</c>.</param>
+/// <param name="Schedule">As for backup jobs; kind <c>None</c> runs only on demand or after <paramref name="AfterJobId"/>.</param>
+public sealed record TapeJobRequestDto(string Name, Guid PoolId, IReadOnlyList<Guid> SourceJobIds, string Mode = "NewestPerVm", bool IncludeSqlBackups = true, ScheduleDto? Schedule = null, Guid? AfterJobId = null, bool Enabled = true);
+
+public sealed record TapeJobDto(
+    Guid Id,
+    string Name,
+    bool Enabled,
+    Guid PoolId,
+    string Pool,
+    IReadOnlyList<Guid> SourceJobIds,
+    IReadOnlyList<string> SourceJobs,
+    string Mode,
+    bool IncludeSqlBackups,
+    ScheduleDto Schedule,
+    Guid? AfterJobId,
+    DateTimeOffset? LastRunUtc,
+    string? LastResult,
+    DateTimeOffset? NextRunUtc);
+
+/// <summary>A tape a copy needs, and where it is now.</summary>
+public sealed record TapeNeededDto(int Sequence, string Barcode, string Location, string? Library);
+
+/// <summary>A restore point on tape.</summary>
+public sealed record TapeCopyDto(
+    Guid Id,
+    Guid OriginalId,
+    string VmId,
+    string VmName,
+    string? JobName,
+    string? ObjectKind,
+    DateTimeOffset CreatedUtc,
+    DateTimeOffset CopiedUtc,
+    Guid SetId,
+    string SetState,
+    string Pool,
+    long StoredBytes,
+    bool Encrypted,
+    IReadOnlyList<TapeNeededDto> Tapes);
+
+public sealed record TapeRestoreRequestDto(Guid RepositoryId);

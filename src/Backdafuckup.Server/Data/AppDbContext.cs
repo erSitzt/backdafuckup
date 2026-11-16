@@ -65,6 +65,18 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<TapeAgentEntity> TapeAgents => Set<TapeAgentEntity>();
 
+    public DbSet<TapeKeyEntity> TapeKeys => Set<TapeKeyEntity>();
+
+    public DbSet<MediaPoolEntity> MediaPools => Set<MediaPoolEntity>();
+
+    public DbSet<MediaSetEntity> MediaSets => Set<MediaSetEntity>();
+
+    public DbSet<TapeJobEntity> TapeJobs => Set<TapeJobEntity>();
+
+    public DbSet<TapeCopyEntity> TapeCopies => Set<TapeCopyEntity>();
+
+    public DbSet<TapeFileEntity> TapeFiles => Set<TapeFileEntity>();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
@@ -104,6 +116,78 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasIndex(x => x.Barcode).IsUnique();
             e.HasIndex(x => x.LibraryId);
             e.HasOne<TapeLibraryEntity>().WithMany().HasForeignKey(x => x.LibraryId).OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<TapeMediumEntity>(e =>
+        {
+            e.Property(x => x.State).HasConversion<string>().HasMaxLength(16).HasDefaultValue(TapeMediumState.Unknown);
+            e.Property(x => x.LabelName).HasMaxLength(64);
+            e.HasIndex(x => x.SetId);
+            e.HasIndex(x => x.PoolId);
+        });
+
+        builder.Entity<TapeKeyEntity>(e =>
+        {
+            e.ToTable("tape_keys");
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.Fingerprint).HasMaxLength(19);
+            e.HasIndex(x => x.Name).IsUnique();
+            e.HasIndex(x => x.Fingerprint).IsUnique();
+        });
+
+        builder.Entity<MediaPoolEntity>(e =>
+        {
+            e.ToTable("media_pools");
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.NewSet).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.Encryption).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.Export).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.TimeZoneId).HasMaxLength(64);
+            e.HasIndex(x => x.Name).IsUnique();
+            e.HasOne<TapeLibraryEntity>().WithMany().HasForeignKey(x => x.LibraryId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<TapeKeyEntity>().WithMany().HasForeignKey(x => x.KeyId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<MediaSetEntity>(e =>
+        {
+            e.ToTable("media_sets");
+            e.Property(x => x.State).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.KeyFingerprint).HasMaxLength(19);
+            e.HasIndex(x => new { x.PoolId, x.State });
+            e.HasOne<MediaPoolEntity>().WithMany().HasForeignKey(x => x.PoolId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<TapeJobEntity>(e =>
+        {
+            e.ToTable("tape_jobs");
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.Mode).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.LastResult).HasConversion<string>().HasMaxLength(16);
+            e.HasIndex(x => x.Name).IsUnique();
+            e.OwnsOne(x => x.Schedule, s => s.Property(p => p.Kind).HasConversion<string>().HasMaxLength(16));
+            e.HasOne<MediaPoolEntity>().WithMany().HasForeignKey(x => x.PoolId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<TapeCopyEntity>(e =>
+        {
+            e.ToTable("tape_copies");
+            e.Property(x => x.Kind).HasMaxLength(16);
+            e.Property(x => x.VmId).HasMaxLength(255);
+            e.Property(x => x.VmName).HasMaxLength(255);
+            e.Property(x => x.JobName).HasMaxLength(100);
+            e.Property(x => x.ObjectKind).HasMaxLength(32);
+            e.Property(x => x.Manifest).HasColumnType("jsonb");
+            e.HasIndex(x => x.SetId);
+            e.HasIndex(x => x.OriginalId);
+            e.HasOne<MediaSetEntity>().WithMany().HasForeignKey(x => x.SetId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TapeFileEntity>(e =>
+        {
+            e.ToTable("tape_files");
+            e.Property(x => x.Type).HasMaxLength(16);
+            e.HasIndex(x => new { x.SetId, x.Sequence, x.FileNumber }).IsUnique();
+            e.HasOne<MediaSetEntity>().WithMany().HasForeignKey(x => x.SetId).OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<TapeAgentEntity>(e =>

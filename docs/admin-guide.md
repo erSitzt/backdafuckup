@@ -1142,6 +1142,40 @@ Load, unload, import, export and scan run as **tape sessions** (*Sessions*, type
 
 The lab VTL (`deploy/vtl`, Holo VTL) behaves like an HPE MSL6480 with LTO-9 drives; its README lists what it does differently from a real library.
 
+### Media pools and sets
+
+A **media pool** is the tapes of one library used for one purpose (*Tape → Media pools*):
+
+- **Sets.** Copies go into the pool's open **media set**. Chunks are written once per set, so a restore needs tapes of one set only. A new set starts by the pool's rule: every run, daily, weekly (the default; weeks begin on Monday), monthly, or never. The old set then closes.
+- **Retention.** A closed set is kept for the pool's days, then it **expires**: its tapes are labelled again when the pool needs tapes. WORM tapes are never reused.
+- **Tapes.** A run appends to the set's last tape while it has room. Then it takes an expired tape of the pool, a free one, a blank one, or one it has not read yet. A tape with other data (not backdafuckup's, or another pool's set that has not expired) is never written to. New tapes are labelled on first use.
+- **WORM only.** The pool takes only WORM cartridges.
+- **Block size.** 256 KiB by default, which reads back on every host and through iSCSI.
+- **The end of a tape.** A file is started only where it fits, with a reserve before the end (`Tape:ReserveMiB`, 128 MiB, or 0.25 % of a larger cartridge). An archive stops at the reserve or at the drive's early warning and goes on on the next tape. A file cut off by the end of the tape is written again on the next one.
+
+### Encryption and keys
+
+- **By the server** (*Software*): AES-256-GCM per record. Chunk ids, file names, manifests and VM names are encrypted; tape labels and file headers stay readable.
+- **By the drive** (*Hardware*, LTO, application-managed encryption): the drive encrypts; the MSL6480 must be set to application-managed encryption.
+- **Keys.** A key comes from a **passphrase** (*Tape → Media pools → Keys*), which is never stored. The server keeps only the derived key (Argon2id, protected with its key ring) and shows its fingerprint, e.g. `3F2A-91C0-7B11-02DE`. Every set gets its own key from it, and every tape's label names the fingerprint.
+- **Key file.** Download the key file once, right after creating the key, and keep it apart from the tapes. Without the passphrase or the key file, encrypted tapes cannot be read, not even by backdafuckup. A key cannot be removed while a pool or a kept set uses it.
+
+### Tape jobs
+
+A tape job copies restore points of backup jobs into a pool (*Tape → Tape jobs*; `POST /api/tape/jobs`):
+
+- **What:** the newest restore point of each VM that the open set does not have yet (the default), or every new one.
+- **When:** on demand (*Run now*), on a schedule, and/or after a backup job succeeded.
+- **One copy at a time.** Each copy is written as archives with the chunks the set lacks, then a restore-point file with its indexes and where all its chunks are. A synchronizing filemark commits it before the database records it. The set's catalog is written at the end of every run and before every tape change.
+- **Repository contents.** The restore points are read from the repository's pack files in storage order, without decompressing them. Pack files keep the drive streaming.
+- **Logs.** The log names each tape, its number in the set, and how much was new.
+
+### Bring a copy back
+
+*Tape → On tape → Bring back…* (`POST /api/tape/copies/{id}/restore`) reads the copy into a repository with the same block size. It loads the tapes it needs in order and reads only the needed parts of each file. The copy becomes a restore point of its own, named *Imported from tape*, that belongs to no job: job retention never deletes it. From there it is restored like any other (VM, files, SQL Server, Active Directory). The tapes it needs must be in the library; offline ones are named.
+
+The format on tape is documented in [tape-format.md](tape-format.md), so that tapes can be read without the server.
+
 ## API and API tokens
 
 The console's API is described under *API reference* (`/api-docs`). Scripts and tools use an **API token** instead of a password:

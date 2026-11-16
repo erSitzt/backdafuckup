@@ -344,6 +344,267 @@ else
             </div>
         </MudTabPanel>
 
+        <MudTabPanel Text="Media pools">
+            <MudText Typo="Typo.body2" Class="mb-3">
+                A pool is the tapes of one library used for one purpose. Copies go into sets: chunks are written once per set, a new set
+                starts by the pool's rule, and a set is kept for the pool's retention after it closed. Tapes are labelled when they are first used.
+            </MudText>
+            <div class="cq mb-3">
+                <MudTable Items="_pools ?? []" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
+                    <HeaderContent>
+                        <MudTh>Pool</MudTh><MudTh>Sets</MudTh><MudTh Class="c-560">Encryption</MudTh><MudTh Class="c-760">Tapes</MudTh><MudTh></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>@context.Name<span class="cell-sub">@context.Library · blocks of @context.BlockSizeKiB KiB@(context.WormOnly ? " · WORM" : "")</span></MudTd>
+                        <MudTd>
+                            @NewSetText(context.NewSet), kept @(context.RetentionDays is { } d ? $"{d} days" : "for ever")
+                            <span class="cell-sub">@(context.OpenSet is { } open ? $"open set: {open.Media} tape(s), {Fmt.Bytes(open.Bytes)}, {open.Copies} copies, since {Fmt.Time(open.CreatedUtc)}" : "no open set")</span>
+                        </MudTd>
+                        <MudTd Class="c-560">@(context.Encryption == "None" ? "none" : $"{(context.Encryption == "Software" ? "by the server" : "by the drive")} · key {context.KeyFingerprint}")</MudTd>
+                        <MudTd Class="c-760">@(context.Media.Count == 0 ? "–" : string.Join(", ", context.Media.Select(m => $"{m.Value} {m.Key.ToLowerInvariant()}")))</MudTd>
+                        <MudTd Style="text-align:right; white-space:nowrap">
+                            <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                                <MudMenuItem Icon="@Icons.Material.Filled.Edit" OnClick="@(() => EditPool(context))">Edit</MudMenuItem>
+                                <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => DeleteAsync($"api/tape/pools/{context.Id}", $"Remove pool {context.Name}?"))">Remove</MudMenuItem>
+                            </MudMenu>
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText>No media pool yet.</MudText></NoRecordsContent>
+                </MudTable>
+            </div>
+            @if (_poolForm is { } pf)
+            {
+                <MudPaper Class="pa-4 mb-3" Elevation="2">
+                    <MudText Typo="Typo.h6" Class="mb-2">@(_poolEditing is null ? "Add media pool" : $"Edit {pf.Name}")</MudText>
+                    <MudGrid>
+                        <MudItem xs="12" md="4"><MudTextField @bind-Value="pf.Name" Label="Name" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="12" md="4">
+                            <MudSelect T="Guid" @bind-Value="pf.LibraryId" Label="Library" Variant="Variant.Outlined">
+                                @foreach (var library in _libraries ?? [])
+                                {
+                                    <MudSelectItem T="Guid" Value="@library.Id">@library.Name</MudSelectItem>
+                                }
+                            </MudSelect>
+                        </MudItem>
+                        <MudItem xs="12" md="4">
+                            <MudSelect T="string" @bind-Value="pf.NewSet" Label="New set" Variant="Variant.Outlined" HelperText="Chunks are stored once per set; a restore needs only tapes of one set.">
+                                <MudSelectItem T="string" Value="@("EveryRun")">every run</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Daily")">daily</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Weekly")">weekly (recommended)</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Monthly")">monthly</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Never")">never (one growing set)</MudSelectItem>
+                            </MudSelect>
+                        </MudItem>
+                        <MudItem xs="12" md="4"><MudNumericField T="int?" @bind-Value="pf.RetentionDays" Label="Keep a set for (days after it closed; empty: for ever)" Min="0" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="12" md="4">
+                            <MudSelect T="string" @bind-Value="pf.Encryption" Label="Encryption" Variant="Variant.Outlined">
+                                <MudSelectItem T="string" Value="@("None")">none</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Software")">by the server (passphrase key)</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Hardware")">by the drive (LTO, key from the passphrase key)</MudSelectItem>
+                            </MudSelect>
+                        </MudItem>
+                        @if (pf.Encryption != "None")
+                        {
+                            <MudItem xs="12" md="4">
+                                <MudSelect T="Guid?" @bind-Value="pf.KeyId" Label="Key" Variant="Variant.Outlined">
+                                    @foreach (var key in _keys ?? [])
+                                    {
+                                        <MudSelectItem T="Guid?" Value="@((Guid?)key.Id)">@key.Name (@key.Fingerprint)</MudSelectItem>
+                                    }
+                                </MudSelect>
+                            </MudItem>
+                        }
+                        <MudItem xs="12" md="4"><MudSwitch T="bool" @bind-Value="pf.WormOnly" Label="WORM tapes only" Color="Color.Primary" /></MudItem>
+                        <MudItem xs="12" md="4">
+                            <MudSelect T="int" @bind-Value="pf.BlockSizeKiB" Label="Block size" Variant="Variant.Outlined" HelperText="256 KiB reads back on every host and through iSCSI.">
+                                <MudSelectItem T="int" Value="256">256 KiB (recommended)</MudSelectItem>
+                                <MudSelectItem T="int" Value="512">512 KiB</MudSelectItem>
+                                <MudSelectItem T="int" Value="1024">1 MiB</MudSelectItem>
+                            </MudSelect>
+                        </MudItem>
+                    </MudGrid>
+                    <div class="d-flex gap-2 mt-4">
+                        <MudButton OnClick="@(() => _poolForm = null)">Cancel</MudButton>
+                        <MudSpacer />
+                        <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="SavePoolAsync">Save</MudButton>
+                    </div>
+                </MudPaper>
+            }
+            else
+            {
+                <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Add" Class="mb-4" OnClick="NewPool" Disabled="@(_libraries is not { Count: > 0 })">Add media pool</MudButton>
+            }
+
+            <MudText Typo="Typo.subtitle1" Class="mt-2 mb-1">Keys</MudText>
+            <MudText Typo="Typo.body2" Class="mb-2">
+                A key comes from a passphrase, which is never stored. Without the passphrase or the key file, encrypted tapes cannot be read,
+                not even by backdafuckup. Download the key file once and keep it apart from the tapes.
+            </MudText>
+            <MudSimpleTable Dense="true" Elevation="0" Class="mb-2">
+                <tbody>
+                    @foreach (var key in _keys ?? [])
+                    {
+                        <tr>
+                            <td>@key.Name<span class="cell-sub mono">@key.Fingerprint</span></td>
+                            <td>@(key.Pools.Count == 0 ? "not used" : string.Join(", ", key.Pools))</td>
+                            <td style="text-align:right; white-space:nowrap">
+                                @if (!key.KeyFileDownloaded)
+                                {
+                                    <MudButton Size="Size.Small" StartIcon="@Icons.Material.Filled.Download" OnClick="@(() => DownloadKeyAsync(key))">Key file (once)</MudButton>
+                                }
+                                <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" aria-label="@($"Remove key {key.Name}")" OnClick="@(() => DeleteAsync($"api/tape/keys/{key.Id}", $"Remove key {key.Name}? Tapes encrypted with it can then only be read with its passphrase or key file."))" />
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </MudSimpleTable>
+            <div class="d-flex gap-2 align-center flex-wrap">
+                <MudTextField @bind-Value="_keyName" Label="Key name" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:220px" />
+                <MudTextField @bind-Value="_passphrase" Label="Passphrase (12 characters or more)" InputType="InputType.Password" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:280px" />
+                <MudTextField @bind-Value="_passphrase2" Label="Again" InputType="InputType.Password" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:200px" />
+                <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Key" Disabled="@(_busy || string.IsNullOrWhiteSpace(_keyName) || _passphrase.Length < 12 || _passphrase != _passphrase2)" OnClick="CreateKeyAsync">Create key</MudButton>
+            </div>
+        </MudTabPanel>
+
+        <MudTabPanel Text="Tape jobs">
+            <div class="cq mb-3">
+                <MudTable Items="_tapeJobs ?? []" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
+                    <HeaderContent>
+                        <MudTh>Tape job</MudTh><MudTh>Copies</MudTh><MudTh Class="c-560">Runs</MudTh><MudTh Class="c-760">Last run</MudTh><MudTh></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>@context.Name<span class="cell-sub">to pool @context.Pool@(context.Enabled ? "" : " · disabled")</span></MudTd>
+                        <MudTd>@(context.Mode == "EveryNew" ? "every new restore point" : "the newest restore point per VM")<span class="cell-sub">of @string.Join(", ", context.SourceJobs)</span></MudTd>
+                        <MudTd Class="c-560">@RunsText(context)</MudTd>
+                        <MudTd Class="c-760">@(context.LastRunUtc is null ? "–" : $"{Fmt.Time(context.LastRunUtc)} · {context.LastResult}")</MudTd>
+                        <MudTd Style="text-align:right; white-space:nowrap">
+                            <MudButton Size="Size.Small" StartIcon="@Icons.Material.Filled.PlayArrow" OnClick="@(() => RunTapeJobAsync(context))">Run now</MudButton>
+                            <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                                <MudMenuItem Icon="@Icons.Material.Filled.Edit" OnClick="@(() => EditTapeJob(context))">Edit</MudMenuItem>
+                                <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => DeleteAsync($"api/tape/jobs/{context.Id}", $"Remove tape job {context.Name}? What it copied stays on tape."))">Remove</MudMenuItem>
+                            </MudMenu>
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText>No tape job yet.</MudText></NoRecordsContent>
+                </MudTable>
+            </div>
+            @if (_jobForm is { } jf)
+            {
+                <MudPaper Class="pa-4 mb-3" Elevation="2">
+                    <MudText Typo="Typo.h6" Class="mb-2">@(_jobEditing is null ? "Add tape job" : $"Edit {jf.Name}")</MudText>
+                    <MudGrid>
+                        <MudItem xs="12" md="4"><MudTextField @bind-Value="jf.Name" Label="Name" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="12" md="4">
+                            <MudSelect T="Guid" @bind-Value="jf.PoolId" Label="Media pool" Variant="Variant.Outlined">
+                                @foreach (var pool in _pools ?? [])
+                                {
+                                    <MudSelectItem T="Guid" Value="@pool.Id">@pool.Name</MudSelectItem>
+                                }
+                            </MudSelect>
+                        </MudItem>
+                        <MudItem xs="12" md="4">
+                            <MudSelect T="string" @bind-Value="jf.Mode" Label="What" Variant="Variant.Outlined">
+                                <MudSelectItem T="string" Value="@("NewestPerVm")">the newest restore point per VM (recommended)</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("EveryNew")">every new restore point</MudSelectItem>
+                            </MudSelect>
+                        </MudItem>
+                        <MudItem xs="12" md="8">
+                            <MudSelect T="Guid" Label="From backup jobs" MultiSelection="true" SelectedValues="jf.SourceJobIds" SelectedValuesChanged="@(v => jf.SourceJobIds = v.ToList())" Variant="Variant.Outlined">
+                                @foreach (var job in _backupJobs ?? [])
+                                {
+                                    <MudSelectItem T="Guid" Value="@job.Id">@job.Name</MudSelectItem>
+                                }
+                            </MudSelect>
+                        </MudItem>
+                        <MudItem xs="12" md="4">
+                            <MudSelect T="Guid?" @bind-Value="jf.AfterJobId" Label="Run after" Variant="Variant.Outlined" Clearable="true">
+                                @foreach (var job in _backupJobs ?? [])
+                                {
+                                    <MudSelectItem T="Guid?" Value="@((Guid?)job.Id)">@job.Name</MudSelectItem>
+                                }
+                            </MudSelect>
+                        </MudItem>
+                        <MudItem xs="12" md="4">
+                            <MudSelect T="string" @bind-Value="jf.ScheduleKind" Label="Schedule" Variant="Variant.Outlined">
+                                <MudSelectItem T="string" Value="@("None")">none (on demand, or after a job)</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Daily")">daily</MudSelectItem>
+                                <MudSelectItem T="string" Value="@("Weekly")">weekly</MudSelectItem>
+                            </MudSelect>
+                        </MudItem>
+                        @if (jf.ScheduleKind != "None")
+                        {
+                            <MudItem xs="12" md="4"><MudTextField @bind-Value="jf.Time" Label="At (HH:mm, the server's time zone)" Variant="Variant.Outlined" /></MudItem>
+                            @if (jf.ScheduleKind == "Weekly")
+                            {
+                                <MudItem xs="12" md="4">
+                                    <MudSelect T="DayOfWeek" Label="On" MultiSelection="true" SelectedValues="jf.Days" SelectedValuesChanged="@(v => jf.Days = v.ToList())" Variant="Variant.Outlined">
+                                        @foreach (var day in Enum.GetValues<DayOfWeek>())
+                                        {
+                                            <MudSelectItem T="DayOfWeek" Value="@day">@day</MudSelectItem>
+                                        }
+                                    </MudSelect>
+                                </MudItem>
+                            }
+                        }
+                        <MudItem xs="12" md="4"><MudSwitch T="bool" @bind-Value="jf.Enabled" Label="Enabled" Color="Color.Primary" /></MudItem>
+                    </MudGrid>
+                    <div class="d-flex gap-2 mt-4">
+                        <MudButton OnClick="@(() => _jobForm = null)">Cancel</MudButton>
+                        <MudSpacer />
+                        <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="SaveTapeJobAsync">Save</MudButton>
+                    </div>
+                </MudPaper>
+            }
+            else
+            {
+                <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Add" OnClick="NewTapeJob" Disabled="@(_pools is not { Count: > 0 })">Add tape job</MudButton>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="@($"On tape ({_copies?.Count ?? 0})")">
+            <div class="cq">
+                <MudTable Items="_copies ?? []" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
+                    <HeaderContent>
+                        <MudTh>VM</MudTh><MudTh>Restore point</MudTh><MudTh Class="c-560">Tapes</MudTh><MudTh Class="c-760">Set</MudTh><MudTh></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>@context.VmName<span class="cell-sub">@context.JobName</span></MudTd>
+                        <MudTd>@Fmt.Time(context.CreatedUtc)<span class="cell-sub">copied @Fmt.Time(context.CopiedUtc) · @Fmt.Bytes(context.StoredBytes)@(context.Encrypted ? " · encrypted" : "")</span></MudTd>
+                        <MudTd Class="c-560">@foreach (var t in context.Tapes)
+                            {
+                                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@(t.Location == "Offline" ? Color.Warning : Color.Default)">@t.Barcode@(t.Location == "Offline" ? " (offline)" : "")</MudChip>
+                            }</MudTd>
+                        <MudTd Class="c-760">@context.Pool<span class="cell-sub">@context.SetState</span></MudTd>
+                        <MudTd Style="text-align:right; white-space:nowrap">
+                            <MudButton Size="Size.Small" StartIcon="@Icons.Material.Filled.SettingsBackupRestore" OnClick="@(async () => { await LoadFormsDataAsync(); _restoring = context; })">Bring back…</MudButton>
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText>Nothing on tape yet.</MudText></NoRecordsContent>
+                </MudTable>
+            </div>
+            @if (_restoring is { } copy)
+            {
+                <MudPaper Class="pa-4 mt-3" Elevation="2">
+                    <MudText Typo="Typo.h6" Class="mb-2">Bring @copy.VmName (@Fmt.Time(copy.CreatedUtc)) back into a repository</MudText>
+                    <MudText Typo="Typo.body2" Class="mb-3">
+                        It becomes a restore point of its own, belonging to no job (job retention never deletes it); from there it is restored like
+                        any other. Tapes needed: @string.Join(", ", copy.Tapes.Select(t => $"{t.Barcode} ({(t.Location == "Offline" ? "offline: import it first" : t.Library)})")).
+                    </MudText>
+                    <div class="d-flex gap-2 align-center flex-wrap">
+                        <MudSelect T="Guid?" @bind-Value="_restoreRepository" Label="Into repository" Variant="Variant.Outlined" Style="min-width:280px">
+                            @foreach (var repository in _repositories ?? [])
+                            {
+                                <MudSelectItem T="Guid?" Value="@((Guid?)repository.Id)">@repository.Name (@Fmt.Bytes(repository.FreeBytes) free)</MudSelectItem>
+                            }
+                        </MudSelect>
+                        <MudSpacer />
+                        <MudButton OnClick="@(() => _restoring = null)">Cancel</MudButton>
+                        <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_restoreRepository is null || _busy)" OnClick="RestoreCopyAsync">Bring back</MudButton>
+                    </div>
+                </MudPaper>
+            }
+        </MudTabPanel>
+
         <MudTabPanel Text="@($"Tape agents ({_agents?.Count ?? 0})")">
             <MudText Typo="Typo.body2" Class="mb-3">
                 A tape agent runs on a Linux host whose tape drives and changers the backup server cannot reach itself (SAS or FC on
@@ -419,6 +680,21 @@ else
     private string _name = string.Empty;
 
     private List<TapeAgentDto>? _agents;
+    private List<MediaPoolDto>? _pools;
+    private List<TapeKeyDto>? _keys;
+    private List<TapeJobDto>? _tapeJobs;
+    private List<TapeCopyDto>? _copies;
+    private List<JobDto>? _backupJobs;
+    private List<RepositoryDto>? _repositories;
+    private PoolForm? _poolForm;
+    private Guid? _poolEditing;
+    private TapeJobForm? _jobForm;
+    private Guid? _jobEditing;
+    private TapeCopyDto? _restoring;
+    private Guid? _restoreRepository;
+    private string _keyName = string.Empty;
+    private string _passphrase = string.Empty;
+    private string _passphrase2 = string.Empty;
     private TapeAgentSecretDto? _agentSecret;
     private string _agentName = string.Empty;
 
@@ -472,6 +748,10 @@ else
 
         _media = await Api.GetAsync<List<TapeMediumDto>>("api/tape/media");
         _agents = await Api.GetAsync<List<TapeAgentDto>>("api/tape/agents");
+        _pools = await Api.GetAsync<List<MediaPoolDto>>("api/tape/pools");
+        _keys = await Api.GetAsync<List<TapeKeyDto>>("api/tape/keys");
+        _tapeJobs = await Api.GetAsync<List<TapeJobDto>>("api/tape/jobs");
+        _copies = await Api.GetAsync<List<TapeCopyDto>>("api/tape/copies");
         _elements = elements;
         _libraries = libraries;
     }
@@ -593,6 +873,211 @@ else
         catch (ApiException ex)
         {
             Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private sealed class PoolForm
+    {
+        public string Name { get; set; } = string.Empty;
+        public Guid LibraryId { get; set; }
+        public string NewSet { get; set; } = "Weekly";
+        public int? RetentionDays { get; set; } = 28;
+        public string Encryption { get; set; } = "None";
+        public Guid? KeyId { get; set; }
+        public bool WormOnly { get; set; }
+        public int BlockSizeKiB { get; set; } = 256;
+    }
+
+    private sealed class TapeJobForm
+    {
+        public string Name { get; set; } = string.Empty;
+        public Guid PoolId { get; set; }
+        public string Mode { get; set; } = "NewestPerVm";
+        public List<Guid> SourceJobIds { get; set; } = [];
+        public Guid? AfterJobId { get; set; }
+        public string ScheduleKind { get; set; } = "None";
+        public string Time { get; set; } = "08:00";
+        public List<DayOfWeek> Days { get; set; } = [DayOfWeek.Saturday];
+        public bool Enabled { get; set; } = true;
+    }
+
+    private static string NewSetText(string newSet) => newSet switch
+    {
+        "EveryRun" => "a new set every run",
+        "Daily" => "a new set every day",
+        "Weekly" => "a new set every week",
+        "Monthly" => "a new set every month",
+        _ => "one growing set",
+    };
+
+    private string RunsText(TapeJobDto job)
+    {
+        var after = job.AfterJobId is { } id ? _backupJobs?.FirstOrDefault(j => j.Id == id)?.Name : null;
+        var schedule = job.Schedule.Kind switch
+        {
+            "Daily" => $"daily at {job.Schedule.TimeOfDay}",
+            "Weekly" => $"{string.Join(", ", job.Schedule.Days)} at {job.Schedule.TimeOfDay}",
+            _ => null,
+        };
+        return string.Join(" · ", new[] { schedule, after is null ? null : $"after {after}" }.OfType<string>().DefaultIfEmpty("on demand"));
+    }
+
+    private async Task LoadFormsDataAsync()
+    {
+        _backupJobs = await Api.GetAsync<List<JobDto>>("api/jobs");
+        _repositories = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
+    }
+
+    private void NewPool()
+    {
+        _poolEditing = null;
+        _poolForm = new PoolForm { LibraryId = _libraries?.FirstOrDefault()?.Id ?? Guid.Empty, KeyId = _keys?.FirstOrDefault()?.Id };
+    }
+
+    private void EditPool(MediaPoolDto pool)
+    {
+        _poolEditing = pool.Id;
+        _poolForm = new PoolForm
+        {
+            Name = pool.Name, LibraryId = pool.LibraryId, NewSet = pool.NewSet, RetentionDays = pool.RetentionDays, Encryption = pool.Encryption, KeyId = pool.KeyId,
+            WormOnly = pool.WormOnly, BlockSizeKiB = pool.BlockSizeKiB,
+        };
+    }
+
+    private async Task SavePoolAsync()
+    {
+        var f = _poolForm!;
+        var request = new MediaPoolRequestDto(f.Name.Trim(), f.LibraryId, f.NewSet, "UTC", f.RetentionDays, f.WormOnly, f.Encryption, f.KeyId, "Never", f.BlockSizeKiB);
+        await SaveAsync(async () =>
+        {
+            if (_poolEditing is { } id)
+            {
+                await Api.PutAsync<MediaPoolDto>($"api/tape/pools/{id}", request);
+            }
+            else
+            {
+                await Api.PostAsync<MediaPoolDto>("api/tape/pools", request);
+            }
+
+            _poolForm = null;
+        });
+    }
+
+    private async Task CreateKeyAsync()
+    {
+        await SaveAsync(async () =>
+        {
+            var key = await Api.PostAsync<TapeKeyDto>("api/tape/keys", new CreateTapeKeyDto(_keyName.Trim(), _passphrase));
+            Snackbar.Add($"Key {key.Name} created: fingerprint {key.Fingerprint}. Download its key file now and keep it apart from the tapes.", Severity.Success);
+            _keyName = _passphrase = _passphrase2 = string.Empty;
+        });
+    }
+
+    private async Task DownloadKeyAsync(TapeKeyDto key)
+    {
+        var response = await Api.PostRawAsync($"api/tape/keys/{key.Id}/file", null);
+        if (!response.IsSuccessStatusCode)
+        {
+            Snackbar.Add(await ApiClient.ReadProblemAsync(response), Severity.Error);
+            return;
+        }
+
+        await JS.InvokeVoidAsync("bdfuSaveText", $"bdfu-tape-key-{key.Fingerprint}.json", await response.Content.ReadAsStringAsync(), "application/json");
+        Snackbar.Add("Key file saved. It is not offered again.", Severity.Success);
+        await RefreshAsync();
+    }
+
+    private async Task NewTapeJob()
+    {
+        await LoadFormsDataAsync();
+        _jobEditing = null;
+        _jobForm = new TapeJobForm { PoolId = _pools?.FirstOrDefault()?.Id ?? Guid.Empty };
+        StateHasChanged();
+    }
+
+    private async Task EditTapeJob(TapeJobDto job)
+    {
+        await LoadFormsDataAsync();
+        _jobEditing = job.Id;
+        _jobForm = new TapeJobForm
+        {
+            Name = job.Name, PoolId = job.PoolId, Mode = job.Mode, SourceJobIds = [.. job.SourceJobIds], AfterJobId = job.AfterJobId, ScheduleKind = job.Schedule.Kind,
+            Time = job.Schedule.TimeOfDay, Days = [.. job.Schedule.Days], Enabled = job.Enabled,
+        };
+        StateHasChanged();
+    }
+
+    private async Task SaveTapeJobAsync()
+    {
+        var f = _jobForm!;
+        var schedule = new ScheduleDto(f.ScheduleKind, f.Time, f.ScheduleKind == "Weekly" ? f.Days : [], "UTC");
+        var request = new TapeJobRequestDto(f.Name.Trim(), f.PoolId, f.SourceJobIds, f.Mode, true, schedule, f.AfterJobId, f.Enabled);
+        await SaveAsync(async () =>
+        {
+            if (_jobEditing is { } id)
+            {
+                await Api.PutAsync<TapeJobDto>($"api/tape/jobs/{id}", request);
+            }
+            else
+            {
+                await Api.PostAsync<TapeJobDto>("api/tape/jobs", request);
+            }
+
+            _jobForm = null;
+        });
+    }
+
+    private async Task RunTapeJobAsync(TapeJobDto job)
+    {
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/tape/jobs/{job.Id}/run");
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task RestoreCopyAsync()
+    {
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/tape/copies/{_restoring!.Id}/restore", new TapeRestoreRequestDto(_restoreRepository!.Value));
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task DeleteAsync(string url, string question)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Remove", question, yesText: "Remove", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        await SaveAsync(() => Api.DeleteAsync(url));
+    }
+
+    private async Task SaveAsync(Func<Task> action)
+    {
+        _busy = true;
+        try
+        {
+            await action();
+            await RefreshAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
         }
     }
 

@@ -196,7 +196,9 @@ public static class Fmt
         "SqlBackup" => "SQL Server backups",
         "AdExplore" => "AD explore",
         "AdRestore" => "AD restore",
-        "TapeMaintenance" => "Tape",
+        "TapeMaintenance" => "Tape library",
+        "TapeBackup" => "Backup to tape",
+        "TapeRestore" => "Restore from tape",
         null => string.Empty,
         _ => kind,
     };

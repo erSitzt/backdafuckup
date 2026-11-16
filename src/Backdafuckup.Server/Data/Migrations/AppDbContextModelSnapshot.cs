@@ -786,6 +786,136 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.ToTable("inventory", (string)null);
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.MediaPoolEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<int>("BlockSize")
+                        .HasColumnType("integer")
+                        .HasColumnName("block_size");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<string>("Encryption")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("encryption");
+
+                    b.Property<string>("Export")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("export");
+
+                    b.Property<Guid?>("KeyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("key_id");
+
+                    b.Property<Guid>("LibraryId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("library_id");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("NewSet")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("new_set");
+
+                    b.Property<int?>("RetentionDays")
+                        .HasColumnType("integer")
+                        .HasColumnName("retention_days");
+
+                    b.Property<string>("TimeZoneId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("time_zone_id");
+
+                    b.Property<bool>("WormOnly")
+                        .HasColumnType("boolean")
+                        .HasColumnName("worm_only");
+
+                    b.HasKey("Id")
+                        .HasName("pk_media_pools");
+
+                    b.HasIndex("KeyId")
+                        .HasDatabaseName("ix_media_pools_key_id");
+
+                    b.HasIndex("LibraryId")
+                        .HasDatabaseName("ix_media_pools_library_id");
+
+                    b.HasIndex("Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_media_pools_name");
+
+                    b.ToTable("media_pools", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.MediaSetEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<long>("Bytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("bytes");
+
+                    b.Property<DateTimeOffset?>("ClosedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("closed_utc");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<DateTimeOffset?>("ExpiresUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_utc");
+
+                    b.PrimitiveCollection<List<string>>("IndexSegments")
+                        .HasColumnType("text[]")
+                        .HasColumnName("index_segments");
+
+                    b.Property<string>("KeyFingerprint")
+                        .HasMaxLength(19)
+                        .HasColumnType("character varying(19)")
+                        .HasColumnName("key_fingerprint");
+
+                    b.Property<int>("Media")
+                        .HasColumnType("integer")
+                        .HasColumnName("media");
+
+                    b.Property<Guid>("PoolId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("pool_id");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("state");
+
+                    b.HasKey("Id")
+                        .HasName("pk_media_sets");
+
+                    b.HasIndex("PoolId", "State")
+                        .HasDatabaseName("ix_media_sets_pool_id_state");
+
+                    b.ToTable("media_sets", (string)null);
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.ProviderArtifactEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -975,6 +1105,10 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<bool?>("DomainController")
                         .HasColumnType("boolean")
                         .HasColumnName("domain_controller");
+
+                    b.Property<Guid?>("ImportedFromTapeCopyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("imported_from_tape_copy_id");
 
                     b.Property<Guid?>("JobId")
                         .HasColumnType("uuid")
@@ -1834,6 +1968,110 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.ToTable("tape_agents", (string)null);
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeCopyEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CopiedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("copied_utc");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<decimal>("FileId")
+                        .HasColumnType("numeric(20,0)")
+                        .HasColumnName("file_id");
+
+                    b.Property<int>("FileNumber")
+                        .HasColumnType("integer")
+                        .HasColumnName("file_number");
+
+                    b.Property<long>("FileStartBlock")
+                        .HasColumnType("bigint")
+                        .HasColumnName("file_start_block");
+
+                    b.Property<string>("JobName")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("job_name");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("kind");
+
+                    b.Property<string>("Manifest")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("manifest");
+
+                    b.PrimitiveCollection<List<int>>("NeededSequences")
+                        .IsRequired()
+                        .HasColumnType("integer[]")
+                        .HasColumnName("needed_sequences");
+
+                    b.Property<string>("ObjectKind")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("object_kind");
+
+                    b.Property<Guid>("OriginalId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("original_id");
+
+                    b.Property<Guid>("PoolId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("pool_id");
+
+                    b.Property<Guid>("RepositoryId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("repository_id");
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("integer")
+                        .HasColumnName("sequence");
+
+                    b.Property<Guid?>("SessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("session_id");
+
+                    b.Property<Guid>("SetId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("set_id");
+
+                    b.Property<long>("StoredBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("stored_bytes");
+
+                    b.Property<string>("VmId")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("vm_id");
+
+                    b.Property<string>("VmName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("vm_name");
+
+                    b.HasKey("Id")
+                        .HasName("pk_tape_copies");
+
+                    b.HasIndex("OriginalId")
+                        .HasDatabaseName("ix_tape_copies_original_id");
+
+                    b.HasIndex("SetId")
+                        .HasDatabaseName("ix_tape_copies_set_id");
+
+                    b.ToTable("tape_copies", (string)null);
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.TapeDriveEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1888,6 +2126,191 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasDatabaseName("ix_tape_drives_serial");
 
                     b.ToTable("tape_drives", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeFileEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<long>("Blocks")
+                        .HasColumnType("bigint")
+                        .HasColumnName("blocks");
+
+                    b.Property<long>("Bytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("bytes");
+
+                    b.Property<Guid?>("CopyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("copy_id");
+
+                    b.Property<decimal>("FileId")
+                        .HasColumnType("numeric(20,0)")
+                        .HasColumnName("file_id");
+
+                    b.Property<int>("FileNumber")
+                        .HasColumnType("integer")
+                        .HasColumnName("file_number");
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("integer")
+                        .HasColumnName("sequence");
+
+                    b.Property<Guid>("SetId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("set_id");
+
+                    b.Property<long>("StartBlock")
+                        .HasColumnType("bigint")
+                        .HasColumnName("start_block");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("type");
+
+                    b.HasKey("Id")
+                        .HasName("pk_tape_files");
+
+                    b.HasIndex("SetId", "Sequence", "FileNumber")
+                        .IsUnique()
+                        .HasDatabaseName("ix_tape_files_set_id_sequence_file_number");
+
+                    b.ToTable("tape_files", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeJobEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid?>("AfterJobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("after_job_id");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("boolean")
+                        .HasColumnName("enabled");
+
+                    b.Property<bool>("IncludeSqlBackups")
+                        .HasColumnType("boolean")
+                        .HasColumnName("include_sql_backups");
+
+                    b.Property<string>("LastResult")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("last_result");
+
+                    b.Property<DateTimeOffset?>("LastRunUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_run_utc");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("mode");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("name");
+
+                    b.Property<DateTimeOffset?>("NextRunUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("next_run_utc");
+
+                    b.Property<Guid>("PoolId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("pool_id");
+
+                    b.PrimitiveCollection<List<Guid>>("SourceJobIds")
+                        .IsRequired()
+                        .HasColumnType("uuid[]")
+                        .HasColumnName("source_job_ids");
+
+                    b.HasKey("Id")
+                        .HasName("pk_tape_jobs");
+
+                    b.HasIndex("Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_tape_jobs_name");
+
+                    b.HasIndex("PoolId")
+                        .HasDatabaseName("ix_tape_jobs_pool_id");
+
+                    b.ToTable("tape_jobs", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeKeyEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<string>("Fingerprint")
+                        .IsRequired()
+                        .HasMaxLength(19)
+                        .HasColumnType("character varying(19)")
+                        .HasColumnName("fingerprint");
+
+                    b.Property<int>("Iterations")
+                        .HasColumnType("integer")
+                        .HasColumnName("iterations");
+
+                    b.Property<bool>("KeyFileDownloaded")
+                        .HasColumnType("boolean")
+                        .HasColumnName("key_file_downloaded");
+
+                    b.Property<int>("MemoryKiB")
+                        .HasColumnType("integer")
+                        .HasColumnName("memory_ki_b");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("name");
+
+                    b.Property<int>("Parallelism")
+                        .HasColumnType("integer")
+                        .HasColumnName("parallelism");
+
+                    b.Property<string>("ProtectedKek")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("protected_kek");
+
+                    b.Property<string>("Salt")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("salt");
+
+                    b.HasKey("Id")
+                        .HasName("pk_tape_keys");
+
+                    b.HasIndex("Fingerprint")
+                        .IsUnique()
+                        .HasDatabaseName("ix_tape_keys_fingerprint");
+
+                    b.HasIndex("Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_tape_keys_name");
+
+                    b.ToTable("tape_keys", (string)null);
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.TapeLibraryEntity", b =>
@@ -1989,9 +2412,17 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(32)")
                         .HasColumnName("barcode");
 
+                    b.Property<long>("BytesWritten")
+                        .HasColumnType("bigint")
+                        .HasColumnName("bytes_written");
+
                     b.Property<long?>("CapacityBytes")
                         .HasColumnType("bigint")
                         .HasColumnName("capacity_bytes");
+
+                    b.Property<int>("FileCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("file_count");
 
                     b.Property<DateTimeOffset>("FirstSeenUtc")
                         .HasColumnType("timestamp with time zone")
@@ -2007,6 +2438,19 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(16)")
                         .HasColumnName("kind");
 
+                    b.Property<string>("LabelName")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("label_name");
+
+                    b.Property<DateTimeOffset?>("LabelledUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("labelled_utc");
+
+                    b.Property<DateTimeOffset?>("LastWrittenUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_written_utc");
+
                     b.Property<Guid?>("LibraryId")
                         .HasColumnType("uuid")
                         .HasColumnName("library_id");
@@ -2017,10 +2461,18 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(16)")
                         .HasColumnName("location");
 
+                    b.Property<Guid?>("MediumId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("medium_id");
+
                     b.Property<string>("MediumSerial")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)")
                         .HasColumnName("medium_serial");
+
+                    b.Property<Guid?>("PoolId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("pool_id");
 
                     b.Property<long?>("RemainingBytes")
                         .HasColumnType("bigint")
@@ -2029,6 +2481,22 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<DateTimeOffset>("SeenUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("seen_utc");
+
+                    b.Property<int?>("Sequence")
+                        .HasColumnType("integer")
+                        .HasColumnName("sequence");
+
+                    b.Property<Guid?>("SetId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("set_id");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("Unknown")
+                        .HasColumnName("state");
 
                     b.HasKey("Id")
                         .HasName("pk_tape_media");
@@ -2039,6 +2507,12 @@ namespace Backdafuckup.Server.Data.Migrations
 
                     b.HasIndex("LibraryId")
                         .HasDatabaseName("ix_tape_media_library_id");
+
+                    b.HasIndex("PoolId")
+                        .HasDatabaseName("ix_tape_media_pool_id");
+
+                    b.HasIndex("SetId")
+                        .HasDatabaseName("ix_tape_media_set_id");
 
                     b.ToTable("tape_media", (string)null);
                 });
@@ -2471,6 +2945,32 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Navigation("Credential");
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.MediaPoolEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.TapeKeyEntity", null)
+                        .WithMany()
+                        .HasForeignKey("KeyId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_media_pools_tape_keys_key_id");
+
+                    b.HasOne("Backdafuckup.Server.Data.TapeLibraryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("LibraryId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_media_pools_tape_libraries_library_id");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.MediaSetEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.MediaPoolEntity", null)
+                        .WithMany()
+                        .HasForeignKey("PoolId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_media_sets_media_pools_pool_id");
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.RestorePointDisk", b =>
                 {
                     b.HasOne("Backdafuckup.Server.Data.RestorePointEntity", null)
@@ -2543,6 +3043,16 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasConstraintName("fk_sql_backup_sets_sql_databases_sql_database_id");
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeCopyEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.MediaSetEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SetId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_tape_copies_media_sets_set_id");
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.TapeDriveEntity", b =>
                 {
                     b.HasOne("Backdafuckup.Server.Data.TapeLibraryEntity", null)
@@ -2551,6 +3061,63 @@ namespace Backdafuckup.Server.Data.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("fk_tape_drives_tape_libraries_library_id");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeFileEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.MediaSetEntity", null)
+                        .WithMany()
+                        .HasForeignKey("SetId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_tape_files_media_sets_set_id");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeJobEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.MediaPoolEntity", null)
+                        .WithMany()
+                        .HasForeignKey("PoolId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_tape_jobs_media_pools_pool_id");
+
+                    b.OwnsOne("Backdafuckup.Server.Data.JobSchedule", "Schedule", b1 =>
+                        {
+                            b1.Property<Guid>("TapeJobEntityId")
+                                .HasColumnType("uuid")
+                                .HasColumnName("id");
+
+                            b1.Property<int>("DaysOfWeek")
+                                .HasColumnType("integer")
+                                .HasColumnName("schedule_days_of_week");
+
+                            b1.Property<string>("Kind")
+                                .IsRequired()
+                                .HasMaxLength(16)
+                                .HasColumnType("character varying(16)")
+                                .HasColumnName("schedule_kind");
+
+                            b1.Property<TimeOnly>("TimeOfDay")
+                                .HasColumnType("time without time zone")
+                                .HasColumnName("schedule_time_of_day");
+
+                            b1.Property<string>("TimeZoneId")
+                                .IsRequired()
+                                .HasColumnType("text")
+                                .HasColumnName("schedule_time_zone_id");
+
+                            b1.HasKey("TapeJobEntityId");
+
+                            b1.ToTable("tape_jobs");
+
+                            b1.WithOwner()
+                                .HasForeignKey("TapeJobEntityId")
+                                .HasConstraintName("fk_tape_jobs_tape_jobs_id");
+                        });
+
+                    b.Navigation("Schedule")
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.TapeMediumEntity", b =>

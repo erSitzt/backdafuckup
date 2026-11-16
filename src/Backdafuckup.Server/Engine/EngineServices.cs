@@ -23,6 +23,8 @@ public sealed class SessionRunnerService(
     Sql.SqlPublishSessionRunner sqlPublishes,
     Sql.SqlRestoreSessionRunner sqlRestores,
     Tape.TapeSessionRunner tapes,
+    Tape.TapeBackupRunner tapeBackups,
+    Tape.TapeRestoreRunner tapeRestores,
     StartupRecovery recovery,
     Telemetry.BackupMetrics metrics,
     IOptions<EngineOptions> options,
@@ -102,7 +104,7 @@ public sealed class SessionRunnerService(
         SessionKind.SqlRestore => running.Count(SessionKind.SqlRestore) < sqlOptions.Value.MaxConcurrentRestores,
 
         // Tape sessions wait for their drive and the robot themselves (FIFO, the holder named in the log).
-        SessionKind.TapeMaintenance => true,
+        SessionKind.TapeMaintenance or SessionKind.TapeBackup or SessionKind.TapeRestore => true,
         _ => false,
     };
 
@@ -125,6 +127,8 @@ public sealed class SessionRunnerService(
                 SessionKind.SqlRestore => await sqlRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.SqlExport => await sqlPublishes.RunExportAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.TapeMaintenance => await tapes.RunAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.TapeBackup => await tapeBackups.RunAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.TapeRestore => await tapeRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 _ => (SessionState.Failed, "Unknown session kind."),
             };
 
@@ -178,6 +182,31 @@ public sealed class SessionRunnerService(
         {
             await using var db = await dbFactory.CreateDbContextAsync(CancellationToken.None).ConfigureAwait(false);
             await db.Jobs.Where(j => j.Id == jobId).ExecuteUpdateAsync(
+                s => s.SetProperty(j => j.LastRunUtc, session.StartedUtc).SetProperty(j => j.LastResult, ToResult(state)),
+                CancellationToken.None).ConfigureAwait(false);
+
+            // Tape jobs that run after this backup job.
+            if (state is SessionState.Succeeded or SessionState.Warning)
+            {
+                foreach (var tapeJob in await db.TapeJobs.Where(j => j.AfterJobId == jobId && j.Enabled).Select(j => new { j.Id, j.Name }).ToListAsync(CancellationToken.None).ConfigureAwait(false))
+                {
+                    try
+                    {
+                        await queue.EnqueueTapeBackupAsync(tapeJob.Id, $"after {session.Name}", CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        logger.LogInformation("Tape job {TapeJob} not queued after {Job}: {Reason}", tapeJob.Name, session.Name, ex.Message);
+                    }
+                }
+            }
+        }
+
+        if (session.Kind == SessionKind.TapeBackup && session.Parameters is { } parameters
+            && System.Text.Json.JsonSerializer.Deserialize<Tape.TapeBackupRequest>(parameters) is { } tapeRun)
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(CancellationToken.None).ConfigureAwait(false);
+            await db.TapeJobs.Where(j => j.Id == tapeRun.JobId).ExecuteUpdateAsync(
                 s => s.SetProperty(j => j.LastRunUtc, session.StartedUtc).SetProperty(j => j.LastResult, ToResult(state)),
                 CancellationToken.None).ConfigureAwait(false);
         }
@@ -252,6 +281,34 @@ public sealed class JobScheduler(
             catch (InvalidOperationException ex)
             {
                 logger.LogWarning("Job {Job}: scheduled run skipped: {Reason}", job.Name, ex.Message);
+            }
+        }
+
+        // Tape jobs with a schedule, the same way.
+        var tapeJobs = await db.TapeJobs.Where(j => j.Enabled && j.Schedule.Kind != ScheduleKind.None).ToListAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var job in tapeJobs)
+        {
+            if (job.NextRunUtc is null || job.NextRunUtc > now)
+            {
+                job.NextRunUtc ??= ScheduleCalculator.Next(job.Schedule, now);
+                continue;
+            }
+
+            var due = job.NextRunUtc.Value;
+            job.NextRunUtc = ScheduleCalculator.Next(job.Schedule, now);
+            if (now - due > options.Value.MisfireGrace)
+            {
+                logger.LogWarning("Tape job {Job}: missed run at {Due} was skipped (server was not running).", job.Name, due);
+                continue;
+            }
+
+            try
+            {
+                await queue.EnqueueTapeBackupAsync(job.Id, "Schedule", cancellationToken).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                logger.LogWarning("Tape job {Job}: scheduled run skipped: {Reason}", job.Name, ex.Message);
             }
         }
 
@@ -543,6 +600,9 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Tape.TapeLocks>();
         services.AddSingleton<Tape.TapeLibraries>();
         services.AddSingleton<Tape.TapeSessionRunner>();
+        services.AddSingleton<Tape.TapeBackupRunner>();
+        services.AddSingleton<Tape.TapeRestoreRunner>();
+        services.AddSingleton<Tape.TapeCatalogService>();
         services.AddSingleton<Tape.TapeMailSlotWatcher>();
         services.AddHostedService(sp => sp.GetRequiredService<Tape.TapeMailSlotWatcher>());
         services.AddSingleton<StartupRecovery>();

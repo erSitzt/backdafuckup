@@ -48,6 +48,18 @@ public sealed class TapeSessionRunner(TapeLibraries libraries, TapeLocks locks, 
         var (drive, lease) = await ChooseDriveAsync(library, request.DriveId, holder, log, cancellationToken).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
+            var (summary, _) = await LoadHeldAsync(library, drive, barcode, holder, log, cancellationToken).ConfigureAwait(false);
+            return summary;
+        }
+    }
+
+    /// <summary>
+    /// Loads <paramref name="barcode"/> into <paramref name="drive"/>, which the caller holds: a cartridge in the drive
+    /// goes back to its slot first; waits until the drive is ready and reads the cartridge memory.
+    /// </summary>
+    internal async Task<(string Summary, MediumInfo Medium)> LoadHeldAsync(TapeLibraryEntity library, TapeDriveEntity drive, string barcode, string holder, IOperationLog log, CancellationToken cancellationToken)
+    {
+        {
             log.Info($"Loading {barcode} into {drive.Name} ({drive.Serial}) of {library.Name}.");
             await using (var robot = await AcquireRobotAsync(library, holder, log, cancellationToken).ConfigureAwait(false))
             await using (var changer = await libraries.OpenChangerAsync(library, cancellationToken).ConfigureAwait(false))
@@ -104,8 +116,42 @@ public sealed class TapeSessionRunner(TapeLibraries libraries, TapeLocks locks, 
                 (info.WriteProtected ? ", write-protected" : string.Empty) +
                 (info.MediumSerial is { } serial ? $", cartridge serial {serial}" : string.Empty) + ".";
             log.Info(summary);
-            return summary;
+            return (summary, info);
         }
+    }
+
+    /// <summary>Unloads <paramref name="drive"/> (held by the caller) into a slot, or into a mail slot with <paramref name="export"/>.</summary>
+    internal async Task<string> UnloadHeldAsync(TapeLibraryEntity library, TapeDriveEntity drive, bool export, string holder, IOperationLog log, CancellationToken cancellationToken)
+    {
+        await using var robot = await AcquireRobotAsync(library, holder, log, cancellationToken).ConfigureAwait(false);
+        await using var changer = await libraries.OpenChangerAsync(library, cancellationToken).ConfigureAwait(false);
+        var inventory = await changer.Changer.ReadInventoryAsync(cancellationToken).ConfigureAwait(false);
+        if (inventory.At(Address(drive)) is not { Full: true } element)
+        {
+            return $"{drive.Name} is empty.";
+        }
+
+        string text;
+        var mail = export ? inventory.MailSlots.FirstOrDefault(m => !m.Full && m.Accessible) : null;
+        if (mail is not null)
+        {
+            await EjectAsync(library, drive, log, cancellationToken).ConfigureAwait(false);
+            await changer.Changer.MoveAsync(element.Address, mail.Address, cancellationToken).ConfigureAwait(false);
+            text = $"{element.VolumeTag?.Trim()} exported to {TapeLibraries.Describe(library, mail)}.";
+            log.Info(text);
+        }
+        else
+        {
+            if (export)
+            {
+                log.Warning($"No free mail slot in {library.Name}: {element.VolumeTag?.Trim()} goes back to a slot instead of being exported.");
+            }
+
+            text = await UnloadToSlotAsync(library, drive, changer, inventory, log, cancellationToken).ConfigureAwait(false);
+        }
+
+        await libraries.ApplyAsync(library.Id, await changer.Changer.ReadInventoryAsync(cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        return text;
     }
 
     private async Task<string> UnloadAsync(TapeLibraryEntity library, TapeDriveEntity drive, IOperationLog log, CancellationToken cancellationToken)
