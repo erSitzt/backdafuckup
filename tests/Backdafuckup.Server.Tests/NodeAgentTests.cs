@@ -29,8 +29,8 @@ public sealed class NodeAgentTests : IDisposable
     {
         var agent = new NodeAgent(Options(), TextWriter.Null);
 
-        Assert.Equal($"{Kubelet}/pods/{PodUid}/volumes/kubernetes.io~empty-dir/cache", agent.VolumePath(PodUid, "empty-dir", "cache"));
-        Assert.Equal($"{Kubelet}/pods/{PodUid}/volumes/kubernetes.io~csi/pvc-0d1e.2/mount", agent.VolumePath(PodUid.ToUpperInvariant(), "csi", "pvc-0d1e.2"));
+        Assert.Equal(Path.Combine(Kubelet, "pods", PodUid, "volumes", "kubernetes.io~empty-dir", "cache"), agent.VolumePath(PodUid, "empty-dir", "cache"));
+        Assert.Equal(Path.Combine(Kubelet, "pods", PodUid, "volumes", "kubernetes.io~csi", "pvc-0d1e.2", "mount"), agent.VolumePath(PodUid.ToUpperInvariant(), "csi", "pvc-0d1e.2"));
         Assert.Null(agent.VolumePath(PodUid, "empty-dir", "../../etc"));
         Assert.Null(agent.VolumePath(PodUid, "empty-dir", "a/b"));
         Assert.Null(agent.VolumePath(PodUid, "empty-dir", "Cache"));

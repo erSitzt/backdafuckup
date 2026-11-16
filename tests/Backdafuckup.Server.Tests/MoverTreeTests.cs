@@ -19,20 +19,24 @@ public sealed class MoverTreeTests : IDisposable
 
     public void Dispose()
     {
-        // A name that is no UTF-8 cannot be deleted through .NET's string paths.
-        _ = Unlink(Z(Encoding.UTF8.GetBytes(_volume + "/odd-").Concat(new byte[] { 0xFF, 0xFE }).ToArray()));
-        foreach (var path in Directory.EnumerateFileSystemEntries(_volume, "*", SearchOption.AllDirectories))
+        // Off Linux the tests are skipped and the folder is empty (no libc, no Unix modes).
+        if (OperatingSystem.IsLinux())
         {
-            try
+            // A name that is no UTF-8 cannot be deleted through .NET's string paths.
+            _ = Unlink(Z(Encoding.UTF8.GetBytes(_volume + "/odd-").Concat(new byte[] { 0xFF, 0xFE }).ToArray()));
+            foreach (var path in Directory.EnumerateFileSystemEntries(_volume, "*", SearchOption.AllDirectories))
             {
-                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-            }
-            catch (IOException)
-            {
-                // A FIFO or a link: nothing to do.
-            }
-            catch (UnauthorizedAccessException)
-            {
+                try
+                {
+                    File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                }
+                catch (IOException)
+                {
+                    // A FIFO or a link: nothing to do.
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
             }
         }
 
