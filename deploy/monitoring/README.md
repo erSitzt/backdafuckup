@@ -116,6 +116,7 @@ Both contain the same 15 alerts:
 | BackdafuckupSqlLogBackupLate | a SQL log backup is late |
 | BackdafuckupAgentOffline | guest agents are offline |
 | BackdafuckupClusterAgentDisconnected | the agent of a Kubernetes cluster reached through it is gone for 15 minutes |
+| BackdafuckupTapeAgentDisconnected | a tape agent is gone for 15 minutes |
 | BackdafuckupClusterSnapshotLongLived | a volume snapshot of a Kubernetes cluster lived over 2 hours (in the last day) |
 
 After changing `backdafuckup.rules.yml`, check it and regenerate the `PrometheusRule`:

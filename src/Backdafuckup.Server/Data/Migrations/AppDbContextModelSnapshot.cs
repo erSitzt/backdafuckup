@@ -1784,6 +1784,56 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.ToTable("ssh_host_keys", (string)null);
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.TapeAgentEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("AgentVersion")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("agent_version");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<string>("HostName")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("host_name");
+
+                    b.Property<string>("LastAddress")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("last_address");
+
+                    b.Property<DateTimeOffset?>("LastSeenUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_seen_utc");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("ProtectedToken")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("protected_token");
+
+                    b.HasKey("Id")
+                        .HasName("pk_tape_agents");
+
+                    b.HasIndex("Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_tape_agents_name");
+
+                    b.ToTable("tape_agents", (string)null);
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.TapeDriveEntity", b =>
                 {
                     b.Property<Guid>("Id")

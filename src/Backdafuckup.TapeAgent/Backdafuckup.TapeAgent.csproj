@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The tape agent: runs on a Linux host with tape drives and changers (SAS, FC or iSCSI) and forwards their SCSI
+       commands to the backup server. Built as one self-contained file by scripts/build-tape-agent.sh. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>backdafuckup-tape-agent</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Tape\Backdafuckup.Tape.csproj" />
+  </ItemGroup>
+</Project>

@@ -198,6 +198,7 @@ try
     app.MapSqlEndpoints();
     app.MapAdEndpoints();
     app.MapTapeEndpoints();
+    app.MapTapeAgentEndpoints();
     app.MapHub<LiveHub>("/hubs/live");
     app.MapFallbackToFile("index.html").AllowAnonymous();
 

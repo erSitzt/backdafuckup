@@ -63,6 +63,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<TapeMediumEntity> TapeMedia => Set<TapeMediumEntity>();
 
+    public DbSet<TapeAgentEntity> TapeAgents => Set<TapeAgentEntity>();
+
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
@@ -102,6 +104,16 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasIndex(x => x.Barcode).IsUnique();
             e.HasIndex(x => x.LibraryId);
             e.HasOne<TapeLibraryEntity>().WithMany().HasForeignKey(x => x.LibraryId).OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<TapeAgentEntity>(e =>
+        {
+            e.ToTable("tape_agents");
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.HostName).HasMaxLength(255);
+            e.Property(x => x.AgentVersion).HasMaxLength(64);
+            e.Property(x => x.LastAddress).HasMaxLength(64);
+            e.HasIndex(x => x.Name).IsUnique();
         });
 
         builder.Entity<ApiTokenEntity>(e =>

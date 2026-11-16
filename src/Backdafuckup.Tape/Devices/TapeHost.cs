@@ -24,12 +24,13 @@ public interface ITapeHost
 }
 
 /// <summary>Tape devices attached to the machine this process runs on (Linux SG_IO or Windows SCSI pass-through).</summary>
-public sealed class LocalTapeHost : ITapeHost
+/// <param name="name">For messages: "this server" on the backup server, "the tape agent on lab-01" in a tape agent.</param>
+public sealed class LocalTapeHost(string name = "this server") : ITapeHost
 {
     /// <summary>Where each serial was found last; checked again after every open.</summary>
     private readonly ConcurrentDictionary<string, string> _paths = new(StringComparer.Ordinal);
 
-    public string Name => "this server";
+    public string Name => name;
 
     public async Task<IReadOnlyList<ScsiDeviceInfo>> DiscoverAsync(CancellationToken cancellationToken)
     {

@@ -1,0 +1,34 @@
+# systemd unit for the backdafuckup tape agent: forwards the SCSI commands of this host's tape drives and changers to
+# the backup server. Install:
+#   useradd --system --no-create-home --shell /usr/sbin/nologin backdafuckup-tape
+#   install -D -m 755 backdafuckup-tape-agent /opt/backdafuckup-tape-agent/backdafuckup-tape-agent
+#   install -D -m 600 agent.env /etc/backdafuckup-tape-agent/agent.env    (the file the console shows when the agent is added)
+#   systemctl enable --now backdafuckup-tape-agent
+[Unit]
+Description=backdafuckup tape agent
+Wants=network-online.target
+After=network-online.target iscsid.service
+
+[Service]
+Type=simple
+User=backdafuckup-tape
+Group=backdafuckup-tape
+# /dev/sg* of tape drives and changers belong to the group tape; nothing else under /dev is reachable.
+SupplementaryGroups=tape
+DevicePolicy=closed
+DeviceAllow=char-sg rw
+EnvironmentFile=/etc/backdafuckup-tape-agent/agent.env
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+ExecStart=/opt/backdafuckup-tape-agent/backdafuckup-tape-agent
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

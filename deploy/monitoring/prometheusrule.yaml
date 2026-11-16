@@ -137,6 +137,15 @@ spec:
             summary: "The agent of cluster {{ $labels.cluster }} is not connected"
             description: "Backups and restores of the cluster fail while its agent is gone. Check the Deployment backdafuckup-agent in backdafuckup-system and its log (it names the server address and the error)."
 
+        - alert: BackdafuckupTapeAgentDisconnected
+          expr: bdfu_tape_agent_connected == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Tape agent {{ $labels.agent }} is not connected"
+            description: "Actions and tape jobs of its libraries fail while it is gone. Check the service backdafuckup-tape-agent on its host (journalctl -u backdafuckup-tape-agent names the server address and the error)."
+
         - alert: BackdafuckupClusterSnapshotLongLived
           expr: histogram_quantile(1, sum by (cluster, le) (rate(bdfu_k8s_snapshot_lifetime_seconds_bucket[1d]))) > 7200
           for: 0m

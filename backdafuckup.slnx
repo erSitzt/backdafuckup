@@ -15,6 +15,7 @@
     <Project Path="src/Backdafuckup.Ssh/Backdafuckup.Ssh.csproj" />
     <Project Path="src/Backdafuckup.Storage/Backdafuckup.Storage.csproj" />
     <Project Path="src/Backdafuckup.Tape/Backdafuckup.Tape.csproj" />
+    <Project Path="src/Backdafuckup.TapeAgent/Backdafuckup.TapeAgent.csproj" />
     <Project Path="src/Backdafuckup.Web/Backdafuckup.Web.csproj" />
     <Project Path="src/Backdafuckup.Xen/Backdafuckup.Xen.csproj" />
   </Folder>

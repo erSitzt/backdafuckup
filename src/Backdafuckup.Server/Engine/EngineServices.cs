@@ -538,6 +538,7 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<MaintenanceSessionRunner>();
         services.Configure<Tape.TapeOptions>(configuration.GetSection("Tape"));
         services.TryAddSingleton<Backdafuckup.Tape.Devices.ITapeHost, Backdafuckup.Tape.Devices.LocalTapeHost>();
+        services.AddSingleton<Tape.TapeAgents>();
         services.AddSingleton<Tape.TapeHosts>();
         services.AddSingleton<Tape.TapeLocks>();
         services.AddSingleton<Tape.TapeLibraries>();

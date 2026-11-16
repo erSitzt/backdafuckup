@@ -42,6 +42,31 @@ public static class TapeHostIds
 {
     /// <summary>The devices are attached to the backup server itself.</summary>
     public const string Local = "local";
+
+    /// <summary>The host id of a library behind a tape agent: the agent's id.</summary>
+    public static string Agent(Guid agentId) => agentId.ToString("D");
+}
+
+/// <summary>A tape agent: a program on another Linux host that forwards the SCSI commands of its tape devices.</summary>
+public sealed class TapeAgentEntity
+{
+    public Guid Id { get; set; } = Guid.CreateVersion7();
+
+    public required string Name { get; set; }
+
+    /// <summary>The connect token, protected with the server's key ring; compared in fixed time.</summary>
+    public required string ProtectedToken { get; set; }
+
+    public DateTimeOffset CreatedUtc { get; set; }
+
+    public DateTimeOffset? LastSeenUtc { get; set; }
+
+    public string? HostName { get; set; }
+
+    public string? AgentVersion { get; set; }
+
+    /// <summary>Where it connected from last (address:port).</summary>
+    public string? LastAddress { get; set; }
 }
 
 public sealed class TapeDriveEntity

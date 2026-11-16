@@ -95,7 +95,7 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
         }
 
         var (scan, devices) = await ScanCoreAsync(request.Host, cancellationToken).ConfigureAwait(false);
-        var hostName = hosts.NameOf(request.Host);
+        var hostName = (await hosts.GetAsync(request.Host, cancellationToken).ConfigureAwait(false)).Name;
         var problems = scan.Problems.Count > 0 ? " " + string.Join(" ", scan.Problems) : string.Empty;
         ScsiDeviceInfo? changer = null;
         if (request.ChangerSerial is not null)
@@ -363,7 +363,7 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
 
     public async Task<OpenedChanger> OpenChangerAsync(TapeLibraryEntity library, CancellationToken cancellationToken)
     {
-        var host = hosts.Get(library.Host);
+        var host = await hosts.GetAsync(library.Host, cancellationToken).ConfigureAwait(false);
         var serial = library.ChangerSerial ?? throw new InvalidOperationException($"{library.Name} is a standalone drive without a changer.");
         var device = await host.OpenAsync(serial, cancellationToken).ConfigureAwait(false);
         return new OpenedChanger(device, new MediumChanger(new ScsiCommandRunner(device, $"the changer of {library.Name} (serial {serial} on {host.Name}, {device.Path})", time)));
@@ -371,7 +371,7 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
 
     public async Task<OpenedDrive> OpenDriveAsync(TapeLibraryEntity library, TapeDriveEntity drive, CancellationToken cancellationToken)
     {
-        var host = hosts.Get(library.Host);
+        var host = await hosts.GetAsync(library.Host, cancellationToken).ConfigureAwait(false);
         var device = await host.OpenAsync(drive.Serial, cancellationToken).ConfigureAwait(false);
         var runner = new ScsiCommandRunner(device, $"{drive.Name} of {library.Name} (serial {drive.Serial} on {host.Name}, {device.Path})", time);
         return new OpenedDrive(device, new TapeDrive(runner, time) { PollInterval = options.Value.ReadyPoll });
@@ -385,10 +385,12 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
             .GroupBy(m => new { m.LibraryId, Mail = m.Location == TapeLocation.MailSlot })
             .Select(g => new { g.Key.LibraryId, g.Key.Mail, Count = g.Count() })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var names = await hosts.NamesAsync(cancellationToken).ConfigureAwait(false);
         return libraries.Select(l => ToDto(
             l,
             counts.Where(c => c.LibraryId == l.Id).Sum(c => c.Count),
-            counts.Where(c => c.LibraryId == l.Id && c.Mail).Sum(c => c.Count))).ToList();
+            counts.Where(c => c.LibraryId == l.Id && c.Mail).Sum(c => c.Count),
+            names)).ToList();
     }
 
     public async Task<TapeLibraryDto> GetAsync(Guid libraryId, CancellationToken cancellationToken) =>
@@ -515,11 +517,11 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
         return barcode.Length == 8 && WormSuffixes.Contains(barcode[6..]) ? TapeMediumKind.Worm : TapeMediumKind.Data;
     }
 
-    private TapeLibraryDto ToDto(TapeLibraryEntity library, int media, int mailSlotsFull) => new(
+    private TapeLibraryDto ToDto(TapeLibraryEntity library, int media, int mailSlotsFull, IReadOnlyDictionary<string, string> names) => new(
         library.Id,
         library.Name,
         library.Host,
-        hosts.NameOf(library.Host),
+        names.GetValueOrDefault(library.Host) ?? library.Host,
         library.ChangerSerial,
         library.Vendor,
         library.Product,
@@ -582,7 +584,7 @@ public sealed class TapeLibraries(IDbContextFactory<AppDbContext> dbFactory, Tap
 
     private async Task<(TapeScanDto Result, IReadOnlyList<ScsiDeviceInfo> Devices)> ScanCoreAsync(string hostId, CancellationToken cancellationToken)
     {
-        var host = hosts.Get(hostId);
+        var host = await hosts.GetAsync(hostId, cancellationToken).ConfigureAwait(false);
         var devices = await host.DiscoverAsync(cancellationToken).ConfigureAwait(false);
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var libraries = await db.TapeLibraries.AsNoTracking().Include(l => l.Drives).Where(l => l.Host == hostId).ToListAsync(cancellationToken).ConfigureAwait(false);

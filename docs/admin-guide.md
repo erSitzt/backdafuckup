@@ -1091,9 +1091,27 @@ backdafuckup drives tape libraries and standalone drives itself, with the SCSI c
 - Devices are known by their **serial number**, not by their device name. When a re-login or a reboot renumbers them, they are found again.
 - A device can be open in one program only. Stop other tools that hold it (`mtx`, `tapeinfo`, other backup software); the error then says that the device is open elsewhere.
 
+### Tape agents (libraries on another host)
+
+A tape agent runs on a Linux host whose drives and changers the backup server cannot reach itself, e.g. a library on SAS or Fibre Channel of another server. It forwards their SCSI commands; everything else stays on the server, and the library works like one attached to the server.
+
+1. **Add it** under *Tape → Tape agents* (`POST /api/tape/agents`). This needs the server address under *Guest Agents → Settings*. The console shows its settings file `agent.env` **once**: the server address, the agent's id, its connect token and the SHA-256 of the server's public key. The agent trusts exactly that key.
+2. **Install it** on the host. `scripts/build-tape-agent.sh` builds one self-contained file with its systemd unit (`deploy/linux/backdafuckup-tape-agent.service`):
+   ```sh
+   useradd --system --no-create-home --shell /usr/sbin/nologin backdafuckup-tape
+   install -D -m 755 backdafuckup-tape-agent /opt/backdafuckup-tape-agent/backdafuckup-tape-agent
+   install -D -m 600 agent.env /etc/backdafuckup-tape-agent/agent.env
+   install -m 644 backdafuckup-tape-agent.service /etc/systemd/system/
+   systemctl daemon-reload && systemctl enable --now backdafuckup-tape-agent
+   ```
+   The service runs as its own user in the group `tape` and reaches no device but `/dev/sg*`. `backdafuckup-tape-agent devices` lists what it would report.
+3. **Add the library** with the agent as host. The agent connects out to the server (port 9555), so no port has to be open on its host.
+
+The agent shows *Online* while it is connected. When it is gone, actions of its libraries fail with a message that says since when and from where it was last seen; it reconnects by itself. *New connect token* disconnects it until its `agent.env` has the new token. The gauge `bdfu_tape_agent_connected{agent}` is 0 while an agent is gone.
+
 ### Add a library
 
-1. **Scan** a host (*Tape → Add library*; `POST /api/tape/hosts/local/scan`). It lists the changers with their drive elements, the drives, and devices it could not ask.
+1. **Scan** a host, this server or a tape agent (*Tape → Add library*; `POST /api/tape/hosts/{host}/scan`, `local` for this server). It lists the changers with their drive elements, the drives, and devices it could not ask.
 2. **Check the drives.** A changer that names its drives (DVCID) maps them itself (*dvcid*). For one that does not, the drives are assigned in serial order and marked *order*: check and correct the mapping.
 3. **Name it** (`POST /api/tape/libraries`). The first inventory runs at once.
 
@@ -1192,6 +1210,7 @@ What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the S
 | `bdfu_k8s_mover_start_seconds` {cluster, mode} | histogram | From creating a mover pod until it runs (`backup`, `restore`, `files`): scheduling, image pull, and on vSphere the copy of the snapshot |
 | `bdfu_k8s_hooks_total` {cluster, phase, result} | counter | Backup hooks in pods: `pre`/`post`, `ok`/`failed`/`timeout` |
 | `bdfu_k8s_agent_connected` {cluster} | gauge | 1 while a cluster's agent is connected, 0 once it is gone (clusters whose agent connected since the server started) |
+| `bdfu_tape_agent_connected` {agent} | gauge | 1 while a tape agent is connected, 0 once it is gone (agents that connected since the server started) |
 
 Kubernetes namespaces count in the session metrics (`bdfu_sessions_total` and the others) and per job in `bdfu_vm_*` like VMs; `cluster` in the `bdfu_k8s_*` metrics is the cluster's address, or its connection's name when it is reached through its agent.
 

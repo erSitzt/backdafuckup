@@ -4,6 +4,7 @@
 @inject ISnackbar Snackbar
 @inject IDialogService Dialogs
 @inject NavigationManager Navigation
+@inject IJSRuntime JS
 
 <PageTitle>Tape – backdafuckup</PageTitle>
 <PageHeader Title="Tape" Description="Tape libraries and standalone drives: their drives, slots and cartridges.">
@@ -342,6 +343,59 @@ else
                 </MudTable>
             </div>
         </MudTabPanel>
+
+        <MudTabPanel Text="@($"Tape agents ({_agents?.Count ?? 0})")">
+            <MudText Typo="Typo.body2" Class="mb-3">
+                A tape agent runs on a Linux host whose tape drives and changers the backup server cannot reach itself (SAS or FC on
+                another server). It forwards their SCSI commands; its libraries then work like the server's own.
+            </MudText>
+            @if (_agentSecret is { } secret)
+            {
+                <MudAlert Severity="Severity.Warning" Class="mb-3">
+                    This is the only time the connect token of <b>@secret.Agent.Name</b> is shown. On the agent's host, save it as
+                    <span class="mono">/etc/backdafuckup-tape-agent/agent.env</span> (owner root, mode 600), install the agent
+                    (<span class="mono">scripts/build-tape-agent.sh</span> builds it with its systemd unit), then
+                    <span class="mono">systemctl enable --now backdafuckup-tape-agent</span>.
+                </MudAlert>
+                <MudPaper Outlined="true" Class="pa-3 mb-3">
+                    <div class="d-flex align-center mb-2">
+                        <MudText Typo="Typo.subtitle2">agent.env</MudText>
+                        <MudSpacer />
+                        <MudButton Size="Size.Small" StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="CopySecretAsync">Copy</MudButton>
+                        <MudButton Size="Size.Small" OnClick="@(() => _agentSecret = null)">Done</MudButton>
+                    </div>
+                    <pre class="mono" style="white-space:pre-wrap; word-break:break-all; margin:0">@secret.EnvironmentFile</pre>
+                </MudPaper>
+            }
+            <div class="d-flex gap-2 align-center flex-wrap mb-3">
+                <MudTextField @bind-Value="_agentName" Label="Name of a new agent (e.g. its host)" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:320px" />
+                <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Add" Disabled="@(string.IsNullOrWhiteSpace(_agentName) || _busy)" OnClick="AddAgentAsync">Add tape agent</MudButton>
+            </div>
+            <div class="cq">
+                <MudTable Items="_agents ?? []" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
+                    <HeaderContent>
+                        <MudTh>Agent</MudTh><MudTh>State</MudTh><MudTh Class="c-560">Devices</MudTh><MudTh Class="c-760">Libraries</MudTh><MudTh></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>@context.Name<span class="cell-sub">@(context.HostName ?? "never connected")@(context.Version is { } v ? $" · version {v}" : "")</span></MudTd>
+                        <MudTd>
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@(context.Online ? Color.Success : Color.Default)">@(context.Online ? "Online" : "Offline")</MudChip>
+                            <span class="cell-sub">@(context.Online ? $"from {context.Address}" : context.LastSeenUtc is { } seen ? $"last seen {Fmt.Time(seen)}" : "")</span>
+                        </MudTd>
+                        <MudTd Class="c-560">@(context.Online ? context.Devices.ToString(System.Globalization.CultureInfo.CurrentCulture) : "–")</MudTd>
+                        <MudTd Class="c-760">@(context.Libraries.Count == 0 ? "–" : string.Join(", ", context.Libraries))</MudTd>
+                        <MudTd Style="text-align:right; white-space:nowrap">
+                            <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                                <MudMenuItem Icon="@Icons.Material.Filled.Key" OnClick="@(() => RenewAgentAsync(context))">New connect token…</MudMenuItem>
+                                <MudDivider />
+                                <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => RemoveAgentAsync(context))">Remove</MudMenuItem>
+                            </MudMenu>
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText>No tape agent. Libraries attached to this server need none.</MudText></NoRecordsContent>
+                </MudTable>
+            </div>
+        </MudTabPanel>
     </MudTabs>
 }
 
@@ -363,6 +417,10 @@ else
     private string? _choice;
     private Dictionary<int, string?> _mapping = [];
     private string _name = string.Empty;
+
+    private List<TapeAgentDto>? _agents;
+    private TapeAgentSecretDto? _agentSecret;
+    private string _agentName = string.Empty;
 
     private Guid? _renaming;
     private string _newName = string.Empty;
@@ -413,6 +471,7 @@ else
         }
 
         _media = await Api.GetAsync<List<TapeMediumDto>>("api/tape/media");
+        _agents = await Api.GetAsync<List<TapeAgentDto>>("api/tape/agents");
         _elements = elements;
         _libraries = libraries;
     }
@@ -534,6 +593,83 @@ else
         catch (ApiException ex)
         {
             Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task AddAgentAsync()
+    {
+        _busy = true;
+        try
+        {
+            _agentSecret = await Api.PostAsync<TapeAgentSecretDto>("api/tape/agents", new CreateTapeAgentDto(_agentName.Trim()));
+            _agentName = string.Empty;
+            await RefreshAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task RenewAgentAsync(TapeAgentDto agent)
+    {
+        if (await Dialogs.ShowMessageBoxAsync(
+                "New connect token",
+                $"Give {agent.Name} a new connect token? It is disconnected until its agent.env has the new one.",
+                yesText: "New token",
+                cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            _agentSecret = await Api.PostAsync<TapeAgentSecretDto>($"api/tape/agents/{agent.Id}/token");
+            await RefreshAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task RemoveAgentAsync(TapeAgentDto agent)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Remove tape agent", $"Remove {agent.Name}? Its connect token stops working.", yesText: "Remove", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await Api.DeleteAsync($"api/tape/agents/{agent.Id}");
+            await RefreshAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task CopySecretAsync()
+    {
+        if (_agentSecret is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", _agentSecret.EnvironmentFile);
+            Snackbar.Add("Copied.", Severity.Success);
+        }
+        catch (JSException)
+        {
+            Snackbar.Add("The browser did not allow copying; select the text instead.", Severity.Warning);
         }
     }
 

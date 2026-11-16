@@ -84,3 +84,24 @@ public static class TapeActions
 
     public static readonly IReadOnlyList<string> All = [Load, Unload, Import, Export, Scan];
 }
+
+/// <summary>A tape agent for the console.</summary>
+/// <param name="Libraries">Names of the libraries attached to it.</param>
+public sealed record TapeAgentDto(
+    Guid Id,
+    string Name,
+    bool Online,
+    string? HostName,
+    string? Version,
+    DateTimeOffset? LastSeenUtc,
+    string? Address,
+    int Devices,
+    IReadOnlyList<string> Libraries,
+    DateTimeOffset CreatedUtc);
+
+public sealed record CreateTapeAgentDto(string Name);
+
+/// <summary>Shown once: the agent's settings file with its connect token.</summary>
+/// <param name="EnvironmentFile">The content of /etc/backdafuckup-tape-agent/agent.env (mode 600, owner root).</param>
+public sealed record TapeAgentSecretDto(TapeAgentDto Agent, string EnvironmentFile);
+
