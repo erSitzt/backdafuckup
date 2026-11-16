@@ -292,23 +292,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
                 }
 
                 await using var reader = new RestorePointReader(this, directory, manifest);
-                foreach (var disk in manifest.AllImages)
-                {
-                    var index = await reader.ReadDiskIndexAsync(disk.Key, cancellationToken).ConfigureAwait(false);
-                    foreach (var entry in index.Entries)
-                    {
-                        if (!entry.IsZero)
-                        {
-                            marked.Add(entry);
-                        }
-                    }
-                }
-
-                foreach (var tree in manifest.FileTrees)
-                {
-                    var root = await reader.ReadFileTreeIndexAsync(tree.Key, cancellationToken).ConfigureAwait(false);
-                    FileTreeWalker.Visit(ChunkStreamRef.OfIds(root.DiskSize, root.Entries), Chunks, _descriptor.ChunkSize, id => marked.Add(id), walkedListings);
-                }
+                await VisitChunksAsync(reader, id => marked.Add(id), walkedListings, cancellationToken).ConfigureAwait(false);
 
                 restorePoints++;
                 progress?.Report($"Marked restore point {id} ({restorePoints} done, {marked.Count} chunks referenced)");

@@ -5,7 +5,8 @@ backdafuckup uses the following third-party components. Keep this list in sync w
 | Component | License | Used by |
 |---|---|---|
 | .NET runtime / ASP.NET Core / EF Core (Microsoft) | MIT | all |
-| ZstdSharp.Port | MIT | Storage (chunk compression) |
+| ZstdSharp.Port | MIT | Storage (chunk compression), Tape (indexes and catalogs on tape) |
+| Konscious.Security.Cryptography.Argon2 | MIT | Tape (Argon2id key derivation from tape passphrases) |
 | Polly.Core | BSD-3-Clause | Xen (XAPI retries) |
 | KubernetesClient (kubernetes-client/csharp) with Fractions and YamlDotNet | Apache-2.0; Fractions and YamlDotNet MIT | Kubernetes (the cluster API: inventory, snapshots, mover pods) |
 | Serilog, Serilog.AspNetCore, Serilog.Sinks.File | Apache-2.0 | Server (logging) |

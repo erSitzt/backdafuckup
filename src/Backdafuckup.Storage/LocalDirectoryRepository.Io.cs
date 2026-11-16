@@ -310,10 +310,53 @@ public sealed partial class LocalDirectoryRepository
                 throw new ArgumentException("Zero chunks are not stored.", nameof(id));
             }
 
+            var level = Repository._descriptor.Compression.Level;
+            EncodedChunk Encode()
+            {
+                var (buffer, length) = ChunkCodec.Encode(plaintext.Span, level);
+                return new EncodedChunk(buffer, length, Pooled: true);
+            }
+
             return Repository._packs is { } packs
-                ? await StorePackedAsync(packs, id, plaintext).ConfigureAwait(false)
-                : await StoreLooseAsync(id, plaintext, cancellationToken).ConfigureAwait(false);
+                ? await StorePackedAsync(packs, id, plaintext.Length, Encode).ConfigureAwait(false)
+                : await StoreLooseAsync(id, Encode, cancellationToken).ConfigureAwait(false);
         }
+
+        /// <summary>
+        /// Stores a chunk as it was stored elsewhere (its <c>BDCK</c> record), without compressing it again. The record is
+        /// decoded and its hash checked first; a damaged one throws <see cref="ChunkCorruptException"/>.
+        /// </summary>
+        protected async ValueTask<ChunkPutResult> StoreEncodedChunkAsync(ChunkId id, ReadOnlyMemory<byte> stored, CancellationToken cancellationToken)
+        {
+            ThrowIfClosed();
+            if (id.IsZero)
+            {
+                throw new ArgumentException("Zero chunks are not stored.", nameof(id));
+            }
+
+            var scratch = ArrayPool<byte>.Shared.Rent(Repository._descriptor.ChunkSize);
+            int rawLength;
+            try
+            {
+                rawLength = ChunkCodec.Decode(id, stored.Span, scratch);
+            }
+            catch (ArgumentException)
+            {
+                throw new ChunkCorruptException(id, $"larger than the repository's chunk size ({Repository._descriptor.ChunkSize} bytes)");
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(scratch);
+            }
+
+            EncodedChunk Encode() => new(stored.ToArray(), stored.Length, Pooled: false);
+            return Repository._packs is { } packs
+                ? await StorePackedAsync(packs, id, rawLength, Encode).ConfigureAwait(false)
+                : await StoreLooseAsync(id, Encode, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>A chunk's stored record; <paramref name="Pooled"/> buffers go back to the shared pool.</summary>
+        protected readonly record struct EncodedChunk(byte[] Buffer, int Length, bool Pooled);
 
         /// <summary>
         /// Seals this writer's packs and every open pack it deduplicated against, then indexes them: everything its
@@ -368,7 +411,7 @@ public sealed partial class LocalDirectoryRepository
             }
         }
 
-        private async ValueTask<ChunkPutResult> StorePackedAsync(PackStore packs, ChunkId id, ReadOnlyMemory<byte> plaintext)
+        private async ValueTask<ChunkPutResult> StorePackedAsync(PackStore packs, ChunkId id, int rawLength, Func<EncodedChunk> encode)
         {
             var repository = Repository;
             var stripe = repository._stripes[id.Stripe(StripeCount)];
@@ -386,7 +429,7 @@ public sealed partial class LocalDirectoryRepository
             }
 
             var compressStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            var (buffer, length) = ChunkCodec.Encode(plaintext.Span, repository._descriptor.Compression.Level);
+            var (buffer, length, pooled) = encode();
             var compressTicks = System.Diagnostics.Stopwatch.GetTimestamp() - compressStart;
             OpenPack? full;
             try
@@ -399,13 +442,16 @@ public sealed partial class LocalDirectoryRepository
                     }
 
                     var appender = _appender ??= packs.CreateAppender();
-                    var location = appender.Append(id, buffer.AsMemory(0, length), (uint)plaintext.Length, out full);
+                    var location = appender.Append(id, buffer.AsMemory(0, length), (uint)rawLength, out full);
                     packs.AddLive(id, location);
                 }
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                if (pooled)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
             }
 
             if (full is not null)
@@ -435,7 +481,7 @@ public sealed partial class LocalDirectoryRepository
             return Repository._looseMayExist && File.Exists(Repository.ChunkPath(id.ToHex()));
         }
 
-        private async ValueTask<ChunkPutResult> StoreLooseAsync(ChunkId id, ReadOnlyMemory<byte> plaintext, CancellationToken cancellationToken)
+        private async ValueTask<ChunkPutResult> StoreLooseAsync(ChunkId id, Func<EncodedChunk> encode, CancellationToken cancellationToken)
         {
             var repository = Repository;
             var hex = id.ToHex();
@@ -462,7 +508,7 @@ public sealed partial class LocalDirectoryRepository
             }
 
             var compressStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            var (buffer, length) = ChunkCodec.Encode(plaintext.Span, repository._descriptor.Compression.Level);
+            var (buffer, length, pooled) = encode();
             var compressTicks = System.Diagnostics.Stopwatch.GetTimestamp() - compressStart;
             var temp = Path.Combine(repository._tempDirectory, $"{hex}.{Guid.NewGuid():N}.tmp");
             try
@@ -491,7 +537,11 @@ public sealed partial class LocalDirectoryRepository
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                if (pooled)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
+
                 if (File.Exists(temp))
                 {
                     File.Delete(temp);
@@ -507,6 +557,26 @@ public sealed partial class LocalDirectoryRepository
 
         public ValueTask<ChunkPutResult> PutChunkAsync(ChunkId id, ReadOnlyMemory<byte> plaintext, CancellationToken cancellationToken) =>
             StoreChunkAsync(id, plaintext, cancellationToken);
+
+        /// <summary>For imports: a chunk's stored record, checked and kept as it is.</summary>
+        public ValueTask<ChunkPutResult> PutEncodedChunkAsync(ChunkId id, ReadOnlyMemory<byte> stored, CancellationToken cancellationToken) =>
+            StoreEncodedChunkAsync(id, stored, cancellationToken);
+
+        /// <summary>For imports: one of the restore point's files (an index or a blob) as it was written elsewhere.</summary>
+        public async Task WriteRawFileAsync(string name, ReadOnlyMemory<byte> content, CancellationToken cancellationToken)
+        {
+            ThrowIfClosed();
+            if (name.Length is 0 or > 200 || name is "." or ".." || name.IndexOfAny(['/', '\\', ':', '\0']) >= 0
+                || name.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase) || name.Equals(DeletedManifestFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException($"'{name}' is not a file of a restore point.", nameof(name));
+            }
+
+            await AtomicFile.WriteAsync(Repository._tempDirectory, Path.Combine(directory, name), content, overwrite: true, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>For imports: whether a file was written.</summary>
+        public bool HasFile(string name) => File.Exists(Path.Combine(directory, name));
 
         public async Task<ManifestIndexRef> WriteDiskIndexAsync(string diskKey, ChunkIndex index, CancellationToken cancellationToken)
         {

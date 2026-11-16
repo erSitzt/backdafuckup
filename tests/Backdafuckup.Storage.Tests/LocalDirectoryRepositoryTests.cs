@@ -48,6 +48,67 @@ public abstract class LocalDirectoryRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task A_restore_point_moves_to_another_repository_as_files_and_stored_chunks()
+    {
+        await using var source = await CreateAsync();
+        var disk = RandomDisk(6);
+        var (rpId, _) = await BackupAsync(source, "vm-1", disk);
+        var files = await source.ReadRestorePointFilesAsync(rpId, Ct);
+        var ids = await source.ListRestorePointChunksAsync(rpId, Ct);
+        Assert.Equal(LocalDirectoryRepository.ManifestFileName, files[0].Name);
+        Assert.Contains(files, f => f.Name == "disk-0.idx");
+        Assert.Equal(6, ids.Count);
+
+        // The other format as target: packs into loose chunks and back.
+        var targetRoot = _root + "-target";
+        try
+        {
+            await using var target = await LocalDirectoryRepository.CreateAsync(targetRoot, Ct, ChunkSize, 3, _time, PackTargetSize == 0 ? 64L * 1024 * 1024 : 0);
+            var original = System.Text.Json.JsonSerializer.Deserialize(files[0].Content, CoreJsonContext.Default.RestorePointManifest)!;
+            var newId = Guid.NewGuid();
+            await using (var import = target.BeginImport(newId, original))
+            {
+                await foreach (var chunk in ((IChunkLocator)source).ReadStoredAsync(((IChunkLocator)source).PlanRead(ids), Ct))
+                {
+                    Assert.Equal(ChunkPutOutcome.Stored, (await import.PutEncodedChunkAsync(chunk.Id, chunk.Record.ToArray(), Ct)).Outcome);
+                }
+
+                // A damaged record is refused before anything is stored.
+                var damaged = ids[0];
+                await foreach (var chunk in ((IChunkLocator)source).ReadStoredAsync(((IChunkLocator)source).PlanRead([damaged]), Ct))
+                {
+                    var bytes = chunk.Record.ToArray();
+                    bytes[^1] ^= 0x5A;
+                    await Assert.ThrowsAsync<ChunkCorruptException>(async () => await import.PutEncodedChunkAsync(ChunkId.Compute(RandomDisk(1)), bytes, Ct));
+                }
+
+                await Assert.ThrowsAsync<InvalidDataException>(() => import.CommitAsync(null, Ct)); // its files are not there yet
+                await Assert.ThrowsAsync<ArgumentException>(() => import.WriteFileAsync("../escape.idx", new byte[1], Ct));
+                foreach (var file in files.Skip(1))
+                {
+                    await import.WriteFileAsync(file.Name, file.Content, Ct);
+                }
+
+                var info = await import.CommitAsync(m => m with { Job = null }, Ct);
+                Assert.Equal((newId, target.Info.RepositoryId), (info.Manifest.RestorePointId, info.Manifest.RepositoryId));
+            }
+
+            var verify = await target.VerifyAsync(newId, VerifyDepth.Full, null, Ct);
+            Assert.True(verify.Ok, string.Join("; ", verify.Problems));
+            await using var reader = await target.OpenRestorePointAsync(newId, Ct);
+            Assert.Equal(disk, await RestoreAsync(reader.Chunks, await reader.ReadDiskIndexAsync("0", Ct)));
+            Assert.Equal("metadata", new StreamReader(await reader.OpenBlobAsync(reader.Manifest.Metadata!, Ct)).ReadToEnd());
+        }
+        finally
+        {
+            if (Directory.Exists(targetRoot))
+            {
+                Directory.Delete(targetRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task Identical_chunks_are_stored_once_and_zero_chunks_not_at_all()
     {
         await using var repo = await CreateAsync();
