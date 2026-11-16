@@ -134,7 +134,8 @@ public sealed partial class LocalDirectoryRepository : IChunkLocator
                     {
                         if (packs.TryLocateDurable(id, out _))
                         {
-                            if (TryDeleteFile(loose))
+                            // Chunks that several restore points share come by many times: count each file once.
+                            if (File.Exists(loose) && TryDeleteFile(loose))
                             {
                                 removedDuplicates++;
                             }

@@ -267,6 +267,7 @@ public sealed class PackRepositoryTests : IDisposable
             var result = await repo.PackLooseChunksAsync(TimeSpan.FromHours(1), null, Ct);
             Assert.True(result.Finished);
             Assert.Equal(6 + 3 + 3, result.Packed); // disk, SQL file, tree (content and listing)
+            Assert.Equal(0, result.RemovedDuplicates); // the second restore point shares all six disk chunks: no file is counted twice
             Assert.False(result.LooseChunksRemain);
             Assert.False(repo.LooseChunksMayExist);
             Assert.Empty(Directory.EnumerateFiles(Path.Combine(_root, "chunks"), "*", SearchOption.AllDirectories));
