@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- bdfu-tape-recover: reads backdafuckup tapes without the server or its database (docs/tape-format.md):
+       devices, inventory, scan, catalog, and restoring a copy into a repository directory or as raw disk images. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>bdfu-tape-recover</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Storage\Backdafuckup.Storage.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Tape\Backdafuckup.Tape.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Backdafuckup.Tape.Tests" />
+    <InternalsVisibleTo Include="Backdafuckup.Server.Tests" />
+  </ItemGroup>
+</Project>

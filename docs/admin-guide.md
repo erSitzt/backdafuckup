@@ -1174,7 +1174,21 @@ A tape job copies restore points of backup jobs into a pool (*Tape → Tape jobs
 
 *Tape → On tape → Bring back…* (`POST /api/tape/copies/{id}/restore`) reads the copy into a repository with the same block size. It loads the tapes it needs in order and reads only the needed parts of each file. The copy becomes a restore point of its own, named *Imported from tape*, that belongs to no job: job retention never deletes it. From there it is restored like any other (VM, files, SQL Server, Active Directory). The tapes it needs must be in the library; offline ones are named.
 
-The format on tape is documented in [tape-format.md](tape-format.md), so that tapes can be read without the server.
+### Without the server: bdfu-tape-recover
+
+The format on tape is documented in [tape-format.md](tape-format.md). `bdfu-tape-recover` (`scripts/build-tape-recover.sh` builds it for Linux and Windows, one file each) reads tapes with nothing but a drive (and a changer, if there is one):
+
+```sh
+bdfu-tape-recover devices
+bdfu-tape-recover catalog --barcode BDF002L9 --passphrase-file pass.txt      # the set's tapes and copies
+bdfu-tape-recover restore --copy 01a1e649 --barcode BDF002L9 --key-file key.json --to-repository /mnt/restore/repo
+bdfu-tape-recover restore --copy 01a1e649 --to-images /mnt/restore/images        # raw disk images (zeros stay holes)
+```
+
+- **Catalog:** it reads the newest complete catalog of the tape it is given. Give it the set's highest tape, which has the whole set.
+- **Tapes:** it loads the tapes it needs with the changer, or asks for each one by its name.
+- **Key:** for encrypted sets it takes the key file, a passphrase file, `BDFU_TAPE_PASSPHRASE` or a prompt, and checks the key against the fingerprint on the tape.
+- **Repository:** a repository directory it wrote can be added in the console like any other; its restore points come with it.
 
 ## API and API tokens
 

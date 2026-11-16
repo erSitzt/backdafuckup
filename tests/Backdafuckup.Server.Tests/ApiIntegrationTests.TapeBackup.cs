@@ -114,5 +114,33 @@ public sealed partial class ApiIntegrationTests
         var verify = await repository.VerifyAsync(imported.Id, VerifyDepth.Full, null, Ct);
         Assert.True(verify.Ok, string.Join("; ", verify.Problems));
         Assert.All(fake.Drives, d => Assert.False(d.Loaded));
+
+        // Without the server: bdfu-tape-recover reads the set's newest catalog from its highest tape and brings the
+        // first copy back as a raw disk image, with only the passphrase.
+        var passphrase = Path.Combine(_root, "passphrase.txt");
+        await File.WriteAllTextAsync(passphrase, "correct horse battery staple\n", Ct);
+        var highest = (await client.GetFromJsonAsync<List<TapeMediumDto>>("/api/tape/media", Ct))!.Where(m => m.SetId is not null).MaxBy(m => m.Sequence)!;
+        async Task<string> RecoverAsync(params string[] args)
+        {
+            var text = new StringWriter();
+            var exit = await new Backdafuckup.TapeRecover.TapeRecovery(_tapeHost, text, new StringReader(string.Empty), _ => null, interactive: false).RunAsync(args, Ct);
+            Assert.True(exit == 0, text.ToString());
+            return text.ToString();
+        }
+
+        var catalog = await RecoverAsync("catalog", "--barcode", highest.Barcode, "--passphrase-file", passphrase);
+        Assert.Contains($"copy {copy.Id}  web01", catalog, StringComparison.Ordinal);
+        Assert.Contains($"copy {copies.First(c => c.Id != copy.Id).Id}  web01", catalog, StringComparison.Ordinal);
+        var images = Path.Combine(_root, "images");
+        await RecoverAsync("restore", "--copy", copy.Id.ToString()[..13], "--barcode", highest.Barcode, "--passphrase-file", passphrase, "--to-images", images);
+        var written = Assert.Single(Directory.GetFiles(images, "*.img"));
+        var recovered = await File.ReadAllBytesAsync(written, Ct);
+        Assert.True(image.AsSpan().SequenceEqual(recovered), "the image from bdfu-tape-recover differs");
+
+        // A wrong passphrase is refused with the fingerprint it needs.
+        await File.WriteAllTextAsync(passphrase, "wrong horse battery staple", Ct);
+        var wrong = new StringWriter();
+        await Assert.ThrowsAsync<System.Security.Cryptography.CryptographicException>(() =>
+            new Backdafuckup.TapeRecover.TapeRecovery(_tapeHost, wrong, new StringReader(string.Empty), _ => null, interactive: false).RunAsync(["catalog", "--barcode", highest.Barcode, "--passphrase-file", passphrase], Ct));
     }
 }

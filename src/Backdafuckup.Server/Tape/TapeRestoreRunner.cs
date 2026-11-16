@@ -75,69 +75,22 @@ public sealed class TapeRestoreRunner(
         var newId = Guid.CreateVersion7();
         try
         {
-            // The restore-point file: its entries, then where its chunks are.
-            var reader = await tapes.AtAsync(copy.Sequence, copy.FileStartBlock, cancellationToken).ConfigureAwait(false);
-            var entries = new List<(string Name, byte[] Content)>();
-            IReadOnlyList<ChunkLocation> locations = [];
-            await foreach (var record in new TapeFileReader(reader, blockSize, cipher).ReadAllAsync(cancellationToken).ConfigureAwait(false))
-            {
-                if (record.Type == TapeFormat.Entry)
-                {
-                    entries.Add(TapeEntries.Decode(record.Body));
-                }
-                else if (record.Type == TapeFormat.Locations)
-                {
-                    locations = ChunkLocations.Decode(record.Body);
-                }
-            }
-
-            var manifestJson = entries.FirstOrDefault(e => e.Name == "manifest.json").Content
-                ?? throw new InvalidDataException($"The restore-point file of {copy.VmName} has no manifest.");
-            var manifest = JsonSerializer.Deserialize(manifestJson, CoreJsonContext.Default.RestorePointManifest)!;
-            log.Info($"Restore-point file of {copy.VmName} read from tape #{copy.Sequence}: {entries.Count - 2} file(s), {locations.Count} chunk(s) on tape(s) {string.Join(", ", locations.Select(l => l.Sequence).Distinct().Order().Select(s => $"#{s}"))}.");
-
-            await using var import = transfer.BeginImport(newId, manifest);
-            long chunks = 0;
-            foreach (var group in locations.GroupBy(l => (l.Sequence, l.FileNumber)).OrderBy(g => g.Key.Sequence).ThenBy(g => g.Key.FileNumber))
-            {
-                var file = files.FirstOrDefault(f => f.Sequence == group.Key.Sequence && f.FileNumber == group.Key.FileNumber)
-                    ?? throw new InvalidDataException($"Tape #{group.Key.Sequence} file {group.Key.FileNumber} is not in the set's catalog.");
-                var needed = group.ToDictionary(l => l.Id);
-                var first = group.OrderBy(l => l.Block).ThenBy(l => l.Offset).First();
-                var blocks = await tapes.AtAsync(group.Key.Sequence, file.StartBlock + first.Block, cancellationToken).ConfigureAwait(false);
-                await foreach (var record in new TapeFileReader(blocks, blockSize, cipher).ReadFromAsync(file.FileId, new RecordPosition(first.Block, first.Offset), cancellationToken).ConfigureAwait(false))
-                {
-                    if (record.Type != TapeFormat.Chunk)
-                    {
-                        continue;
-                    }
-
-                    var (id, stored) = TapeEntries.DecodeChunk(record.Body);
-                    if (needed.Remove(id))
-                    {
-                        await import.PutEncodedChunkAsync(id, stored, cancellationToken).ConfigureAwait(false);
-                        chunks++;
-                        if (needed.Count == 0)
-                        {
-                            break;
-                        }
-                    }
-                }
-
-                if (needed.Count > 0)
-                {
-                    throw new InvalidDataException($"{needed.Count} chunk(s) of {copy.VmName} were not in tape #{group.Key.Sequence} file {group.Key.FileNumber}.");
-                }
-            }
-
-            foreach (var (name, content) in entries.Where(e => e.Name is not (TapeCopyInfo.FileName or "manifest.json")))
-            {
-                await import.WriteFileAsync(name, content, cancellationToken).ConfigureAwait(false);
-            }
-
-            var committed = await import.CommitAsync(m => m with { Job = null, BaseRestorePointId = null }, cancellationToken).ConfigureAwait(false);
-            await CatalogAsync(committed, copy, set, request.RepositoryId, session.Id, cancellationToken).ConfigureAwait(false);
-            var summary = $"{copy.VmName} (restore point of {copy.CreatedUtc:yyyy-MM-dd HH:mm} UTC) is back in the repository as {newId}: {chunks} chunk(s) read from {tapes.Loaded.Count} tape(s).";
+            var result = await TapeSetReader.RestoreAsync(
+                tapes,
+                blockSize,
+                cipher,
+                copy.Sequence,
+                copy.FileStartBlock,
+                (sequence, number) => files.FirstOrDefault(f => f.Sequence == sequence && f.FileNumber == number) is { } f
+                    ? (f.StartBlock, f.FileId)
+                    : throw new InvalidDataException($"Tape #{sequence} file {number} is not in the set's catalog."),
+                transfer,
+                newId,
+                m => m with { Job = null, BaseRestorePointId = null },
+                message => log.Info(message),
+                cancellationToken).ConfigureAwait(false);
+            await CatalogAsync(result.Committed, copy, set, request.RepositoryId, session.Id, cancellationToken).ConfigureAwait(false);
+            var summary = $"{copy.VmName} (restore point of {copy.CreatedUtc:yyyy-MM-dd HH:mm} UTC) is back in the repository as {newId}: {result.Chunks} chunk(s) read from {tapes.Loaded.Count} tape(s).";
             log.Info(summary);
             return (log.Warned ? SessionState.Warning : SessionState.Succeeded, summary);
         }
@@ -186,7 +139,7 @@ public sealed class TapeRestoreRunner(
 
 /// <summary>The tapes of a set for reading: loads the one asked for into the held drive and places it at a block.</summary>
 internal sealed class TapeReaderSession(
-    TapeLibraryEntity library, TapeDriveEntity drive, IReadOnlyList<TapeMediumEntity> media, TapeLibraries libraries, TapeSessionRunner robot, string holder, IOperationLog log) : IAsyncDisposable
+    TapeLibraryEntity library, TapeDriveEntity drive, IReadOnlyList<TapeMediumEntity> media, TapeLibraries libraries, TapeSessionRunner robot, string holder, IOperationLog log) : ITapeVolumes, IAsyncDisposable
 {
     private OpenedDrive? _drive;
     private int? _sequence;

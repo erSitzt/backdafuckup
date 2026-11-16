@@ -16,6 +16,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Backdafuckup.Testing\Backdafuckup.Testing.csproj" />
     <ProjectReference Include="..\..\src\Backdafuckup.Server\Backdafuckup.Server.csproj" />
+    <ProjectReference Include="..\..\src\Backdafuckup.TapeRecover\Backdafuckup.TapeRecover.csproj" />
     <ProjectReference Include="..\..\src\Backdafuckup.Agent.Core\Backdafuckup.Agent.Core.csproj" />
     <ProjectReference Include="..\..\src\Backdafuckup.Mover\Backdafuckup.Mover.csproj" />
   </ItemGroup>
