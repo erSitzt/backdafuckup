@@ -18,7 +18,7 @@ for rid in linux-x64 win-x64; do
   "$dotnet" publish "$root/src/Backdafuckup.TapeRecover" -c Release -r "$rid" -p:Version="$version" \
     -o "$work/$rid" --artifacts-path "$work/artifacts-$rid" --nologo -v quiet
   mkdir -p "$out/$rid"
-  cp "$work/$rid"/bdfu-tape-recover* "$out/$rid/"
+  cp "$work/$rid"/bdfu-tape-recover "$work/$rid"/bdfu-tape-recover.exe "$out/$rid/" 2>/dev/null || true
 done
 echo "$version" > "$out/version.txt"
 find "$out" -type f -printf '  %P  %s bytes\n' | sort

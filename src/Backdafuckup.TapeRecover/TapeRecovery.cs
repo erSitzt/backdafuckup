@@ -142,15 +142,16 @@ internal sealed class TapeRecovery(ITapeHost host, TextWriter output, TextReader
                 ? (f.StartBlock, f.FileId)
                 : throw new InvalidDataException($"Tape #{sequence} file {number} is not in the catalog."),
             repository,
-            copy.OriginalId,
+            Guid.CreateVersion7(), // a new id, as the server gives imports: the original may still be in a catalog
             m => m with { Job = null, BaseRestorePointId = null },
             output.WriteLine,
             cancellationToken).ConfigureAwait(false);
-        output.WriteLine($"{result.Chunks} chunk(s) read from {result.Tapes} tape(s); restore point {copy.OriginalId} is in {directory}.");
+        var restored = result.Committed.RestorePointId;
+        output.WriteLine($"{result.Chunks} chunk(s) read from {result.Tapes} tape(s); restore point {restored} (copy of {copy.OriginalId}) is in {directory}.");
 
         if (imagesDirectory is not null)
         {
-            await using var reader = await repository.OpenRestorePointAsync(copy.OriginalId, cancellationToken).ConfigureAwait(false);
+            await using var reader = await repository.OpenRestorePointAsync(restored, cancellationToken).ConfigureAwait(false);
             foreach (var disk in reader.Manifest.Disks)
             {
                 var path = Path.Combine(imagesDirectory, $"{Safe(copy.VmName)}-{Safe(disk.Key)}.img");
