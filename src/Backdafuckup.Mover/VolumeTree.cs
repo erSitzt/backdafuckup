@@ -41,6 +41,7 @@ internal sealed class VolumeTree
     private long _bytes;
     private long _issues;
     private long _asOwner;
+    private string _alsoTried = string.Empty;
     private volatile string _current = string.Empty;
 
     private VolumeTree(Stream output, Stream? previous, TimeSpan racy, CancellationToken cancellationToken)
@@ -209,7 +210,7 @@ internal sealed class VolumeTree
         var fd = OpenAsOwner(dirFd, name, TreeNative.ODirectory, stat, parent, keep: true);
         if (fd < 0)
         {
-            IssueEntry(name, "cannot open the folder: " + TreeNative.Error());
+            IssueEntry(name, $"cannot open the folder{_alsoTried}: {TreeNative.Error()}");
             return;
         }
 
@@ -254,7 +255,7 @@ internal sealed class VolumeTree
         var fd = OpenAsOwner(dirFd, name, TreeNative.ONonBlock | TreeNative.ONoCtty, stat, folder, keep: false);
         if (fd < 0)
         {
-            IssueEntry(name, TreeNative.Errno() == TreeNative.ENOENT ? "vanished while the volume was read" : "cannot open the file: " + TreeNative.Error());
+            IssueEntry(name, TreeNative.Errno() == TreeNative.ENOENT ? "vanished while the volume was read" : $"cannot open the file{_alsoTried}: {TreeNative.Error()}");
             return;
         }
 
@@ -369,10 +370,13 @@ internal sealed class VolumeTree
 
     /// <summary>
     /// Opens <paramref name="name"/>; when root is refused, as the entry's owner, then as its folder's. With
-    /// <paramref name="keep"/> the walk goes on as whoever opened it (a folder), else the caller switches back.
+    /// <paramref name="keep"/> the walk goes on as whoever opened it (a folder), else the caller switches back. When
+    /// that fails too, <see cref="_alsoTried"/> names whom it was tried as, for the issue (a file even its owner may not
+    /// read, not a squashed root).
     /// </summary>
     private int OpenAsOwner(int dirFd, byte[] name, int flags, TreeNative.StatResult stat, TreeNative.StatResult folder, bool keep)
     {
+        _alsoTried = string.Empty;
         var fd = TreeNative.OpenAt(dirFd, name, flags);
         if (fd >= 0 || !Refused())
         {
@@ -380,7 +384,8 @@ internal sealed class VolumeTree
         }
 
         var before = _as;
-        foreach (var owner in new[] { Owner.Of(stat), Owner.Of(folder) }.Distinct())
+        var tried = new List<string>(2);
+        foreach (var (owner, whose) in new[] { (Owner.Of(stat), "its owner"), (Owner.Of(folder), "its folder's owner") }.DistinctBy(o => o.Item1))
         {
             if (owner == before || !Become(owner))
             {
@@ -398,9 +403,12 @@ internal sealed class VolumeTree
 
                 return fd;
             }
+
+            tried.Add($"{whose} {owner.Uid}:{owner.Gid}");
         }
 
-        // The error of the last try; the identity back to what it was (setfsuid sets no errno).
+        // The error of the last try (building the text and setfsuid leave errno alone); the identity back to what it was.
+        _alsoTried = tried.Count > 0 ? $" (also tried as {string.Join(" and as ", tried)})" : string.Empty;
         Become(before);
         return -1;
     }

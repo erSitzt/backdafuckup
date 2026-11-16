@@ -130,7 +130,8 @@ internal static class KubernetesResources
             AddAll("v1", "PersistentVolume", [Node(await TryAsync($"PersistentVolume {name}", () => client.CoreV1.ReadPersistentVolumeAsync(name, cancellationToken: cancellationToken)).ConfigureAwait(false))]);
         }
 
-        foreach (var name in volumes.Select(v => v.StorageClass).OfType<string>().Distinct(StringComparer.Ordinal))
+        // A PVC of a static PV names the class "" on purpose (no class); reading "" would read the list of all classes.
+        foreach (var name in volumes.Select(v => v.StorageClass).Where(c => !string.IsNullOrEmpty(c)).OfType<string>().Distinct(StringComparer.Ordinal))
         {
             AddAll("storage.k8s.io/v1", "StorageClass", [Node(await TryAsync($"StorageClass {name}", () => client.StorageV1.ReadStorageClassAsync(name, cancellationToken: cancellationToken)).ConfigureAwait(false))]);
         }

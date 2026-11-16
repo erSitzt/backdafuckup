@@ -73,6 +73,7 @@ public sealed class NamespaceBackupTests
                 ],
                 kinds);
             Assert.Equal(descriptor.ObjectCount, objects.Count);
+            Assert.DoesNotContain("GET /apis/storage.k8s.io/v1/storageclasses/", api.Requests); // the class "" not read (that is the list)
             Assert.All(objects, o => Assert.Null(o["metadata"]!["managedFields"]));
             Assert.Equal("apps/v1", (string?)objects.Single(o => (string?)o["kind"] == "StatefulSet")["apiVersion"]);
             Assert.Equal("databases.example.com/v1", (string?)objects.Single(o => (string?)o["kind"] == "RedisFailover")["apiVersion"]);
@@ -159,7 +160,7 @@ public sealed class NamespaceBackupTests
         pod["status"] = new JsonObject { ["phase"] = "Running" };
         api.Add("api/v1", "pods", pod);
         api.Add("api/v1", "persistentvolumeclaims", Claim("data-redis-test-0", "pvc-1", "vsphere-csi"));
-        api.Add("api/v1", "persistentvolumeclaims", Claim("nfs-data", "nfs-1", null));
+        api.Add("api/v1", "persistentvolumeclaims", Claim("nfs-data", "nfs-1", string.Empty)); // a static PV's claim: no class, on purpose
         api.Add("api/v1", "persistentvolumes", new JsonObject
         {
             ["metadata"] = new JsonObject { ["name"] = "pvc-1" },

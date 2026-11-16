@@ -225,7 +225,9 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         var classes = _options.OtherCluster
             ? []
             : _objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && _selected.Contains(KubernetesObjects.Key(o)))
-                .Select(o => (string?)o["spec"]?["storageClassName"]).OfType<string>().Where(c => _rewrite.MapClass(c) == c).ToHashSet(StringComparer.Ordinal);
+                .Select(o => (string?)o["spec"]?["storageClassName"]).Where(c => !string.IsNullOrEmpty(c)).OfType<string>().Where(c => _rewrite.MapClass(c) == c)
+                .ToHashSet(StringComparer.Ordinal); // "" is no class: older backups hold a nameless StorageClass for it, which stays out
+
         var definitions = new List<JsonObject>();
         var unserved = new Dictionary<string, (string Group, KubernetesPlatformProfile Platform)>(StringComparer.Ordinal);
         var notServed = new List<JsonObject>();

@@ -51,7 +51,7 @@
   Built 2026-11-12 to 2026-11-16 (lab runbook K15–K22):
   - **Platform profiles** (spec `2026-11-12-1952-kubernetes-platform-profiles`): what a platform makes itself (namespaces, CRD groups, objects, fields) as data, detected per cluster, instead of Rancher/RKE2 rules in code; tested on RKE2 and kind, other platforms from their public docs.
   - **File-level backup of volumes without snapshots** (spec `2026-11-12-1952-kubernetes-file-level-volumes`): NFS, hostPath and local PVs through a read-only shadow PV, incremental by file; opt-in pod volumes without a PVC and CSI volumes without snapshots (mounted by a pod) through an optional node agent; usage numbers from the node agent or Prometheus to warn about data that is not backed up; restores as files.
-  - Open in the lab: an NFS export with `root_squash`, local-path on kind (K18).
+  - Open in the lab: local-path on kind (K18).
 
   Later: changed block tracking (CSI SnapshotMetadata) and group snapshots; then Kubernetes clusters on XCP-ng, whose PVs could be read through XAPI with CBT.
 

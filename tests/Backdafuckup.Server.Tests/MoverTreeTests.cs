@@ -166,6 +166,12 @@ public sealed class MoverTreeTests : IDisposable
         var file = Path.Combine(folder, "secret.txt");
         File.WriteAllText(file, "for 1000 only");
         File.WriteAllText(Path.Combine(_volume, "mine.txt"), "1001's");
+
+        // And one not even its owner may read: an issue that says so, not a squashed root.
+        var locked = Path.Combine(_volume, "locked");
+        File.WriteAllText(locked, "nobody's");
+        Assert.Equal(0, Chown(Z(locked), 1000, 1000));
+        File.SetUnixFileMode(locked, UnixFileMode.None);
         Assert.Equal(0, Chown(Z(file), 1000, 1000));
         Assert.Equal(0, Chown(Z(folder), 1000, 1000));
         Assert.Equal(0, Chown(Z(Path.Combine(_volume, "mine.txt")), 1001, 1001));
@@ -197,7 +203,7 @@ public sealed class MoverTreeTests : IDisposable
         finally
         {
             // Back to root, so the folder can be removed without CAP_DAC_OVERRIDE.
-            foreach (var path in new[] { file, folder, Path.Combine(_volume, "mine.txt") })
+            foreach (var path in new[] { file, folder, Path.Combine(_volume, "mine.txt"), locked })
             {
                 _ = Chown(Z(path), 0, 0);
             }
@@ -205,10 +211,11 @@ public sealed class MoverTreeTests : IDisposable
 
         stream.Position = 0;
         var (records, contents) = await ParseAsync(stream);
-        Assert.Equal(["F mine.txt", "D private", "F private/secret.txt", "U private"], records.Select(r => r.Text));
+        Assert.Equal(["I locked", "F mine.txt", "D private", "F private/secret.txt", "U private"], records.Select(r => r.Text));
+        Assert.Equal("cannot open the file (also tried as its owner 1000:1000): Permission denied", records.Single(r => r.Text == "I locked").Reason);
         Assert.Equal("for 1000 only"u8.ToArray(), contents["private/secret.txt"]);
         Assert.Equal("1001's"u8.ToArray(), contents["mine.txt"]);
-        Assert.Equal(0, summary.Issues);
+        Assert.Equal(1, summary.Issues);
         Assert.True(summary.AsOwner >= 2, $"{summary.AsOwner} read as their owner");
     }
 
