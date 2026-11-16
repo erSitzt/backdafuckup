@@ -89,6 +89,18 @@ public sealed partial class ApiIntegrationTests
             ["status"] = new JsonObject { ["phase"] = "Running" },
         });
 
+        // The agent on worker-2 is stopping (an update of the DaemonSet), its exec fails: its numbers are missing, nothing else.
+        api.Add("api/v1", "pods", new JsonObject
+        {
+            ["metadata"] = new JsonObject
+            {
+                ["name"] = "backdafuckup-node-q4m8z", ["namespace"] = KubernetesSetup.NodeNamespace, ["uid"] = "uid-agent-2",
+                ["labels"] = new JsonObject { ["app.kubernetes.io/name"] = KubernetesSetup.NodeAgentName },
+            },
+            ["spec"] = new JsonObject { ["nodeName"] = "worker-2", ["containers"] = new JsonArray(new JsonObject { ["name"] = "node", ["image"] = "mover" }) },
+            ["status"] = new JsonObject { ["phase"] = "Running" },
+        });
+
         var socket = Path.Combine(_root, "node.sock");
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var agent = new NodeAgent(
@@ -100,6 +112,14 @@ public sealed partial class ApiIntegrationTests
             lock (requests)
             {
                 requests.Add($"{pod} {(string?)JsonNode.Parse(input)!["op"]}");
+            }
+
+            if (pod == "backdafuckup-node-q4m8z")
+            {
+                throw new k8s.KubernetesException(new k8s.Models.V1Status
+                {
+                    Status = "Failure", Message = "Internal error occurred: error executing command in container: failed to exec in container: cannot exec in a stopped state",
+                });
             }
 
             // The kubelet's statistics as the agent cuts them; everything else through the agent's socket.
@@ -142,6 +162,7 @@ public sealed partial class ApiIntegrationTests
             Assert.Contains("read file by file by the node agent backdafuckup-node/backdafuckup-node-x7k2p on node worker-1 from " + logs, log, StringComparison.Ordinal);
             Assert.Contains("web: Volume logs-web: 1 file(s) in 0 folder(s)", log, StringComparison.Ordinal);
             Assert.Equal(2, requests.Count(r => r == "backdafuckup-node-x7k2p read"));
+            Assert.Equal(1, requests.Count(r => r == "backdafuckup-node-q4m8z stats"));
 
             var point = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!);
             var store = await _factory.Services.GetRequiredService<RepositoryManager>().GetAsync(repository.Id, Ct);

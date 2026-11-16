@@ -70,7 +70,7 @@ public sealed class FileRestoreSessionRunner(
             var disks = await FileRestoreMounts.OpenDisksAsync(reader, cache, cancellationToken).ConfigureAwait(false);
             if (point.Consistency != "application")
             {
-                log.Info("The restore point is crash-consistent: the newest changes before the snapshot may be missing in some files.");
+                log.Info(FileRestoreMounts.CrashConsistency(reader.Manifest, point.ConsistencyReason, "files"));
             }
 
             var (result, targetText, targetWarnings) = request.Target.Kind switch

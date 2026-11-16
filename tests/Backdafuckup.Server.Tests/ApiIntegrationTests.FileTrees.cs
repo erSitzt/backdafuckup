@@ -94,6 +94,9 @@ public sealed partial class ApiIntegrationTests
         var download = await client.GetByteArrayAsync($"/api/file-restore/mounts/{mount.Id}/file?volume={Uri.EscapeDataString(volume.Id)}&path=/site/index.bin", Ct);
         Assert.Equal(page, download);
         (await client.DeleteAsync($"/api/file-restore/mounts/{mount.Id}", Ct)).EnsureSuccessStatusCode();
+        var browseLog = string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{mount.SessionId}/log", Ct))!.Select(l => l.Message));
+        Assert.Contains("The restore point is crash-consistent: data-web read file by file while in use, not at one point in time.", browseLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("snapshot", browseLog, StringComparison.Ordinal);
 
         // The namespace restored into a new one: the PVC gets a new volume (the provisioner's), filled with its files.
         var restored = await Read<StartedDto>(client.PostAsJsonAsync("/api/restores", new RestoreRequestDto

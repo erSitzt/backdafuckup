@@ -41,7 +41,9 @@ public sealed class NodeAgents
         {
             var list = await client.CoreV1.ListNamespacedPodAsync(
                 KubernetesSetup.NodeNamespace, labelSelector: $"app.kubernetes.io/name={KubernetesSetup.NodeAgentName}", cancellationToken: cancellationToken).ConfigureAwait(false);
-            foreach (var pod in list.Items.Where(p => p.Status?.Phase == "Running" && p.Metadata.DeletionTimestamp is null && !string.IsNullOrEmpty(p.Spec.NodeName)))
+            // Not a pod on its way out (an update of the DaemonSet replaces them): exec into a stopped container fails.
+            foreach (var pod in list.Items.Where(p => p.Status?.Phase == "Running" && p.Metadata.DeletionTimestamp is null && !string.IsNullOrEmpty(p.Spec.NodeName)
+                                                      && p.Status.ContainerStatuses?.Any(c => !c.Ready || c.State?.Running is null) != true))
             {
                 pods.TryAdd(pod.Spec.NodeName, pod.Metadata.Name);
             }
@@ -69,7 +71,7 @@ public sealed class NodeAgents
         {
             (code, output) = await _executor.ExecAsync(KubernetesSetup.NodeNamespace, pod, "node", Command, request.ToJsonString(), cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is System.Net.WebSockets.WebSocketException or HttpOperationException or HttpRequestException or IOException)
+        catch (Exception ex) when (ex is System.Net.WebSockets.WebSocketException or HttpOperationException or HttpRequestException or IOException or KubernetesException)
         {
             throw new KubernetesOperationException(
                 $"The node agent {KubernetesSetup.NodeNamespace}/{pod} on node {node} of cluster {_cluster} cannot be reached by exec: {ex.Message}" +
