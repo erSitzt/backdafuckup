@@ -43,6 +43,8 @@ public sealed partial class RestoreSessionRunner
             log.Warning($"Namespace {name} failed in the run: it comes from its restore point of {point.CreatedUtc.ToLocalTime():g} instead.");
         }
 
+        // Objects that fail on their own are warnings: the namespaces still follow (their objects name what they lack).
+        var clusterFailed = 0;
         try
         {
             await using var cluster = await connections.OpenAsync(target, cancellationToken).ConfigureAwait(false);
@@ -57,6 +59,7 @@ public sealed partial class RestoreSessionRunner
             }
 
             byte[] objects;
+            IReadOnlyList<string>? sourcePlatforms;
             var repository = await repositories.GetAsync(run.ClusterPoint.RepositoryId, cancellationToken).ConfigureAwait(false);
             using (repository.Pin(run.ClusterPoint.Id))
             await using (var reader = await repository.OpenRestorePointAsync(run.ClusterPoint.Id, cancellationToken).ConfigureAwait(false))
@@ -65,10 +68,12 @@ public sealed partial class RestoreSessionRunner
                 using var memory = new MemoryStream();
                 await blob.CopyToAsync(memory, cancellationToken).ConfigureAwait(false);
                 objects = memory.ToArray();
+                sourcePlatforms = reader.Manifest.Kubernetes?.Platforms;
             }
 
             log.Info($"Restoring the cluster-scoped objects of {run.ClusterPoint.CreatedUtc.ToLocalTime():g} ({run.ClusterPoint.VmName}), then {chosen.Count} namespace(s): {string.Join(", ", chosen.Select(c => c.Namespace))}.");
-            var result = await restorer.RestoreClusterScopeAsync(objects, options.StorageClassMap, options.ReplaceExisting, log, cancellationToken).ConfigureAwait(false);
+            var result = await restorer.RestoreClusterScopeAsync(objects, sourcePlatforms, options.StorageClassMap, options.ReplaceExisting, log, cancellationToken).ConfigureAwait(false);
+            clusterFailed = result.Failed;
             await FinishAsync(task.Id, result.Failed > 0 ? SessionState.Warning : SessionState.Succeeded, null, 0).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -117,7 +122,8 @@ public sealed partial class RestoreSessionRunner
             }
         }
 
-        var overall = failed > 0 ? SessionState.Failed : warnings > 0 || chosen.Any(c => !c.FromRun) ? SessionState.Warning : SessionState.Succeeded;
-        return (overall, $"Cluster-scoped objects restored; {succeeded} namespace(s) restored, {warnings} with warnings, {failed} failed.");
+        var overall = failed > 0 ? SessionState.Failed : warnings > 0 || clusterFailed > 0 || chosen.Any(c => !c.FromRun) ? SessionState.Warning : SessionState.Succeeded;
+        var clusterScope = clusterFailed > 0 ? $"Cluster-scoped objects restored, {clusterFailed} failed" : "Cluster-scoped objects restored";
+        return (overall, $"{clusterScope}; {succeeded} namespace(s) restored, {warnings} with warnings, {failed} failed.");
     }
 }

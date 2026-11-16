@@ -6,7 +6,7 @@ namespace Backdafuckup.Testing.Kubernetes;
 
 /// <summary>
 /// An in-memory Kubernetes API for tests, plugged into the client as its outermost handler so no request reaches the
-/// network. It serves <c>/version</c>, lists (with equality label selectors), reads, creates, replaces, merge-patches
+/// network. It serves <c>/version</c>, lists (with equality label and field selectors), reads, creates, replaces, merge-patches
 /// and deletes of objects, core and grouped, cluster-scoped and namespaced, by the API's URL layout, and pod logs.
 /// <see cref="Created"/> stands in for the cluster's controllers (a snapshot becomes ready, a pod runs).
 /// </summary>
@@ -19,6 +19,9 @@ public sealed class FakeKubernetesApi
     private static readonly string[] BuiltInApis = ["api/v1", "apis/apps/v1", "apis/storage.k8s.io/v1"];
 
     public string GitVersion { get; set; } = "v1.32.13+rke2r1";
+
+    /// <summary>API groups served without objects of them (e.g. an aggregated API), for discovery.</summary>
+    public HashSet<string> ExtraApiGroups { get; } = new(StringComparer.Ordinal);
 
     /// <summary>When set, every request is answered with this status (e.g. 401 for a refused token).</summary>
     public HttpStatusCode? FailWith { get; set; }
@@ -37,6 +40,9 @@ public sealed class FakeKubernetesApi
 
     /// <summary>Called after an object was deleted, with its plural and the object.</summary>
     public Action<string, JsonObject>? Deleted { get; set; }
+
+    /// <summary>When it gives a message for (plural, object), creating that object is answered with 422 Invalid and the message.</summary>
+    public Func<string, JsonObject, string?>? Refuse { get; set; }
 
     /// <summary>What a SelfSubjectAccessReview answers for (verb, resource); everything by default.</summary>
     public Func<string, string, bool> Allowed { get; set; } = (_, _) => true;
@@ -140,6 +146,31 @@ public sealed class FakeKubernetesApi
         if (path == "version")
         {
             return Json(HttpStatusCode.OK, new JsonObject { ["major"] = "1", ["minor"] = "32", ["gitVersion"] = GitVersion });
+        }
+
+        if (path == "apis")
+        {
+            // Discovery: the built-in groups, the groups of the objects added, and those served without objects.
+            List<string> versions;
+            lock (_lock)
+            {
+                versions = [.. BuiltInApis.Concat(_objects.Select(o => o.ApiPath)).Concat(ExtraApiGroups.Select(g => $"apis/{g}/v1"))
+                    .Where(a => a.StartsWith("apis/", StringComparison.Ordinal)).Distinct(StringComparer.Ordinal)];
+            }
+
+            var groups = new JsonArray();
+            foreach (var group in versions.Select(a => a.Split('/')).GroupBy(a => a[1], StringComparer.Ordinal))
+            {
+                var preferred = new JsonObject { ["groupVersion"] = $"{group.Key}/{group.First()[2]}", ["version"] = group.First()[2] };
+                groups.Add(new JsonObject
+                {
+                    ["name"] = group.Key,
+                    ["versions"] = new JsonArray([.. group.Select(a => (JsonNode)new JsonObject { ["groupVersion"] = $"{a[1]}/{a[2]}", ["version"] = a[2] })]),
+                    ["preferredVersion"] = preferred,
+                });
+            }
+
+            return Json(HttpStatusCode.OK, new JsonObject { ["kind"] = "APIGroupList", ["apiVersion"] = "v1", ["groups"] = groups });
         }
 
         var parts = path.Split('/');
@@ -246,10 +277,19 @@ public sealed class FakeKubernetesApi
             return Json(HttpStatusCode.MethodNotAllowed, new JsonObject { ["kind"] = "Status", ["message"] = $"fake: {request.Method} /{path} not supported" });
         }
 
-        var selector = System.Web.HttpUtility.ParseQueryString(request.RequestUri.Query)["labelSelector"]?
+        var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri.Query);
+        var selector = query["labelSelector"]?
             .Split(',', StringSplitOptions.RemoveEmptyEntries)
             .Select(term => term.Split('=', 2))
             .ToList() ?? [];
+
+        // Field selectors with equality on dotted paths, e.g. metadata.name=x or spec.nodeName=n.
+        var fields = query["fieldSelector"]?
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(term => term.Split('=', 2))
+            .ToList() ?? [];
+        static string? Field(JsonObject item, string path) =>
+            path.Split('.').Aggregate((JsonNode?)item, (node, key) => node?[key]) is JsonValue value ? value.ToString() : null;
         List<JsonObject> matches;
         bool served;
         lock (_lock)
@@ -260,6 +300,7 @@ public sealed class FakeKubernetesApi
                 .Where(o => ns is null || (string?)o.Item["metadata"]?["namespace"] == ns)
                 .Where(o => name is null || (string?)o.Item["metadata"]?["name"] == name)
                 .Where(o => selector.All(term => (string?)o.Item["metadata"]?["labels"]?[term[0]] == term[^1]))
+                .Where(o => fields.All(term => Field(o.Item, term[0]) == term[^1]))
                 .Select(o => (JsonObject)o.Item.DeepClone())
                 .ToList();
         }
@@ -299,6 +340,14 @@ public sealed class FakeKubernetesApi
         if (ns is not null)
         {
             metadata["namespace"] = ns;
+        }
+
+        if (Refuse?.Invoke(plural, item) is { } refusal)
+        {
+            return Json(HttpStatusCode.UnprocessableEntity, new JsonObject
+            {
+                ["kind"] = "Status", ["apiVersion"] = "v1", ["status"] = "Failure", ["reason"] = "Invalid", ["code"] = 422, ["message"] = refusal,
+            });
         }
 
         lock (_lock)

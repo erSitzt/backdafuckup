@@ -12,12 +12,250 @@ public static class KubernetesSetup
     public const string FileName = "backdafuckup-setup.yaml";
 
     /// <summary>
+    /// The resources the product reads by name (<c>get</c>), per API group. Everything else is read by listing: a <c>get</c>
+    /// on <c>*/*</c> would also grant the proxy subresources (<c>nodes/proxy</c> reaches the kubelet, and through it exec in
+    /// any pod), which a backup never needs. Objects of other kinds are read by name through a list with a field selector
+    /// (<see cref="KubernetesApplier.ReadAsync"/>).
+    /// </summary>
+    public static IReadOnlyList<(string Group, IReadOnlyList<string> Resources)> ReadByName { get; } =
+    [
+        ("", ["configmaps", "limitranges", "namespaces", "persistentvolumeclaims", "persistentvolumes", "pods", "pods/log", "podtemplates",
+              "replicationcontrollers", "resourcequotas", "secrets", "serviceaccounts", "services"]),
+        ("apps", ["daemonsets", "deployments", "replicasets", "statefulsets"]),
+        ("apiextensions.k8s.io", ["customresourcedefinitions"]),
+        ("snapshot.storage.k8s.io", ["volumesnapshotclasses", "volumesnapshotcontents", "volumesnapshots"]),
+        ("storage.k8s.io", ["storageclasses"]),
+    ];
+
+    private static string ReadByNameRules() => string.Concat(ReadByName.Select(r => $$"""
+          - apiGroups: [{{Quote(r.Group)}}]
+            resources: [{{string.Join(", ", r.Resources)}}]
+            verbs: [get]
+
+        """));
+
+    /// <summary>
     /// The manifest to apply (kubectl or a Fleet bundle). Backup reads every object, Secrets included, takes and removes
     /// volume snapshots, runs hooks in pods and works with PVCs, PVs and pods in the work namespace. Restore creates and
     /// changes objects in any namespace; without it the account only backs up.
     /// </summary>
-    public static string Manifest(bool includeRestore = true, ClusterAgentManifest? agent = null) =>
-        (includeRestore ? Backup + Restore : Backup) + (agent is null ? string.Empty : Agent(agent));
+    public static string Manifest(bool includeRestore = true, ClusterAgentManifest? agent = null, NodeAgentManifest? nodeAgent = null) =>
+        (includeRestore ? Backup + Restore : Backup) + (agent is null ? string.Empty : Agent(agent)) + (nodeAgent is null ? string.Empty : NodeAgent(nodeAgent));
+
+    public const string NodeNamespace = "backdafuckup-node";
+
+    public const string NodeAgentName = "backdafuckup-node";
+
+    /// <summary>Where the node agent's container sees the kubelet's directory.</summary>
+    public const string NodeKubeletMount = "/host/kubelet";
+
+    /// <summary>
+    /// The optional node agent (spec 2026-11-12-1952-kubernetes-file-level-volumes): a DaemonSet in its own namespace that
+    /// reads pod volumes (emptyDirs, CSI volumes a pod has mounted) from the kubelet's directory and the kubelet's usage
+    /// numbers. The namespace allows privileged pods (Pod Security), because the agent mounts a host path; the agent itself
+    /// is not privileged: root without capabilities but <c>DAC_READ_SEARCH</c> (reading every file), a read-only root file
+    /// system, the kubelet's directory mounted read-only, no host network. Its own ServiceAccount may only read the
+    /// kubelet's statistics (<c>nodes/stats</c>); the server reaches it by exec (the backup role's <c>pods/exec</c>).
+    /// </summary>
+    private static string NodeAgent(NodeAgentManifest agent)
+    {
+        var pull = agent.PullSecretName is { } name
+            ? $$"""
+                    imagePullSecrets:
+                      - name: {{Quote(name)}}
+
+              """
+            : string.Empty;
+        var pullSecret = agent.PullSecretName is { } secretName && agent.DockerConfigJson is { } json
+            ? $$"""
+              ---
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: {{Quote(secretName)}}
+                namespace: {{NodeNamespace}}
+                labels:
+                  app.kubernetes.io/managed-by: backdafuckup
+              type: kubernetes.io/dockerconfigjson
+              data:
+                .dockerconfigjson: {{Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json))}}
+
+              """
+            : string.Empty;
+        return $$"""
+            ---
+            # The node agent: reads pod volumes (emptyDirs, CSI volumes a pod has mounted) on each node, and the kubelet's usage
+            # numbers. Privileged namespace for its host path; the pod itself: root with DAC_READ_SEARCH only, read-only.
+            apiVersion: v1
+            kind: Namespace
+            metadata:
+              name: {{NodeNamespace}}
+              labels:
+                app.kubernetes.io/managed-by: backdafuckup
+                pod-security.kubernetes.io/enforce: privileged
+                pod-security.kubernetes.io/audit: privileged
+                pod-security.kubernetes.io/warn: privileged
+            ---
+            apiVersion: v1
+            kind: ServiceAccount
+            metadata:
+              name: {{NodeAgentName}}
+              namespace: {{NodeNamespace}}
+              labels:
+                app.kubernetes.io/managed-by: backdafuckup
+            ---
+            # The kubelet's statistics only (/stats/summary); never nodes/proxy.
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRole
+            metadata:
+              name: {{NodeAgentName}}
+              labels:
+                app.kubernetes.io/managed-by: backdafuckup
+            rules:
+              - apiGroups: [""]
+                resources: [nodes/stats]
+                verbs: [get]
+            ---
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: ClusterRoleBinding
+            metadata:
+              name: {{NodeAgentName}}
+              labels:
+                app.kubernetes.io/managed-by: backdafuckup
+            roleRef:
+              apiGroup: rbac.authorization.k8s.io
+              kind: ClusterRole
+              name: {{NodeAgentName}}
+            subjects:
+              - kind: ServiceAccount
+                name: {{NodeAgentName}}
+                namespace: {{NodeNamespace}}
+            ---
+            # The server keeps the node agent at its own version: it may change this DaemonSet (its image), nothing else here.
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: Role
+            metadata:
+              name: backdafuckup-node-update
+              namespace: {{NodeNamespace}}
+              labels:
+                app.kubernetes.io/managed-by: backdafuckup
+            rules:
+              - apiGroups: [apps]
+                resources: [daemonsets]
+                resourceNames: [{{NodeAgentName}}]
+                verbs: [patch]
+            ---
+            apiVersion: rbac.authorization.k8s.io/v1
+            kind: RoleBinding
+            metadata:
+              name: backdafuckup-node-update
+              namespace: {{NodeNamespace}}
+              labels:
+                app.kubernetes.io/managed-by: backdafuckup
+            roleRef:
+              apiGroup: rbac.authorization.k8s.io
+              kind: Role
+              name: backdafuckup-node-update
+            subjects:
+              - kind: ServiceAccount
+                name: {{ServiceAccount}}
+                namespace: {{WorkNamespace}}
+
+            """ + pullSecret + $$"""
+            ---
+            apiVersion: apps/v1
+            kind: DaemonSet
+            metadata:
+              name: {{NodeAgentName}}
+              namespace: {{NodeNamespace}}
+              labels:
+                app.kubernetes.io/name: {{NodeAgentName}}
+                app.kubernetes.io/managed-by: backdafuckup
+            spec:
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: {{NodeAgentName}}
+              updateStrategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 25%
+              template:
+                metadata:
+                  labels:
+                    app.kubernetes.io/name: {{NodeAgentName}}
+                spec:
+                  serviceAccountName: {{NodeAgentName}}
+                  # Every node, those with taints too: their pods' volumes are read where they are.
+                  tolerations:
+                    - operator: Exists
+
+            """ + pull + $$"""
+                  securityContext:
+                    seccompProfile:
+                      type: RuntimeDefault
+                  containers:
+                    - name: node
+                      image: {{Quote(agent.Image)}}
+                      imagePullPolicy: IfNotPresent
+                      env:
+                        - name: BDFU_MOVER_MODE
+                          value: node
+                        - name: BDFU_NODE_SERVER_URL
+                          value: {{Quote(agent.ServerUrl)}}
+                        - name: BDFU_MOVER_SERVER_PINS
+                          value: {{Quote(string.Join(',', agent.ServerPins))}}
+                        - name: BDFU_NODE_KUBELET_ROOT
+                          value: {{NodeKubeletMount}}
+                        - name: NODE_NAME
+                          valueFrom:
+                            fieldRef:
+                              fieldPath: spec.nodeName
+                        - name: HOST_IP
+                          valueFrom:
+                            fieldRef:
+                              fieldPath: status.hostIP
+                        - name: POD_UID
+                          valueFrom:
+                            fieldRef:
+                              fieldPath: metadata.uid
+                        # The root file system is read-only: no diagnostics socket in /tmp.
+                        - name: DOTNET_EnableDiagnostics
+                          value: "0"
+                      resources:
+                        requests:
+                          cpu: 20m
+                          memory: 64Mi
+                        limits:
+                          memory: 512Mi
+                      securityContext:
+                        runAsUser: 0
+                        runAsGroup: 0
+                        allowPrivilegeEscalation: false
+                        readOnlyRootFilesystem: true
+                        capabilities:
+                          drop: [ALL]
+                          add: [DAC_READ_SEARCH]
+                      volumeMounts:
+                        # The kubelet's directory ({{agent.KubeletRootDir}}, from the cluster's platform), read-only; the volumes
+                        # mounted under it later (CSI, tmpfs emptyDirs) are seen too.
+                        - name: kubelet
+                          mountPath: {{NodeKubeletMount}}
+                          readOnly: true
+                          mountPropagation: HostToContainer
+                        - name: run
+                          mountPath: /run/bdfu
+                  volumes:
+                    - name: kubelet
+                      hostPath:
+                        path: {{Quote(agent.KubeletRootDir)}}
+                        type: Directory
+                    - name: run
+                      emptyDir:
+                        medium: Memory
+                        sizeLimit: 1Mi
+
+            """;
+    }
 
     public const string AgentName = "backdafuckup-agent";
 
@@ -175,7 +413,8 @@ public static class KubernetesSetup
         type: kubernetes.io/service-account-token
         ---
         # Backup: read every object (Secrets too), take and remove volume snapshots, run hooks in pods, and hand restored
-        # volumes to their claims (PVs are cluster-scoped).
+        # volumes to their claims (PVs are cluster-scoped). Objects are read by listing; "get" only on the resources below,
+        # never on */*, which would include nodes/proxy (the kubelet's API, and through it exec in any pod).
         apiVersion: rbac.authorization.k8s.io/v1
         kind: ClusterRole
         metadata:
@@ -183,13 +422,14 @@ public static class KubernetesSetup
         rules:
           - apiGroups: ["*"]
             resources: ["*"]
-            verbs: [get, list, watch]
-          - apiGroups: [snapshot.storage.k8s.io]
+            verbs: [list, watch]
+        {{ReadByNameRules()}}  - apiGroups: [snapshot.storage.k8s.io]
             resources: [volumesnapshots, volumesnapshotcontents]
             verbs: [create, delete, patch, update]
+          # Hooks and the node agent: exec over a WebSocket is a GET the API server authorizes as get (and create).
           - apiGroups: [""]
             resources: [pods/exec]
-            verbs: [create]
+            verbs: [create, get]
           - apiGroups: [""]
             resources: [persistentvolumes]
             verbs: [create, delete, patch, update]
@@ -273,6 +513,13 @@ public static class KubernetesSetup
 
         """;
 }
+
+/// <summary>What the node agent part of a cluster's setup manifest needs.</summary>
+/// <param name="ServerUrl">Where the node agents send the files they read (Guest agents → Settings).</param>
+/// <param name="ServerPins">SHA-256 SPKI pins of the server certificate; empty: the system's CA store.</param>
+/// <param name="Image">The mover image by digest.</param>
+/// <param name="KubeletRootDir">The kubelet's directory on the nodes (from the cluster's platform).</param>
+public sealed record NodeAgentManifest(string ServerUrl, IReadOnlyList<string> ServerPins, string Image, string KubeletRootDir, string? PullSecretName, string? DockerConfigJson);
 
 /// <summary>What the agent part of a cluster's setup manifest needs.</summary>
 /// <param name="ServerUrl">Where the agent reaches the backup server (Guest agents → Settings).</param>

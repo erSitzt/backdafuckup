@@ -115,12 +115,13 @@ public sealed class KubernetesProviderTests
              redis.Properties[KubernetesInventoryProperties.UsedBy], redis.ParentNativeId));
 
         var uploads = Item(inventory, InventoryKind.VolumeClaim, "portal/uploads");
-        Assert.Equal(DataPaths.ObjectsOnly, uploads.Properties[KubernetesInventoryProperties.DataPath]);
+        Assert.Equal(DataPaths.Files, uploads.Properties[KubernetesInventoryProperties.DataPath]);
         Assert.StartsWith("NFS volume", uploads.Properties[KubernetesInventoryProperties.DataPathReason], StringComparison.Ordinal);
+        Assert.EndsWith("read file by file through a read-only copy of its PV", uploads.Properties[KubernetesInventoryProperties.DataPathReason], StringComparison.Ordinal);
         Assert.Equal(("nfs", "Deployment web"), (uploads.Properties[KubernetesInventoryProperties.Driver], uploads.Properties[KubernetesInventoryProperties.UsedBy]));
 
         var legacy = Item(inventory, InventoryKind.VolumeClaim, "legacy/data");
-        Assert.Equal("no VolumeSnapshotClass for the CSI driver csi.example.com", legacy.Properties[KubernetesInventoryProperties.DataPathReason]);
+        Assert.Equal("no VolumeSnapshotClass for the CSI driver csi.example.com; the node agent would read it file by file while a pod has it mounted", legacy.Properties[KubernetesInventoryProperties.DataPathReason]);
         Assert.Equal("not bound to a volume", Item(inventory, InventoryKind.VolumeClaim, "legacy/pending").Properties[KubernetesInventoryProperties.DataPathReason]);
 
         Assert.Equal(("1", "1"), Counts(Item(inventory, InventoryKind.Namespace, "redis")));
@@ -152,7 +153,7 @@ public sealed class KubernetesProviderTests
         await using var session = await new KubernetesProvider(api.CreateHandler).OpenAsync(Settings(), Ct);
         var inventory = await session.GetInventoryAsync(Ct);
 
-        Assert.Equal("no VolumeSnapshotClass for the CSI driver csi.vsphere.vmware.com",
+        Assert.Equal("no VolumeSnapshotClass for the CSI driver csi.vsphere.vmware.com; the node agent would read it file by file while a pod has it mounted",
             Item(inventory, InventoryKind.VolumeClaim, "redis/data").Properties[KubernetesInventoryProperties.DataPathReason]);
     }
 
@@ -246,7 +247,7 @@ public sealed class KubernetesSetupTests
         Assert.Equal(("kubernetes.io/service-account-token", "backdafuckup"), (token.Type, token.Metadata.Annotations["kubernetes.io/service-account.name"]));
         var backup = Assert.IsType<k8s.Models.V1ClusterRole>(objects[3]);
         Assert.Contains(backup.Rules, r => r.Resources.Contains("volumesnapshotcontents") && r.Verbs.Contains("create"));
-        Assert.Contains(backup.Rules, r => r.Resources.Contains("pods/exec"));
+        Assert.Contains(backup.Rules, r => r.Resources.Contains("pods/exec") && r.Verbs.Contains("create") && r.Verbs.Contains("get"));
 
         // The restore may bind and escalate roles: RoleBindings to admin or edit, and the ClusterRoles of a whole-cluster restore.
         var restore = Assert.IsType<k8s.Models.V1ClusterRole>(objects[7]);
@@ -258,5 +259,72 @@ public sealed class KubernetesSetupTests
         var backupOnly = k8s.KubernetesYaml.LoadAllFromString(KubernetesSetup.Manifest(includeRestore: false));
         Assert.Equal(7, backupOnly.Count);
         Assert.DoesNotContain(backupOnly, o => o is k8s.Models.V1ClusterRole { Metadata.Name: "backdafuckup-restore" });
+    }
+
+    [Fact]
+    public void The_node_agent_runs_in_its_own_privileged_namespace_but_is_not_privileged_itself()
+    {
+        var manifest = KubernetesSetup.Manifest(
+            includeRestore: false, nodeAgent: new NodeAgentManifest("https://backup.example:9555/", ["pin-1"], "registry.corp.example/backdafuckup/mover@sha256:abc", "/var/lib/k0s/kubelet", null, null));
+        var objects = k8s.KubernetesYaml.LoadAllFromString(manifest);
+
+        var ns = objects.OfType<k8s.Models.V1Namespace>().Single(n => n.Metadata.Name == KubernetesSetup.NodeNamespace);
+        Assert.Equal("privileged", ns.Metadata.Labels["pod-security.kubernetes.io/enforce"]);
+
+        // Its own account reads the kubelets' statistics, nothing else; the server may change its DaemonSet's image only.
+        var role = objects.OfType<k8s.Models.V1ClusterRole>().Single(r => r.Metadata.Name == KubernetesSetup.NodeAgentName);
+        var rule = Assert.Single(role.Rules);
+        Assert.Equal(("nodes/stats", "get"), (string.Join(',', rule.Resources), string.Join(',', rule.Verbs)));
+        var update = objects.OfType<k8s.Models.V1Role>().Single(r => r.Metadata.NamespaceProperty == KubernetesSetup.NodeNamespace);
+        Assert.Equal(("daemonsets", KubernetesSetup.NodeAgentName, "patch"), (string.Join(',', update.Rules[0].Resources), string.Join(',', update.Rules[0].ResourceNames), string.Join(',', update.Rules[0].Verbs)));
+        Assert.Equal(KubernetesSetup.ServiceAccount, objects.OfType<k8s.Models.V1RoleBinding>().Single(b => b.Metadata.NamespaceProperty == KubernetesSetup.NodeNamespace).Subjects[0].Name);
+
+        var daemonSet = Assert.Single(objects.OfType<k8s.Models.V1DaemonSet>());
+        var pod = daemonSet.Spec.Template.Spec;
+        var container = Assert.Single(pod.Containers);
+        Assert.Equal("registry.corp.example/backdafuckup/mover@sha256:abc", container.Image);
+        Assert.Null(pod.HostNetwork);
+        Assert.Null(pod.HostPID);
+        Assert.Equal((false, true, false), (container.SecurityContext.Privileged ?? false, container.SecurityContext.ReadOnlyRootFilesystem ?? false, container.SecurityContext.AllowPrivilegeEscalation ?? true));
+        Assert.Equal(("ALL", "DAC_READ_SEARCH"), (string.Join(',', container.SecurityContext.Capabilities.Drop), string.Join(',', container.SecurityContext.Capabilities.Add)));
+        Assert.Equal("Exists", Assert.Single(pod.Tolerations).OperatorProperty);
+
+        // The kubelet's directory of the cluster's platform, read-only, with the mounts made under it later.
+        var kubelet = pod.Volumes.Single(v => v.HostPath is not null);
+        Assert.Equal(("/var/lib/k0s/kubelet", "Directory"), (kubelet.HostPath.Path, kubelet.HostPath.Type));
+        var mount = container.VolumeMounts.Single(m => m.Name == kubelet.Name);
+        Assert.Equal((KubernetesSetup.NodeKubeletMount, true, "HostToContainer"), (mount.MountPath, mount.ReadOnlyProperty ?? false, mount.MountPropagation));
+        Assert.Equal(1, pod.Volumes.Count(v => v.HostPath is not null));
+        var env = container.Env.ToDictionary(e => e.Name, e => e.Value ?? e.ValueFrom?.FieldRef?.FieldPath);
+        Assert.Equal(("node", "https://backup.example:9555/", "pin-1", "status.hostIP"), (env["BDFU_MOVER_MODE"], env["BDFU_NODE_SERVER_URL"], env["BDFU_MOVER_SERVER_PINS"], env["HOST_IP"]));
+    }
+
+    [Fact]
+    public void The_backup_role_lists_everything_but_gets_only_what_it_reads_by_name_never_a_proxy()
+    {
+        var backup = k8s.KubernetesYaml.LoadAllFromString(KubernetesSetup.Manifest(includeRestore: false))
+            .OfType<k8s.Models.V1ClusterRole>().Single(r => r.Metadata.Name == "backdafuckup-backup");
+
+        // RBAC as the API server matches it: "*" in a rule's resources matches every resource and subresource.
+        bool Allows(string group, string resource, string verb) => backup.Rules.Any(r =>
+            (r.ApiGroups.Contains("*") || r.ApiGroups.Contains(group)) && (r.Resources.Contains("*") || r.Resources.Contains(resource))
+            && (r.Verbs.Contains("*") || r.Verbs.Contains(verb)));
+
+        // The kubelet's API (and through it exec in any pod) and the other proxies are never granted.
+        Assert.False(Allows("", "nodes/proxy", "get"));
+        Assert.False(Allows("", "pods/proxy", "get"));
+        Assert.False(Allows("", "services/proxy", "get"));
+        Assert.False(Allows("", "nodes/proxy", "create"));
+
+        // Every kind can be listed and watched (backups, restores reading objects of other kinds by a field selector).
+        Assert.True(Allows("example.com", "widgets", "list"));
+        Assert.True(Allows("", "secrets", "watch"));
+        Assert.False(Allows("example.com", "widgets", "get"));
+
+        // What the product reads by name is granted.
+        foreach (var (group, resources) in KubernetesSetup.ReadByName)
+        {
+            Assert.All(resources, resource => Assert.True(Allows(group, resource, "get"), $"get {group}/{resource}"));
+        }
     }
 }

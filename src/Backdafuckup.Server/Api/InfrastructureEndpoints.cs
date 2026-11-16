@@ -13,6 +13,7 @@ public static class InfrastructureEndpoints
     public static void MapInfrastructureEndpoints(this IEndpointRouteBuilder app)
     {
         var connections = app.MapGroup("/api/connections");
+        Clusters.KubernetesUsageSources.Map(connections);
 
         connections.MapGet("/", async (AppDbContext db, Clusters.ClusterAgents agents, string? kind, CancellationToken ct) =>
         {
@@ -212,24 +213,61 @@ public static class InfrastructureEndpoints
             "Reaches a Kubernetes cluster through its agent from now on (jobs and restore points stay): the stored token and pins are replaced by a connect token, " +
             "which the cluster's setup manifest with the agent (GET /api/kubernetes/setup.yaml?connectionId=…) holds. Going back to direct access means adding the token again.");
 
-        connections.MapPost("/{id:guid}/rescan", async (Guid id, AppDbContext db, ConnectionManager manager, TimeProvider time, CancellationToken ct) =>
+        // The platforms of a cluster set by hand, or (null) detected again; the product name follows at once.
+        connections.MapPut("/{id:guid}/platforms", async (Guid id, SetConnectionPlatformsDto request, AppDbContext db, Clusters.ClusterAgents agents, CancellationToken ct) =>
         {
-            return await TryRefreshInventoryAsync(id, db, manager, time, ct) is { } error
-                ? Results.Problem(error, statusCode: StatusCodes.Status502BadGateway)
-                : Results.NoContent();
+            var connection = await db.Connections.Include(c => c.Credential).Include(c => c.Hosts).FirstOrDefaultAsync(c => c.Id == id, ct);
+            if (connection is null)
+            {
+                return Results.NotFound();
+            }
+
+            if (connection.Kind != HypervisorKind.Kubernetes)
+            {
+                return Results.Problem("Only Kubernetes clusters have platforms.", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            var ids = request.Override?.Select(i => i.Trim()).Where(i => i.Length > 0 && i != "kubernetes").Distinct(StringComparer.Ordinal).ToList();
+            if (ids is not null && KubernetesPlatformMapping.Check(ids) is { } problem)
+            {
+                return Results.Problem(problem, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            connection.PlatformOverride = ids;
+            connection.ProductName = Backdafuckup.Kubernetes.KubernetesPlatformSet.Of(ids ?? connection.DetectedPlatforms?.Select(d => d.Id)).Display;
+            await db.SaveChangesAsync(ct);
+            return Results.Ok(WithAgent(connection, agents));
+        });
+
+        connections.MapPost("/{id:guid}/rescan", async (
+            Guid id, AppDbContext db, ConnectionManager manager, TimeProvider time, [Microsoft.AspNetCore.Mvc.FromServices] Movers.MoverRegistry images, ILoggerFactory loggers,
+            CancellationToken ct) =>
+        {
+            if (await TryRefreshInventoryAsync(id, db, manager, time, ct) is { } error)
+            {
+                return Results.Problem(error, statusCode: StatusCodes.Status502BadGateway);
+            }
+
+            await UpdateNodeAgentAsync(id, db, manager, images, loggers.CreateLogger("Backdafuckup.Server.NodeAgents"), ct);
+            return Results.NoContent();
         });
 
         connections.MapGet("/{id:guid}/inventory", async (Guid id, AppDbContext db, CancellationToken ct) =>
             (await db.Inventory.Where(i => i.ConnectionId == id).OrderBy(i => i.Kind).ThenBy(i => i.Name).ToListAsync(ct)).Select(i => i.ToDto()));
 
+        // The platform catalog, for setting a cluster's platforms by hand.
+        app.MapGet("/api/kubernetes/platforms", () => Backdafuckup.Kubernetes.KubernetesPlatformCatalog.Builtin.Profiles.Where(p => !p.Always).Select(KubernetesPlatformMapping.ToDto));
+
         app.MapGet("/api/kubernetes/setup.yaml", async (
-                bool? restore, bool? download, Guid? connectionId, AppDbContext db, CredentialProtector protector, Agents.AgentSettingsStore settings,
+                bool? restore, bool? download, Guid? connectionId, bool? nodeAgent, AppDbContext db, CredentialProtector protector, Agents.AgentSettingsStore settings,
                 [Microsoft.AspNetCore.Mvc.FromServices] Movers.MoverRegistry images, CancellationToken ct) =>
             {
                 Backdafuckup.Kubernetes.ClusterAgentManifest? agent = null;
+                Backdafuckup.Kubernetes.NodeAgentManifest? node = null;
+                HypervisorConnection? cluster = null;
                 if (connectionId is { } id)
                 {
-                    var connection = await db.Connections.AsNoTracking().Include(c => c.Credential).FirstOrDefaultAsync(c => c.Id == id && c.Kind == HypervisorKind.Kubernetes, ct);
+                    var connection = cluster = await db.Connections.AsNoTracking().Include(c => c.Credential).FirstOrDefaultAsync(c => c.Id == id && c.Kind == HypervisorKind.Kubernetes, ct);
                     if (connection is null)
                     {
                         return Results.NotFound();
@@ -259,14 +297,41 @@ public static class InfrastructureEndpoints
                     }
                 }
 
-                var manifest = Backdafuckup.Kubernetes.KubernetesSetup.Manifest(restore != false, agent);
+                // The node agent: its kubelet directory from the cluster's platforms (the base's without a cluster).
+                if (nodeAgent == true)
+                {
+                    var url = await settings.GetServerUrlAsync(ct);
+                    if (string.IsNullOrWhiteSpace(url))
+                    {
+                        return Results.Problem("Set the address under which the cluster reaches this server first (Guest agents → Settings → server address): the node agents send the files they read there.",
+                            statusCode: StatusCodes.Status409Conflict);
+                    }
+
+                    Backdafuckup.Core.DataMover.MoverDeployment mover;
+                    try
+                    {
+                        mover = await images.EnsurePushedAsync(null, ct);
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or Movers.RegistryException or HttpRequestException)
+                    {
+                        return Results.Problem($"The node agent runs the mover image, which is not in a registry the cluster can pull from yet (Kubernetes Clusters → Mover image): {ex.Message}",
+                            statusCode: StatusCodes.Status409Conflict);
+                    }
+
+                    var platforms = Backdafuckup.Kubernetes.KubernetesPlatformSet.Of(cluster?.PlatformOverride ?? cluster?.DetectedPlatforms?.Select(d => d.Id));
+                    node = new Backdafuckup.Kubernetes.NodeAgentManifest(url.TrimEnd('/') + "/", settings.ServerPins(), mover.Image, platforms.KubeletRootDir, mover.PullSecretName, mover.DockerConfigJson);
+                }
+
+                var manifest = Backdafuckup.Kubernetes.KubernetesSetup.Manifest(restore != false, agent, node);
                 return download == true
                     ? Results.File(System.Text.Encoding.UTF8.GetBytes(manifest), "application/yaml", Backdafuckup.Kubernetes.KubernetesSetup.FileName)
                     : Results.Text(manifest, "application/yaml");
             })
             .WithDescription(
                 "The objects a Kubernetes cluster needs for backdafuckup: work namespace, ServiceAccount with a token, backup and (unless restore=false) restore roles. " +
-                "With connectionId of a cluster reached through its agent also the agent (Deployment, connect token, pull secret); the mover image is pushed first if needed. download=true returns it as a file.");
+                "With connectionId of a cluster reached through its agent also the agent (Deployment, connect token, pull secret); the mover image is pushed first if needed. " +
+                "nodeAgent=true adds the node agent (a DaemonSet in backdafuckup-node that reads pod volumes and the kubelets' usage numbers; its kubelet directory from the cluster's platforms). " +
+                "download=true returns it as a file.");
 
         var repositories = app.MapGroup("/api/repositories");
 
@@ -457,7 +522,7 @@ public static class InfrastructureEndpoints
     /// stays, shows the error and can be rescanned or removed). Returns the error, or null.
     /// </summary>
     /// <summary>A connection for the console; a cluster behind its agent with the agent's state.</summary>
-    private static ConnectionDto WithAgent(HypervisorConnection connection, Clusters.ClusterAgents agents) =>
+    internal static ConnectionDto WithAgent(HypervisorConnection connection, Clusters.ClusterAgents agents) =>
         connection.Access == ConnectionAccess.Agent
             ? connection.ToDto() with { Agent = agents.Describe(connection.Id) ?? new ConnectionAgentDto(false, null, null, null, null, null, null) }
             : connection.ToDto();
@@ -477,6 +542,38 @@ public static class InfrastructureEndpoints
             await db.Connections.Where(c => c.Id == connectionId)
                 .ExecuteUpdateAsync(u => u.SetProperty(c => c.Status, ConnectionStatus.Error).SetProperty(c => c.LastError, error), ct);
             return error;
+        }
+    }
+
+    /// <summary>
+    /// Brings a cluster's node agent to this server's mover image, when it has one and no session of a cluster runs (its pods
+    /// restart, and a read in progress would fail). Best effort: a failure is logged, the rescan still succeeded.
+    /// </summary>
+    private static async Task UpdateNodeAgentAsync(Guid id, AppDbContext db, ConnectionManager manager, Movers.MoverRegistry images, ILogger logger, CancellationToken ct)
+    {
+        if (!await db.Connections.AnyAsync(c => c.Id == id && c.Kind == HypervisorKind.Kubernetes, ct)
+            || await db.Sessions.AnyAsync(s => s.ObjectKind == RestorePointObjectKinds.KubernetesNamespace && (s.State == SessionState.Queued || s.State == SessionState.Running || s.State == SessionState.Stopping), ct))
+        {
+            return;
+        }
+
+        try
+        {
+            await using var cluster = await manager.OpenAsync(id, ct);
+            if (cluster is not Backdafuckup.Kubernetes.IKubernetesAgentUpdater updater)
+            {
+                return;
+            }
+
+            var mover = await images.EnsurePushedAsync(null, ct);
+            if (await updater.UpdateNodeAgentImageAsync(mover.Image, ct) is { } previous)
+            {
+                logger.LogInformation("The node agent of connection {Connection} ran {Previous}; its DaemonSet now runs {Image}.", id, previous, mover.Image);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning("The node agent of connection {Connection} could not be brought to this server's version: {Error}", id, ex.Message);
         }
     }
 
@@ -538,6 +635,15 @@ public static class InfrastructureEndpoints
         }
 
         await db.SaveChangesAsync(ct);
+
+        // A cluster's platforms and the product name they give it ("RKE2 · Rancher"), at every scan.
+        if (inventory.Platforms is { } detected)
+        {
+            var list = detected.ToList();
+            await db.Connections.Where(c => c.Id == connectionId).ExecuteUpdateAsync(u => u
+                .SetProperty(c => c.DetectedPlatforms, list)
+                .SetProperty(c => c.ProductName, platform.ProductName), ct);
+        }
 
         // Status fields only, without the row version: background services touch the same row.
         await db.Connections.Where(c => c.Id == connectionId).ExecuteUpdateAsync(u => u

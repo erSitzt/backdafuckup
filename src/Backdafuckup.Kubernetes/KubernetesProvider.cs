@@ -17,15 +17,17 @@ namespace Backdafuckup.Kubernetes;
 /// <param name="images">The mover image in a registry the clusters can pull from.</param>
 /// <param name="timings">Tests only: shorter waits.</param>
 /// <param name="executor">Tests only: runs hooks instead of the cluster's exec.</param>
+/// <param name="usage">The usage numbers configured per cluster (sizes of what backups do not hold); null: none.</param>
 public sealed class KubernetesProvider(
     Func<ConnectionSettings, DelegatingHandler?>? transport = null, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null,
-    IPodExecutor? executor = null)
+    IPodExecutor? executor = null, IKubernetesUsageSources? usage = null)
     : IHypervisorProvider
 {
     /// <summary>Tests only: one transport for every connection.</summary>
     public KubernetesProvider(
-        Func<DelegatingHandler?> transport, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
-        : this(_ => transport(), channels, images, timings, executor)
+        Func<DelegatingHandler?> transport, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null,
+        IKubernetesUsageSources? usage = null)
+        : this(_ => transport(), channels, images, timings, executor, usage)
     {
     }
 
@@ -86,7 +88,7 @@ public sealed class KubernetesProvider(
     public Task<IHypervisorSession> OpenAsync(ConnectionSettings settings, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        IHypervisorSession session = new KubernetesSession(KubernetesClients.Create(settings, null, transport?.Invoke(settings)), settings, channels, images, timings, executor);
+        IHypervisorSession session = new KubernetesSession(KubernetesClients.Create(settings, null, transport?.Invoke(settings)), settings, channels, images, timings, executor, usage);
         return Task.FromResult(session);
     }
 

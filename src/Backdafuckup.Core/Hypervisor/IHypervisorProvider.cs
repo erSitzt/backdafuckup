@@ -77,6 +77,9 @@ public interface IVmBackupSession : IAsyncDisposable
     /// <summary>A Kubernetes namespace's cluster, volumes and hooks (the backup of a namespace); null for a VM.</summary>
     Repository.KubernetesNamespaceDescriptor? Kubernetes => null;
 
+    /// <summary>Data the job asked for was not backed up (the provider logged what): the run ends with a warning.</summary>
+    bool Warned => false;
+
     /// <summary>How long <see cref="CommitAsync"/> took to remove the snapshot data; null before the commit.</summary>
     TimeSpan? ReleaseDuration => null;
 
@@ -110,6 +113,25 @@ public interface IVmBackupSession : IAsyncDisposable
     /// <summary>Token for the next incremental backup of this disk (null if the platform cannot track changes for it).</summary>
     ChangeToken? GetNewChangeToken(SnapshotDisk disk);
 
+    /// <summary>
+    /// Volumes read file by file instead of as disks (spec 2026-11-12-1952-kubernetes-file-level-volumes): Kubernetes volumes
+    /// without CSI snapshots. Empty for VMs.
+    /// </summary>
+    IReadOnlyList<FileTreeSource> FileTrees => [];
+
+    /// <summary>
+    /// Starts reading a volume file by file (its mover); the reader hands over the mover's stream once. With
+    /// <paramref name="previous"/> (an incremental run), files unchanged since then are not read again.
+    /// </summary>
+    Task<IFileTreeReader> OpenFileTreeAsync(FileTreeSource tree, IPreviousFileTree? previous, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This platform reads no volumes file by file.");
+
+    /// <summary>
+    /// Every file tree has been read (or failed): what waited for that runs now, e.g. post-hooks held back until the files
+    /// of volumes in use were read (Velero's order). Called once; disposing the session does it when this was not called.
+    /// </summary>
+    Task FileTreesReadAsync(IOperationLog log, CancellationToken cancellationToken) => Task.CompletedTask;
+
     /// <summary>The restore point is committed: keep only change-tracking state and remove the snapshot data.</summary>
     Task CommitAsync(IOperationLog log, CancellationToken cancellationToken);
 }
@@ -140,3 +162,19 @@ public interface IVmRestoreSession : IAsyncDisposable
 /// </summary>
 public sealed class SnapshotCleanupDeferredException(string message, Exception? inner = null) : Exception(message, inner);
 
+
+/// <summary>
+/// A volume read file by file: its key in the restore point (a PVC's name, or <c>pod/&lt;pod&gt;/&lt;volume&gt;</c>), its name,
+/// its kind ("pvc" or "pod-volume"), how it is read ("shadow-pv" or "node-agent"), its size if known, and for messages
+/// what it is (cluster, namespace, PVC, PV).
+/// </summary>
+public sealed record FileTreeSource(string Key, string Name, string Kind, string Reader, long? EstimatedBytes, string Description);
+
+/// <summary>A volume being read file by file: hands the mover's <c>BDFUTRE1</c> stream to the consumer once.</summary>
+public interface IFileTreeReader : IAsyncDisposable
+{
+    /// <summary>For messages, e.g. "a read-only copy of PV pvc-1 (nfs 10.26.0.5:/export/x)".</summary>
+    string TransportName { get; }
+
+    Task ReadAsync(Func<Stream, CancellationToken, Task> consume, CancellationToken cancellationToken);
+}

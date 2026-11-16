@@ -83,7 +83,20 @@ public sealed class ConnectionManager(IEnumerable<IHypervisorProvider> providers
         new NetworkCredential(connection.Credential.Username, protector.Unprotect(connection.Credential.ProtectedSecret)),
         connection.TrustMode,
         connection.Hosts.Select(h => new PinnedCertificate(h.Address, h.SpkiSha256, h.Sha256Thumbprint, h.CertificatePem)).ToList(),
-        new Dictionary<string, string> { [XenConnectionOptions.AllowInsecureNbd] = connection.AllowInsecureNbd ? "true" : "false" });
+        Options(connection, new Dictionary<string, string> { [XenConnectionOptions.AllowInsecureNbd] = connection.AllowInsecureNbd ? "true" : "false" }));
+
+    /// <summary>The options every session of the connection gets, the platforms set by hand among them (Kubernetes).</summary>
+    public static Dictionary<string, string> Options(HypervisorConnection connection, Dictionary<string, string> options)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(options);
+        if (connection.PlatformOverride is { } platforms)
+        {
+            options[Backdafuckup.Kubernetes.KubernetesConnectionOptions.Platforms] = string.Join(',', platforms);
+        }
+
+        return options;
+    }
 
     public async Task<IHypervisorSession> OpenAsync(Guid connectionId, CancellationToken cancellationToken)
     {

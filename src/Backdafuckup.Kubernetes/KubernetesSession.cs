@@ -17,6 +17,12 @@ public interface IKubernetesNamespaceReader
     Task<IReadOnlyList<System.Text.Json.Nodes.JsonObject>> ReadObjectsAsync(string ns, CancellationToken cancellationToken);
 }
 
+/// <summary>A cluster's platforms (spec 2026-11-12-1952-kubernetes-platform-profiles), detected once per session.</summary>
+public interface IKubernetesPlatforms
+{
+    Task<KubernetesPlatformSelection> GetPlatformsAsync(CancellationToken cancellationToken);
+}
+
 /// <summary>The namespaces of a cluster with certain labels, for jobs that select them so.</summary>
 public interface IKubernetesNamespaceSelector
 {
@@ -35,32 +41,58 @@ public interface IKubernetesAgentUpdater
     /// runs <paramref name="image"/> already or the cluster has no agent Deployment.
     /// </summary>
     Task<string?> UpdateAgentImageAsync(string image, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Sets the image of the node agent's DaemonSet (its pods restart with it, a part at a time); returns the image it had,
+    /// or null when it runs <paramref name="image"/> already or the cluster has no node agent. Never while volumes are read.
+    /// </summary>
+    Task<string?> UpdateNodeAgentImageAsync(string image, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
 }
 
 internal sealed class KubernetesSession(
-    IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null)
-    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater, IKubernetesNamespaceSelector, IKubernetesRestorePlanner, IKubernetesClusterRestorer
+    IKubernetes client, ConnectionSettings settings, IMoverChannels? channels = null, IMoverImageSource? images = null, KubernetesTimings? timings = null, IPodExecutor? executor = null,
+    IKubernetesUsageSources? usage = null)
+    : IHypervisorSession, IKubernetesNamespaceReader, IKubernetesFileRestore, IKubernetesAgentUpdater, IKubernetesNamespaceSelector, IKubernetesRestorePlanner, IKubernetesClusterRestorer, IKubernetesPlatforms
 {
     private PlatformInfo? _platform;
+    private KubernetesPlatformSelection? _platforms;
+
+    public async Task<KubernetesPlatformSelection> GetPlatformsAsync(CancellationToken cancellationToken)
+    {
+        if (_platforms is null)
+        {
+            var facts = await KubernetesPlatformDetection.ReadFactsAsync(client, cancellationToken: cancellationToken).ConfigureAwait(false);
+            _platforms = KubernetesPlatformDetection.Select(KubernetesPlatformDetection.Detect(facts), settings);
+        }
+
+        return _platforms;
+    }
 
     public PlatformInfo Platform => _platform ?? new PlatformInfo(string.Empty, settings.ClusterName(), settings.Address, "Kubernetes", string.Empty);
 
     public Task<string?> MissingRestoreRightsAsync(CancellationToken cancellationToken) => KubernetesClusterRestore.MissingRightsAsync(client, settings.ClusterName(), cancellationToken);
 
     public Task<KubernetesClusterRestoreResult> RestoreClusterScopeAsync(
-        byte[] objects, IReadOnlyDictionary<string, string> storageClassMap, bool replaceExisting, IOperationLog log, CancellationToken cancellationToken) =>
+        byte[] objects, IReadOnlyList<string>? sourcePlatforms, IReadOnlyDictionary<string, string> storageClassMap, bool replaceExisting, IOperationLog log,
+        CancellationToken cancellationToken) =>
         KubernetesClusterRestore.RestoreAsync(
-            client, settings.ClusterName(), [.. KubernetesResources.Read(objects)], storageClassMap, replaceExisting, log, timings ?? new KubernetesTimings(), cancellationToken);
+            client, settings.ClusterName(), [.. KubernetesResources.Read(objects)], KubernetesPlatformSet.Recorded(sourcePlatforms), storageClassMap, replaceExisting, log,
+            timings ?? new KubernetesTimings(), cancellationToken);
 
     public Task<KubernetesRestorePlan> PlanRestoreAsync(
         KubernetesNamespaceDescriptor descriptor, byte[] objects, string targetNamespace, IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster,
-        CancellationToken cancellationToken) =>
+        IReadOnlyCollection<string>? chosen, IReadOnlyCollection<string>? onlyClaims, CancellationToken cancellationToken) =>
         KubernetesRestorePlanner.PlanAsync(
-            client, settings.ClusterName(), descriptor, [.. KubernetesResources.Read(objects)], targetNamespace, storageClassMap, otherCluster, cancellationToken);
+            client, settings.ClusterName(), descriptor, [.. KubernetesResources.Read(objects)], targetNamespace, storageClassMap, otherCluster, chosen, onlyClaims,
+            cancellationToken);
 
     public async Task<Inventory> GetInventoryAsync(CancellationToken cancellationToken)
     {
-        var inventory = await KubernetesInventory.GetAsync(client, settings, cancellationToken).ConfigureAwait(false);
+        // The node agents' kubelet numbers count before Prometheus'.
+        var agents = await NodeAgents.FindAsync(client, executor ?? new ClientPodExecutor(client), settings.ClusterName(), cancellationToken).ConfigureAwait(false);
+        var numbers = KubernetesUsage.Merge(
+            agents.Any ? await agents.UsageAsync(null, cancellationToken).ConfigureAwait(false) : null, await ReadUsageAsync(null, null, cancellationToken).ConfigureAwait(false));
+        var inventory = await KubernetesInventory.GetAsync(client, settings, numbers, cancellationToken, agents).ConfigureAwait(false);
         _platform = inventory.Platform;
         return inventory;
     }
@@ -86,14 +118,43 @@ internal sealed class KubernetesSession(
             }
         }
 
+        // What the cluster's platforms make is recorded with each restore point (and left out of the cluster-scoped objects).
+        var platforms = (await GetPlatformsAsync(cancellationToken).ConfigureAwait(false)).Set;
         if (request.VmId == KubernetesClusterBackup.Member)
         {
-            return await KubernetesClusterBackup.StartAsync(client, settings, _platform.ProductVersion, request, log, cancellationToken).ConfigureAwait(false);
+            return await KubernetesClusterBackup.StartAsync(client, settings, _platform.ProductVersion, platforms, request, log, cancellationToken).ConfigureAwait(false);
         }
 
+        var numbers = await ReadUsageAsync(request.VmId, log, cancellationToken).ConfigureAwait(false);
         return await KubernetesNamespaceBackup.StartAsync(
-            client, settings, _platform.ProductVersion, request, log, ledger, channels, images, executor ?? new ClientPodExecutor(client), timings ?? new KubernetesTimings(), cancellationToken)
-            .ConfigureAwait(false);
+            client, settings, _platform.ProductVersion, platforms, request, log, ledger, channels, images, executor ?? new ClientPodExecutor(client), timings ?? new KubernetesTimings(),
+            numbers, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The usage numbers of a namespace (or all) from the source configured for the cluster; null without one, or when it
+    /// cannot be read (a warning in the log: the backup goes on without sizes).
+    /// </summary>
+    private async Task<KubernetesUsage?> ReadUsageAsync(string? ns, Core.Operations.IOperationLog? log, CancellationToken cancellationToken)
+    {
+        if (usage is null || await usage.ForAsync(settings.ConnectionId, cancellationToken).ConfigureAwait(false) is not { } source)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await source.ReadAsync(ns, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Text.Json.JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            log?.Warning($"Usage numbers from {source.Name} cannot be read ({ex.Message}); sizes of what is not backed up are unknown.");
+            return null;
+        }
+        finally
+        {
+            (source as IDisposable)?.Dispose();
+        }
     }
 
     public async Task<IReadOnlyList<System.Text.Json.Nodes.JsonObject>> ReadObjectsAsync(string ns, CancellationToken cancellationToken)
@@ -175,6 +236,46 @@ internal sealed class KubernetesSession(
         return current;
     }
 
+    public async Task<string?> UpdateNodeAgentImageAsync(string image, CancellationToken cancellationToken)
+    {
+        const string Ns = KubernetesSetup.NodeNamespace;
+        const string Name = KubernetesSetup.NodeAgentName;
+        k8s.Models.V1DaemonSet daemonSet;
+        try
+        {
+            daemonSet = await client.AppsV1.ReadNamespacedDaemonSetAsync(Name, Ns, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        var containers = daemonSet.Spec?.Template?.Spec?.Containers?.ToList() ?? [];
+        var index = containers.FindIndex(c => c.Name == "node");
+        if (index < 0 || containers[index].Image == image)
+        {
+            return null;
+        }
+
+        var current = containers[index].Image;
+        var patch = new System.Text.Json.Nodes.JsonArray(
+            new System.Text.Json.Nodes.JsonObject { ["op"] = "test", ["path"] = $"/spec/template/spec/containers/{index}/name", ["value"] = "node" },
+            new System.Text.Json.Nodes.JsonObject { ["op"] = "replace", ["path"] = $"/spec/template/spec/containers/{index}/image", ["value"] = image });
+        try
+        {
+            await client.AppsV1.PatchNamespacedDaemonSetAsync(new k8s.Models.V1Patch(patch.ToJsonString(), k8s.Models.V1Patch.PatchType.JsonPatch), Name, Ns, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (k8s.Autorest.HttpOperationException ex) when (ex.Response?.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            throw new KubernetesOperationException(
+                $"The node agent's DaemonSet {Ns}/{Name} in cluster {settings.ClusterName()} runs {current}, and the ServiceAccount may not change it: apply the current setup manifest with the node agent once; from then on the server keeps it up to date itself.",
+                ex);
+        }
+
+        return current;
+    }
+
     /// <summary>Starts a mover pod next to a live PVC that puts restored files into it.</summary>
     public async Task<IPvcFileRestore> BeginFileRestoreAsync(PvcFileRestoreRequest request, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken)
     {
@@ -194,6 +295,12 @@ internal sealed class KubernetesSession(
         {
             await WorkloadPause.ResumeAsync(flow, artifact.NativeId, artifact.Data, cancellationToken).ConfigureAwait(false);
             log.Info($"Workload {artifact.NativeId} scaled back in cluster {settings.ClusterName()} (a PVC swap did not finish).");
+            return;
+        }
+
+        if (artifact.Kind == KubernetesArtifactKinds.VolumeHandOver)
+        {
+            await VolumeFilesImport.GiveBackAsync(flow, artifact.NativeId, artifact.Data, cancellationToken).ConfigureAwait(false);
             return;
         }
 

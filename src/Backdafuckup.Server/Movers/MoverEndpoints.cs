@@ -18,7 +18,13 @@ public static class MoverEndpoints
         // Backup: the mover sends its volume.
         movers.MapPut("/{id:guid}/data", async (Guid id, MoverChannels channels, HttpContext http, CancellationToken ct) =>
         {
-            if (channels.Find(id, http.Request.Headers.Authorization) is not BackupChannel channel)
+            var found = channels.Find(id, http.Request.Headers.Authorization);
+            if (found is TreeBackupChannel tree)
+            {
+                return await ReceiveTreeAsync(tree, channels, http, ct);
+            }
+
+            if (found is not BackupChannel channel)
             {
                 return NotOpen(id);
             }
@@ -83,6 +89,40 @@ public static class MoverEndpoints
             return Results.Empty;
         });
 
+        // Incremental file tree: the mover fetches the previous run's tree and follows it while it walks the volume.
+        movers.MapGet("/{id:guid}/previous", async (Guid id, MoverChannels channels, HttpContext http, CancellationToken ct) =>
+        {
+            if (channels.Find(id, http.Request.Headers.Authorization) is not TreeBackupChannel { Previous: { } previous } channel)
+            {
+                return NotOpen(id);
+            }
+
+            if (!channel.TryClaimPrevious())
+            {
+                return Results.Problem($"The previous tree for {channel.Description} was already fetched on channel {id}.", statusCode: StatusCodes.Status409Conflict);
+            }
+
+            // The mover reads it as fast as its walk goes: a large file being read holds it back for a while.
+            if (http.Features.Get<IHttpMinResponseDataRateFeature>() is { } rate)
+            {
+                rate.MinDataRate = null;
+            }
+
+            http.Response.ContentType = "application/octet-stream";
+            try
+            {
+                await previous.WriteAsync(http.Response.Body, ct);
+            }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException or InvalidDataException)
+            {
+                // The mover sees a stream without its end and fails; its report names the cause it saw.
+                channels.Logger.LogWarning("Sending the previous tree for {Volume} failed: {Error}", channel.Description, ex.Message);
+                http.Abort();
+            }
+
+            return Results.Empty;
+        });
+
         // The mover's report: the end of a restore, or an error.
         movers.MapPost("/{id:guid}/result", (Guid id, MoverResult result, MoverChannels channels, HttpContext http) =>
         {
@@ -135,6 +175,45 @@ public static class MoverEndpoints
                 return Results.Problem(ex.Message, statusCode: StatusCodes.Status502BadGateway);
             }
         }).WithDescription("Pushes the mover image this server ships to the registry (blobs it lacks, then the manifest).");
+    }
+
+    /// <summary>A mover sends its volume file by file: the stream goes to the channel's consumer.</summary>
+    private static async Task<IResult> ReceiveTreeAsync(TreeBackupChannel channel, MoverChannels channels, HttpContext http, CancellationToken ct)
+    {
+        if (!channel.TryClaim())
+        {
+            return Results.Problem($"The mover channel {channel.Id} for {channel.Description} is already connected.", statusCode: StatusCodes.Status409Conflict);
+        }
+
+        // A file that is slow to read (a busy NFS server) sends nothing for a while; heartbeats keep the connection.
+        if (http.Features.Get<IHttpMinRequestBodyDataRateFeature>() is { } rate)
+        {
+            rate.MinDataRate = null;
+        }
+
+        channels.Logger.LogInformation("Mover for {Volume} connected from {Remote} to send its files.", channel.Description, http.Connection.RemoteIpAddress);
+        try
+        {
+            await channel.ReceiveAsync(http.Request.Body, ct);
+            return Results.Json(new MoverResult(0));
+        }
+        catch (InvalidDataException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status422UnprocessableEntity);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return Results.Problem($"The backup of {channel.Description} stopped on the server.", statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+        catch (TimeoutException ex)
+        {
+            // The mover stopped making progress (a hung NFS server): the server gave up on it.
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status504GatewayTimeout);
+        }
+        catch (IOException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status500InternalServerError);
+        }
     }
 
     private static IResult NotOpen(Guid id) =>

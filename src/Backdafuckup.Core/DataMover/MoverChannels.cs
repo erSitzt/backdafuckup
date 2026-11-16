@@ -2,9 +2,10 @@ namespace Backdafuckup.Core.DataMover;
 
 /// <summary>
 /// What a mover pod needs to reach the server for one volume: the URL of its channel, where it reports the end of a
-/// restore, the one-time token, and the server certificate's SPKI pins (empty: system validation).
+/// restore, the one-time token, and the server certificate's SPKI pins (empty: system validation). A volume read file by
+/// file in an incremental run also gets where it fetches the previous run's tree (<see cref="MoverPrevious"/>).
 /// </summary>
-public sealed record MoverEndpoint(Uri DataUrl, Uri ResultUrl, string Token, IReadOnlyList<string> ServerPins);
+public sealed record MoverEndpoint(Uri DataUrl, Uri ResultUrl, string Token, IReadOnlyList<string> ServerPins, Uri? PreviousUrl = null);
 
 /// <summary>
 /// What a mover reports to <see cref="MoverEndpoint.ResultUrl"/>: after a restore the data bytes it wrote and flushed
@@ -75,6 +76,33 @@ public interface IMoverChannels
 
     /// <param name="description">For messages: the live volume the files go into (cluster, namespace, PVC).</param>
     Task<IMoverFilesChannel> OpenFilesAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null);
+
+    /// <param name="description">For messages: the volume read file by file (cluster, namespace, PVC or pod volume).</param>
+    /// <param name="previous">The volume's tree in the previous run: the mover fetches it and sends unchanged files as such.</param>
+    Task<IMoverTreeChannel> OpenTreeBackupAsync(string description, CancellationToken cancellationToken, TimeSpan? connectTimeout = null, IPreviousFileTree? previous = null) =>
+        throw new NotSupportedException("This server takes no volumes file by file.");
+}
+
+/// <summary>A volume's tree in the previous run, served to its mover for an incremental read (<see cref="MoverPrevious"/>).</summary>
+public interface IPreviousFileTree
+{
+    /// <summary>Writes the <c>BDFUPRV1</c> stream to <paramref name="output"/>.</summary>
+    Task WriteAsync(Stream output, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// A file tree backup channel (spec 2026-11-12-1952-kubernetes-file-level-volumes): the mover reads its volume file by file
+/// and sends the <see cref="MoverTree"/> stream to <see cref="Endpoint"/>; the server consumes it once.
+/// </summary>
+public interface IMoverTreeChannel : IAsyncDisposable
+{
+    MoverEndpoint Endpoint { get; }
+
+    /// <summary>Hands the mover's stream to <paramref name="consume"/> when it connects; completes when it has consumed it.</summary>
+    Task ConsumeAsync(Func<Stream, CancellationToken, Task> consume, CancellationToken cancellationToken);
+
+    /// <summary>Fails the channel from outside, e.g. when the mover's pod cannot start.</summary>
+    void Abort(Exception error);
 }
 
 /// <summary>What a cluster needs to start movers: the image, and the pull secret (its name, and its content when the server creates it).</summary>

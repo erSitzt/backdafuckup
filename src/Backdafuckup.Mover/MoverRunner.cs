@@ -40,6 +40,9 @@ internal static partial class MoverRunner
                 case MoverMode.Files:
                     await FilesAsync(http, options, log, cancellationToken).ConfigureAwait(false);
                     break;
+                case MoverMode.Tree:
+                    await TreeAsync(http, options, log, cancellationToken).ConfigureAwait(false);
+                    break;
                 default:
                     await RestoreAsync(http, options, log, cancellationToken).ConfigureAwait(false);
                     break;
@@ -172,6 +175,105 @@ internal static partial class MoverRunner
         var report = await new VolumeFiles(options.Root, options.Keep, options.Owners, log).ApplyAsync(stream, cancellationToken).ConfigureAwait(false);
         await ReportAsync(http, options, new MoverResult(report.Bytes, null, report), cancellationToken).ConfigureAwait(false);
         log.WriteLine($"Done in {Stopwatch.GetElapsedTime(started):hh\\:mm\\:ss}: {report.Files} file(s), {Size(report.Bytes)}; {report.Renamed} as RESTORED- copies, {report.Failed} failed, {report.Partial} without all of owner, mode or times.");
+    }
+
+    /// <summary>
+    /// Reads the mounted volume file by file (<see cref="VolumeTree"/>, on a thread of its own) and sends the tree as the
+    /// request body: the walk waits while the server is behind (the pipe pauses it), a heartbeat keeps the request alive
+    /// while a slow file is read.
+    /// </summary>
+    private static async Task TreeAsync(HttpClient http, MoverOptions options, TextWriter log, CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            throw new PlatformNotSupportedException("The mover reads volumes file by file on Linux only.");
+        }
+
+        log.WriteLine($"Reading {options.Root} file by file to {options.DataUrl.Authority}{(options.PreviousUrl is null ? string.Empty : ", files unchanged since the previous run not again")}.");
+        var started = Stopwatch.GetTimestamp();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        // The previous run's tree streams in alongside the walk, which follows it (on its own connection).
+        using var previous = options.PreviousUrl is { } previousUrl ? await PreviousAsync(http, previousUrl, cancellationToken).ConfigureAwait(false) : null;
+        await using var previousStream = previous is null ? null : await previous.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var pipe = new System.IO.Pipelines.Pipe(new System.IO.Pipelines.PipeOptions(pauseWriterThreshold: 8 * 1024 * 1024, resumeWriterThreshold: 4 * 1024 * 1024));
+        var walk = Task.Factory.StartNew(
+            () =>
+            {
+                try
+                {
+                    using var output = pipe.Writer.AsStream();
+                    var summary = VolumeTree.Read(options.Root, output, HeartbeatInterval, stop.Token, previousStream, options.Racy);
+                    pipe.Writer.Complete();
+                    return summary;
+                }
+                catch (Exception ex)
+                {
+                    pipe.Writer.Complete(ex);
+                    throw;
+                }
+            },
+            stop.Token,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+
+        using var content = new StreamContent(pipe.Reader.AsStream());
+        using var request = new HttpRequestMessage(HttpMethod.Put, options.DataUrl) { Content = content };
+        HttpResponseMessage response;
+        try
+        {
+            response = await SendAsync(http, request, options.DataUrl, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            await stop.CancelAsync().ConfigureAwait(false);
+            await ThrowIfWalkFailedAsync(walk, options.Root).ConfigureAwait(false);
+            throw;
+        }
+
+        using (response)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                await stop.CancelAsync().ConfigureAwait(false);
+                await ThrowIfWalkFailedAsync(walk, options.Root).ConfigureAwait(false);
+                throw new HttpRequestException($"The backup server {options.DataUrl.Authority} refused the files: {(int)response.StatusCode} {Detail(body)}");
+            }
+        }
+
+        var done = await walk.ConfigureAwait(false);
+        log.WriteLine($"Done in {Stopwatch.GetElapsedTime(started):hh\\:mm\\:ss}: {done.Entries} entries, {Size(done.Bytes)} of file content read, " +
+                      $"{done.Unchanged} file(s) unchanged since the previous run, {done.Issues} not read" +
+                      (done.AsOwner > 0 ? $", {done.AsOwner} read as their owner (root was refused: root_squash)." : "."));
+    }
+
+    /// <summary>
+    /// When the walk failed (the volume cannot be read, the previous tree broke off), the upload broke because of it: its
+    /// error is the one to report, not the upload's (a stream that ended early, a refused request).
+    /// </summary>
+    private static async Task ThrowIfWalkFailedAsync(Task walk, string root)
+    {
+        await Task.WhenAny(walk, Task.Delay(TimeSpan.FromSeconds(5), CancellationToken.None)).ConfigureAwait(false);
+        if (walk is { IsFaulted: true, Exception.InnerException: { } cause } && cause is not OperationCanceledException)
+        {
+            throw new IOException($"Reading {root} failed: {cause.Message}", cause);
+        }
+    }
+
+    /// <summary>Starts fetching the previous run's tree; the walk reads it as it goes.</summary>
+    private static async Task<HttpResponseMessage> PreviousAsync(HttpClient http, Uri url, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        var response = await SendAsync(http, request, url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            response.Dispose();
+            throw new HttpRequestException($"The backup server {url.Authority} did not send the previous run's tree: {(int)response.StatusCode} {Detail(body)}");
+        }
+
+        return response;
     }
 
     private static async Task ReportAsync(HttpClient http, MoverOptions options, MoverResult result, CancellationToken cancellationToken)

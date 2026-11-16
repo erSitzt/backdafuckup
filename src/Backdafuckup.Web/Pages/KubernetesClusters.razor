@@ -18,26 +18,37 @@
 {
     <MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
         <div class="d-flex align-center gap-2 mb-2">
-            <MudText Typo="Typo.subtitle1" Class="section-title">Setup manifest@(_setupFor is { } forCluster ? $" of {forCluster.DisplayName}, with its agent" : string.Empty)</MudText>
+            <MudText Typo="Typo.subtitle1" Class="section-title">Setup manifest@(_setupFor is { } forCluster ? $" of {forCluster.DisplayName}{(forCluster.Agent is null ? string.Empty : ", with its agent")}" : string.Empty)</MudText>
             <MudSpacer />
             <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="CopySetupAsync">Copy</MudButton>
             <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Download" Href="@SetupUrl(download: true)">Download</MudButton>
             <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Close" aria-label="Close" OnClick="@(() => { _setup = null; _setupFor = null; })" />
         </div>
         <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
-            Apply it in the cluster yourself (kubectl apply -f @KubernetesSetupFile, or as a Fleet bundle). It creates the work namespace backdafuckup-system, a ServiceAccount
+            Apply it in the cluster yourself (kubectl apply -f @KubernetesSetupFile, or through a GitOps tool such as Fleet or Argo CD). It creates the work namespace backdafuckup-system, a ServiceAccount
             with a token, and the roles. Backup reads every object, Secrets included, takes and removes volume snapshots and runs hooks in pods.
             @if (_setupFor is null)
             {
                 <span>Then <b>Add cluster</b> with the token and the cluster CA from its token secret, or add it through an agent.</span>
             }
-            else
+            else if (_setupFor.Agent is not null)
             {
                 <span>With the agent: a Deployment that dials out to this server, and its connect token. Keep the manifest like a password.</span>
             }
         </MudText>
         <MudSwitch T="bool" Value="_withRestore" ValueChanged="OnRestoreChangedAsync" Color="Color.Primary" Class="mb-2"
                    Label="With the restore role: create and change objects in any namespace (leave it off for an account that only backs up)" />
+        <MudSwitch T="bool" Value="_withNodeAgent" ValueChanged="OnNodeAgentChangedAsync" Color="Color.Primary" Class="mb-2"
+                   Label="With the node agent: reads pod volumes (emptyDirs), CSI volumes without snapshots that pods have mounted, and the kubelets' usage numbers on every node" />
+        @if (_withNodeAgent)
+        {
+            <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-2">
+                A DaemonSet in its own namespace backdafuckup-node, which Pod Security lets run privileged pods: the agent mounts the kubelet's directory
+                (read-only) to read pod volumes there. The agent itself runs as root with one capability only, DAC_READ_SEARCH (reading every file), a read-only
+                root file system and no host network; its ServiceAccount may only read the kubelets' statistics (nodes/stats). It sends the files to this
+                server's address, like the movers.
+            </MudText>
+        }
         <pre class="mono" style="max-height: 360px; overflow: auto; background: var(--mud-palette-background-gray); padding: 12px; border-radius: 8px; margin: 0">@_setup</pre>
     </MudPaper>
 }
@@ -74,7 +85,7 @@ else if (_clusters.Count > 0)
     <MudPaper Elevation="0" Outlined="true" Class="mb-4 cq">
         <MudSimpleTable Dense="true" Hover="true" Elevation="0">
             <thead>
-                <tr><th>Cluster</th><th>Connection</th><th class="c-560">Version</th><th class="c-760">Storage for volumes</th><th class="c-950">Namespaces</th><th>Volumes</th></tr>
+                <tr><th>Cluster</th><th>Connection</th><th class="c-560">Platform</th><th class="c-760">Storage for volumes</th><th class="c-950">Namespaces</th><th>Volumes</th></tr>
             </thead>
             <tbody>
                 @foreach (var cluster in _clusters)
@@ -94,15 +105,16 @@ else if (_clusters.Count > 0)
                                 <span class="cell-sub">direct API</span>
                             }
                         </td>
-                        <td class="c-560">@cluster.ProductVersion</td>
+                        <td class="c-560">@cluster.ProductName<span class="cell-sub">@cluster.ProductVersion@(cluster.Platforms?.Override is not null ? " · set by hand" : string.Empty)</span></td>
                         <td class="c-760">
-                            @foreach (var (driver, snapshot) in summary.Drivers)
+                            @foreach (var (driver, path) in summary.Drivers)
                             {
-                                <span class="@(snapshot ? "mini-chip success" : "mini-chip")" title="@(snapshot ? "Volumes of this driver are backed up through a CSI snapshot." : "Volumes of this driver: objects only.")">@driver · @(snapshot ? "snapshots" : "objects only")</span>
+                                <span class="@(KubernetesDataPaths.HasData(path) ? "mini-chip success" : "mini-chip")"
+                                      title="@(path switch { KubernetesDataPaths.Snapshot => "Volumes of this driver are backed up through a CSI snapshot.", KubernetesDataPaths.Files => "Volumes of this driver are backed up file by file: through a read-only copy of their PV, or by the node agent from a pod's mount.", _ => "Volumes of this driver: objects only." })">@driver · @(path == KubernetesDataPaths.Snapshot ? "snapshots" : KubernetesDataPaths.Label(path))</span>
                             }
                         </td>
                         <td class="c-950 num">@summary.Namespaces</td>
-                        <td>@summary.Snapshot snapshot<span class="cell-sub">@summary.ObjectsOnly objects only</span></td>
+                        <td>@summary.Snapshot snapshot@(summary.Files > 0 ? $", {summary.Files} files" : string.Empty)<span class="cell-sub">@summary.ObjectsOnly objects only</span></td>
                     </tr>
                 }
             </tbody>
@@ -122,6 +134,7 @@ else if (_clusters.Count > 0)
                 }
                 else
                 {
+                    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Description" OnClick="@(() => ShowAgentSetupAsync(selected))">Setup manifest</MudButton>
                     <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.SettingsEthernet" OnClick="@(() => SwitchToAgentAsync(selected))">Reach it through an agent</MudButton>
                 }
                 <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Refresh" OnClick="@(() => RescanAsync(selected))">Rescan</MudButton>
@@ -143,13 +156,21 @@ else if (_clusters.Count > 0)
                                     <tr>
                                         <td>@volume.ParentNativeId</td>
                                         <td>@volume.Name</td>
-                                        <td class="c-560 num">@Fmt.Bytes(long.TryParse(p.GetValueOrDefault("sizeBytes"), out var size) ? size : null)</td>
+                                        <td class="c-560 num">@Fmt.Bytes(long.TryParse(p.GetValueOrDefault("sizeBytes"), out var size) ? size : null)@if (long.TryParse(p.GetValueOrDefault("usedBytes"), out var used))
+                                            {
+                                                <span class="cell-sub">@Fmt.Bytes(used) used</span>
+                                            }</td>
                                         <td class="c-760">@(string.IsNullOrEmpty(p.GetValueOrDefault("storageClass")) ? "–" : p["storageClass"])<span class="cell-sub">@p.GetValueOrDefault("driver")</span></td>
                                         <td class="c-950">@p.GetValueOrDefault("usedBy")</td>
                                         <td>
-                                            @if (p.GetValueOrDefault("dataPath") == "snapshot")
+                                            @if (p.GetValueOrDefault("dataPath") == KubernetesDataPaths.Snapshot)
                                             {
                                                 <span class="mini-chip success" title="@($"VolumeSnapshotClass {p.GetValueOrDefault("snapshotClass")}")">snapshot</span>
+                                            }
+                                            else if (p.GetValueOrDefault("dataPath") == KubernetesDataPaths.Files)
+                                            {
+                                                <span class="mini-chip success" title="@p.GetValueOrDefault("dataPathReason")">files</span>
+                                                <span class="cell-sub">@p.GetValueOrDefault("dataPathReason")</span>
                                             }
                                             else
                                             {
@@ -166,19 +187,145 @@ else if (_clusters.Count > 0)
                 <MudTabPanel Text="Namespaces">
                     <div class="cq" style="overflow-x: auto">
                         <MudSimpleTable Dense="true" Hover="true" Elevation="0">
-                            <thead><tr><th>Namespace</th><th class="num">Volumes</th><th class="num">Through a snapshot</th><th class="c-560">Phase</th></tr></thead>
+                            <thead><tr><th>Namespace</th><th class="num">Volumes</th><th class="num">With data</th><th class="num" title="Volumes of pods that are not PVCs (without those of platforms)">Pod volumes</th><th class="num" title="Data in pod volumes and containers' own file systems, from the usage numbers">Outside PVCs</th><th class="c-560">Phase</th></tr></thead>
                             <tbody>
                                 @foreach (var ns in items.Where(i => i.Kind == "Namespace").OrderBy(i => i.Name))
                                 {
                                     <tr>
                                         <td>@ns.Name</td>
                                         <td class="num">@ns.Properties.GetValueOrDefault("volumeClaims")</td>
-                                        <td class="num">@ns.Properties.GetValueOrDefault("snapshotVolumes")</td>
+                                        <td class="num" title="Through a snapshot, or file by file">@WithData(ns)</td>
+                                        <td class="num">@ns.Properties.GetValueOrDefault("podVolumes")</td>
+                                        <td class="num">@(long.TryParse(ns.Properties.GetValueOrDefault("unsavedBytes"), out var unsaved) ? Fmt.Bytes(unsaved) : "–")</td>
                                         <td class="c-560">@ns.Properties.GetValueOrDefault("phase")</td>
                                     </tr>
                                 }
                             </tbody>
                         </MudSimpleTable>
+                    </div>
+                </MudTabPanel>
+                <MudTabPanel Text="Pod volumes">
+                    <div class="d-flex align-center flex-wrap gap-2 px-4 pt-3">
+                        <MudText Typo="Typo.body2">
+                            Volumes of running pods that are not PVCs, and what containers write into their own file systems, per workload. Backups hold none of it unless asked
+                            for (the job's switch, or the pod annotation <span class="mono">backup.velero.io/backup-volumes</span>), and reading pod volumes needs the node agent.
+                            @(selected.UsageSource is null ? "Sizes need usage numbers (tab Usage numbers)." : string.Empty)
+                        </MudText>
+                        <MudSpacer />
+                        <MudSwitch T="bool" @bind-Value="_showPlatformVolumes" Color="Color.Primary" Label="Platforms' volumes too" />
+                    </div>
+                    <div class="cq" style="overflow-x: auto">
+                        <MudSimpleTable Dense="true" Hover="true" Elevation="0">
+                            <thead><tr><th>Namespace</th><th>Workload</th><th>Volume</th><th class="c-560">Kind</th><th class="num">Data</th><th>Backup</th></tr></thead>
+                            <tbody>
+                                @foreach (var v in PodVolumeRows(items))
+                                {
+                                    var p = v.Properties;
+                                    var kind = p.GetValueOrDefault("kind");
+                                    <tr>
+                                        <td>@v.ParentNativeId</td>
+                                        <td>@p.GetValueOrDefault("workload")<span class="cell-sub">@(p.GetValueOrDefault("pods") is "1" or null ? "1 pod" : $"{p["pods"]} pods")</span></td>
+                                        <td>@v.Name</td>
+                                        <td class="c-560">@KindLabel(kind)<span class="cell-sub">@p.GetValueOrDefault("source")@(long.TryParse(p.GetValueOrDefault("sizeLimitBytes"), out var limit) ? $"limit {Fmt.Bytes(limit)}" : null)</span></td>
+                                        <td class="num">@(long.TryParse(p.GetValueOrDefault("usedBytes"), out var data) ? Fmt.Bytes(data) : "–")@if (double.TryParse(p.GetValueOrDefault("writeBytesPerSecond"), System.Globalization.CultureInfo.InvariantCulture, out var rate))
+                                            {
+                                                <span class="cell-sub">writes @Fmt.Bytes((long)(rate * 3600))/h</span>
+                                            }</td>
+                                        <td>
+                                            @if (kind == "container")
+                                            {
+                                                <span class="mini-chip warning" title="@p.GetValueOrDefault("reason")">never backed up</span>
+                                            }
+                                            else if (p.GetValueOrDefault("readBy") == "node-agent")
+                                            {
+                                                <span class="mini-chip success" title="@p.GetValueOrDefault("reason")">asked for · node agent</span>
+                                            }
+                                            else if (!string.IsNullOrEmpty(p.GetValueOrDefault("optIn")))
+                                            {
+                                                <span class="mini-chip warning" title="@p.GetValueOrDefault("reason")">asked for · not backed up</span>
+                                                <span class="cell-sub">@p.GetValueOrDefault("reason")</span>
+                                            }
+                                            else if (!string.IsNullOrEmpty(p.GetValueOrDefault("platform")))
+                                            {
+                                                <span class="mini-chip" title="@p.GetValueOrDefault("reason")">@p["platform"]</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="mini-chip" title="@p.GetValueOrDefault("reason")">not asked for</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                    </div>
+                </MudTabPanel>
+                <MudTabPanel Text="Usage numbers">
+                    <UsageSourcePanel Cluster="selected" OnSaved="OnUsageSavedAsync" />
+                </MudTabPanel>
+                <MudTabPanel Text="Platform">
+                    <div class="pa-4">
+                        @if (selected.Platforms is { } platforms)
+                        {
+                            <MudText Typo="Typo.body2" Class="mb-2">
+                                <b>@platforms.Display</b> · @(platforms.Override is null ? "detected" : "set by hand")
+                            </MudText>
+                            <div class="mb-3">
+                                @foreach (var p in platforms.Effective)
+                                {
+                                    <span class="mini-chip" title="@(p.Notes ?? p.Category)">@p.Name@(p.Tested ? string.Empty : " · untested")</span>
+                                }
+                            </div>
+                            <MudText Typo="Typo.subtitle2">Detected</MudText>
+                            @if (platforms.Detected.Count == 0)
+                            {
+                                <div class="cell-sub mb-3">Nothing particular: only what every Kubernetes cluster has.</div>
+                            }
+                            else
+                            {
+                                <ul class="mb-3">
+                                    @foreach (var d in platforms.Detected)
+                                    {
+                                        <li>@d.Name <span class="cell-sub">by @d.Evidence@(d.Tested ? string.Empty : " · untested: its rules come from the platform's documentation")</span></li>
+                                    }
+                                </ul>
+                            }
+
+                            <MudText Typo="Typo.subtitle2">Left out by whole-cluster jobs with the platform's list</MudText>
+                            <div class="cell-sub mb-3">@string.Join("; ", platforms.Namespaces.Select(n => $"{n.Profile}: {string.Join(", ", n.Patterns)}"))</div>
+
+                            @foreach (var note in platforms.Effective.Where(p => p.Notes is not null))
+                            {
+                                <MudAlert Severity="Severity.Info" Dense="true" Class="mb-2">@note.Name: @note.Notes</MudAlert>
+                            }
+
+                            @if (_editingPlatforms == selected.Id && _catalog is not null)
+                            {
+                                <MudPaper Elevation="0" Outlined="true" Class="pa-3 mt-2">
+                                    <MudSwitch T="bool" @bind-Value="_platformsByHand" Color="Color.Primary" Label="Set by hand instead of detecting them" />
+                                    @if (_platformsByHand)
+                                    {
+                                        @foreach (var category in _catalog.GroupBy(p => p.Category))
+                                        {
+                                            <MudText Typo="Typo.caption" Class="mt-2 d-block">@category.Key</MudText>
+                                            @foreach (var p in category)
+                                            {
+                                                <MudCheckBox T="bool" Value="@_chosenPlatforms.Contains(p.Id)" ValueChanged="@(on => TogglePlatform(p.Id, on))" Dense="true" Color="Color.Primary"
+                                                             Label="@($"{p.Name}{(p.Tested ? string.Empty : " (untested)")}")" />
+                                            }
+                                        }
+                                    }
+                                    <div class="d-flex gap-2 mt-2">
+                                        <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="@(() => SavePlatformsAsync(selected))">Save</MudButton>
+                                        <MudButton OnClick="@(() => _editingPlatforms = Guid.Empty)">Cancel</MudButton>
+                                    </div>
+                                </MudPaper>
+                            }
+                            else
+                            {
+                                <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Tune" OnClick="@(() => EditPlatformsAsync(selected))">Set platforms…</MudButton>
+                            }
+                        }
                     </div>
                 </MudTabPanel>
             </MudTabs>
@@ -194,6 +341,7 @@ else if (_clusters.Count > 0)
     private string? _setup;
     private ConnectionDto? _setupFor;
     private bool _withRestore = true;
+    private bool _withNodeAgent;
     private bool _showMover;
     private MoverImageDto? _mover;
     private const string KubernetesSetupFile = "backdafuckup-setup.yaml";
@@ -226,19 +374,28 @@ else if (_clusters.Count > 0)
         }
     }
 
-    /// <summary>Per cluster: the CSI drivers (and NFS) of its volumes and whether they go through a snapshot, and the counts.</summary>
-    private (IReadOnlyList<(string Driver, bool Snapshot)> Drivers, int Namespaces, int Snapshot, int ObjectsOnly) Summary(Guid clusterId)
+    /// <summary>
+    /// Per cluster: the CSI drivers (and NFS) of its volumes and how their data is backed up (the best of the driver's
+    /// volumes), and the counts.
+    /// </summary>
+    private (IReadOnlyList<(string Driver, string Path)> Drivers, int Namespaces, int Snapshot, int Files, int ObjectsOnly) Summary(Guid clusterId)
     {
         var items = _inventory.GetValueOrDefault(clusterId) ?? [];
         var volumes = items.Where(i => i.Kind == "VolumeClaim").ToList();
+        static int Rank(string? path) => path switch { KubernetesDataPaths.Snapshot => 2, KubernetesDataPaths.Files => 1, _ => 0 };
         var drivers = volumes
             .GroupBy(v => string.IsNullOrEmpty(v.Properties.GetValueOrDefault("driver")) ? "unbound" : v.Properties["driver"])
-            .Select(g => (g.Key, g.Any(v => v.Properties.GetValueOrDefault("dataPath") == "snapshot")))
-            .OrderByDescending(d => d.Item2).ThenBy(d => d.Key)
+            .Select(g => (g.Key, g.Select(v => v.Properties.GetValueOrDefault("dataPath")).MaxBy(Rank) ?? KubernetesDataPaths.ObjectsOnly))
+            .OrderByDescending(d => Rank(d.Item2)).ThenBy(d => d.Key)
             .ToList();
-        var snapshot = volumes.Count(v => v.Properties.GetValueOrDefault("dataPath") == "snapshot");
-        return (drivers, items.Count(i => i.Kind == "Namespace"), snapshot, volumes.Count - snapshot);
+        var snapshot = volumes.Count(v => v.Properties.GetValueOrDefault("dataPath") == KubernetesDataPaths.Snapshot);
+        var files = volumes.Count(v => v.Properties.GetValueOrDefault("dataPath") == KubernetesDataPaths.Files);
+        return (drivers, items.Count(i => i.Kind == "Namespace"), snapshot, files, volumes.Count - snapshot - files);
     }
+
+    /// <summary>A namespace's PVCs whose data is backed up (through a snapshot or file by file).</summary>
+    private static int WithData(InventoryItemDto ns) =>
+        (int.TryParse(ns.Properties.GetValueOrDefault("snapshotVolumes"), out var s) ? s : 0) + (int.TryParse(ns.Properties.GetValueOrDefault("fileVolumes"), out var f) ? f : 0);
 
     private async Task ToggleSetupAsync()
     {
@@ -254,7 +411,8 @@ else if (_clusters.Count > 0)
     }
 
     private string SetupUrl(bool download) =>
-        $"api/kubernetes/setup.yaml?restore={(_withRestore ? "true" : "false")}{(_setupFor is { } cluster ? $"&connectionId={cluster.Id}" : string.Empty)}{(download ? "&download=true" : string.Empty)}";
+        $"api/kubernetes/setup.yaml?restore={(_withRestore ? "true" : "false")}{(_withNodeAgent ? "&nodeAgent=true" : string.Empty)}" +
+        $"{(_setupFor is { } cluster ? $"&connectionId={cluster.Id}" : string.Empty)}{(download ? "&download=true" : string.Empty)}";
 
     /// <summary>The manifest of a cluster behind its agent, with the agent and its connect token (to apply it again).</summary>
     private async Task ShowAgentSetupAsync(ConnectionDto cluster)
@@ -298,6 +456,20 @@ else if (_clusters.Count > 0)
     private static string AgentTitle(ConnectionAgentDto agent) =>
         $"Version {agent.Version ?? "?"}{(agent.ConnectedUtc is { } at ? $", connected since {Fmt.Time(at)}" : string.Empty)}{(agent.ApiServer is { } api ? $", API server {api} in the cluster" : string.Empty)}";
 
+    private async Task OnNodeAgentChangedAsync(bool value)
+    {
+        _withNodeAgent = value;
+        try
+        {
+            _setup = await Api.GetStringAsync(SetupUrl(download: false));
+        }
+        catch (ApiException ex)
+        {
+            _withNodeAgent = false;
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
     private async Task OnRestoreChangedAsync(bool value)
     {
         _withRestore = value;
@@ -321,6 +493,86 @@ else if (_clusters.Count > 0)
     {
         _adding = false;
         await LoadAsync();
+    }
+
+    private bool _showPlatformVolumes;
+
+    /// <summary>Pod volumes and containers' file systems, the largest first; those of platforms only when asked for.</summary>
+    private IEnumerable<InventoryItemDto> PodVolumeRows(List<InventoryItemDto> items) => items
+        .Where(i => i.Kind == "PodVolume" && (_showPlatformVolumes || string.IsNullOrEmpty(i.Properties.GetValueOrDefault("platform"))))
+        .OrderByDescending(i => string.IsNullOrEmpty(i.Properties.GetValueOrDefault("optIn")) ? 0 : 1)
+        .ThenByDescending(i => long.TryParse(i.Properties.GetValueOrDefault("usedBytes"), out var b) ? b : -1)
+        .ThenBy(i => i.ParentNativeId).ThenBy(i => i.Properties.GetValueOrDefault("workload")).ThenBy(i => i.Name);
+
+    private static string KindLabel(string? kind) => kind switch
+    {
+        "emptyDir-memory" => "emptyDir in memory",
+        "container" => "container file system",
+        null or "" => "–",
+        _ => kind,
+    };
+
+    /// <summary>A changed usage source shows its numbers at once: the cluster is scanned again.</summary>
+    private async Task OnUsageSavedAsync(ConnectionDto saved)
+    {
+        try
+        {
+            await Api.PostAsync($"api/connections/{saved.Id}/rescan");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Warning);
+        }
+
+        await LoadAsync();
+    }
+
+    private Guid _editingPlatforms;
+    private bool _platformsByHand;
+    private readonly HashSet<string> _chosenPlatforms = new(StringComparer.Ordinal);
+    private List<KubernetesPlatformDto>? _catalog;
+
+    private async Task EditPlatformsAsync(ConnectionDto cluster)
+    {
+        try
+        {
+            _catalog ??= await Api.GetAsync<List<KubernetesPlatformDto>>("api/kubernetes/platforms");
+            _chosenPlatforms.Clear();
+            _chosenPlatforms.UnionWith(cluster.Platforms?.Effective.Select(p => p.Id).Where(id => id != "kubernetes") ?? []);
+            _platformsByHand = cluster.Platforms?.Override is not null;
+            _editingPlatforms = cluster.Id;
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private void TogglePlatform(string id, bool on)
+    {
+        if (on)
+        {
+            _chosenPlatforms.Add(id);
+        }
+        else
+        {
+            _chosenPlatforms.Remove(id);
+        }
+    }
+
+    private async Task SavePlatformsAsync(ConnectionDto cluster)
+    {
+        try
+        {
+            await Api.PutAsync($"api/connections/{cluster.Id}/platforms", new SetConnectionPlatformsDto(_platformsByHand ? [.. _chosenPlatforms] : null));
+            _editingPlatforms = Guid.Empty;
+            Snackbar.Add(_platformsByHand ? $"Platforms of {cluster.DisplayName} set." : $"Platforms of {cluster.DisplayName} are detected again.", Severity.Success);
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
     }
 
     private async Task RescanAsync(ConnectionDto cluster)

@@ -27,9 +27,11 @@ public sealed record KubernetesVolumePlan(string Claim, string? SourceStorageCla
 /// <summary>Plans a namespace restore into a cluster (read only): what a restore would check, and what to look at first.</summary>
 public interface IKubernetesRestorePlanner
 {
+    /// <param name="chosen">Only these objects and what they need, as the restore's <c>Objects</c>; null: all.</param>
+    /// <param name="onlyClaims">Only these PVCs, as the restore's <c>OnlyClaims</c>; null: all.</param>
     Task<KubernetesRestorePlan> PlanRestoreAsync(
         KubernetesNamespaceDescriptor descriptor, byte[] objects, string targetNamespace, IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster,
-        CancellationToken cancellationToken);
+        IReadOnlyCollection<string>? chosen, IReadOnlyCollection<string>? onlyClaims, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -43,9 +45,13 @@ internal static class KubernetesRestorePlanner
 
     public static async Task<KubernetesRestorePlan> PlanAsync(
         IKubernetes client, string cluster, KubernetesNamespaceDescriptor descriptor, IReadOnlyList<JsonObject> objects, string targetNamespace,
-        IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster, CancellationToken cancellationToken)
+        IReadOnlyDictionary<string, string> storageClassMap, bool otherCluster, IReadOnlyCollection<string>? chosen, IReadOnlyCollection<string>? onlyClaims,
+        CancellationToken cancellationToken)
     {
-        var rewrite = new ObjectRewrite(storageClassMap, otherCluster);
+        // What the restore brings back, as it chooses: a PVC or workload left out cannot stop it.
+        var selected = KubernetesObjects.Selection(objects, onlyClaims, chosen);
+        objects = [.. objects.Where(o => KubernetesObjects.Namespace(o) is null || selected.Contains(KubernetesObjects.Key(o)))];
+        var rewrite = new ObjectRewrite(storageClassMap, otherCluster, KubernetesPlatformSet.Recorded(descriptor.Platforms));
         var storage = await KubernetesTargetStorage.ReadAsync(client, cancellationToken).ConfigureAwait(false);
         var warnings = new List<string>();
         var errors = new List<string>();
@@ -57,6 +63,7 @@ internal static class KubernetesRestorePlanner
 
         var available = storage.ClassNames.Count > 0 ? string.Join(", ", storage.ClassNames) : "none";
         var volumes = new List<KubernetesVolumePlan>();
+        bool imagesAsFiles = false, treesAsFiles = false;
         foreach (var claim in objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && KubernetesObjects.Namespace(o) is not null))
         {
             var name = KubernetesObjects.Name(claim);
@@ -64,7 +71,7 @@ internal static class KubernetesRestorePlanner
             var target = rewrite.MapClass(source);
             var record = descriptor.Volumes.FirstOrDefault(v => v.Claim == name);
             var size = record?.SizeBytes ?? 0;
-            if (record?.DiskKey is null)
+            if (record is not { HasData: true })
             {
                 var missing = !string.IsNullOrEmpty(target) && !storage.Has(target)
                     && (otherCluster || target != source || !objects.Any(o => KubernetesObjects.Kind(o) == "StorageClass" && KubernetesObjects.Name(o) == target));
@@ -86,8 +93,28 @@ internal static class KubernetesRestorePlanner
                 continue;
             }
 
+            if (record.TreeKey is not null)
+            {
+                // Backed up file by file: its files go back as files, whatever the target class can do.
+                way = way with { Path = VolumeDataPath.Files, SnapshotClass = null, Reason = "it was backed up file by file" };
+            }
+
             volumes.Add(new KubernetesVolumePlan(name, source, way.StorageClass, way.Path == VolumeDataPath.Block ? "block" : "files", way.Reason, size));
             var targetClass = storage.Find(way.StorageClass);
+            if (way.Path == VolumeDataPath.Files)
+            {
+                imagesAsFiles |= record.TreeKey is null;
+                treesAsFiles |= record.TreeKey is not null;
+                var modes = (claim["spec"]?["accessModes"] as JsonArray)?.Select(m => (string?)m).OfType<string>().ToList() ?? [];
+                var sourceProvisioner = objects.FirstOrDefault(o => KubernetesObjects.Kind(o) == "StorageClass" && KubernetesObjects.Name(o) == source)?["provisioner"]?.GetValue<string>();
+                var otherProvisioner = sourceProvisioner is null ? way.StorageClass != source : sourceProvisioner != targetClass?.Provisioner;
+                if (otherProvisioner && modes.FirstOrDefault(m => m is "ReadWriteMany" or "ReadOnlyMany") is { } shared)
+                {
+                    warnings.Add($"PVC {name} is {shared}: should the StorageClass {way.StorageClass}{(targetClass?.Provisioner is { } p ? $" ({p})" : string.Empty)} not provide that, " +
+                                 "its volume is made ReadWriteOnce and the PVC restored that way (pods on different nodes cannot mount it at the same time).");
+                }
+            }
+
             if (way.Path == VolumeDataPath.Files && targetClass?.Provisioner?.Contains("nfs", StringComparison.OrdinalIgnoreCase) == true)
             {
                 warnings.Add($"PVC {name} goes onto NFS ({targetClass.Provisioner}): owners are kept only if the export lets root give files to other users (no root_squash); otherwise the files belong to the export's user, and a workload running as another user may not read them.");
@@ -100,20 +127,43 @@ internal static class KubernetesRestorePlanner
             }
         }
 
-        if (volumes.Any(v => v.Path == "files"))
+        if (imagesAsFiles)
         {
             warnings.Add("Volumes that go in as files are read from their file system (ext or XFS only): hard links become copies, sparse files are written in full, extended attributes and ACLs stay behind.");
         }
 
-        await CheckWorkloadsAsync(client, cluster, objects, otherCluster, warnings, cancellationToken).ConfigureAwait(false);
-        await CheckDefinitionsAsync(client, cluster, objects, otherCluster, warnings, cancellationToken).ConfigureAwait(false);
-        if (otherCluster)
+        if (treesAsFiles)
         {
-            var rancher = objects.Where(o => KubernetesObjects.Kind(o) != "CustomResourceDefinition" && KubernetesObjects.IsRancherMade(o)).ToList();
-            if (rancher.Count > 0)
-            {
-                warnings.Add($"{rancher.Count} object(s) of Rancher's stay out ({string.Join(", ", rancher.GroupBy(KubernetesObjects.Kind).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Count()} {g.Key}"))}): Rancher makes them where it manages the cluster.");
-            }
+            warnings.Add("Volumes backed up file by file go back as files: hard links become copies, sparse files are written in full; FIFOs, sockets and devices are left out, extended attributes and ACLs were not backed up.");
+        }
+
+        await CheckWorkloadsAsync(client, cluster, objects, otherCluster, warnings, cancellationToken).ConfigureAwait(false);
+        await CheckDefinitionsAsync(client, cluster, objects, rewrite, warnings, cancellationToken).ConfigureAwait(false);
+
+        // What the source cluster's platforms made: left out of another cluster, and what they make in every namespace
+        // out of any restore. One line per platform.
+        var platforms = rewrite.Platforms;
+        foreach (var group in objects
+                     .Where(o => KubernetesObjects.Kind(o) != "CustomResourceDefinition" && KubernetesObjects.Namespace(o) is not null && !KubernetesObjects.IsControlled(o))
+                     .Select(o => (Object: o, Made: platforms.MadeBy(o)))
+                     .Where(m => m.Made is { } made && (otherCluster || made.Always))
+                     .GroupBy(m => m.Made!.Profile))
+        {
+            var kinds = string.Join(", ", group.GroupBy(m => KubernetesObjects.Kind(m.Object)).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Count()} {g.Key}"));
+            warnings.Add($"{group.Count()} object(s) made by {group.Key.Name} stay out ({kinds}): {group.Key.Name} makes them again{(otherCluster ? " where it runs" : string.Empty)}.");
+        }
+
+        // Pod volumes: their pods are created again with them empty; the files of those read are in the restore point.
+        var podVolumes = descriptor.PodVolumes.Where(v => v.Platform is null).ToList();
+        if (podVolumes.Any(v => v.TreeKey is not null))
+        {
+            warnings.Add($"Pods start with empty volumes; the files of {string.Join(", ", podVolumes.Where(v => v.TreeKey is not null).Select(v => $"{v.Pod}/{v.Volume}"))} " +
+                         "are in the restore point: restore them under Files (browse, download, into a PVC or onto a share).");
+        }
+
+        if (podVolumes.Any(v => v.TreeKey is null && v.OptIn is not null))
+        {
+            warnings.Add($"Pod volumes asked for were not backed up ({string.Join(", ", podVolumes.Where(v => v.TreeKey is null && v.OptIn is not null).Select(v => $"{v.Pod}/{v.Volume}"))}): their pods start with them empty.");
         }
 
         return new KubernetesRestorePlan(cluster, targetNamespace, otherCluster, exists, storage.ClassNames, storage.DefaultClass, volumes, warnings, errors);
@@ -172,18 +222,39 @@ internal static class KubernetesRestorePlanner
 
     /// <summary>CRDs the restore point brings that the target lacks: their objects come back, their operators do not.</summary>
     private static async Task CheckDefinitionsAsync(
-        IKubernetes client, string cluster, IReadOnlyList<JsonObject> objects, bool otherCluster, List<string> warnings, CancellationToken cancellationToken)
+        IKubernetes client, string cluster, IReadOnlyList<JsonObject> objects, ObjectRewrite rewrite, List<string> warnings, CancellationToken cancellationToken)
     {
-        foreach (var definition in objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition"
-                                                      && !(otherCluster && KubernetesObjects.IsRancherGroup((string?)o["spec"]?["group"] ?? string.Empty))))
+        // CRDs whose objects all stay out (a platform's records, e.g. Rancher's) are not needed.
+        foreach (var definition in objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition" && !LeftOutKind(o, rewrite)))
         {
             var name = KubernetesObjects.Name(definition);
-            if (!await ExistsAsync(() => client.ApiextensionsV1.ReadCustomResourceDefinitionAsync(name, cancellationToken: cancellationToken)).ConfigureAwait(false))
+            if (await ExistsAsync(() => client.ApiextensionsV1.ReadCustomResourceDefinitionAsync(name, cancellationToken: cancellationToken)).ConfigureAwait(false))
             {
-                warnings.Add($"The CRD {name} is created in cluster {cluster} from the restore point; the operator or controller that acts on its objects is not part of it.");
+                continue;
             }
+
+            // A platform's CRDs come with the platform, never from a backup.
+            var group = (string?)definition["spec"]?["group"] ?? string.Empty;
+            if (rewrite.Platforms.CrdGroupOf(group) is { } platform)
+            {
+                var kind = (string?)definition["spec"]?["names"]?["kind"] ?? string.Empty;
+                var count = objects.Count(o => KubernetesObjects.Kind(o) == kind && KubernetesObjects.Namespace(o) is not null);
+                if (count > 0)
+                {
+                    warnings.Add($"{count} {kind} object(s) stay out: their API {group} comes with {platform.Name}, which cluster {cluster} does not have.");
+                }
+
+                continue;
+            }
+
+            warnings.Add($"The CRD {name} is created in cluster {cluster} from the restore point; the operator or controller that acts on its objects is not part of it.");
         }
     }
+
+    /// <summary>Whether every object of a CRD's kind stays out of this restore (made by a platform of the source cluster).</summary>
+    internal static bool LeftOutKind(JsonObject definition, ObjectRewrite rewrite) =>
+        (string?)definition["spec"]?["group"] is { } group && (string?)definition["spec"]?["names"]?["kind"] is { } kind
+        && rewrite.Platforms.MakesKind(group, "v1", kind) is { } made && (rewrite.OtherCluster || made.Always);
 
     /// <summary>The pod spec of a workload (its template) or pod.</summary>
     private static JsonObject? PodSpec(JsonObject item) => KubernetesObjects.Kind(item) switch

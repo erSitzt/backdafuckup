@@ -131,6 +131,12 @@ public sealed record KubernetesRestorePlanRequestDto
     public string? TargetNamespace { get; init; }
 
     public Dictionary<string, string> StorageClassMap { get; init; } = [];
+
+    /// <summary>As the restore's: only these objects (<c>Kind/name</c>) and what they need. Null: the whole namespace.</summary>
+    public List<string>? Objects { get; init; }
+
+    /// <summary>As the restore's: only these PVCs.</summary>
+    public List<string>? OnlyClaims { get; init; }
 }
 
 /// <summary>How a restore would go: each PVC's class and data path in the target, what to look at first, and what stops it.</summary>
@@ -157,7 +163,20 @@ public sealed record KubernetesRestorePointDto(
     string? KubernetesVersion,
     IReadOnlyList<KubernetesVolumeDto> Volumes,
     IReadOnlyList<KubernetesObjectDto> Objects,
-    IReadOnlyList<KubernetesHookDto> Hooks);
+    IReadOnlyList<KubernetesHookDto> Hooks,
+    IReadOnlyList<KubernetesPodVolumeDto>? PodVolumes = null,
+    IReadOnlyList<KubernetesContainerWriteDto>? ContainerWrites = null,
+    string? UsageSource = null);
+
+/// <summary>A volume of a pod that is not a PVC, as the backup found it.</summary>
+/// <param name="OptIn"><c>job</c> or <c>annotation</c> when its data was asked for; null: not.</param>
+/// <param name="Platform">The platform that put it into the pod, or whose namespace it is in.</param>
+/// <param name="BackedUp">Its files are in the restore point.</param>
+public sealed record KubernetesPodVolumeDto(
+    string Pod, string Workload, string Volume, string Kind, string? Source, string? OptIn, string? Platform, long? UsedBytes, bool BackedUp, string? Reason);
+
+/// <summary>What a container had written into its own file system (never backed up), from the usage numbers.</summary>
+public sealed record KubernetesContainerWriteDto(string Pod, string Workload, string Container, long? LayerBytes, double? WriteBytesPerSecond);
 
 /// <param name="DataPath"><c>snapshot</c>: its data is in the restore point; <c>objects-only</c>: see <paramref name="Reason"/>.</param>
 public sealed record KubernetesVolumeDto(string Claim, string DataPath, string? Reason, string? StorageClass, long SizeBytes, string VolumeMode);

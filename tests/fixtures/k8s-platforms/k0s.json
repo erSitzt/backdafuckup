@@ -1,0 +1,36 @@
+{
+  "source": "A k0s controller+worker after https://docs.k0sproject.io/ (version suffix +k0s, kube-router).",
+  "tested": false,
+  "facts": {
+    "gitVersion": "v1.32.4+k0s",
+    "apiGroups": [
+      "admissionregistration.k8s.io",
+      "apiextensions.k8s.io",
+      "apps",
+      "batch",
+      "networking.k8s.io",
+      "policy",
+      "rbac.authorization.k8s.io",
+      "storage.k8s.io"
+    ],
+    "namespaces": [
+      "default",
+      "kube-system"
+    ],
+    "nodes": [
+      {
+        "name": "node-1",
+        "providerId": null,
+        "labels": {
+          "kubernetes.io/os": "linux",
+          "kubernetes.io/arch": "amd64"
+        },
+        "annotations": {}
+      }
+    ],
+    "csiDrivers": []
+  },
+  "expect": [
+    "k0s"
+  ]
+}

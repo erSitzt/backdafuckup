@@ -130,19 +130,86 @@ internal static class MoverPods
     };
 
     /// <summary>
+    /// The mover pod that reads a volume file by file (spec 2026-11-12-1952-kubernetes-file-level-volumes): in the work
+    /// namespace, a read-only copy of the volume's PV mounted read-only, pinned to <paramref name="node"/> when the data is
+    /// on one node (hostPath, local). It runs as root and may read files of any owner (DAC_OVERRIDE, and SETUID/SETGID to read
+    /// as a file's owner on NFS exports that map root to nobody); all allowed by the Pod Security level "baseline".
+    /// </summary>
+    public static V1Pod BuildRead(string claim, V1ObjectMeta metadata, MoverDeployment mover, MoverEndpoint endpoint, string tokenSecret, string? node) => new()
+    {
+        Metadata = metadata,
+        Spec = new V1PodSpec
+        {
+            RestartPolicy = "Never",
+            AutomountServiceAccountToken = false,
+            NodeName = node,
+            Tolerations = node is null ? null : [new V1Toleration { OperatorProperty = "Exists" }],
+            ImagePullSecrets = mover.PullSecretName is { } pull ? [new V1LocalObjectReference { Name = pull }] : null,
+            SecurityContext = new V1PodSecurityContext { RunAsUser = 0, SeccompProfile = new V1SeccompProfile { Type = "RuntimeDefault" } },
+            Volumes = [new V1Volume { Name = "volume", PersistentVolumeClaim = new V1PersistentVolumeClaimVolumeSource { ClaimName = claim, ReadOnlyProperty = true } }],
+            Containers =
+            [
+                new V1Container
+                {
+                    Name = "mover",
+                    Image = mover.Image,
+                    ImagePullPolicy = "IfNotPresent",
+                    Env =
+                    [
+                        new V1EnvVar { Name = "BDFU_MOVER_MODE", Value = "tree" },
+                        new V1EnvVar { Name = "BDFU_MOVER_DATA_URL", Value = endpoint.DataUrl.ToString() },
+                        new V1EnvVar { Name = "BDFU_MOVER_RESULT_URL", Value = endpoint.ResultUrl.ToString() },
+                        .. endpoint.PreviousUrl is { } previous ? [new V1EnvVar { Name = "BDFU_MOVER_PREVIOUS_URL", Value = previous.ToString() }] : Array.Empty<V1EnvVar>(),
+                        new V1EnvVar { Name = "BDFU_MOVER_SERVER_PINS", Value = string.Join(',', endpoint.ServerPins) },
+                        new V1EnvVar { Name = "BDFU_MOVER_ROOT", Value = FilesRoot },
+                        new V1EnvVar { Name = "DOTNET_EnableDiagnostics", Value = "0" },
+                        new V1EnvVar
+                        {
+                            Name = "BDFU_MOVER_TOKEN",
+                            ValueFrom = new V1EnvVarSource { SecretKeyRef = new V1SecretKeySelector { Name = tokenSecret, Key = "token" } },
+                        },
+                    ],
+                    VolumeMounts = [new V1VolumeMount { Name = "volume", MountPath = FilesRoot, ReadOnlyProperty = true }],
+                    Resources = new V1ResourceRequirements
+                    {
+                        Requests = new Dictionary<string, ResourceQuantity> { ["cpu"] = new("100m"), ["memory"] = new("64Mi") },
+                        Limits = new Dictionary<string, ResourceQuantity> { ["memory"] = new("512Mi") },
+                    },
+                    SecurityContext = new V1SecurityContext
+                    {
+                        AllowPrivilegeEscalation = false,
+                        ReadOnlyRootFilesystem = true,
+                        Capabilities = new V1Capabilities { Drop = ["ALL"], Add = ["DAC_OVERRIDE", "SETUID", "SETGID"] },
+                    },
+                },
+            ],
+        },
+    };
+
+    /// <summary>
     /// Watches the mover pod while the channel waits: fails the channel at once when the pod cannot start or failed (with
     /// its reason and the end of its log), and writes a line now and then while the volume is still being copied.
     /// </summary>
     /// <param name="ns">The pod's namespace (default: the work namespace).</param>
     /// <param name="pending">What a pending pod waits for, for the log (default: the copy of a snapshot).</param>
+    /// <param name="claim">
+    /// The PVC (in the pod's namespace) whose volume the pending pod waits for: each new warning about it (a provisioner that
+    /// cannot make the volume, a volume that cannot be attached) is logged at once, not only after minutes of waiting.
+    /// </param>
+    /// <param name="claimProblem">
+    /// Sees each new warning about <paramref name="claim"/> first: true takes it over (it is not logged) and stops the watch,
+    /// for the caller to deal with the cause.
+    /// </param>
     public static async Task WatchAsync(
-        VolumeSnapshotFlow flow, string podName, string source, Action<Exception> abort, CancellationToken cancellationToken, string? ns = null, string? pending = null, string mode = "backup")
+        VolumeSnapshotFlow flow, string podName, string source, Action<Exception> abort, CancellationToken cancellationToken, string? ns = null, string? pending = null, string mode = "backup",
+        string? claim = null, Func<Corev1Event, bool>? claimProblem = null)
     {
         var space = ns ?? KubernetesSetup.WorkNamespace;
         var client = flow.Client;
         var started = DateTimeOffset.UtcNow;
         var reported = started;
         var running = false;
+        var warned = new HashSet<string>(StringComparer.Ordinal);
         while (!cancellationToken.IsCancellationRequested)
         {
             await Task.Delay(flow.Timings.Poll, cancellationToken).ConfigureAwait(false);
@@ -160,6 +227,24 @@ internal static class MoverPods
             {
                 flow.Log.Warning($"The mover pod {space}/{podName} could not be read (cluster {flow.Cluster}): {VolumeSnapshotFlow.Problem(ex)}");
                 continue;
+            }
+
+            if (claim is not null && pod.Status?.Phase is null or "Pending")
+            {
+                foreach (var warning in await ClaimWarningsAsync(flow, space, claim, cancellationToken).ConfigureAwait(false))
+                {
+                    if (!warned.Add($"{warning.Reason}\n{warning.Message}"))
+                    {
+                        continue;
+                    }
+
+                    if (claimProblem?.Invoke(warning) == true)
+                    {
+                        return;
+                    }
+
+                    flow.Log.Warning($"PVC {space}/{claim} of the mover pod for {source} (cluster {flow.Cluster}): {warning.Reason}: {warning.Message}");
+                }
             }
 
             // Being deleted: Kubernetes has sent the mover SIGTERM, which ends its transfer at once. The server deletes its
@@ -199,6 +284,21 @@ internal static class MoverPods
                         : $"Mover pod {space}/{podName} {pending ?? $"waiting for its volume, a copy of the snapshot of {source}"} ({(DateTimeOffset.UtcNow - started).TotalMinutes:0} min).");
                     break;
             }
+        }
+    }
+
+    /// <summary>The warnings about a PVC (events of type Warning), oldest first; none when they cannot be read.</summary>
+    private static async Task<IReadOnlyList<Corev1Event>> ClaimWarningsAsync(VolumeSnapshotFlow flow, string ns, string claim, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var events = await flow.Client.CoreV1.ListNamespacedEventAsync(
+                ns, fieldSelector: $"involvedObject.kind=PersistentVolumeClaim,involvedObject.name={claim},type=Warning", cancellationToken: cancellationToken).ConfigureAwait(false);
+            return [.. events.Items.OrderBy(e => e.LastTimestamp ?? e.EventTime ?? e.Metadata?.CreationTimestamp ?? DateTime.MinValue)];
+        }
+        catch (HttpOperationException)
+        {
+            return []; // Events are a help for the log, never a reason to stop.
         }
     }
 

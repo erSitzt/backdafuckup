@@ -21,6 +21,15 @@ public static class KubernetesArtifactKinds
     public const string Pod = "k8s.Pod";
     public const string Secret = "k8s.Secret";
 
+    /// <summary>A read-only copy of a PV for reading its volume file by file (cluster-scoped; id: its name).</summary>
+    public const string PersistentVolume = "k8s.PersistentVolume";
+
+    /// <summary>
+    /// A restored volume's PV kept (Retain) while it changes from the work PVC to the target PVC (id: its name, data: its
+    /// reclaim policy); its cleanup gives the policy back, and deletes the PV when no PVC took it.
+    /// </summary>
+    public const string VolumeHandOver = "k8s.VolumeHandOver";
+
     /// <summary>A workload scaled to 0 for a PVC swap (id <c>namespace/Kind/name</c>, data: its replicas); its cleanup scales it back.</summary>
     public const string ScaledWorkload = "k8s.ScaledWorkload";
 }
@@ -34,6 +43,9 @@ public sealed record KubernetesTimings
 
     /// <summary>The mover's volume is a full copy of the snapshot (vSphere: a new disk from it), which takes long for large volumes.</summary>
     public TimeSpan MoverConnect { get; init; } = TimeSpan.FromHours(4);
+
+    /// <summary>A mover that reads a volume file by file mounts an existing volume: no copy to wait for.</summary>
+    public TimeSpan FilesMoverConnect { get; init; } = TimeSpan.FromMinutes(15);
 
     public TimeSpan Deleted { get; init; } = TimeSpan.FromMinutes(5);
 
@@ -237,6 +249,20 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
                 case KubernetesArtifactKinds.Secret:
                     await client.CoreV1.DeleteNamespacedSecretAsync(name, ns, cancellationToken: cancellationToken).ConfigureAwait(false);
                     break;
+                case KubernetesArtifactKinds.PersistentVolume:
+                {
+                    // The only PVs the product deletes: its own read-only copies, which keep the data whatever happens to them.
+                    var pv = await client.CoreV1.ReadPersistentVolumeAsync(name, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    if (pv.Metadata.Labels is not { } labels || !labels.TryGetValue(ManagedByLabel, out var managedBy) || managedBy != "backdafuckup"
+                        || pv.Spec.PersistentVolumeReclaimPolicy != "Retain")
+                    {
+                        throw new KubernetesOperationException(
+                            $"{what} in cluster {cluster} is not left to delete: it is not backdafuckup's read-only copy of a volume (label {ManagedByLabel}, reclaim policy Retain).");
+                    }
+
+                    await client.CoreV1.DeletePersistentVolumeAsync(name, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    break;
+                }
                 default:
                     throw new KubernetesOperationException($"Unknown kind of object {what} in the artifact ledger of cluster {cluster}.");
             }
@@ -370,6 +396,12 @@ internal sealed class VolumeSnapshotFlow(IKubernetes client, string cluster, IOp
     }
 
     internal static string Hash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..8];
+
+    /// <summary>A size as Kubernetes shows it best: whole GiB or MiB as <c>Gi</c>/<c>Mi</c>, any other in bytes.</summary>
+    internal static ResourceQuantity Quantity(long bytes) => new(
+        bytes > 0 && bytes % (1L << 30) == 0 ? $"{bytes >> 30}Gi"
+        : bytes > 0 && bytes % (1L << 20) == 0 ? $"{bytes >> 20}Mi"
+        : bytes.ToString(CultureInfo.InvariantCulture));
 
     internal static JsonElement Element(object value) => value is JsonElement element ? element : JsonSerializer.SerializeToElement(value);
 

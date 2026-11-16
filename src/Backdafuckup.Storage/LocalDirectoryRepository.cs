@@ -248,6 +248,10 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
             // Mark: every chunk referenced by a committed manifest. Deletions cannot run concurrently (GC mutex),
             // and pinned base restore points of running backups are therefore always included.
             var marked = new HashSet<ChunkId>();
+
+            // File trees: listings already walked (identical subtrees are one listing). Kept apart from the marked chunks on
+            // purpose: a file whose bytes equal a listing marks that chunk, which must not stop its subtree from being walked.
+            var walkedListings = new HashSet<ChunkId>();
             var restorePoints = 0;
             foreach (var (id, directory) in _restorePoints.ToArray())
             {
@@ -269,6 +273,12 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
                             marked.Add(entry);
                         }
                     }
+                }
+
+                foreach (var tree in manifest.FileTrees)
+                {
+                    var root = await reader.ReadFileTreeIndexAsync(tree.Key, cancellationToken).ConfigureAwait(false);
+                    FileTreeWalker.Visit(ChunkStreamRef.OfIds(root.DiskSize, root.Entries), Chunks, _descriptor.ChunkSize, id => marked.Add(id), walkedListings);
                 }
 
                 restorePoints++;
@@ -370,20 +380,40 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
         try
         {
             var seen = new HashSet<ChunkId>();
+
+            // What to check: per disk its index, per file tree every chunk its listings reference (reading the listings
+            // checks their chunks in full on the way).
+            var sources = new List<(string What, IReadOnlyList<ChunkId> Ids)>();
             foreach (var disk in reader.Manifest.AllImages)
             {
-                ChunkIndex index;
                 try
                 {
-                    index = await reader.ReadDiskIndexAsync(disk.Key, cancellationToken).ConfigureAwait(false);
+                    sources.Add(($"Disk {disk.Key}", (await reader.ReadDiskIndexAsync(disk.Key, cancellationToken).ConfigureAwait(false)).Entries));
                 }
                 catch (Exception ex) when (ex is IOException or InvalidDataException)
                 {
                     problems.Add($"Disk {disk.Key}: index unreadable: {ex.Message}");
-                    continue;
                 }
+            }
 
-                foreach (var id in index.Entries)
+            foreach (var tree in reader.Manifest.FileTrees)
+            {
+                try
+                {
+                    var root = await reader.ReadFileTreeIndexAsync(tree.Key, cancellationToken).ConfigureAwait(false);
+                    var ids = new List<ChunkId>();
+                    FileTreeWalker.Visit(ChunkStreamRef.OfIds(root.DiskSize, root.Entries), Chunks, _descriptor.ChunkSize, ids.Add, new HashSet<ChunkId>());
+                    sources.Add(($"File tree {tree.Key}", ids));
+                }
+                catch (Exception ex) when (ex is IOException or InvalidDataException)
+                {
+                    problems.Add($"File tree {tree.Key}: listings unreadable: {ex.Message}");
+                }
+            }
+
+            foreach (var (what, ids) in sources)
+            {
+                foreach (var id in ids)
                 {
                     if (id.IsZero || !seen.Add(id))
                     {
@@ -406,7 +436,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
                     {
                         if (problems.Count < 100)
                         {
-                            problems.Add($"Disk {disk.Key}: {ex.Message}");
+                            problems.Add($"{what}: {ex.Message}");
                         }
                     }
 

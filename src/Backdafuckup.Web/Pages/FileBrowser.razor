@@ -140,7 +140,7 @@ else
             <MudRadioGroup T="string" Value="_restoreTarget" ValueChanged="OnTargetChanged">
                 @if (IsNamespace)
                 {
-                    <MudRadio T="string" Value="@("pvc")" Color="Color.Primary" Disabled="@(_volume?.Family != "unix")">Back into the PVC @Claim (mover pod)</MudRadio>
+                    <MudRadio T="string" Value="@("pvc")" Color="Color.Primary" Disabled="@(_volume?.Family != "unix")">@(IsPodVolume ? "Into a PVC of the namespace (mover pod)" : $"Back into the PVC {Claim} (mover pod)")</MudRadio>
                 }
                 <MudRadio T="string" Value="@("share")" Color="Color.Primary">Copy to a network share (SMB)</MudRadio>
                 @if (!IsNamespace)
@@ -165,6 +165,16 @@ else
                         }
                     </MudSelect>
                 }
+            }
+            else if (_restoreTarget == "pvc" && IsPodVolume)
+            {
+                <MudText Typo="Typo.body2">
+                    @_volume?.Title is a pod volume (an emptyDir), which lives only as long as its pod: its files go into a PVC of namespace @_mount?.VmName instead,
+                    through a mover pod, while the workloads keep running. The PVC has to be bound (in use by a pod, or bound at once by its StorageClass).
+                </MudText>
+                <MudTextField T="string" @bind-Value="_targetClaim" Label="PVC" Variant="Variant.Outlined" HelperText="A PVC of the namespace the restore point is of." />
+                <MudTextField T="string" @bind-Value="_guestFolder" Label="Folder in the PVC" Placeholder="/restore" Variant="Variant.Outlined"
+                              HelperText="From the PVC's root; / for the root. The selected items go directly into this folder. Missing folders are created." />
             }
             else if (_restoreTarget == "pvc")
             {
@@ -519,15 +529,22 @@ else
     private bool CanStart => _restoreTarget switch
     {
         "share" => !string.IsNullOrWhiteSpace(_sharePath) && _credentialId is not null,
-        "pvc" => _volume?.Family == "unix" && (_toOriginal || !string.IsNullOrWhiteSpace(_guestFolder)),
+        "pvc" => _volume?.Family == "unix" && (IsPodVolume
+            ? !string.IsNullOrWhiteSpace(_targetClaim) && !string.IsNullOrWhiteSpace(_guestFolder)
+            : _toOriginal || !string.IsNullOrWhiteSpace(_guestFolder)),
         _ => (_volume?.Family == "unix" ? _linuxCredentialId is not null : AgentProblem is null)
             && (_toOriginal ? OriginalLocation is not null : !string.IsNullOrWhiteSpace(_guestFolder)),
     };
 
     private bool IsNamespace => _mount?.ObjectKind == RestorePointObjectKinds.KubernetesNamespace;
 
-    /// <summary>The PVC the browsed volume is the image of.</summary>
-    private string? Claim => _volume?.DiskName;
+    /// <summary>The PVC the browsed volume is the image of; for a pod volume the PVC chosen as the target.</summary>
+    private string? Claim => IsPodVolume ? _targetClaim?.Trim() : _volume?.DiskName;
+
+    /// <summary>A pod volume read by the node agent (its file tree's key starts with <c>pod_</c>): it has no PVC of its own.</summary>
+    private bool IsPodVolume => _volume?.Id.StartsWith("pod_", StringComparison.Ordinal) == true;
+
+    private string? _targetClaim;
 
     /// <summary>The current folder in the PVC, from its root.</summary>
     private string PvcLocation => "/" + string.Join('/', _path);
@@ -542,7 +559,8 @@ else
         }
         else if (target == "pvc")
         {
-            _toOriginal = true;
+            _toOriginal = !IsPodVolume;
+            _guestFolder = IsPodVolume ? _guestFolder ?? "/restore" : _guestFolder;
             _restorePermissions = true;
         }
     }

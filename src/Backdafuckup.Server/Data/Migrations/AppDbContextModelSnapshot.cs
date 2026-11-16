@@ -327,6 +327,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(16)")
                         .HasColumnName("guest_processing_mode");
 
+                    b.Property<bool>("KubernetesPodVolumes")
+                        .HasColumnType("boolean")
+                        .HasColumnName("kubernetes_pod_volumes");
+
                     b.Property<string>("LastResult")
                         .HasMaxLength(16)
                         .HasColumnType("character varying(16)")
@@ -646,6 +650,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("current_master_address");
 
+                    b.Property<string>("DetectedPlatforms")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("detected_platforms");
+
                     b.Property<string>("DisplayName")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -674,6 +682,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("platform_name");
 
+                    b.Property<string>("PlatformOverride")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("platform_override");
+
                     b.Property<int>("Port")
                         .HasColumnType("integer")
                         .HasColumnName("port");
@@ -697,6 +709,14 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)")
                         .HasColumnName("trust_mode");
+
+                    b.Property<string>("UsageSecret")
+                        .HasColumnType("text")
+                        .HasColumnName("usage_secret");
+
+                    b.Property<string>("UsageSource")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("usage_source");
 
                     b.Property<uint>("Version")
                         .IsConcurrencyToken()
@@ -856,9 +876,25 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("disk_key");
 
+                    b.Property<long?>("FileCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("file_count");
+
                     b.Property<string>("FullReason")
                         .HasColumnType("text")
                         .HasColumnName("full_reason");
+
+                    b.Property<long?>("IssueCount")
+                        .HasColumnType("bigint")
+                        .HasColumnName("issue_count");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("disk")
+                        .HasColumnName("kind");
 
                     b.Property<string>("Mode")
                         .IsRequired()

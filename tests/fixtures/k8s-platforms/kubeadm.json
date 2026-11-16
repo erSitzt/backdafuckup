@@ -1,0 +1,14 @@
+{
+  "source": "A plain kubeadm cluster as the Kubernetes documentation sets it up (no distribution, manager or addon of the catalog).",
+  "tested": false,
+  "facts": {
+    "gitVersion": "v1.32.4",
+    "apiGroups": [ "admissionregistration.k8s.io", "apiextensions.k8s.io", "apiregistration.k8s.io", "apps", "authentication.k8s.io", "authorization.k8s.io", "autoscaling", "batch", "certificates.k8s.io", "coordination.k8s.io", "discovery.k8s.io", "events.k8s.io", "flowcontrol.apiserver.k8s.io", "networking.k8s.io", "node.k8s.io", "policy", "rbac.authorization.k8s.io", "scheduling.k8s.io", "storage.k8s.io" ],
+    "namespaces": [ "default", "kube-node-lease", "kube-public", "kube-system", "ns-1" ],
+    "nodes": [
+      { "name": "node-1", "providerId": null, "labels": { "kubernetes.io/arch": "amd64", "kubernetes.io/hostname": "x", "kubernetes.io/os": "linux", "node-role.kubernetes.io/control-plane": "" }, "annotations": { "kubeadm.alpha.kubernetes.io/cri-socket": "x", "node.alpha.kubernetes.io/ttl": "x" } }
+    ],
+    "csiDrivers": []
+  },
+  "expect": []
+}

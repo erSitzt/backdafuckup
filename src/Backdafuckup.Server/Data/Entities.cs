@@ -84,6 +84,18 @@ public sealed class HypervisorConnection
 
     public string? ProductVersion { get; set; }
 
+    /// <summary>Kubernetes: the platforms recognised at the last scan or backup run, with their evidence.</summary>
+    public List<Backdafuckup.Core.Hypervisor.DetectedPlatform>? DetectedPlatforms { get; set; }
+
+    /// <summary>Kubernetes: the platforms set by hand (catalog ids), used instead of the detected ones; null: detected.</summary>
+    public List<string>? PlatformOverride { get; set; }
+
+    /// <summary>Kubernetes: where the cluster's usage numbers come from (a Prometheus API); null: none.</summary>
+    public Backdafuckup.Kubernetes.KubernetesUsageConfig? UsageSource { get; set; }
+
+    /// <summary>The usage source's password or bearer token, protected with ASP.NET Data Protection; never returned by the API.</summary>
+    public string? UsageSecret { get; set; }
+
     public Guid CredentialId { get; set; }
 
     public Credential Credential { get; set; } = null!;
@@ -389,6 +401,12 @@ public sealed class BackupJob
     /// <summary>Application-consistent backups: freeze the guest through the backdafuckup agent (VSS) for the snapshot.</summary>
     public bool GuestProcessing { get; set; }
 
+    /// <summary>
+    /// Kubernetes: back up every pod volume that is not a PVC (emptyDir and the like), not only those a pod names in
+    /// <c>backup.velero.io/backup-volumes</c>. Needs the node agent in the cluster.
+    /// </summary>
+    public bool KubernetesPodVolumes { get; set; }
+
     public GuestFailurePolicy GuestFailurePolicy { get; set; } = GuestFailurePolicy.CrashConsistentWithWarning;
 
     /// <summary>Windows credentials to install the agent automatically where it is missing (optional).</summary>
@@ -576,6 +594,22 @@ public sealed class RestorePointDisk
     public long ReadBytes { get; set; }
 
     public long NewStoredBytes { get; set; }
+
+    /// <summary><see cref="RestorePointDiskKinds.Disk"/>, or <see cref="RestorePointDiskKinds.FileTree"/> for a volume read file by file.</summary>
+    public string Kind { get; set; } = RestorePointDiskKinds.Disk;
+
+    /// <summary>A file tree's files.</summary>
+    public long? FileCount { get; set; }
+
+    /// <summary>A file tree's entries that were not read.</summary>
+    public long? IssueCount { get; set; }
+}
+
+public static class RestorePointDiskKinds
+{
+    public const string Disk = "disk";
+
+    public const string FileTree = "files";
 }
 
 public enum SessionKind

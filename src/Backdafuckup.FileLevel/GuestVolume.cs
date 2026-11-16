@@ -1,7 +1,21 @@
 namespace Backdafuckup.FileLevel;
 
 /// <summary>A disk of a restore point for <see cref="GuestImage"/>; <see cref="Open"/> creates a new stream per call.</summary>
-public sealed record GuestDiskSource(string Key, string Name, Func<Stream> Open);
+/// <summary>
+/// A disk of a restore point (its image through <see cref="Open"/>), or a volume backed up file by file
+/// (<see cref="OpenTree"/>, its file system directly; <see cref="Open"/> is not called).
+/// </summary>
+public sealed record GuestDiskSource(string Key, string Name, Func<Stream> Open)
+{
+    /// <summary>A file tree: opens its file system (one per call, as images do).</summary>
+    public Func<IGuestFileSystem>? OpenTree { get; init; }
+
+    /// <summary>A file tree's bytes (its files' sizes).</summary>
+    public long TreeBytes { get; init; }
+
+    /// <summary>The volume id of a file tree (<c>&lt;key&gt;:files</c>).</summary>
+    public string TreeVolumeId => $"{Key}:{FileTreeFileSystem.TypeName}";
+}
 
 /// <summary>A volume found on the disks of a restore point.</summary>
 public sealed record GuestVolume

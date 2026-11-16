@@ -87,7 +87,7 @@ public sealed class ClusterAgents : IAsyncDisposable
             new NetworkCredential("agent", session.ApiToken),
             TlsTrustMode.Pinned,
             session.Authorities,
-            new Dictionary<string, string> { [KubernetesConnectionOptions.TlsName] = session.TlsName, [KubernetesConnectionOptions.ClusterName] = connection.DisplayName });
+            Engine.ConnectionManager.Options(connection, new Dictionary<string, string> { [KubernetesConnectionOptions.TlsName] = session.TlsName, [KubernetesConnectionOptions.ClusterName] = connection.DisplayName }));
     }
 
     /// <summary>The connection whose connect token the request carries, or null.</summary>
@@ -270,6 +270,11 @@ public sealed class ClusterAgents : IAsyncDisposable
                     if (cluster is IKubernetesAgentUpdater updater && await updater.UpdateAgentImageAsync(mover.Image, _stopping.Token).ConfigureAwait(false) is { } previous)
                     {
                         logger.LogInformation("The agent of cluster {Cluster} ran {Previous}; its Deployment now runs {Image}, and the agent reconnects with it.", connection.DisplayName, previous, mover.Image);
+                    }
+
+                    if (cluster is IKubernetesAgentUpdater nodes && await nodes.UpdateNodeAgentImageAsync(mover.Image, _stopping.Token).ConfigureAwait(false) is { } before)
+                    {
+                        logger.LogInformation("The node agent of cluster {Cluster} ran {Previous}; its DaemonSet now runs {Image}.", connection.DisplayName, before, mover.Image);
                     }
 
                     return;

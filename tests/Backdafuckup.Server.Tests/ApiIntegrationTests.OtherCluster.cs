@@ -85,6 +85,14 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal(["fast-csi", "nfs-client"], plan.StorageClasses);
         Assert.Equal(("missing", "vsphere-csi"), (Assert.Single(plan.Volumes).Path, plan.Volumes[0].TargetStorageClass));
         Assert.Contains(plan.Errors, e => e.Contains("map vsphere-csi to one of them", StringComparison.Ordinal));
+
+        // Of a chosen part only: a ConfigMap alone is not stopped by the PVC's class; the PVC chosen is.
+        var part = await Read<KubernetesRestorePlanDto>(client.PostAsJsonAsync($"/api/restore-points/{point.Id}/kubernetes/restore-plan",
+            new KubernetesRestorePlanRequestDto { TargetConnectionId = target.Id, Objects = ["ConfigMap/redis-config"] }, Ct));
+        Assert.Equal((0, 0), (part.Volumes.Count, part.Errors.Count));
+        part = await Read<KubernetesRestorePlanDto>(client.PostAsJsonAsync($"/api/restore-points/{point.Id}/kubernetes/restore-plan",
+            new KubernetesRestorePlanRequestDto { TargetConnectionId = target.Id, OnlyClaims = ["data-redis-test-0"] }, Ct));
+        Assert.Equal(("missing", 1), (Assert.Single(part.Volumes).Path, part.Errors.Count));
         plan = await PlanAsync(new() { ["vsphere-csi"] = "fast-csi" });
         Assert.Equal(("block", "fast-csi"), (Assert.Single(plan.Volumes).Path, plan.Volumes[0].TargetStorageClass));
         Assert.Empty(plan.Errors);
@@ -210,6 +218,14 @@ public sealed partial class ApiIntegrationTests
         Assert.DoesNotContain(nfs.All("pods"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
         Assert.DoesNotContain(nfs.All("secrets"), p => (string?)p["metadata"]!["namespace"] == KubernetesSetup.WorkNamespace);
 
+        // The hand-over was in the ledger while the PV was kept (Retain), and is done.
+        await using (var db = await _factory!.Services.GetRequiredService<Microsoft.EntityFrameworkCore.IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>().CreateDbContextAsync(Ct))
+        {
+            var handOver = Assert.Single(db.Artifacts.Where(a => a.Kind == KubernetesArtifactKinds.VolumeHandOver).ToList());
+            Assert.Equal((restoredVolume["metadata"]!["name"]!.ToString(), Backdafuckup.Core.Operations.ArtifactState.Done, """{"reclaimPolicy":"Delete"}"""),
+                (handOver.NativeId, handOver.State, handOver.Data));
+        }
+
         // The files of the volume are in its folder on the export, without lost+found; the root has the backed-up mode.
         var export = (string)restoredVolume["spec"]!["nfs"]!["path"]!;
         var expected = FsFixtures.Manifest("ext4-gpt.p1").ToDictionary(l => l[7], l => l[1]);
@@ -302,7 +318,7 @@ public sealed partial class ApiIntegrationTests
 
                 case "pods" when ns == KubernetesSetup.WorkNamespace:
                 {
-                    // The kubelet: the files mover with its PVC's folder on the export mounted.
+                    // The kubelet: the files mover (or the tree mover reading a volume) with its PVC's folder on the export mounted.
                     var env = item["spec"]!["containers"]![0]!["env"]!.AsArray().ToDictionary(e => (string)e!["name"]!, e => (string?)e!["value"]);
                     var token = (string)nfs.Find("secrets", ns, (string)item["spec"]!["containers"]![0]!["env"]!.AsArray()
                         .Single(e => (string?)e!["name"] == "BDFU_MOVER_TOKEN")!["valueFrom"]!["secretKeyRef"]!["name"]!)!["stringData"]!["token"]!;
@@ -310,8 +326,11 @@ public sealed partial class ApiIntegrationTests
                     var volume = (string)nfs.Find("persistentvolumeclaims", ns, claim)!["spec"]!["volumeName"]!;
                     var folder = (string)nfs.Find("persistentvolumes", null, volume)!["spec"]!["nfs"]!["path"]!;
                     var options = new Backdafuckup.Mover.MoverOptions(
-                        Backdafuckup.Mover.MoverMode.Files, new Uri(env["BDFU_MOVER_DATA_URL"]!), new Uri(env["BDFU_MOVER_RESULT_URL"]!), token, [], string.Empty,
-                        Root: folder, Keep: env["BDFU_MOVER_IF_EXISTS"] == "keep", Owners: env["BDFU_MOVER_OWNERS"] == "1");
+                        env["BDFU_MOVER_MODE"] == "tree" ? Backdafuckup.Mover.MoverMode.Tree : Backdafuckup.Mover.MoverMode.Files,
+                        new Uri(env["BDFU_MOVER_DATA_URL"]!), new Uri(env["BDFU_MOVER_RESULT_URL"]!), token, [], string.Empty,
+                        Root: folder, Keep: env.GetValueOrDefault("BDFU_MOVER_IF_EXISTS") == "keep", Owners: env.GetValueOrDefault("BDFU_MOVER_OWNERS") == "1",
+                        PreviousUrl: env.GetValueOrDefault("BDFU_MOVER_PREVIOUS_URL") is { } previous ? new Uri(previous) : null,
+                        Racy: TimeSpan.Zero); // files written just before count as settled: the test's next run is moments later
                     nfs.Mutate(() => item["status"] = new JsonObject { ["phase"] = "Running" });
                     _ = Task.Run(async () =>
                     {

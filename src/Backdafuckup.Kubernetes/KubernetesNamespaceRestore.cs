@@ -55,7 +55,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         _run = (plan.SessionId == Guid.Empty ? Guid.NewGuid() : plan.SessionId).ToString("N")[..8];
         _flow = new VolumeSnapshotFlow(client, settings.ClusterName(), log, ledger, timings) { Channels = channels };
         _objects = [.. KubernetesResources.Read(plan.Metadata.Content)];
-        _rewrite = new ObjectRewrite(_options.StorageClassMap, _options.OtherCluster);
+        _rewrite = new ObjectRewrite(_options.StorageClassMap, _options.OtherCluster, KubernetesPlatformSet.Recorded(_descriptor.Platforms));
 
         var plurals = KubernetesApplier.BuiltInPlurals();
         foreach (var crd in _objects.Where(o => KubernetesObjects.Kind(o) == "CustomResourceDefinition"))
@@ -68,11 +68,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
         _applier = new KubernetesApplier(client, plurals);
         var claims = _objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim").Select(KubernetesObjects.Key);
-        _selected = _options.OnlyClaims is { } only
-            ? [.. only.Select(c => $"PersistentVolumeClaim/{c}")]
-            : _options.Objects is { } chosen
-                ? _options.ExactObjects ? chosen.ToHashSet(StringComparer.Ordinal) : KubernetesObjects.Expand(chosen, _objects)
-                : [.. _objects.Where(o => KubernetesObjects.Namespace(o) is not null).Select(KubernetesObjects.Key)];
+        _selected = KubernetesObjects.Selection(_objects, _options.OnlyClaims, _options.Objects, _options.ExactObjects);
     }
 
     private IOperationLog Log => _flow.Log;
@@ -81,11 +77,11 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
     private string Source => _descriptor.Namespace;
 
-    /// <summary>The PVCs with data in the restore point that this restore brings back (claim names).</summary>
+    /// <summary>The PVCs with data in the restore point (a disk, or a file tree) that this restore brings back.</summary>
     private IEnumerable<KubernetesVolumeRecord> DataVolumes =>
-        _descriptor.Volumes.Where(v => v.DiskKey is not null && _selected.Contains($"PersistentVolumeClaim/{v.Claim}"));
+        _descriptor.Volumes.Where(v => v.HasData && _selected.Contains($"PersistentVolumeClaim/{v.Claim}"));
 
-    public bool RestoresDisk(string diskKey) => DataVolumes.Any(v => v.DiskKey == diskKey);
+    public bool RestoresDisk(string diskKey) => DataVolumes.Any(v => v.DiskKey == diskKey || v.TreeKey == diskKey);
 
     public async Task<RestoreValidation> ValidateAsync(CancellationToken cancellationToken)
     {
@@ -140,7 +136,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                          (workloads.Count > 0 ? $"; {string.Join(", ", workloads.Select(w => $"{w.Kind} {w.Name}"))} is scaled to 0 for the swap and back afterwards." : "."));
         }
 
-        foreach (var volume in _descriptor.Volumes.Where(v => v.DiskKey is null && _selected.Contains($"PersistentVolumeClaim/{v.Claim}")))
+        foreach (var volume in _descriptor.Volumes.Where(v => !v.HasData && _selected.Contains($"PersistentVolumeClaim/{v.Claim}")))
         {
             warnings.Add($"PVC {volume.Claim}: only its object is restored; its data is not in the restore point ({volume.Reason}).");
         }
@@ -171,7 +167,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
     public async Task<IDiskWriter> CreateDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken)
     {
-        var volume = DataVolumes.First(v => v.DiskKey == target.DiskKey);
+        var volume = DataVolumes.First(v => v.DiskKey == target.DiskKey || v.TreeKey == target.DiskKey);
         var way = _targets.GetValueOrDefault(volume.Claim) ?? throw new InvalidOperationException($"The volume of PVC {volume.Claim} was not validated.");
         if (way.Path == VolumeDataPath.Files)
         {
@@ -199,7 +195,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
         var existing = new List<string>();
         var replaced = new List<string>();
         var controlled = 0;
-        var rancher = 0;
+        var platformMade = new Dictionary<string, int>(StringComparer.Ordinal);
 
         // The namespace first (as in the restore point, renamed when it goes elsewhere).
         if (await _applier.ReadAsync(new JsonObject { ["apiVersion"] = "v1", ["kind"] = "Namespace", ["metadata"] = new JsonObject { ["name"] = Target } }, cancellationToken).ConfigureAwait(false) is null)
@@ -220,20 +216,37 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
         // What the selected objects need from the cluster's scope, when missing: their CRDs, and in the same cluster the
         // StorageClasses they keep (another cluster has its own classes: the map names them).
-        var kinds = _objects.Where(o => _selected.Contains(KubernetesObjects.Key(o)) && !(_options.OtherCluster && KubernetesObjects.IsRancherMade(o)))
+        var kinds = _objects.Where(o => _selected.Contains(KubernetesObjects.Key(o)) && LeftOut(o) is null)
             .Select(KubernetesObjects.Kind).ToHashSet(StringComparer.Ordinal);
         var classes = _options.OtherCluster
             ? []
             : _objects.Where(o => KubernetesObjects.Kind(o) == "PersistentVolumeClaim" && _selected.Contains(KubernetesObjects.Key(o)))
-                .Select(o => (string?)o["spec"]?["storageClassName"]).OfType<string>().Where(c => _rewrite.MapClass(c) == c).ToHashSet(StringComparer.Ordinal);
+                .Select(o => (string?)o["spec"]?["storageClassName"]).Where(c => !string.IsNullOrEmpty(c)).OfType<string>().Where(c => _rewrite.MapClass(c) == c)
+                .ToHashSet(StringComparer.Ordinal); // "" is no class: older backups hold a nameless StorageClass for it, which stays out
+
         var definitions = new List<JsonObject>();
+        var unserved = new Dictionary<string, (string Group, KubernetesPlatformProfile Platform)>(StringComparer.Ordinal);
+        var notServed = new List<JsonObject>();
         foreach (var definition in _objects.Where(o =>
                      (KubernetesObjects.Kind(o) == "CustomResourceDefinition" && kinds.Contains((string?)o["spec"]?["names"]?["kind"] ?? string.Empty))
                      || (KubernetesObjects.Kind(o) == "StorageClass" && classes.Contains(KubernetesObjects.Name(o)))))
         {
             var prepared = KubernetesObjects.Prepare(definition, Source, Target, _rewrite);
-            if (await _applier.ReadAsync(definition, cancellationToken).ConfigureAwait(false) is null
-                && await TryCreateAsync(prepared, restored, cancellationToken).ConfigureAwait(false)
+            var missing = await _applier.ReadAsync(definition, cancellationToken).ConfigureAwait(false) is null;
+
+            // A platform's CRDs come with the platform, never from a backup: without them here, their objects stay out.
+            if (KubernetesObjects.Kind(definition) == "CustomResourceDefinition" && (string?)definition["spec"]?["group"] is { } group
+                && _rewrite.Platforms.CrdGroupOf(group) is { } platform)
+            {
+                if (missing)
+                {
+                    unserved[(string)definition["spec"]!["names"]!["kind"]!] = (group, platform);
+                }
+
+                continue;
+            }
+
+            if (missing && await TryCreateAsync(prepared, restored, cancellationToken).ConfigureAwait(false)
                 && KubernetesObjects.Kind(definition) == "CustomResourceDefinition")
             {
                 definitions.Add(prepared);
@@ -261,9 +274,15 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                 continue;
             }
 
-            if (_options.OtherCluster && KubernetesObjects.IsRancherMade(item))
+            if (LeftOut(item) is { } made)
             {
-                rancher++;
+                platformMade[made.Profile.Name] = platformMade.GetValueOrDefault(made.Profile.Name) + 1;
+                continue;
+            }
+
+            if (unserved.ContainsKey(KubernetesObjects.Kind(item)))
+            {
+                notServed.Add(item);
                 continue;
             }
 
@@ -297,15 +316,30 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             }
         }
 
+        foreach (var group in notServed.GroupBy(o => unserved[KubernetesObjects.Kind(o)].Group))
+        {
+            var platform = unserved[KubernetesObjects.Kind(group.First())].Platform.Name;
+            Warn($"{group.Count()} object(s) are not restored ({string.Join(", ", group.Select(KubernetesObjects.Key))}): their API {group.Key} comes with {platform}, " +
+                 $"which cluster {_settings.ClusterName()} does not have.");
+        }
+
         await WaitBoundAsync(cancellationToken).ConfigureAwait(false);
         await ResumeAsync(cancellationToken).ConfigureAwait(false);
         Log.Info($"{restored.Count} object(s) restored{(restored.Count > 0 ? $" ({Summary(restored)})" : string.Empty)}" +
                  (replaced.Count > 0 ? $"; {replaced.Count} replaced ({Summary(replaced)})" : string.Empty) +
                  (existing.Count > 0 ? $"; {existing.Count} existed and were left as they are ({Summary(existing)})" : string.Empty) +
                  (controlled > 0 ? $"; {controlled} made by their controllers (they make them again)" : string.Empty) +
-                 (rancher > 0 ? $"; {rancher} object(s) of Rancher's left out (Rancher makes them where it manages the cluster)" : string.Empty) + ".");
+                 (platformMade.Count > 0
+                     ? $"; {string.Join(", ", platformMade.Select(kv => $"{kv.Value} made by {kv.Key}"))} left out (the platform makes them again)"
+                     : string.Empty) + ".");
         return new RestoredVm(Target, Target, Warnings: _warnings);
     }
+
+    /// <summary>
+    /// An object the source cluster's platform made, left out: in another cluster all of them (its platform makes its own
+    /// there), in the same cluster those it makes in every namespace.
+    /// </summary>
+    private PlatformMade? LeftOut(JsonObject o) => _rewrite.Platforms.MadeBy(o) is { } made && (_options.OtherCluster || made.Always) ? made : null;
 
     public Task<RestoredVm> CompleteAsync(CancellationToken cancellationToken)
     {
@@ -411,6 +445,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
 
             spec["volumeName"] = await files.HandOverAsync(Target, name, cancellationToken).ConfigureAwait(false);
             spec["storageClassName"] = files.StorageClass;
+            spec["accessModes"] = new JsonArray([.. files.AccessModes.Select(m => (JsonNode)m)]); // the volume's: fewer when the class could not share it
             await CallAsync($"creating the PVC {Target}/{name}", () => _applier.CreateAsync(prepared, cancellationToken)).ConfigureAwait(false);
             _created.Add(prepared);
             restored.Add($"PersistentVolumeClaim/{name}");
@@ -596,7 +631,7 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
             var name = KubernetesObjects.Name(claim);
             var source = (string?)claim["spec"]?["storageClassName"];
             var volume = DataVolumes.FirstOrDefault(v => v.Claim == name);
-            var chosen = volume?.DiskKey is { } key && _plan.DiskStorage.GetValueOrDefault(key) is { Length: > 0 } picked ? picked : null;
+            var chosen = (volume?.DiskKey ?? volume?.TreeKey) is { } key && _plan.DiskStorage.GetValueOrDefault(key) is { Length: > 0 } picked ? picked : null;
             var target = chosen ?? _rewrite.MapClass(source);
             if (volume is null)
             {
@@ -618,8 +653,16 @@ internal sealed class KubernetesNamespaceRestore : IVmRestoreSession
                 continue;
             }
 
+            // A volume backed up file by file goes back as files, into whatever class (a snapshot class does not matter).
+            if (volume.TreeKey is not null)
+            {
+                way = way with { Path = VolumeDataPath.Files, SnapshotClass = null, Reason = "it was backed up file by file" };
+            }
+
             _targets[name] = way;
-            Log.Info(way.Path == VolumeDataPath.Block
+            Log.Info(volume.TreeKey is not null
+                ? $"PVC {name}: its files go into a new volume of the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()}, from its file tree with owners, modes and times; hard links become copies, sparse files are written in full."
+                : way.Path == VolumeDataPath.Block
                 ? $"PVC {name}: its data goes into the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()} as a block volume ({way.Reason})."
                 : $"PVC {name}: its data goes into the StorageClass {way.StorageClass} of cluster {_settings.ClusterName()} as files ({way.Reason}): read from the file system " +
                   "of its image (ext or XFS) with owners, modes and times; hard links become copies, sparse files are written in full, extended attributes and ACLs stay behind.");

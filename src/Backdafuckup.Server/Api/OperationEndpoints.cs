@@ -62,7 +62,7 @@ public static class OperationEndpoints
                 await using var reader = await repository.OpenRestorePointAsync(point.Id, ct);
                 var volumes = reader.Manifest.Kubernetes?.Volumes ?? [];
                 namespaces.Add(new ClusterRunNamespaceDto(
-                    name, point.Id, fromRun, point.CreatedUtc, volumes.Count, volumes.Count(v => v.DiskKey is not null),
+                    name, point.Id, fromRun, point.CreatedUtc, volumes.Count, volumes.Count(v => v.HasData),
                     [.. volumes.Select(v => v.StorageClass).OfType<string>().Where(c => c.Length > 0).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)]));
             }
 
@@ -322,7 +322,10 @@ public static class OperationEndpoints
                 space.KubernetesVersion,
                 [.. space.Volumes.Select(v => new KubernetesVolumeDto(v.Claim, v.DataPath, v.Reason, v.StorageClass, v.SizeBytes, v.VolumeMode))],
                 [.. Backdafuckup.Kubernetes.KubernetesRestorePoints.Objects(content).Select(o => new KubernetesObjectDto(o.ApiVersion, o.Kind, o.Name, o.Namespace, o.Controlled, o.App, o.Needs))],
-                [.. space.Hooks.Select(h => new KubernetesHookDto(h.Phase, h.Pod, h.Container, h.Command, h.ExitCode, h.Error, h.Seconds))]));
+                [.. space.Hooks.Select(h => new KubernetesHookDto(h.Phase, h.Pod, h.Container, h.Command, h.ExitCode, h.Error, h.Seconds))],
+                [.. space.PodVolumes.Select(v => new KubernetesPodVolumeDto(v.Pod, v.Workload, v.Volume, v.Kind, v.Source, v.OptIn, v.Platform, v.UsedBytes, v.TreeKey is not null, v.Reason))],
+                [.. space.ContainerWrites.Select(w => new KubernetesContainerWriteDto(w.Pod, w.Workload, w.Container, w.LayerBytes, w.WriteBytesPerSecond))],
+                space.UsageSource));
         }).WithDescription("A restore point of a Kubernetes namespace: its volumes (with or without data), its objects (with their app and, for workloads, what a restore of them brings along) and its hooks.");
 
         points.MapGet("/{id:guid}/kubernetes/compare", async (Guid id, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, TimeProvider time, CancellationToken ct) =>
@@ -371,7 +374,8 @@ public static class OperationEndpoints
             try
             {
                 await using var session = await connections.OpenAsync(cluster, ct);
-                var plan = await ((Backdafuckup.Kubernetes.IKubernetesRestorePlanner)session).PlanRestoreAsync(space!, content!, target, request.StorageClassMap, other, ct);
+                var plan = await ((Backdafuckup.Kubernetes.IKubernetesRestorePlanner)session).PlanRestoreAsync(
+                    space!, content!, target, request.StorageClassMap, other, request.Objects, request.OnlyClaims, ct);
                 return Results.Ok(new KubernetesRestorePlanDto(
                     cluster, plan.Cluster, plan.TargetNamespace, plan.OtherCluster, plan.NamespaceExists, plan.StorageClasses, plan.DefaultStorageClass,
                     [.. plan.Volumes.Select(v => new KubernetesVolumePlanDto(v.Claim, v.SourceStorageClass, v.TargetStorageClass, v.Path, v.Reason, v.SizeBytes))],
@@ -381,7 +385,7 @@ public static class OperationEndpoints
             {
                 return Results.Problem($"Cluster {connection.DisplayName} could not be read for the plan: {ex.Message}", statusCode: StatusCodes.Status502BadGateway);
             }
-        }).WithDescription("Previews a namespace restore into a cluster (the restore point's or another one, with StorageClasses mapped): each PVC's class and data path there (block, files, objects only, missing), warnings and what would stop it. Writes nothing.");
+        }).WithDescription("Previews a namespace restore into a cluster (the restore point's or another one, with StorageClasses mapped): each PVC's class and data path there (block, files, objects only, missing), warnings and what would stop it; with Objects or OnlyClaims, of what that restore brings back only. Writes nothing.");
 
         points.MapGet("/{id:guid}/kubernetes/object", async (Guid id, string kind, string name, bool? live, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, CancellationToken ct) =>
         {
@@ -654,6 +658,7 @@ public static class OperationEndpoints
         job.NbdConnectionsPerDisk = Math.Clamp(request.NbdConnectionsPerDisk, 1, 12);
         job.MaxParallelDisks = Math.Clamp(request.MaxParallelDisks, 1, 8);
         job.GuestProcessing = request.GuestProcessing;
+        job.KubernetesPodVolumes = request.KubernetesPodVolumes;
         job.GuestFailurePolicy = Enum.TryParse<GuestFailurePolicy>(request.GuestFailurePolicy, true, out var policy) ? policy : GuestFailurePolicy.CrashConsistentWithWarning;
         job.GuestCredentialId = request.GuestCredentialId;
         job.GuestProcessingMode = Enum.TryParse<GuestProcessingMode>(request.GuestProcessingMode, true, out var mode) && !int.TryParse(request.GuestProcessingMode, out _) ? mode : GuestProcessingMode.Vss;

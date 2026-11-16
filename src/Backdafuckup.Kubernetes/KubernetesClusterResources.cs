@@ -11,24 +11,12 @@ namespace Backdafuckup.Kubernetes;
 /// The cluster-scoped objects of a whole-cluster backup (spec 2026-11-11-1343, phase 2), in the blob format of a
 /// namespace's (<see cref="KubernetesResources.Format"/>): the CRDs and their cluster-scoped objects, the ClusterRoles and
 /// ClusterRoleBindings people made, and the classes (storage, snapshots, ingress, priority, runtime); the webhook
-/// configurations only for the record (a restore lists them, it never creates them). Left out is what a cluster makes
-/// itself or Rancher, Fleet and RKE2 put into it: system roles and defaults, their CRDs, the CNI's, the snapshot API's.
+/// configurations only for the record (a restore lists them, it never creates them). Left out is what the cluster's
+/// platforms make themselves (<see cref="KubernetesPlatformSet"/>: system roles and defaults, a distribution's, manager's
+/// or addon's roles, webhooks and CRDs), the snapshot API's CRDs, and backdafuckup's own objects.
 /// </summary>
 internal static class KubernetesClusterResources
 {
-    /// <summary>
-    /// CRD groups that belong to the cluster's own machinery: the snapshot API, the CNI's, and the vSphere CSI driver's
-    /// bookkeeping (its objects describe the nodes and volumes of the cluster backed up, the driver makes them again).
-    /// </summary>
-    private static readonly string[] SkippedCrdGroups =
-        [VolumeSnapshotFlow.Group, "crd.projectcalico.org", "projectcalico.org", "operator.tigera.io", "cilium.io", "k3s.cattle.io", "cns.vmware.com"];
-
-    /// <summary>The default ClusterRoles of Kubernetes that are not system:-prefixed.</summary>
-    private static readonly HashSet<string> DefaultRoles = new(StringComparer.Ordinal) { "admin", "edit", "view", "cluster-admin" };
-
-    /// <summary>Name prefixes of what RKE2, Rancher, Fleet and backdafuckup itself make.</summary>
-    private static readonly string[] ManagedPrefixes = ["system:", "rke2-", "cattle-", "fleet-", "rancher-", "backdafuckup-", "cluster-owner", "project-owner"];
-
     /// <summary>The cluster-scoped kinds besides CRDs, as the generic API serves them.</summary>
     private static readonly (string Group, string Version, string Plural, string Kind)[] Kinds =
     [
@@ -43,10 +31,12 @@ internal static class KubernetesClusterResources
         ("admissionregistration.k8s.io", "v1", "mutatingwebhookconfigurations", "MutatingWebhookConfiguration"),
     ];
 
-    public static async Task<KubernetesResources.Collected> CollectAsync(IKubernetes client, string cluster, IOperationLog log, CancellationToken cancellationToken)
+    public static async Task<KubernetesResources.Collected> CollectAsync(
+        IKubernetes client, string cluster, KubernetesPlatformSet platforms, IOperationLog log, CancellationToken cancellationToken)
     {
         var lines = new List<JsonObject>();
-        var skipped = 0;
+        var skipped = new Dictionary<string, int>(StringComparer.Ordinal);
+        void Skip(string by) => skipped[by] = skipped.GetValueOrDefault(by) + 1;
 
         async Task<object?> TryAsync(string what, Func<Task<object>> call)
         {
@@ -73,13 +63,15 @@ internal static class KubernetesClusterResources
         {
             foreach (var item in items.OfType<JsonObject>())
             {
-                if (IsManaged(kind, item))
+                // Matched as stored: items of lists of built-in kinds carry no apiVersion and kind until cleaned.
+                var cleaned = KubernetesResources.Clean(item, apiVersion, kind);
+                if (MadeBy(cleaned, platforms) is { } by)
                 {
-                    skipped++;
+                    Skip(by);
                     continue;
                 }
 
-                lines.Add(KubernetesResources.Clean(item, apiVersion, kind));
+                lines.Add(cleaned);
             }
         }
 
@@ -89,9 +81,16 @@ internal static class KubernetesClusterResources
         foreach (var crd in definitions?.Items ?? [])
         {
             var group = crd.Spec.Group;
-            if (SkippedCrdGroups.Contains(group, StringComparer.Ordinal) || group.EndsWith(".cattle.io", StringComparison.Ordinal) || group == "cattle.io")
+            // The snapshot API's (the cluster's own machinery, never from a backup), and what the platforms install.
+            if (group == VolumeSnapshotFlow.Group)
             {
-                skipped++;
+                Skip("Kubernetes");
+                continue;
+            }
+
+            if (platforms.CrdGroupOf(group) is { } platform)
+            {
+                Skip(platform.Name);
                 continue;
             }
 
@@ -125,34 +124,23 @@ internal static class KubernetesClusterResources
 
         var perKind = lines.GroupBy(l => (string)l["kind"]!).ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
         log.Info($"Cluster-scoped objects of {cluster}: {lines.Count} ({string.Join(", ", perKind.OrderByDescending(k => k.Value).ThenBy(k => k.Key, StringComparer.Ordinal).Select(k => $"{k.Value} {k.Key}"))}); " +
-                 $"{skipped} of the cluster itself, Rancher, Fleet or RKE2 left out.");
+                 $"{skipped.Values.Sum()} left out, made by the cluster's platforms ({platforms.Display}) or backdafuckup" +
+                 (skipped.Count > 0 ? $": {string.Join(", ", skipped.OrderByDescending(s => s.Value).ThenBy(s => s.Key, StringComparer.Ordinal).Select(s => $"{s.Value} {s.Key}"))}." : "."));
         return new KubernetesResources.Collected(content.ToArray(), lines.Count, perKind);
     }
 
-    /// <summary>What the cluster, RKE2, Rancher, Fleet or backdafuckup make themselves (and make again).</summary>
-    internal static bool IsManaged(string kind, JsonObject item)
+    /// <summary>
+    /// Who makes a cluster-scoped object itself (and makes it again): backdafuckup (its own roles and objects), or a platform
+    /// of the cluster (the base's system roles and defaults, a distribution's or manager's roles, webhooks and records).
+    /// </summary>
+    internal static string? MadeBy(JsonObject item, KubernetesPlatformSet platforms)
     {
-        var name = (string?)item["metadata"]?["name"] ?? string.Empty;
-        var labels = item["metadata"]?["labels"] as JsonObject;
-        if ((string?)labels?[VolumeSnapshotFlow.ManagedByLabel] == "backdafuckup")
+        if ((string?)item["metadata"]?["labels"]?[VolumeSnapshotFlow.ManagedByLabel] == "backdafuckup"
+            || (KubernetesObjects.Kind(item) is "ClusterRole" or "ClusterRoleBinding" && KubernetesObjects.Name(item).StartsWith("backdafuckup-", StringComparison.Ordinal)))
         {
-            return true;
+            return "backdafuckup";
         }
 
-        switch (kind)
-        {
-            case "ClusterRole" or "ClusterRoleBinding":
-                return DefaultRoles.Contains(name)
-                       || ManagedPrefixes.Any(p => name.StartsWith(p, StringComparison.Ordinal))
-                       || (string?)labels?["kubernetes.io/bootstrapping"] == "rbac-defaults"
-                       || labels?.Any(kv => kv.Key.Contains("cattle.io", StringComparison.Ordinal)) == true
-                       || item["metadata"]?["annotations"] is JsonObject annotations && annotations.Any(kv => kv.Key.Contains("cattle.io", StringComparison.Ordinal));
-            case "PriorityClass":
-                return name.StartsWith("system-", StringComparison.Ordinal);
-            case "ValidatingWebhookConfiguration" or "MutatingWebhookConfiguration":
-                return name.StartsWith("rancher.cattle.io", StringComparison.Ordinal) || name.StartsWith("rke2-", StringComparison.Ordinal);
-            default:
-                return false;
-        }
+        return platforms.MadeBy(item)?.Profile.Name;
     }
 }

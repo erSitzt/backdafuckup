@@ -117,6 +117,25 @@ public sealed partial class LocalDirectoryRepository
             return index;
         }
 
+        public async Task<ChunkIndex> ReadFileTreeIndexAsync(string key, CancellationToken cancellationToken)
+        {
+            var tree = Manifest.FileTrees.FirstOrDefault(t => t.Key == key)
+                ?? throw new KeyNotFoundException($"Restore point {Manifest.RestorePointId} has no file tree '{key}'.");
+            var raw = ChunkIndexFormat.Decompress(await File.ReadAllBytesAsync(Path.Combine(directory, tree.Index.File), cancellationToken).ConfigureAwait(false));
+            if (ChunkIndexFormat.Sha256Hex(raw) != tree.Index.Sha256)
+            {
+                throw new InvalidDataException($"The root index of file tree '{key}' in restore point {Manifest.RestorePointId} is corrupt (hash mismatch).");
+            }
+
+            var index = ChunkIndexFormat.Deserialize(raw);
+            if (index.DiskSize != tree.RootLength || index.ChunkSize != Manifest.Chunking.ChunkSize)
+            {
+                throw new InvalidDataException($"The root index of file tree '{key}' does not match the manifest.");
+            }
+
+            return index;
+        }
+
         public async Task<Stream> OpenBlobAsync(ManifestBlob blob, CancellationToken cancellationToken)
         {
             var raw = ChunkIndexFormat.Decompress(await File.ReadAllBytesAsync(Path.Combine(directory, blob.File), cancellationToken).ConfigureAwait(false));
@@ -279,6 +298,20 @@ public sealed partial class LocalDirectoryRepository
             return new ManifestIndexRef(file, ChunkIndexFormat.Sha256Hex(raw), index.Entries.LongLength);
         }
 
+        public async Task<ManifestIndexRef> WriteFileTreeIndexAsync(string key, ChunkIndex root, CancellationToken cancellationToken)
+        {
+            ThrowIfClosed();
+            if (root.ChunkSize != Repository._descriptor.ChunkSize)
+            {
+                throw new ArgumentException("Index chunk size does not match the Repository.", nameof(root));
+            }
+
+            var raw = ChunkIndexFormat.Serialize(root);
+            var file = $"tree-{SafeName(key)}.idx";
+            await AtomicFile.WriteAsync(Repository._tempDirectory, Path.Combine(directory, file), ChunkIndexFormat.Compress(raw), overwrite: true, cancellationToken).ConfigureAwait(false);
+            return new ManifestIndexRef(file, ChunkIndexFormat.Sha256Hex(raw), root.Entries.LongLength);
+        }
+
         public async Task<ManifestBlob> WriteBlobAsync(string name, string format, Stream content, CancellationToken cancellationToken)
         {
             ThrowIfClosed();
@@ -303,6 +336,12 @@ public sealed partial class LocalDirectoryRepository
             {
                 throw new ArgumentException("Manifest chunk size does not match the Repository.", nameof(manifest));
             }
+
+            // File trees need a version that walks them in GC and verify; restore points without stay readable by every version.
+            manifest = manifest with
+            {
+                FormatVersion = manifest.FileTrees.Count > 0 ? RestorePointManifest.FileTreeFormatVersion : RestorePointManifest.BaseFormatVersion,
+            };
 
             // Make all chunk/index/blob data durable before the manifest (the commit point) appears.
             FileSystemSync.SyncFileSystem(Repository.Root);

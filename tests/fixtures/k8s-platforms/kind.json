@@ -1,0 +1,61 @@
+{
+  "source": "A kind v0.33.0 cluster (Kubernetes 1.37), captured with scripts/k8s-platform-facts.sh on 2026-11-12.",
+  "tested": true,
+  "facts": {
+    "gitVersion": "v1.37.0",
+    "apiGroups": [
+      "admissionregistration.k8s.io",
+      "apiextensions.k8s.io",
+      "apiregistration.k8s.io",
+      "apps",
+      "authentication.k8s.io",
+      "authorization.k8s.io",
+      "autoscaling",
+      "batch",
+      "certificates.k8s.io",
+      "coordination.k8s.io",
+      "discovery.k8s.io",
+      "events.k8s.io",
+      "flowcontrol.apiserver.k8s.io",
+      "networking.k8s.io",
+      "node.k8s.io",
+      "policy",
+      "rbac.authorization.k8s.io",
+      "resource.k8s.io",
+      "scheduling.k8s.io",
+      "storage.k8s.io",
+      "storagemigration.k8s.io"
+    ],
+    "namespaces": [
+      "default",
+      "kube-node-lease",
+      "kube-public",
+      "kube-system",
+      "local-path-storage"
+    ],
+    "nodes": [
+      {
+        "name": "node-1",
+        "providerId": "kind://",
+        "labels": {
+          "beta.kubernetes.io/arch": "x",
+          "beta.kubernetes.io/os": "x",
+          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/hostname": "x",
+          "kubernetes.io/os": "linux",
+          "node-role.kubernetes.io/control-plane": ""
+        },
+        "annotations": {
+          "node.alpha.kubernetes.io/ttl": "x",
+          "volumes.kubernetes.io/controller-managed-attach-detach": "x"
+        }
+      }
+    ],
+    "csiDrivers": [
+      "rancher.io/local-path"
+    ]
+  },
+  "expect": [
+    "kind"
+  ]
+}

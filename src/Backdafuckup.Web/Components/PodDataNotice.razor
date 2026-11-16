@@ -1,0 +1,55 @@
+@* What a namespace's restore point does not hold: the data of pod volumes that are not PVCs (emptyDir and the like) and
+   what containers wrote into their own file systems. Restored pods start with those empty. *@
+@if (Read.Count > 0)
+{
+    <MudAlert Severity="Severity.Info" Dense="true" Class="@Class">
+        The files of @Read.Count pod volume(s) are in this restore point (@string.Join(", ", Read.Select(v => $"{v.Pod}/{v.Volume}").Take(6))@(Read.Count > 6 ? ", …" : string.Empty)):
+        restore them under Files – browse, download, into a PVC or onto a share. Restored pods start with these volumes empty.
+    </MudAlert>
+}
+@if (Missing.Count > 0 || Layers.Count > 0)
+{
+    <MudAlert Severity="@(Missing.Any(v => v.OptIn is not null) ? Severity.Warning : Severity.Info)" Dense="true" Class="@Class">
+        @if (Missing.Count > 0)
+        {
+            <div>
+                Not in this restore point: the data of @Missing.Count pod volume(s) without a PVC@(Bytes(Missing.Select(v => v.UsedBytes)))
+                – @string.Join(", ", Groups()). Restored pods start with them empty.
+            </div>
+        }
+        @if (Layers.Count > 0)
+        {
+            <div>
+                What containers had written into their own file systems (@Fmt.Bytes(Layers.Sum(w => w.LayerBytes!.Value))) is never backed up:
+                @string.Join(", ", Layers.GroupBy(w => $"{w.Workload}/{w.Container}").OrderByDescending(g => g.Sum(w => w.LayerBytes!.Value)).Take(5).Select(g => $"{g.Key} {Fmt.Bytes(g.Sum(w => w.LayerBytes!.Value))}")).
+            </div>
+        }
+    </MudAlert>
+}
+
+@code {
+    [Parameter, EditorRequired]
+    public KubernetesRestorePointDto Details { get; set; } = null!;
+
+    [Parameter]
+    public string? Class { get; set; }
+
+    /// <summary>The workload's own pod volumes whose data is not in the restore point (platforms' left aside).</summary>
+    private List<KubernetesPodVolumeDto> Missing => [.. (Details.PodVolumes ?? []).Where(v => !v.BackedUp && v.Platform is null)];
+
+    private List<KubernetesPodVolumeDto> Read => [.. (Details.PodVolumes ?? []).Where(v => v.BackedUp)];
+
+    private List<KubernetesContainerWriteDto> Layers => [.. (Details.ContainerWrites ?? []).Where(w => w.LayerBytes is > 0)];
+
+    private IEnumerable<string> Groups() => Missing
+        .GroupBy(v => (v.Workload, v.Volume, v.Kind))
+        .OrderByDescending(g => g.Sum(v => v.UsedBytes ?? 0))
+        .Take(6)
+        .Select(g => $"{g.Key.Workload}/{g.Key.Volume} ({(g.Key.Kind == "emptyDir-memory" ? "emptyDir in memory" : g.Key.Kind)}{Bytes(g.Select(v => v.UsedBytes))}{(g.Any(v => v.OptIn is not null) ? ", asked for" : string.Empty)})");
+
+    private static string Bytes(IEnumerable<long?> sizes)
+    {
+        var known = sizes.Where(s => s is not null).Select(s => s!.Value).ToList();
+        return known.Count == 0 ? string.Empty : $", {Fmt.Bytes(known.Sum())}";
+    }
+}

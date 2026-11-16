@@ -70,7 +70,7 @@ public sealed class FileRestoreSessionRunner(
             var disks = await FileRestoreMounts.OpenDisksAsync(reader, cache, cancellationToken).ConfigureAwait(false);
             if (point.Consistency != "application")
             {
-                log.Info("The restore point is crash-consistent: the newest changes before the snapshot may be missing in some files.");
+                log.Info(FileRestoreMounts.CrashConsistency(reader.Manifest, point.ConsistencyReason, "files"));
             }
 
             var (result, targetText, targetWarnings) = request.Target.Kind switch
@@ -354,7 +354,7 @@ public sealed class FileRestoreSessionRunner(
             {
                 using var image = GuestImage.Open(disks);
                 var volume = ReadableVolume(image, request.Volume);
-                if (volume.FileSystem is not ("ext" or "XFS"))
+                if (volume.FileSystem is not ("ext" or "XFS" or FileTreeFileSystem.TypeName))
                 {
                     throw new InvalidOperationException($"Volume {FileRestoreMounts.Title(volume)} is {volume.FileSystem}; SSH restores files of Linux volumes. Restore Windows files through the agent.");
                 }
@@ -488,7 +488,7 @@ public sealed class FileRestoreSessionRunner(
             {
                 using var image = GuestImage.Open(disks);
                 var volume = ReadableVolume(image, request.Volume);
-                if (volume.FileSystem is not ("ext" or "XFS"))
+                if (volume.FileSystem is not ("ext" or "XFS" or FileTreeFileSystem.TypeName))
                 {
                     throw new InvalidOperationException($"Volume {FileRestoreMounts.Title(volume)} is {volume.FileSystem}; files go back into PVCs with ext or XFS file systems only.");
                 }

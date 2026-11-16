@@ -584,30 +584,32 @@ backdafuckup backs up namespaces of Kubernetes clusters, with their objects and 
 - files of a PVC;
 - a whole cluster from one run, into the same cluster or another one.
 
-It was built for RKE2 on vSphere with the vSphere CSI driver. Any CSI driver with volume snapshots works the same way.
+It was built for RKE2 on vSphere with the vSphere CSI driver. Any CSI driver with volume snapshots works the same way. Volumes without snapshots (NFS, hostPath and local PVs; with the optional node agent also other CSI volumes and pod volumes such as emptyDirs) are backed up file by file.
 
 ### Requirements
 
 | Item | Notes |
 |---|---|
 | Cluster | Tested with RKE2 1.32 and vSphere CSI 3.6.3. Either the backup server reaches the API server, or the cluster's pods reach the backup server (an agent, see below). |
-| Volume snapshots | The snapshot CRDs and the snapshot controller (RKE2 ships both), the CSI driver's snapshotter, and a VolumeSnapshotClass for the driver (`deletionPolicy: Delete`). PVCs on storage without a snapshot class (NFS, for example) are backed up as objects only. |
+| Volume snapshots | The snapshot CRDs and the snapshot controller (RKE2 ships both), the CSI driver's snapshotter, and a VolumeSnapshotClass for the driver (`deletionPolicy: Delete`). PVCs on NFS, hostPath and local volumes are backed up file by file without snapshots; CSI volumes without a snapshot class only with the node agent (see [Volumes without snapshots](#volumes-without-snapshots-file-by-file)). |
 | vSphere CSI | 3.5 or later. 3.3.1 is end of life and not supported on Kubernetes 1.32. vSphere allows 3 snapshots per volume by default and costs I/O for each; backdafuckup keeps a snapshot only while its volume is read. |
 | Container registry | For the mover image: reachable by the backup server (push) and the cluster's nodes (pull). |
 | Server address | *Guest agents → Settings → server address*: the mover pods connect to it, like the guest agents. |
 
 ### Connect a cluster
 
-1. Open *Backup Infrastructure → Kubernetes Clusters → Setup manifest*. Copy or download `backdafuckup-setup.yaml`.
+1. Open *Backup Infrastructure → Kubernetes Clusters → Setup manifest* (for a cluster that is connected already: *Setup manifest* in its row). Copy or download `backdafuckup-setup.yaml`.
    - Turn *With the restore role* off for an account that only backs up.
+   - Turn *With the node agent* on to read pod volumes and CSI volumes without snapshots (see [The node agent](#the-node-agent)).
 2. Apply it with `kubectl apply -f backdafuckup-setup.yaml`, or as a Fleet bundle. It creates:
 
    | Object | Purpose |
    |---|---|
    | Namespace `backdafuckup-system` with `pod-security.kubernetes.io/enforce: baseline` | The work namespace: temporary PVCs and the mover pods |
    | ServiceAccount `backdafuckup` and its token Secret `backdafuckup-token` | The account the server uses |
-   | ClusterRole `backdafuckup-backup` | Read every object, Secrets included. Create and delete VolumeSnapshots and VolumeSnapshotContents. `pods/exec` for hooks. PersistentVolumes |
+   | ClusterRole `backdafuckup-backup` | List and watch every object, Secrets included; `get` only on the kinds it reads by name (core objects, workloads, CRDs, StorageClasses, snapshots), never on `*/*`, which would include `nodes/proxy`: the kubelet's API, and through it exec in any pod. Create and delete VolumeSnapshots and VolumeSnapshotContents. `get` and `create` on `pods/exec`, for hooks and the node agent (an exec over a WebSocket is authorised as `get`). PersistentVolumes, for the read-only copies of volumes read file by file |
    | Role `backdafuckup-work` in `backdafuckup-system` | PVCs, pods and Secrets of the work namespace; patch the agent's Deployment `backdafuckup-agent` (its image) |
+   | Namespace `backdafuckup-node` and its DaemonSet (optional, *With the node agent*) | See [The node agent](#the-node-agent) |
    | ClusterRole `backdafuckup-restore` (optional) | Create, change and delete objects in every namespace: restores, and the mover pod of a file restore in the PVC's namespace. `bind` and `escalate` on roles and ClusterRoles, to restore RoleBindings to `admin` or `edit` and the ClusterRoles of a whole cluster. Together this is as much as cluster-admin. |
 
 3. Read the token and the cluster CA. The commands are in the manifest's header:
@@ -624,9 +626,10 @@ It was built for RKE2 on vSphere with the vSphere CSI driver. Any CSI driver wit
    The server trusts an API server whose certificate that CA signed for the address. The token is stored encrypted, like credentials.
 5. The inventory lists the namespaces and their PVCs. *Backup of its data* shows how each PVC's data is backed up:
    - *snapshot*: its driver has a VolumeSnapshotClass;
-   - *objects only*: it has none.
+   - *files*: an NFS, hostPath or local volume, read through a read-only copy of its PV; or a CSI volume without a snapshot class that a running pod has mounted on a node with the node agent;
+   - *objects only*: none of these, with the reason.
 
-   *Rescan* reads the inventory again.
+   *Pod volumes* lists the workloads' volumes that are not PVCs and what containers write into their own file systems; *Usage numbers* gives them sizes (see [Pod volumes](#pod-volumes-and-container-file-systems)). *Rescan* reads the inventory again.
 
 ### Through an agent (clusters the server cannot reach)
 
@@ -709,16 +712,17 @@ Each run makes one restore point per namespace:
    - Also read: the namespace itself, the PVs and StorageClasses of its PVCs, and the CRDs that have objects in it.
    - Left out: events, endpoints and leases, because the cluster makes them. A kind the account may not list gives a warning.
 2. **Pre-hooks**, see below.
-3. **Snapshots:** one VolumeSnapshot per PVC that has a snapshot class, taken one after another. Then the post-hooks run.
+3. **Snapshots:** one VolumeSnapshot per PVC that has a snapshot class, taken one after another. Then the post-hooks run, unless volumes are read file by file (step 5).
 4. **Data, one volume after another:**
    - The snapshot is exposed in `backdafuckup-system`: a VolumeSnapshotContent and VolumeSnapshot on the same snapshot, with `snapshot.storage.kubernetes.io/allow-volume-mode-change`, and a block PVC from it.
    - A mover pod reads the device and sends its non-zero blocks to the server. The server stores them like a VM disk, with dedup and compression.
    - Then the pod, the PVC and both snapshots are deleted.
+5. **Volumes without snapshots, file by file:** NFS, hostPath and local PVCs, CSI volumes without a snapshot class and pod volumes asked for (see below). Then the post-hooks run: Velero's order, pre-hook → snapshots → file reads → post-hook.
 
 **What to expect:**
 - **Every run reads every volume in full.** CSI drivers of vanilla clusters have no changed block tracking. The repository stores only the chunks that changed, and the session log notes the full read as information.
 - **The copy takes time.** On vSphere the block PVC is a full copy of the snapshot on the same datastore, made before the mover starts. The server waits up to 4 hours for the mover.
-- **PVCs without a snapshot class** are backed up as objects only. The restore point and the session log say so.
+- **PVCs whose data cannot be read** (a CSI volume without a snapshot class and no node agent, a block-mode PVC without snapshots, a hostPath PV that no pod uses) are backed up as objects only. The restore point and the session log say why.
 
 **Hooks** use Velero's annotations on the pod, so existing annotations keep working:
 
@@ -728,7 +732,7 @@ Each run makes one restore point per namespace:
 | `pre.hook.backup.velero.io/container` | The container; default: the pod's first. |
 | `pre.hook.backup.velero.io/on-error` | `Fail` (the default): the namespace is not backed up. `Continue`: the backup goes on and is crash-consistent with a warning. |
 | `pre.hook.backup.velero.io/timeout` | Default `30s`; `s` and `m` are understood. |
-| `post.hook.backup.velero.io/…` | The same, after the last snapshot. Post-hooks also run when a snapshot fails. |
+| `post.hook.backup.velero.io/…` | The same, after the last snapshot, or after the volumes read file by file. Post-hooks also run when a snapshot or a read fails. |
 
 Only running pods run hooks, through `pods/exec`.
 
@@ -736,18 +740,154 @@ Only running pods run hooks, through `pods/exec`.
 - Each volume is crash-consistent at the moment of its snapshot. The volumes of a namespace are captured one after another, because vSphere has no group snapshots.
 - When every pre-hook succeeded, the restore point is *app-consistent (hooks)*.
 - A failed hook with `on-error: Continue` makes it crash-consistent with a warning.
+- Volumes read file by file are read while in use, not at one point in time: the consistency names them and the number of files that changed while they were read.
 
 **The whole cluster:** turn on *Back up the whole cluster* in the job editor.
-- Each run backs up every namespace of the cluster at that time, except those of *Leave out these namespaces*: names, or patterns with `*`. The default leaves out what Kubernetes, RKE2, Rancher and Fleet make themselves: `kube-system`, `kube-public`, `kube-node-lease`, `cattle-*`, `fleet-*`, `cluster-fleet-*`, `local`. `backdafuckup-system` is always left out.
+- Each run backs up every namespace of the cluster at that time, except those left out:
+  - *Leave out what the cluster's platforms make* (on by default): the namespaces of the platforms detected at that run (see [Platforms](#platforms)), so a new platform or a catalog update reaches the job. In the job object this is `@platform`.
+  - *Also leave out*: names, or patterns with `*`.
+  - `backdafuckup-system` is always left out.
+  - Jobs saved before platforms were detected keep their fixed list (`kube-system`, `kube-public`, `kube-node-lease`, `cattle-*`, `fleet-*`, `cluster-fleet-*`, `local`). The job editor offers *Use the platform's list*.
 - Each run also makes a restore point *Cluster-scoped objects* (`@cluster`):
   - **Included:** the CRDs and their cluster-scoped objects (for example cert-manager's ClusterIssuers), the ClusterRoles and ClusterRoleBindings people made, and the StorageClasses, VolumeSnapshotClasses, IngressClasses, PriorityClasses and RuntimeClasses. The webhook configurations are included for the record.
-  - **Left out:** system and default roles, the roles and CRDs of RKE2, Rancher and Fleet, the CRDs of the CNI, of the snapshot API and of the vSphere CSI driver (`cns.vmware.com`), nodes, APIServices.
-- The session log names the namespaces of each run.
+  - **Left out:** what the cluster's platforms make (system and default roles, a distribution's or manager's roles and webhooks, the CRDs the platforms install), the snapshot API's CRDs, backdafuckup's own objects, nodes, APIServices. The log counts them per platform.
+- The session log names the platforms of the run, the namespaces it backs up, and those the platforms' list left out, per platform.
 
 **Secrets:** the restore point holds the namespace's Secrets with their values.
 - The repository protects them like disk images, through its file permissions.
 - There is no encryption at rest yet.
 - The console shows the keys of a Secret, never its values.
+
+### Volumes without snapshots (file by file)
+
+Volumes that no CSI snapshot can reach are read file by file into the repository: each file's content is stored in chunks like disk data (deduplicated across runs and clusters), each folder as a listing with owners, modes, times and inode numbers. Two readers:
+
+- **A read-only copy of the PV** (NFS, hostPath and local PVs; no extra rights):
+  - In `backdafuckup-system` the server makes a PV with only the volume's source, node affinity, mount options and capacity, forced to `ReadOnlyMany`, `Retain`, no StorageClass, read-only (`nfs.readOnly`), hostPath `type: Directory`, bound ahead to a PVC there. Annotations (above all the provisioner's), finalizers and the reclaim policy are never copied, so deleting the copy never touches the export or its folder. It carries the label `backdafuckup.io/shadow-of`.
+  - A mover pod mounts it read-only and reads the files. It runs as root with `DAC_OVERRIDE` (read every file), `SETUID` and `SETGID` (see `root_squash` below), 512 MiB memory limit, on the node of a pod that uses the volume when there is one.
+  - A hostPath PV without node affinity has its data on one node: it is read on the node of the pod that uses it; with no such pod it stays objects only.
+  - The mover may take up to 15 minutes to connect (mount). While it waits, the session log reports the pod's state and the warning events of its PVC.
+  - Afterwards the pod, the PVC and the copy of the PV are deleted, the PV last. backdafuckup deletes no other PV: only one with `app.kubernetes.io/managed-by: backdafuckup` and `Retain`.
+- **The node agent** (CSI volumes without a snapshot class; see [The node agent](#the-node-agent)): it reads the volume where the kubelet has mounted it for a running pod (`pods/<uid>/volumes/kubernetes.io~csi/<pv>/mount`). A volume that no running pod has mounted, or on a node without the agent, stays objects only. Block-mode PVCs cannot be read this way.
+
+**What is kept:** files, folders, symbolic links, hard links (stored once), FIFOs and device files (as entries), owners, modes, modification and change times, sparse regions (holes are not stored). Not kept: extended attributes and ACLs; access times are not recorded, so unchanged folders deduplicate.
+
+**Incremental runs:** each run compares the volume with the job's newest restore point that has it ("compared with the restore point of …"). A file whose size, modification and change times and inode are unchanged is taken from that restore point without being read; the server checks every such file against its own copy of the previous listing. Files that changed during the previous read are read again. The log names the files and bytes not read again. A run whose data is all file by file and all compared is an *Incremental* restore point. *Active full* reads every file.
+
+**`root_squash`:** an NFS export that maps root to nobody refuses root a file or folder that only its owner may read. The mover then reads it as its owner, or else as its folder's owner (`setfsuid`/`setfsgid`); nothing to do, and the run log does not mention it. A file it cannot read even so is a warning with its path, whom the mover also tried and the reason, e.g. "Volume data: 1 entry not read: locked.bin: cannot open the file (also tried as its owner 1000:1000): Permission denied." Such a file's mode lets not even its owner read it; the restore names it as not read at the backup.
+
+**Changes while reading:** a file that changed while it was read, or less than 2 seconds before, is flagged (the consistency counts those that changed while read) and read again by the next run. Use pre- and post-hooks to make the application hold still (e.g. `["redis-cli", "save"]`, or a database's checkpoint) if the files must be consistent with each other.
+
+### Pod volumes and container file systems
+
+Data that is not in a PVC is not backed up unless asked for: an emptyDir, an inline CSI volume, or what a container writes into its own file system (its writable layer). backdafuckup names it, with its size when the cluster has usage numbers.
+
+**Asking for pod volumes** (Velero's annotations, so existing annotations keep working):
+
+| Where | Meaning |
+|---|---|
+| Pod annotation `backup.velero.io/backup-volumes` | The pod's volumes to back up, comma-separated, e.g. `cache,uploads`. |
+| Job switch *Back up every pod volume that is not a PVC* | Every pod volume of the job's namespaces, except those in `backup.velero.io/backup-volumes-excludes`. |
+
+- **Never read:** hostPath volumes (their data belongs to the node), a pod's own NFS mounts (give them a PV and PVC), ConfigMaps, Secrets, projected and downward API volumes, and what a platform puts into pods (e.g. Istio's sidecar volumes; a platform's volumes in its own namespaces).
+- **Reading them needs the node agent.** Without it, or without an agent pod on the volume's node, volumes asked for are a warning ("asked for, not backed up … needs the node agent") and the run ends *Warning*.
+- **Volumes not asked for** are named in the log as information, as a warning from 100 MiB.
+- **Container file systems** are never backed up. The log names the containers that wrote most (writable layer from 100 MiB as a warning, else by write rate).
+- **The inventory**, tab *Pod volumes*: each workload's volumes with kind, size, size limit and whether they are asked for; the platforms' volumes hidden; read-only hostPath mounts left out. The namespaces show how many pod volumes they have and how much data is outside PVCs.
+
+**Restore:** pod volumes come back as files: browse, download, *Into a PVC of the namespace (mover pod)*, or onto a share. A namespace restore starts the pods with empty volumes and names where their files are; backdafuckup does not change workloads (no init container), because emptyDir data lives only as long as its pod.
+
+### Usage numbers
+
+*Kubernetes Clusters → (cluster) → Usage numbers* gives the inventory and backups the sizes of pod volumes, containers' writable layers and PVCs, and containers' write rates. Two sources; the node agent's numbers come first where both have one:
+
+- **The node agent:** the kubelets' statistics (`/stats/summary`) of every node.
+- **Prometheus:** a Prometheus API that has the cluster's storage metrics. Enter:
+  - its URL (this server queries it at each scan and backup, so it must reach the address);
+  - an optional user and password (basic authentication) or a token (bearer), stored encrypted;
+  - TLS: the system's CAs, a CA certificate (PEM), or, after a test that shows an untrusted certificate, that certificate pinned;
+  - an optional label filter for a Prometheus of several clusters, e.g. `cluster="prod"`;
+  - optionally other queries. The defaults:
+
+    | Numbers | Default query (metric) |
+    |---|---|
+    | Pod volumes | `ephemeral_storage_container_volume_usage` (the ephemeral-storage-exporter) |
+    | Writable layers | `ephemeral_storage_container_rootfs_used_bytes` (the ephemeral-storage-exporter) |
+    | PVCs | `kubelet_volume_stats_used_bytes` |
+    | Write rates | `rate(container_fs_writes_bytes_total[1h])` (cAdvisor) |
+
+    `$namespace` becomes the namespace, `$filter` the label filter. Each query gives series with the labels `namespace` (or `pod_namespace`), `pod` (`pod_name`) and `volume` (`volume_name`), `container`, or `persistentvolumeclaim`.
+- *Test* runs every query and names how many series each found, or what failed.
+- **NFS and hostPath PVCs get no size from the kubelet:** it measures the file system the volume is on, which for an NFS export is the whole export. A size larger than the PVC's capacity is ignored too.
+
+### The node agent
+
+The node agent is optional. It reads what the API cannot reach: pod volumes asked for (emptyDirs, on disk or in memory, and inline CSI volumes), CSI volumes without a snapshot class that a running pod has mounted, and the kubelets' usage numbers.
+
+**Install it:** *Setup manifest* (or *Setup manifest with the agent*) with *With the node agent* on, then apply the manifest. It needs the mover image (pushed first if needed) and the server address under *Guest agents → Settings*, like the movers. It adds:
+
+| Object | Purpose |
+|---|---|
+| Namespace `backdafuckup-node` with `pod-security.kubernetes.io/enforce: privileged` | Pod Security allows its host path mount only at "privileged". |
+| ServiceAccount `backdafuckup-node`, ClusterRole and binding `backdafuckup-node` | `get` on `nodes/stats` only: the kubelet's statistics, never `nodes/proxy`. |
+| Role and RoleBinding `backdafuckup-node-update` | The server's account may patch the DaemonSet `backdafuckup-node` (its image), nothing else there. |
+| DaemonSet `backdafuckup-node` | One pod per node, control-plane and tainted nodes included (tolerates every taint). |
+
+**The agent pod:**
+- The mover image with `BDFU_MOVER_MODE=node`. 20m CPU and 64 MiB requested, 512 MiB limit.
+- Root (uid 0), all capabilities dropped but `DAC_READ_SEARCH` (read every file and folder), no privilege escalation, read-only root file system, seccomp `RuntimeDefault`, no host network.
+- The kubelet's directory (from the cluster's platform, e.g. `/var/lib/kubelet`) mounted read-only with `HostToContainer` propagation, so volumes the kubelet mounts later are seen. No other host path.
+- Its self-check at start: its own pod's folder must be there, else the kubelet directory is wrong for the platform (set the platform by hand); the pod log says so.
+
+**How the server uses it:**
+- It finds the running agent pods by their label and reaches the one on the volume's node by exec (`/app/backdafuckup-mover node-request`), sending the request on standard input, never in the command (the API server's audit log keeps commands).
+- A request names an operation (`check`, `read` or `stats`), and for a read the pod's UID, the volume and a one-time channel token. The agent builds the path only from the kubelet's fixed patterns (`pods/<uid>/volumes/kubernetes.io~empty-dir/<name>`, `kubernetes.io~csi/<name>/mount`) and refuses any other name.
+- It sends the files to its own configured server address, checked against its pins, like the movers. At most 2 reads run at once per node.
+- The kubelet's statistics come from `https://<node IP>:10250/stats/summary` with the agent's token. TLS is always checked: against the cluster CA for the node's address (RKE2), else against the kubelet's own certificate in its directory (kubeadm and kind sign their own). With neither, there are no kubelet numbers.
+
+**Updates:** the server keeps the DaemonSet at its own mover image. It patches the image when it differs: at *Rescan*, and for a cluster reached through its agent when that agent connects (after a server update), but not while a session of the cluster runs.
+
+**Remove it:** `kubectl delete namespace backdafuckup-node` and `kubectl delete clusterrole,clusterrolebinding backdafuckup-node`; apply the setup manifest without the switch.
+
+### Platforms
+
+Kubernetes distributions, cluster managers and addons make objects of their own, and make them again: namespaces like `kube-system` or `cattle-system`, roles, webhooks, the CRDs they install, records such as Rancher's App objects. backdafuckup knows these from a catalog of platforms and recognises a cluster's platforms by what it shows: its version, its API groups, its namespaces, a sample of nodes (provider ids, labels, annotations) and its CSI drivers.
+
+- **When:** at every scan (adding, *Rescan*, the agent's connect) and at the start of every backup run. The clusters page names them (*Platform*, e.g. "RKE2 · Rancher · Fleet"); its *Platform* tab lists what gave each away.
+- **What they decide:**
+  - which namespaces a whole-cluster job leaves out with the platform's list;
+  - what the cluster-scoped objects leave out;
+  - what a restore leaves out as made by the platform: into another cluster everything the source's platforms made (they make their own there); into any cluster what they make in every namespace (e.g. OpenShift's image pull secrets, Istio's root CA ConfigMap);
+  - which labels and annotations mean nothing in another cluster (e.g. Rancher's project fields);
+  - CRDs a platform installs never come from a backup. Objects of such an API (e.g. RKE2's HelmCharts, OpenShift's Routes) go into a cluster that has it; elsewhere they stay out, named in the preview and the log.
+- **Restore points** record the platforms of their run; restores use those. Restore points from before platforms were recorded are restored with the rules of that time (Kubernetes, RKE2, k3s, Rancher, Fleet, Calico, Cilium, vSphere CSI).
+- **Set by hand:** *Platform → Set platforms…* chooses them instead of detecting them (for a cluster whose platform is not recognised, or not readable); *Set by hand* off detects them again.
+
+| Platform | Kind | Tested | Recognised by | Leaves out (namespaces) |
+|---|---|---|---|---|
+| Kubernetes | base | yes | always | `kube-system`, `kube-public`, `kube-node-lease` |
+| RKE2 | distribution | yes | version `+rke2r…`, node annotation `rke2.io/node-args` | — |
+| k3s | distribution | no | version `+k3s…`, node annotation `k3s.io/node-args` | — |
+| kind | distribution | yes | provider id `kind://` | `local-path-storage` |
+| OpenShift | distribution | no | API group `config.openshift.io`, namespace `openshift-config` | `openshift`, `openshift-*` |
+| GKE | distribution | no | version `-gke.`, provider id `gce://`, node label `cloud.google.com/gke-nodepool` | `gke-managed-*`, `gke-system`, `gmp-system`, `gmp-public` |
+| EKS | distribution | no | version `-eks-`, node label `eks.amazonaws.com/nodegroup` | `amazon-cloudwatch`, `amazon-guardduty` |
+| AKS | distribution | no | node label `kubernetes.azure.com/cluster`, provider id `azure://` | `gatekeeper-system`, `app-routing-system` |
+| MicroK8s | distribution | no | node label `microk8s.io/cluster=true` | — |
+| k0s | distribution | no | version `+k0s` | — |
+| Tanzu Kubernetes Grid | distribution | no | version `+vmware.`, namespace `tkg-system` | `tkg-system`, `vmware-system-*` |
+| Rancher | manager | yes | namespace `cattle-system`, API group `management.cattle.io` | `cattle-*`, `local` |
+| Fleet | manager | yes | namespace `cattle-fleet-system`, API group `fleet.cattle.io` | `fleet-*`, `cluster-fleet-*`, `cattle-fleet-*` |
+| Calico / Canal | addon | yes | API groups `crd.projectcalico.org`, `operator.tigera.io` | `calico-system`, `calico-apiserver`, `tigera-operator` |
+| Cilium | addon | no | API group `cilium.io` | `cilium-secrets` |
+| vSphere CSI | addon | yes | CSI driver `csi.vsphere.vmware.com`, API group `cns.vmware.com` | `vmware-system-csi` |
+| Istio | addon | yes | API group `networking.istio.io` | — (its root CA ConfigMap in every namespace) |
+| Antrea | addon | no | API group `crd.antrea.io` | — |
+| Longhorn | addon | no | CSI driver `driver.longhorn.io`, API group `longhorn.io` | `longhorn-system` |
+
+*Tested* means checked in the lab; the other platforms' rules come from their public documentation, named in the catalog (`src/Backdafuckup.Kubernetes/Platforms/platforms.json`). For a platform that is not recognised or not right, `scripts/k8s-platform-facts.sh` (read-only; kubectl and jq) prints what detection looks at, with node names, label values and namespaces that may be internal replaced, for a test fixture.
+
+**OpenShift (untested):** mover pods run as root, so the backdafuckup ServiceAccount needs an SCC that allows it (for example `anyuid`), which the setup manifest does not create. A namespace's UID range (`openshift.io/sa.scc.*`) is kept in another cluster on purpose: restored volume data keeps its owners, which pods of a new range could not read.
 
 ### Restore
 
@@ -786,7 +926,7 @@ Only running pods run hooks, through `pods/exec`.
 
 **Into another cluster:** choose the cluster under *Where*.
 - **StorageClasses:** classes the target lacks start on its default class. Choose another one per class under *Volumes in the target*.
-- **Preview:** before anything is written, it shows each PVC's class and data path in the target, and what stops the restore. It warns about:
+- **Preview:** before anything is written, it shows each PVC's class and data path in the target, and what stops the restore. It covers what you chose: with apps or single PVCs, a PVC left out cannot stop the restore. It warns about:
   - owners on NFS;
   - what the files path loses;
   - CRDs whose operators are not part of the restore;
@@ -801,9 +941,11 @@ Only running pods run hooks, through `pods/exec`.
     3. The volume is handed over to the restored PVC: its PV keeps `Retain` while the work PVC is deleted, is reserved for the restored PVC, and gets its reclaim policy back once bound.
 
     What the files path loses: hard links become copies, sparse files are written in full, extended attributes and ACLs stay behind. On an NFS export that maps root to nobody (`root_squash`), owners cannot be set. The session then notes that once, and the files belong to the export's user.
+  - **Volumes backed up file by file** always go back this way, into the same cluster too, from their file tree: a new volume of the (mapped) class, of the PVC's size or larger when the files need more. FIFOs and device files are left out with a warning. A shared access mode the class refuses (local-path and ReadWriteMany) makes the volume ReadWriteOnce, with a warning.
 - **Left out in another cluster:**
   - finalizers;
-  - Rancher's project fields, Rancher's RoleBindings, and the objects of Rancher's API groups (`*.cattle.io`, such as the App records of Helm releases; Rancher makes them again from the restored release Secrets) with their CRDs;
+  - what the source cluster's platforms made, and the labels and annotations they set for themselves (see [Platforms](#platforms)): for example Rancher's project RoleBindings, project fields and App records of Helm releases (Rancher makes them again from the restored release Secrets);
+  - objects of an API a platform installs, when the target lacks it (named in the preview and the log);
   - a Service's `loadBalancerIP` and `externalIPs`;
   - static PVs, for example of an NFS export. Their PVCs get new volumes, because both clusters would otherwise share the data.
 - **StorageClasses** of the backup are not created in another cluster.
@@ -823,7 +965,7 @@ Only running pods run hooks, through `pods/exec`.
   - VolumeSnapshotClasses, when the target does not serve the snapshot API (its volumes then come back as files);
   - webhook configurations: with a stale CA and `failurePolicy: Fail` they would block the whole cluster. They are listed with the services they call; their operators make them again once their namespaces are back.
 - **A namespace whose backup failed in the run** comes from its newest older restore point, with a warning.
-- **When the cluster-scoped objects fail,** the namespaces are not restored.
+- **When the cluster-scoped step fails** (no right to bind roles, an unreadable restore point, the cluster out of reach), the namespaces are not restored. Objects that fail on their own are warnings: the namespaces follow, and the session ends as *Warning* at least.
 
 **Objects: compare and pick:**
 - **Compare:** the restore point against the live namespace. Each object is *same*, *changed*, *deleted since* or *new since*. The deployment revision annotation and a PVC's `volumeName` do not count as changes.
@@ -831,7 +973,8 @@ Only running pods run hooks, through `pods/exec`.
 - **Restore:** the picked objects exactly as stored, without what they need. Existing ones are replaced on request. PVCs with data come back only when they do not exist; otherwise use *Single PVCs*.
 
 **Files and folders of a PVC:**
-- The file browser reads the PVC's image: ext4 or XFS on the whole device. The ZIP download works as for VMs.
+- The file browser reads the PVC's image: ext4 or XFS on the whole device. A volume backed up file by file is browsed from its file tree, whatever its file system was. The ZIP download works as for VMs.
+- **A pod volume** (no PVC): *Into a PVC of the namespace (mover pod)* writes its files into a PVC you name, into a folder you choose; or download them, or copy them onto a share.
 - **Back into the PVC** (the default target) writes into the live volume while the workload keeps running:
   - **The mover pod:** a mover pod in the PVC's own namespace mounts it as a file system. It runs on the node of the pods that use the PVC, tolerating that node's taints; for ReadWriteMany it runs anywhere.
   - **Target:** the original location or another folder in the PVC. Existing files are replaced, or kept with `RESTORED-<name>` copies next to them. Owner and group come from the backup, or from the folder each item goes into.
@@ -854,17 +997,19 @@ Only running pods run hooks, through `pods/exec`.
 **To check a cluster:**
 ```sh
 kubectl get volumesnapshot,volumesnapshotcontent -A -l app.kubernetes.io/managed-by=backdafuckup
+kubectl get pv -l backdafuckup.io/shadow-of
 kubectl -n backdafuckup-system get pvc,pods,secrets
 ```
-Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-registry` stay. Do not delete the others by hand while a session runs.
+Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-registry` stay. Do not delete the others by hand while a session runs. The node agent's namespace `backdafuckup-node` holds only its DaemonSet; it creates nothing during a backup.
 
 ### Limits
 
-- **Volumes go into another cluster's StorageClass without snapshots only as files**, from ext or XFS. Any other file system needs a target class with snapshots.
+- **Volumes go into another cluster's StorageClass without snapshots only as files**, from ext or XFS, or from a volume backed up file by file. Any other file system needs a target class with snapshots.
 - **Webhook configurations and APIServices are never restored**; the operators that own them make them again.
 - **Namespaces are chosen by name or by labels**, one selector per job, or as the whole cluster with exclude patterns.
 - **No changed block tracking and no group snapshots** on vanilla vSphere CSI.
-- **NFS volumes** are backed up as objects only. Their data at file level is planned.
+- **File by file:** no extended attributes or ACLs; restores write hard links as copies and sparse files in full. Volumes read file by file are not one point in time (use hooks).
+- **Not read:** a pod's hostPath volumes, block-mode PVCs without snapshots, CSI volumes without snapshots that no running pod has mounted, and what containers write into their own file systems (named in the log, with sizes when there are usage numbers).
 - **GitOps:** Fleet or Argo CD may set restored objects back to the state in Git. Restore those from Git, and use backdafuckup for the data and for objects made by hand.
 
 ### Troubleshooting
@@ -873,6 +1018,7 @@ Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-r
 |---|---|---|
 | `TooManyRequests` … "storage is (re)initializing" | The API server restarts its watch cache. | backdafuckup retries 429 and 503 up to 5 times and follows `Retry-After`. If it persists, check the API servers. |
 | "403 Forbidden: the ServiceAccount lacks a permission (apply the current setup manifest)" | The cluster has an older manifest, or one without the restore role. | Apply the current manifest from the console. |
+| Manifests from before this version | Their backup role grants `get` on `*/*`, which includes `nodes/proxy`, `pods/proxy` and `services/proxy`. Nothing in backdafuckup uses them. | Apply the current setup manifest; `kubectl auth can-i get nodes --subresource=proxy --as=system:serviceaccount:backdafuckup-system:backdafuckup` then answers `no` (`nodes/proxy` would ask for a node named proxy). |
 | "The mover pod … cannot start (ImagePullBackOff)" | The image is not in the registry, or the nodes may not pull it. | *Mover image → Push*; check the pull secret mode. |
 | "The mover for … did not connect to https://…:9555/… within … minutes" | The pod was not scheduled, its volume was not attached, or it cannot reach the server. | Check the server address under *Guest agents → Settings* and the firewall from the pod network to TCP 9555; see the pod's events. |
 | "The certificate of the backup server … is not trusted" (in the mover's log) | The server certificate is from your own CA. | Set `Agent:ServerPins`. |
@@ -882,6 +1028,13 @@ Only `backdafuckup-token` and, in *Create* mode, the pull secret `backdafuckup-r
 | "PVC …: the StorageClass … does not exist in cluster … (it has …)" | The target lacks the class of a backed-up PVC (another cluster). | Map the class to one the target has; the preview shows them. |
 | "… restored, but owners are not kept: the volume does not let the mover give files to other users" | The target volume is on an NFS export with `root_squash`, or the like. | Allow root on the export for the restore, or fix the owners afterwards; the files are there. |
 | "The account may not escalate ClusterRoles in cluster …" | The cluster has a setup manifest from before the cluster restore. | Apply the current setup manifest (its restore role has `bind` and `escalate`). |
+| "PVC …: objects only, not its data – no VolumeSnapshotClass for the CSI driver …" | The driver has no snapshot class, and no node agent reads the volume. | Add a VolumeSnapshotClass for the driver, or install the node agent; it reads the volume while a running pod has it mounted. |
+| "Pod volumes asked for, not backed up: … needs the node agent" | A pod's `backup.velero.io/backup-volumes`, or the job's switch, asks for volumes, and the cluster has no node agent (or none on that node). | Install the node agent, or remove the annotation or the switch. |
+| "The node agent backdafuckup-node/… on node … cannot be reached by exec: … 403" | The setup manifest predates the node agent: exec over a WebSocket needs `get` on `pods/exec`. | Apply the current setup manifest. |
+| "… does not exist (the pod runs elsewhere, or was replaced)" (node agent) | The pod moved or restarted between the plan and the read; its volume folder is gone. | Run the backup again. |
+| Node agent log: its own pod's folder is missing | The kubelet directory of the cluster's platform is not where the kubelet keeps its pods. | Check the cluster's platform (*Platform*); set it by hand if it is not recognised. |
+| "The kubelet … cannot be reached, or its certificate is neither signed by the cluster CA for … nor its own …" | The kubelet's serving certificate is from another CA, and its own certificate file is not in the kubelet directory. | No kubelet numbers then; reads still work. Usage numbers can come from Prometheus instead. |
+| "Usage numbers of …: …" (warning) | The Prometheus query failed, or the node agent's statistics did. | *Usage numbers → Test* names each query's result; check the URL, sign-in, CA or pin, and the label filter. |
 | "The agent of cluster … is not connected to this server" | The agent pod is not running, or cannot reach the server. | Check `kubectl -n backdafuckup-system logs deploy/backdafuckup-agent`: it names the server address and the error (certificate, connection). |
 | "Cannot connect to the backup server … 401" (in the agent's log) | The connect token is not the cluster's current one (the cluster was added again or switched). | Apply the current setup manifest with the agent. |
 | "the agent cannot reach the API server …" (server log) | The agent cannot open a TCP connection to `KUBERNETES_SERVICE_HOST`. | Check network policies in `backdafuckup-system`. |

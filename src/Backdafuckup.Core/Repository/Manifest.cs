@@ -20,11 +20,24 @@ public enum DiskBackupMode
 /// The commit record of a restore point (<c>manifest.json</c>). A restore point exists exactly when its manifest
 /// exists. Every manifest references complete chunk indexes, so each restore point is restorable on its own.
 /// </summary>
+// Members added after the first manifests coalesce null in their init: the JSON source generator sets a member missing
+// from an older manifest to null (it initialises every member of a type with required members), not to its default.
 public sealed record RestorePointManifest
 {
-    public const int CurrentFormatVersion = 1;
+    /// <summary>The newest format this version reads.</summary>
+    public const int CurrentFormatVersion = FileTreeFormatVersion;
 
-    public int FormatVersion { get; init; } = CurrentFormatVersion;
+    /// <summary>Restore points without file trees: readable by every version.</summary>
+    public const int BaseFormatVersion = 1;
+
+    /// <summary>
+    /// Restore points with file trees (<see cref="FileTrees"/>). Older versions refuse them, so their garbage collection
+    /// and verification never miss the trees' chunks.
+    /// </summary>
+    public const int FileTreeFormatVersion = 2;
+
+    /// <summary>Set at commit: <see cref="FileTreeFormatVersion"/> with file trees, else <see cref="BaseFormatVersion"/>.</summary>
+    public int FormatVersion { get; init; } = BaseFormatVersion;
 
     public required Guid RestorePointId { get; init; }
 
@@ -35,7 +48,7 @@ public sealed record RestorePointManifest
     public required RestorePointKind Kind { get; init; }
 
     /// <summary>"crash" or "application" (guest frozen through the agent while the snapshot was taken).</summary>
-    public string Consistency { get; init; } = "crash";
+    public string Consistency { get; init => field = value ?? "crash"; } = "crash";
 
     /// <summary>Why a backup with guest processing is only crash-consistent.</summary>
     public string? ConsistencyReason { get; init; }
@@ -94,7 +107,7 @@ public sealed record RestorePointManifest
     public required IReadOnlyList<ManifestDisk> Disks { get; init; }
 
     /// <summary>Disks of the VM that were deliberately not backed up; a restore of the VM creates them empty.</summary>
-    public IReadOnlyList<ManifestExcludedDisk> ExcludedDisks { get; init; } = [];
+    public IReadOnlyList<ManifestExcludedDisk> ExcludedDisks { get; init => field = value ?? []; } = [];
 
     /// <summary>
     /// The RAM image of a snapshot with memory (key <c>memory</c>), stored like a disk but not a disk of the VM; null without
@@ -114,6 +127,13 @@ public sealed record RestorePointManifest
 
     /// <summary>For a Kubernetes namespace (the "VM" of the restore point): the cluster, its volumes and the hooks; null for VMs.</summary>
     public KubernetesNamespaceDescriptor? Kubernetes { get; init; }
+
+    /// <summary>
+    /// Volumes backed up file by file (spec 2026-11-12-1952-kubernetes-file-level-volumes): Kubernetes volumes without CSI
+    /// snapshots, and pod volumes without a PVC. Their chunks are referenced through their listings, not through
+    /// <see cref="AllImages"/>.
+    /// </summary>
+    public IReadOnlyList<ManifestFileTree> FileTrees { get; init => field = value ?? []; } = [];
 
     /// <summary>The disks and, with memory, the RAM image: everything whose chunks the restore point references.</summary>
     [JsonIgnore]
@@ -145,15 +165,58 @@ public sealed record KubernetesNamespaceDescriptor
     public int ObjectCount { get; init; }
 
     /// <summary>Every PVC of the namespace: how its data was backed up, or why only its objects were.</summary>
-    public IReadOnlyList<KubernetesVolumeRecord> Volumes { get; init; } = [];
+    public IReadOnlyList<KubernetesVolumeRecord> Volumes { get; init => field = value ?? []; } = [];
 
     /// <summary>The hooks that ran in pods before and after the snapshots.</summary>
-    public IReadOnlyList<KubernetesHookRecord> Hooks { get; init; } = [];
+    public IReadOnlyList<KubernetesHookRecord> Hooks { get; init => field = value ?? []; } = [];
+
+    /// <summary>
+    /// The volumes of the namespace's running pods that are not PVCs (emptyDir, hostPath, NFS or CSI mounted directly): whether
+    /// their data was backed up, or why not, and how much there was when usage numbers were available.
+    /// </summary>
+    public IReadOnlyList<KubernetesPodVolumeRecord> PodVolumes { get; init => field = value ?? []; } = [];
+
+    /// <summary>What the running containers wrote into their own file systems (never backed up), from the usage numbers.</summary>
+    public IReadOnlyList<KubernetesContainerWriteRecord> ContainerWrites { get; init => field = value ?? []; } = [];
+
+    /// <summary>Where the usage numbers came from ("Prometheus https://…"); null: none were read.</summary>
+    public string? UsageSource { get; init; }
+
+    /// <summary>
+    /// The platforms of the cluster at backup time (ids of the platform catalog): what a restore leaves out as made by them.
+    /// Null in restore points from before platforms were detected.
+    /// </summary>
+    public IReadOnlyList<string>? Platforms { get; init; }
 }
 
 /// <param name="DataPath"><c>snapshot</c> (the data is the disk <paramref name="DiskKey"/>) or <c>objects-only</c> (see <paramref name="Reason"/>).</param>
+/// <param name="DiskKey">The disk with the volume's data (read through a snapshot); null without.</param>
+/// <param name="TreeKey">The file tree with the volume's files (read file by file); null without.</param>
 public sealed record KubernetesVolumeRecord(
-    string Claim, string DataPath, string? Reason, string? StorageClass, string? Driver, string? SnapshotClass, long SizeBytes, string VolumeMode, string? DiskKey);
+    string Claim, string DataPath, string? Reason, string? StorageClass, string? Driver, string? SnapshotClass, long SizeBytes, string VolumeMode, string? DiskKey,
+    string? TreeKey = null)
+{
+    /// <summary>Whether the restore point holds the volume's data (as a disk or as files), not only its objects.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HasData => DiskKey is not null || TreeKey is not null;
+}
+
+/// <summary>A volume of a running pod that is not a PVC.</summary>
+/// <param name="Workload">The pod's controller ("Deployment web"), or "Pod name" without one.</param>
+/// <param name="Kind"><c>emptyDir</c>, <c>emptyDir-memory</c> (tmpfs), <c>hostPath</c>, <c>nfs</c>, <c>csi</c> or another volume type mounted directly.</param>
+/// <param name="Source">Where it lives: the hostPath's path, the NFS export, the CSI driver; null for an emptyDir.</param>
+/// <param name="OptIn">Why its data was asked for: <c>job</c> (the job's switch), <c>annotation</c> (<c>backup.velero.io/backup-volumes</c>); null: not asked for.</param>
+/// <param name="Platform">The platform that puts it into pods (a sidecar's volume, not the workload's data), or null.</param>
+/// <param name="UsedBytes">Its data from the usage numbers; null: not known.</param>
+/// <param name="SizeLimitBytes">An emptyDir's sizeLimit; null: none.</param>
+/// <param name="TreeKey">The file tree with its files; null: not backed up (see <paramref name="Reason"/>).</param>
+public sealed record KubernetesPodVolumeRecord(
+    string Pod, string Workload, string Volume, string Kind, string? Source, string? OptIn, string? Platform, long? UsedBytes, long? SizeLimitBytes, string? TreeKey, string? Reason);
+
+/// <summary>A running container and what it wrote into its own file system (its writable layer), from the usage numbers.</summary>
+/// <param name="LayerBytes">The data in its writable layer; null: not known.</param>
+/// <param name="WriteBytesPerSecond">How fast it writes to local disks over the last hour (its writable layer, emptyDirs, block PVCs); null: not known.</param>
+public sealed record KubernetesContainerWriteRecord(string Pod, string Workload, string Container, long? LayerBytes, double? WriteBytesPerSecond);
 
 /// <param name="Phase"><c>pre</c> (before the snapshots) or <c>post</c>.</param>
 public sealed record KubernetesHookRecord(string Phase, string Pod, string Container, string Command, int? ExitCode, string? Error, double Seconds);
@@ -205,6 +268,62 @@ public sealed record ManifestDisk
 }
 
 public sealed record ManifestIndexRef(string File, string Sha256, long ChunkCount);
+
+/// <summary>A volume backed up file by file: its root listing (<c>tree-&lt;key&gt;.idx</c>), the root folder's own meta, and counts.</summary>
+public sealed record ManifestFileTree
+{
+    /// <summary>The volume: a PVC's name, or <c>pod/&lt;pod&gt;/&lt;volume&gt;</c> for a pod volume without a PVC.</summary>
+    public required string Key { get; init; }
+
+    public required string Name { get; init; }
+
+    /// <summary>"pvc" or "pod-volume".</summary>
+    public string Kind { get; init => field = value ?? "pvc"; } = "pvc";
+
+    /// <summary>How it was read: "shadow-pv" (a read-only copy of its PV) or "node-agent".</summary>
+    public string Reader { get; init => field = value ?? "shadow-pv"; } = "shadow-pv";
+
+    /// <summary>The root listing's chunks (its length is the index's size).</summary>
+    public required ManifestIndexRef Index { get; init; }
+
+    public required long RootLength { get; init; }
+
+    public FileTreeRootMeta Root { get; init; } = new(0755, 0, 0, 0);
+
+    public FileTreeStats Stats { get; init => field = value ?? new(); } = new();
+
+    /// <summary>The restore point whose tree unchanged files were taken from (their chunks, not the restore point itself).</summary>
+    public Guid? BaseRestorePointId { get; init; }
+}
+
+/// <summary>The root folder of a file tree: mode, owner and modification time (nanoseconds since 1970).</summary>
+public sealed record FileTreeRootMeta(int Mode, long Uid, long Gid, long MtimeNs);
+
+public sealed record FileTreeStats
+{
+    public long Files { get; init; }
+
+    public long Directories { get; init; }
+
+    public long Bytes { get; init; }
+
+    /// <summary>Entries not read (permission denied, vanished, …).</summary>
+    public long Issues { get; init; }
+
+    public long ChangedWhileRead { get; init; }
+
+    /// <summary>Files taken from the base tree without reading them (unchanged).</summary>
+    public long UnchangedFiles { get; init; }
+
+    /// <summary>The content bytes of those files.</summary>
+    public long UnchangedBytes { get; init; }
+
+    /// <summary>Bytes of file content read in this run.</summary>
+    public long ReadBytes { get; init; }
+
+    /// <summary>Bytes the repository stored new for this tree (compressed; chunks it had already are not counted).</summary>
+    public long NewStoredBytes { get; init; }
+}
 
 public sealed record DiskBackupStats
 {

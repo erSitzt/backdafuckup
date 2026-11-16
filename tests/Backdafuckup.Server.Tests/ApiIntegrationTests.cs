@@ -34,6 +34,12 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     private readonly FakeRegistry _registry = new("bdfu-push", "secret-1");
     private readonly Backdafuckup.Testing.Kubernetes.FakeKubernetesApi _cluster = new();
 
+    /// <summary>What a test's node agent answers to <c>node-request</c> (by agent pod and standard input); null: none.</summary>
+    private volatile Func<string, string, Task<(int, string)>>? _nodeRequests;
+
+    /// <summary>The Prometheus every cluster's usage source reaches.</summary>
+    private readonly Backdafuckup.Testing.Kubernetes.FakePrometheus _prometheus = new();
+
     /// <summary>More clusters by the address of their connection; every other address reaches <see cref="_cluster"/>.</summary>
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Backdafuckup.Testing.Kubernetes.FakeKubernetesApi> _clusters = new(StringComparer.OrdinalIgnoreCase);
 
@@ -80,7 +86,10 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
                     {
                         Poll = TimeSpan.FromMilliseconds(20), SnapshotReady = TimeSpan.FromSeconds(20), Deleted = TimeSpan.FromSeconds(20), Progress = TimeSpan.FromHours(1),
                     },
-                    new HookRecorder()));
+                    new HookRecorder(() => _nodeRequests),
+                    sp.GetRequiredService<Backdafuckup.Server.Clusters.KubernetesUsageSources>()));
+                services.RemoveAll<Backdafuckup.Server.Clusters.KubernetesUsageTransport>();
+                services.AddSingleton(new Backdafuckup.Server.Clusters.KubernetesUsageTransport(() => _prometheus.CreateHandler()));
                 services.AddSingleton<IHypervisorProvider>(new XenProvider(
                     new XenOptions { XapiRetryAttempts = 1, XapiRetryDelay = TimeSpan.FromMilliseconds(10) },
                     (_, host) => new XapiTransport(new Uri($"https://{host}/"), _pool.CreateHandler())));

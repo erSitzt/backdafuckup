@@ -1,0 +1,42 @@
+{
+  "source": "An EKS cluster with a managed node group after its documentation (version suffix -eks-, the nodegroup label).",
+  "tested": false,
+  "facts": {
+    "gitVersion": "v1.31.4-eks-2d5f260",
+    "apiGroups": [
+      "admissionregistration.k8s.io",
+      "apiextensions.k8s.io",
+      "apps",
+      "batch",
+      "networking.k8s.io",
+      "policy",
+      "rbac.authorization.k8s.io",
+      "storage.k8s.io",
+      "crd.k8s.amazonaws.com",
+      "vpcresources.k8s.aws"
+    ],
+    "namespaces": [
+      "amazon-cloudwatch",
+      "default",
+      "kube-system"
+    ],
+    "nodes": [
+      {
+        "name": "node-1",
+        "providerId": "aws://",
+        "labels": {
+          "kubernetes.io/os": "linux",
+          "kubernetes.io/arch": "amd64",
+          "eks.amazonaws.com/nodegroup": "x"
+        },
+        "annotations": {}
+      }
+    ],
+    "csiDrivers": [
+      "ebs.csi.aws.com"
+    ]
+  },
+  "expect": [
+    "eks"
+  ]
+}

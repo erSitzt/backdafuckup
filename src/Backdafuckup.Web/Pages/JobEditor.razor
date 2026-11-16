@@ -43,7 +43,7 @@ else
                             @(Id is not null
                                 ? "A saved job keeps what it backs up; create a new job for the other kind."
                                 : IsCluster
-                                    ? "Namespaces of a Kubernetes cluster: their objects, and the data of their volumes whose storage takes CSI snapshots."
+                                    ? "Namespaces of a Kubernetes cluster: their objects, and the data of their volumes (through a CSI snapshot, or file by file for NFS, hostPath and local volumes)."
                                     : "VMs of a pool: their disks, with change tracking, and optionally application-consistent through the agent.")
                         </MudText>
                     </div>
@@ -74,7 +74,10 @@ else
                         <MudTextField @bind-Value="_vmFilter" Placeholder="@(IsCluster ? "Filter namespaces" : "Filter VMs")" Variant="Variant.Outlined" Margin="Margin.Dense" Adornment="Adornment.Start"
                                       AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Clearable="true" />
                         <div class="field-toolbar-end">
-                            <span class="mini-chip @(_selected.Count > 0 ? "success" : null)">@_selected.Count selected</span>
+                            @if (!(IsCluster && _wholeCluster))
+                            {
+                                <span class="mini-chip @(_selected.Count > 0 ? "success" : null)">@_selected.Count selected</span>
+                            }
                             @if (_withMemory.Count > 0)
                             {
                                 <span class="mini-chip info">@_withMemory.Count with memory</span>
@@ -88,12 +91,33 @@ else
                     }
                     @if (IsCluster && _wholeCluster)
                     {
+                        @if (_legacyExcludes)
+                        {
+                            <MudAlert Severity="Severity.Info" Dense="true" Class="mb-2">
+                                This job leaves out the fixed list of namespaces from before platforms were detected.
+                                <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Primary" OnClick="UsePlatformExcludes">Use the platform's list</MudButton>
+                            </MudAlert>
+                        }
+
+                        <MudSwitch T="bool" @bind-Value="_platformExcludes" Color="Color.Primary" Class="mb-1"
+                                   Label="@($"Leave out what the cluster's platforms make ({SelectedPlatforms?.Display ?? "detected at the first scan"})")" />
+                        @if (_platformExcludes && SelectedPlatforms is { } platforms)
+                        {
+                            <div class="cell-sub mb-2">
+                                @foreach (var group in platforms.Namespaces)
+                                {
+                                    <span class="mini-chip" title="Checked at every run against the platforms detected then">@group.Profile: @string.Join(", ", group.Patterns)</span>
+                                }
+                            </div>
+                        }
+
                         <MudTextField T="string" @bind-Value="_excludes" Immediate="true" DebounceInterval="250" Variant="Variant.Outlined" Margin="Margin.Dense"
-                                      Label="Leave out these namespaces" Error="@(ExcludesError is not null)" ErrorText="@ExcludesError"
-                                      HelperText="Names or patterns with *, separated by commas. By default what Kubernetes, RKE2, Rancher and Fleet make themselves; backdafuckup-system is always left out." />
+                                      Label="@(_platformExcludes ? "Also leave out" : "Leave out these namespaces")" Error="@(ExcludesError is not null)" ErrorText="@ExcludesError"
+                                      HelperText="Names or patterns with *, separated by commas. backdafuckup-system is always left out." />
                         <div class="cell-sub mt-1 mb-2">
                             Backed up now: @(WholeClusterNamespaces() is { Count: > 0 } now ? string.Join(", ", now) : "no namespace") and the cluster-scoped objects.
                         </div>
+                        break;
                     }
                     else if (IsCluster)
                     {
@@ -109,7 +133,7 @@ else
                         </div>
                         <div class="table-box">
                             <MudSimpleTable Dense="true" Hover="true" Elevation="0" FixedHeader="true">
-                                <thead><tr><th style="width:48px"></th><th>Namespace</th><th class="num">PVCs</th><th class="num">With data (snapshot)</th><th>Phase</th></tr></thead>
+                                <thead><tr><th style="width:48px"></th><th>Namespace</th><th class="num">PVCs</th><th class="num" title="Through a snapshot, or file by file">With data</th><th>Phase</th></tr></thead>
                                 <tbody>
                                     @foreach (var ns in _vms.Where(v => string.IsNullOrWhiteSpace(_vmFilter) || v.Name.Contains(_vmFilter, StringComparison.OrdinalIgnoreCase)))
                                     {
@@ -123,7 +147,7 @@ else
                                                 }
                                             </td>
                                             <td class="num">@ns.Properties.GetValueOrDefault("volumeClaims")</td>
-                                            <td class="num">@ns.Properties.GetValueOrDefault("snapshotVolumes")</td>
+                                            <td class="num">@((int.TryParse(ns.Properties.GetValueOrDefault("snapshotVolumes"), out var sv) ? sv : 0) + (int.TryParse(ns.Properties.GetValueOrDefault("fileVolumes"), out var fv) ? fv : 0))</td>
                                             <td>@ns.Properties.GetValueOrDefault("phase")</td>
                                         </tr>
                                     }
@@ -134,9 +158,21 @@ else
                             <MudIcon Icon="@AppIcons.Kubernetes" Size="Size.Small" />
                             <span>
                                 Every object of a namespace is backed up, Secrets included. PVCs on a CSI driver with a VolumeSnapshotClass are backed up with their data
-                                (a snapshot, read by a mover pod, deleted right after); other PVCs, e.g. on NFS, only as objects. Pods with the annotation
+                                (a snapshot, read by a mover pod, deleted right after); PVCs on NFS, hostPath and local volumes file by file, through a read-only copy of
+                                their PV, while they are in use; CSI volumes without snapshots file by file by the node agent, while a pod has them mounted; other
+                                PVCs only as objects. Pods with the annotation
                                 <span class="mono nowrap">pre.hook.backup.velero.io/command</span> run it before the snapshots (application-consistent), and
-                                <span class="mono nowrap">post.hook.backup.velero.io/command</span> after them.
+                                <span class="mono nowrap">post.hook.backup.velero.io/command</span> after them (after the files are read, when there are such volumes).
+                            </span>
+                        </div>
+                        <MudSwitch T="bool" @bind-Value="_podVolumes" Color="Color.Primary" Class="mt-3" Label="Back up every pod volume that is not a PVC (emptyDir and the like)" />
+                        <div class="form-note">
+                            <MudIcon Icon="@Icons.Material.Filled.FolderOpen" Size="Size.Small" />
+                            <span>
+                                Off: only the volumes a pod names in <span class="mono nowrap">backup.velero.io/backup-volumes</span> are asked for. On: every one but those in
+                                <span class="mono nowrap">backup.velero.io/backup-volumes-excludes</span>, hostPath volumes and what a platform puts into pods (Istio's sidecar).
+                                Reading pod volumes needs the node agent in the cluster: without it they are named in the log, with their size when the cluster has usage
+                                numbers, and the run ends with a warning. What containers write into their own file systems is never backed up; the log names it.
                             </span>
                         </div>
                         break;
@@ -476,17 +512,30 @@ else
                             <div class="summary-card-head"><MudIcon Icon="@(IsCluster ? AppIcons.Kubernetes : AppIcons.Vm)" Size="Size.Small" /> @(IsCluster ? "Namespaces" : "Virtual machines")</div>
                             <dl class="summary-list">
                                 <dt>@(IsCluster ? "Cluster" : "Pool")</dt><dd>@_pools.FirstOrDefault(p => p.Id == _connectionId)?.DisplayName</dd>
-                                <dt>@(IsCluster ? "Namespaces" : "VMs") (@_selected.Count)</dt>
-                                <dd>
-                                    @foreach (var (nativeId, vmName) in _selected.OrderBy(kv => kv.Value, StringComparer.OrdinalIgnoreCase))
-                                    {
-                                        <span class="mini-chip">@vmName@(_withMemory.Contains(nativeId) ? " · RAM" : null)</span>
-                                    }
-                                </dd>
+                                @if (IsCluster && _wholeCluster)
+                                {
+                                    <dt>Namespaces</dt>
+                                    <dd>@KubernetesClusterScope.Describe(ExcludeList()) <span class="cell-sub">now @WholeClusterNamespaces().Count namespace(s) and the cluster-scoped objects</span></dd>
+                                }
+                                else
+                                {
+                                    <dt>@(IsCluster ? "Namespaces" : "VMs") (@_selected.Count)</dt>
+                                    <dd>
+                                        @foreach (var (nativeId, vmName) in _selected.OrderBy(kv => kv.Value, StringComparer.OrdinalIgnoreCase))
+                                        {
+                                            <span class="mini-chip">@vmName@(!IsCluster && _withMemory.Contains(nativeId) ? " · RAM" : null)</span>
+                                        }
+                                    </dd>
+                                }
                                 @if (IsCluster && !string.IsNullOrWhiteSpace(_labelSelector))
                                 {
                                     <dt>By labels</dt>
                                     <dd><span class="mini-chip info mono">@_labelSelector.Trim()</span> <span class="cell-sub">now @(SelectorMatches?.Count ?? 0) namespace(s)</span></dd>
+                                }
+                                @if (IsCluster)
+                                {
+                                    <dt>Pod volumes</dt>
+                                    <dd>@(_podVolumes ? "every one without a PVC, but those excluded by annotation" : "those a pod names in backup.velero.io/backup-volumes")</dd>
                                 }
                             </dl>
                         </section>
@@ -532,7 +581,7 @@ else
                     <MudSwitch T="bool" @bind-Value="_enabled" Color="Color.Primary" Label="Job enabled" Class="mt-4" />
                     <MudAlert Severity="Severity.Info" Dense="true" Variant="Variant.Text" Class="mt-2">
                         @(IsCluster
-                            ? "Each run reads the volumes in full (Kubernetes has no change tracking); the repository stores only the chunks that changed. The mover image must be in a registry the cluster can pull from (Kubernetes Clusters → Mover image)."
+                            ? "Volumes with snapshots are read in full at each run (Kubernetes has no change tracking), and the repository stores only the chunks that changed; volumes read file by file read only the files changed since the previous run. The mover image must be in a registry the cluster can pull from (Kubernetes Clusters → Mover image)."
                             : "Changed block tracking is enabled on the VMs' disks with the first backup. While it is enabled, storage live migration of those disks is not possible.")
                     </MudAlert>
                     break;
@@ -569,7 +618,7 @@ else
     [
         "How the job appears in lists, sessions and notifications.",
         IsCluster
-            ? "The namespaces this job backs up, all from one cluster: their objects, and the data of their PVCs whose storage takes CSI snapshots."
+            ? "The namespaces this job backs up, all from one cluster: their objects, and the data of their PVCs (through a CSI snapshot, or file by file for NFS, hostPath and local volumes)."
             : "The VMs this job backs up, all from one pool. With memory takes a snapshot with RAM of a VM.",
         IsCluster
             ? "Where the restore points go and how many are kept; how many namespaces and volumes are read at a time."
@@ -644,15 +693,36 @@ else
     /// <summary>Kubernetes: the whole cluster, without the namespaces of <see cref="_excludes"/>.</summary>
     private bool _wholeCluster;
 
-    private string _excludes = string.Join(", ", KubernetesClusterScope.DefaultExcludes);
+    /// <summary>Kubernetes: leave out what the cluster's platforms make (<see cref="KubernetesClusterScope.PlatformToken"/>), expanded at each run.</summary>
+    private bool _platformExcludes = true;
 
-    private IReadOnlyList<string> ExcludeList() => _excludes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    /// <summary>The job's own exclude patterns.</summary>
+    private string _excludes = string.Empty;
+
+    /// <summary>A job saved with the fixed list from before platforms were detected.</summary>
+    private bool _legacyExcludes;
+
+    private IReadOnlyList<string> ExcludeList() =>
+        [.. (_platformExcludes ? [KubernetesClusterScope.PlatformToken] : Array.Empty<string>()), .. _excludes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
 
     private string? ExcludesError => KubernetesClusterScope.Validate(ExcludeList());
 
+    /// <summary>The platforms of the chosen cluster, as last detected (or set by hand).</summary>
+    private KubernetesPlatformsDto? SelectedPlatforms => _pools?.FirstOrDefault(p => p.Id == _connectionId)?.Platforms;
+
     /// <summary>The namespaces of the inventory a whole-cluster run would back up now.</summary>
-    private List<string> WholeClusterNamespaces() =>
-        [.. _vms.Select(v => v.Name).Where(n => !KubernetesClusterScope.IsExcluded(n, ExcludeList())).Order(StringComparer.Ordinal)];
+    private List<string> WholeClusterNamespaces()
+    {
+        var excludes = KubernetesClusterScope.Expand(ExcludeList(), SelectedPlatforms?.Namespaces.SelectMany(n => n.Patterns) ?? []);
+        return [.. _vms.Select(v => v.Name).Where(n => !KubernetesClusterScope.IsExcluded(n, excludes)).Order(StringComparer.Ordinal)];
+    }
+
+    private void UsePlatformExcludes()
+    {
+        _platformExcludes = true;
+        _excludes = string.Empty;
+        _legacyExcludes = false;
+    }
 
     private string? SelectorError => string.IsNullOrWhiteSpace(_labelSelector) ? null : KubernetesLabelSelector.Parse(_labelSelector).Error;
 
@@ -682,6 +752,9 @@ else
     private int _nbdConnections = 4;
     private int _parallelDisks = 2;
     private bool _guest;
+
+    /// <summary>Kubernetes: every pod volume that is not a PVC, not only the annotated ones.</summary>
+    private bool _podVolumes;
     private string _guestPolicy = GuestFailurePolicies.CrashConsistentWithWarning;
     private Guid? _guestCredentialId;
     private List<WindowsCredentialDto> _credentials = [];
@@ -732,6 +805,7 @@ else
             _nbdConnections = job.NbdConnectionsPerDisk;
             _parallelDisks = job.MaxParallelDisks;
             _guest = job.GuestProcessing;
+            _podVolumes = job.KubernetesPodVolumes;
             _guestPolicy = job.GuestFailurePolicy;
             _guestCredentialId = job.GuestCredentialId;
             _guestMode = job.GuestProcessingMode;
@@ -774,7 +848,10 @@ else
                 if (KubernetesClusterScope.IsJobObject(o.NativeId))
                 {
                     _wholeCluster = true;
-                    _excludes = string.Join(", ", KubernetesClusterScope.Excludes(o.NativeId));
+                    var excludes = KubernetesClusterScope.Excludes(o.NativeId);
+                    _platformExcludes = excludes.Contains(KubernetesClusterScope.PlatformToken);
+                    _excludes = string.Join(", ", excludes.Where(e => e != KubernetesClusterScope.PlatformToken));
+                    _legacyExcludes = !_platformExcludes && excludes.ToHashSet(StringComparer.Ordinal).SetEquals(KubernetesClusterScope.LegacyDefaultExcludes);
                     continue;
                 }
 
@@ -898,6 +975,7 @@ else
             NbdConnectionsPerDisk = _nbdConnections,
             MaxParallelDisks = _parallelDisks,
             GuestProcessing = _guest && !IsCluster,
+            KubernetesPodVolumes = IsCluster && _podVolumes,
             GuestFailurePolicy = _guestPolicy,
             GuestCredentialId = _guest ? _guestCredentialId : null,
             GuestProcessingMode = _guestMode,

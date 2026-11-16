@@ -1,0 +1,44 @@
+{
+  "source": "A Tanzu Kubernetes Grid workload cluster after its documentation (version suffix +vmware., tkg-system, Antrea, vSphere CSI).",
+  "tested": false,
+  "facts": {
+    "gitVersion": "v1.28.8+vmware.1",
+    "apiGroups": [
+      "admissionregistration.k8s.io",
+      "apiextensions.k8s.io",
+      "apps",
+      "batch",
+      "networking.k8s.io",
+      "policy",
+      "rbac.authorization.k8s.io",
+      "storage.k8s.io",
+      "crd.antrea.io",
+      "run.tanzu.vmware.com"
+    ],
+    "namespaces": [
+      "default",
+      "kube-system",
+      "tkg-system",
+      "vmware-system-csi"
+    ],
+    "nodes": [
+      {
+        "name": "node-1",
+        "providerId": "vsphere://",
+        "labels": {
+          "kubernetes.io/os": "linux",
+          "kubernetes.io/arch": "amd64"
+        },
+        "annotations": {}
+      }
+    ],
+    "csiDrivers": [
+      "csi.vsphere.vmware.com"
+    ]
+  },
+  "expect": [
+    "tanzu",
+    "vsphere-csi",
+    "antrea"
+  ]
+}

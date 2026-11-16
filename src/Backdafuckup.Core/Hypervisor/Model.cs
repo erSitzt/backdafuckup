@@ -71,6 +71,12 @@ public enum InventoryKind
 
     /// <summary>A Kubernetes PersistentVolumeClaim; its parent is the namespace.</summary>
     VolumeClaim,
+
+    /// <summary>
+    /// A volume of a workload's pods that is not a PVC (emptyDir, hostPath, …), or a container's own file system (kind
+    /// <c>container</c>); its parent is the namespace.
+    /// </summary>
+    PodVolume,
 }
 
 /// <summary>Hypervisor-neutral inventory entry. Provider-specific details go into <see cref="Properties"/>.</summary>
@@ -81,7 +87,14 @@ public sealed record InventoryItem(
     string? ParentNativeId,
     IReadOnlyDictionary<string, string> Properties);
 
-public sealed record Inventory(PlatformInfo Platform, IReadOnlyList<InventoryItem> Items);
+public sealed record Inventory(PlatformInfo Platform, IReadOnlyList<InventoryItem> Items)
+{
+    /// <summary>The platforms recognised in the cluster (Kubernetes: ids of the platform catalog), with what gave each away.</summary>
+    public IReadOnlyList<DetectedPlatform>? Platforms { get; init; }
+}
+
+/// <summary>A platform recognised in a cluster and what gave it away, e.g. <c>("rke2", "version v1.32.13+rke2r1")</c>.</summary>
+public sealed record DetectedPlatform(string Id, string Evidence);
 
 /// <summary>Opaque token that allows asking "what changed since" for a disk (Xen: uuid of the cbt_metadata VDI).</summary>
 public sealed record ChangeToken(string Kind, string Value);
@@ -107,7 +120,7 @@ public sealed record VmDescriptor
 
     public string? OsName { get; init; }
 
-    public IReadOnlyList<VmNic> Nics { get; init; } = [];
+    public IReadOnlyList<VmNic> Nics { get; init => field = value ?? []; } = [];
 
     /// <summary>
     /// The VM generation id at backup time (Xen: <c>generation_id</c>). Windows compares it at start: a changed id tells a
@@ -152,7 +165,13 @@ public sealed record VmMetadataBlob(string Format, byte[] Content);
 /// Snapshot with memory (Xen: <c>VM.checkpoint</c>) when the VM runs: the VM is paused while its RAM is written and all disks
 /// are captured, and the RAM image is backed up (<see cref="IVmBackupSession.Memory"/>). A VM that does not run gets a normal snapshot.
 /// </param>
-public sealed record VmBackupRequest(string VmId, Guid JobId, Guid SessionId, Guid RestorePointId, string SnapshotName, IGuestQuiescer? Quiescer = null, IBackupTelemetry? Telemetry = null, bool WithMemory = false);
+/// <param name="PodVolumes">
+/// Kubernetes: back up the data of every pod volume that is not a PVC (emptyDir and the like; Velero's opt-out mode), not only
+/// those named in a pod's <c>backup.velero.io/backup-volumes</c> annotation.
+/// </param>
+public sealed record VmBackupRequest(
+    string VmId, Guid JobId, Guid SessionId, Guid RestorePointId, string SnapshotName, IGuestQuiescer? Quiescer = null, IBackupTelemetry? Telemetry = null, bool WithMemory = false,
+    bool PodVolumes = false);
 
 public enum RestoreMode
 {

@@ -25,6 +25,7 @@ public sealed class GuestImage : IDisposable
     private readonly List<VirtualDisk> _disks = [];
     private readonly Dictionary<string, (LogicalVolumeInfo Info, GuestVolume Volume)> _volumes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, IGuestFileSystem> _open = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, GuestDiskSource> _trees = new(StringComparer.Ordinal);
     private bool _describe = true;
 
     static GuestImage()
@@ -74,6 +75,11 @@ public sealed class GuestImage : IDisposable
             return open;
         }
 
+        if (_trees.TryGetValue(volumeId, out var tree))
+        {
+            return _open[volumeId] = tree.OpenTree!();
+        }
+
         if (!_volumes.TryGetValue(volumeId, out var volume))
         {
             throw new KeyNotFoundException($"The restore point has no volume '{volumeId}'.");
@@ -117,7 +123,7 @@ public sealed class GuestImage : IDisposable
     {
         var manager = new VolumeManager();
         var physical = new Dictionary<string, (GuestDiskSource Source, VirtualDisk Disk, PhysicalVolumeInfo Volume)>(StringComparer.Ordinal);
-        foreach (var source in sources)
+        foreach (var source in sources.Where(s => s.OpenTree is null))
         {
             var disk = new DiscUtils.Raw.Disk(source.Open(), Ownership.Dispose);
             _disks.Add(disk);
@@ -160,7 +166,18 @@ public sealed class GuestImage : IDisposable
             _volumes[volume.Id] = (_volumes[volume.Id].Info, volume);
         }
 
-        Volumes = mapped;
+        // Volumes backed up file by file: their file system is the tree itself, read through no partition or image.
+        var trees = new List<GuestVolume>();
+        foreach (var source in sources.Where(s => s.OpenTree is not null))
+        {
+            _trees[source.TreeVolumeId] = source;
+            trees.Add(new GuestVolume
+            {
+                Id = source.TreeVolumeId, DiskKey = source.Key, DiskName = source.Name, Length = source.TreeBytes, FileSystem = FileTreeFileSystem.TypeName, Readable = true,
+            });
+        }
+
+        Volumes = [.. mapped, .. trees];
         Warnings = warnings;
     }
 

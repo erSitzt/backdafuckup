@@ -117,7 +117,7 @@ public static class VolumeFileSender
             ?? throw new InvalidOperationException(
                 $"The image of {writer.Description} holds no file system the server can read ({string.Join("; ", image.Volumes.Select(v => $"{FileRestoreMounts.Title(v)}: {v.FileSystem ?? v.Reason}"))}); " +
                 "it can go into a StorageClass with snapshots only (as a block volume).");
-        return volume.FileSystem is "ext" or "XFS"
+        return volume.FileSystem is "ext" or "XFS" or FileTreeFileSystem.TypeName
             ? volume
             : throw new InvalidOperationException($"The image of {writer.Description} is {volume.FileSystem}; volumes go in as files only from ext or XFS. Map it to a StorageClass with snapshots.");
     }

@@ -86,6 +86,11 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasOne(x => x.Credential).WithMany().HasForeignKey(x => x.CredentialId).OnDelete(DeleteBehavior.Restrict);
             e.HasMany(x => x.Hosts).WithOne().HasForeignKey(x => x.ConnectionId).OnDelete(DeleteBehavior.Cascade);
             e.Property(x => x.Version).IsRowVersion();
+            ConfigureJsonList(e.Property(x => x.DetectedPlatforms));
+            ConfigureJsonList(e.Property(x => x.PlatformOverride));
+            e.Property(x => x.UsageSource).HasColumnType("jsonb").HasConversion(
+                v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+                v => JsonSerializer.Deserialize<Backdafuckup.Kubernetes.KubernetesUsageConfig>(v, JsonSerializerOptions.Default));
         });
 
         builder.Entity<ConnectionHost>(e => e.HasIndex(x => new { x.ConnectionId, x.Address }).IsUnique());
@@ -148,7 +153,11 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasIndex(x => new { x.RepositoryId, x.JobId, x.VmNativeId, x.CreatedUtc });
         });
 
-        builder.Entity<RestorePointDisk>(e => e.Property(x => x.Mode).HasConversion<string>().HasMaxLength(16));
+        builder.Entity<RestorePointDisk>(e =>
+        {
+            e.Property(x => x.Mode).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.Kind).HasMaxLength(16).HasDefaultValue(RestorePointDiskKinds.Disk);
+        });
 
         builder.Entity<SqlDatabaseEntity>(e =>
         {
@@ -285,6 +294,16 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             }
         }
     }
+
+    /// <summary>A list stored as jsonb; it is replaced, never mutated.</summary>
+    private static void ConfigureJsonList<T>(Microsoft.EntityFrameworkCore.Metadata.Builders.PropertyBuilder<List<T>?> property) =>
+        property.HasColumnType("jsonb").HasConversion(
+            v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+            v => JsonSerializer.Deserialize<List<T>>(v, JsonSerializerOptions.Default),
+            new ValueComparer<List<T>?>(
+                (a, b) => JsonSerializer.Serialize(a, JsonSerializerOptions.Default) == JsonSerializer.Serialize(b, JsonSerializerOptions.Default),
+                v => v == null ? 0 : JsonSerializer.Serialize(v, JsonSerializerOptions.Default).GetHashCode(StringComparison.Ordinal),
+                v => v == null ? null : new List<T>(v)));
 
     /// <summary>Transfer statistics are stored as jsonb; the objects are replaced, never mutated.</summary>
     private static void ConfigureMetrics(Microsoft.EntityFrameworkCore.Metadata.Builders.PropertyBuilder<TransferMetricsDto?> property) =>

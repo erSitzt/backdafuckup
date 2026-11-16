@@ -12,7 +12,12 @@ internal static class ApiMapping
     public static ConnectionDto ToDto(this HypervisorConnection c) => new(
         c.Id, c.Kind.ToString(), c.DisplayName, c.Address, c.Port, c.CurrentMasterAddress, c.PlatformName, c.ProductName, c.ProductVersion,
         c.Status.ToString(), c.LastConnectedUtc, c.LastError, c.Credential?.Username ?? string.Empty, c.AllowInsecureNbd,
-        c.Hosts.OrderBy(h => h.Address).Select(h => new ConnectionHostDto(h.Address, h.SpkiSha256, h.TrustedUtc)).ToList());
+        c.Hosts.OrderBy(h => h.Address).Select(h => new ConnectionHostDto(h.Address, h.SpkiSha256, h.TrustedUtc)).ToList(),
+        Platforms: KubernetesPlatformMapping.Platforms(c),
+        UsageSource: c.UsageSource is { } usage ? usage.ToDto(c.UsageSecret is not null) : null);
+
+    public static KubernetesUsageSourceDto ToDto(this Backdafuckup.Kubernetes.KubernetesUsageConfig u, bool hasSecret) => new(
+        u.Url, u.Username, hasSecret, u.CaPem, u.PinnedSpkiSha256, u.Filter, u.PodVolumesQuery, u.ContainerLayersQuery, u.ClaimsQuery, u.ContainerWritesQuery);
 
     public static InventoryItemDto ToDto(this InventoryEntry e) => new(e.Kind.ToString(), e.NativeId, e.Name, e.ParentNativeId, e.Properties);
 
@@ -40,7 +45,7 @@ internal static class ApiMapping
         j.Objects.OrderBy(o => o.Order).Select(o => new JobObjectDto(o.NativeId, o.CachedName, o.WithMemory)).ToList(),
         j.NextRunUtc, j.LastRunUtc, j.LastResult?.ToString(), running, j.MaxParallelVms, j.NbdConnectionsPerDisk, j.RetryCount, j.TransportMode.ToString(), j.MaxParallelDisks,
         j.GuestProcessing, j.GuestFailurePolicy.ToString(), j.GuestCredentialId, j.GuestProcessingMode.ToString(), j.SqlCredentialId, j.SqlSnapshotCopyOnly,
-        j.SqlBackup.ToDto());
+        j.SqlBackup.ToDto(), j.KubernetesPodVolumes);
 
     public static SqlBackupSettingsDto ToDto(this SqlBackupSettings s) => new(
         s.Enabled, s.LogIntervalMinutes, s.FullSchedule.ToDto(), s.SystemSchedule.ToDto(), s.FullForAllDatabases, s.FullOnChainBreak, [.. s.ExcludedDatabases], s.StagingFolder);
@@ -79,7 +84,7 @@ internal static class ApiMapping
         r.Id, r.RepositoryId, r.JobId, r.JobName, r.ConnectionId, r.VmNativeId, r.VmName, r.CreatedUtc, r.Kind.ToString(), r.State.ToString(),
         r.LogicalBytes, r.NewStoredBytes,
         r.Disks.OrderBy(d => d.DiskKey, StringComparer.Ordinal).Select(d => new RestorePointDiskDto(
-            d.DiskKey, d.Name, d.CapacityBytes, d.StorageId, d.StorageName, d.Mode.ToString(), d.FullReason, d.ReadBytes, d.NewStoredBytes)).ToList(),
+            d.DiskKey, d.Name, d.CapacityBytes, d.StorageId, d.StorageName, d.Mode.ToString(), d.FullReason, d.ReadBytes, d.NewStoredBytes, d.Kind, d.FileCount, d.IssueCount)).ToList(),
         (r.Vm?.Nics ?? []).Select(n => new RestorePointNicDto(n.Device, n.Mac, n.NetworkId, n.NetworkName)).ToList(),
         r.Vm?.VCpus ?? 0,
         r.Vm?.MemoryBytes ?? 0,

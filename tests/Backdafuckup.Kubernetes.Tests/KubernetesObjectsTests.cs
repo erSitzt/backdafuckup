@@ -249,15 +249,15 @@ public sealed class KubernetesObjectsTests
         projectBinding["metadata"]!["labels"] = new JsonObject { ["authz.cluster.cattle.io/rtb-owner-updated"] = "p-abc" };
         var creatorBinding = Obj("RoleBinding", "u-xyz-admin", "rbac.authorization.k8s.io/v1");
         creatorBinding["metadata"]!["labels"] = new JsonObject { ["cattle.io/creator"] = "norman" };
-        Assert.True(KubernetesObjects.IsRancherMade(projectBinding));
-        Assert.True(KubernetesObjects.IsRancherMade(creatorBinding));
-        Assert.False(KubernetesObjects.IsRancherMade(Obj("RoleBinding", "redis", "rbac.authorization.k8s.io/v1")));
+        Assert.Equal("rancher", KubernetesPlatformSet.Legacy.MadeBy(projectBinding)?.Profile.Id);
+        Assert.Equal("rancher", KubernetesPlatformSet.Legacy.MadeBy(creatorBinding)?.Profile.Id);
+        Assert.Null(KubernetesPlatformSet.Legacy.MadeBy(Obj("RoleBinding", "redis", "rbac.authorization.k8s.io/v1")));
 
         // So do the objects of Rancher's API groups (the App records of its Helm releases); others' groups that end alike do not.
-        Assert.True(KubernetesObjects.IsRancherMade(Obj("App", "redis", "catalog.cattle.io/v1")));
-        Assert.True(KubernetesObjects.IsRancherMade(Obj("Setting", "x", "cattle.io/v1")));
-        Assert.False(KubernetesObjects.IsRancherMade(Obj("Thing", "x", "notcattle.io/v1")));
-        Assert.False(KubernetesObjects.IsRancherMade(Obj("Certificate", "x", "cert-manager.io/v1")));
+        Assert.Equal("rancher", KubernetesPlatformSet.Legacy.MadeBy(Obj("App", "redis", "catalog.cattle.io/v1"))?.Profile.Id);
+        Assert.Equal("rancher", KubernetesPlatformSet.Legacy.MadeBy(Obj("Setting", "x", "cattle.io/v1"))?.Profile.Id);
+        Assert.Null(KubernetesPlatformSet.Legacy.MadeBy(Obj("Thing", "x", "notcattle.io/v1")));
+        Assert.Null(KubernetesPlatformSet.Legacy.MadeBy(Obj("Certificate", "x", "cert-manager.io/v1")));
     }
 
     private static JsonObject Obj(string kind, string name, string group = "v1", JsonObject? spec = null)

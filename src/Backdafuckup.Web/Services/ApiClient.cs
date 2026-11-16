@@ -57,6 +57,13 @@ public sealed class ApiClient(HttpClient http)
     /// <summary>POST that returns the raw response (caller handles e.g. 409 with a body).</summary>
     public Task<HttpResponseMessage> PostRawAsync(string url, object? body) => http.PostAsJsonAsync(url, body, Json);
 
+    public async Task<T> PutAsync<T>(string url, object body)
+    {
+        using var response = await http.PutAsJsonAsync(url, body, Json);
+        await EnsureSuccessAsync(response);
+        return (await response.Content.ReadFromJsonAsync<T>(Json))!;
+    }
+
     public async Task PutAsync(string url, object body)
     {
         using var response = await http.PutAsJsonAsync(url, body, Json);
