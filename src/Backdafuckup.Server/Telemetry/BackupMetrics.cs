@@ -30,6 +30,8 @@ public sealed class BackupMetrics
     private readonly Histogram<double> _writesHeld;
     private readonly Histogram<double> _freeze;
     private readonly Counter<long> _snapshots;
+    private readonly Counter<long> _tapeWritten;
+    private readonly Counter<long> _tapeRead;
     private readonly Counter<long> _diskBytes;
     private readonly Counter<double> _diskReadSeconds;
     private readonly Counter<long> _fullReads;
@@ -66,6 +68,8 @@ public sealed class BackupMetrics
         _restoredBytes = meter.CreateCounter<long>("bdfu_restore_bytes_total", "By", "Bytes written by VM restores.");
         _repackedBytes = meter.CreateCounter<long>("bdfu_repository_repacked_bytes_total", "By", "Bytes of chunks still in use that garbage collection copied out of sparse packs.");
         _packedLoose = meter.CreateCounter<long>("bdfu_repository_packed_loose_chunks_total", description: "Loose chunks of format 1 moved into packs after a conversion.");
+        _tapeWritten = meter.CreateCounter<long>("bdfu_tape_written_bytes_total", "By", "Bytes written to tape (blocks with their headers), by media pool.");
+        _tapeRead = meter.CreateCounter<long>("bdfu_tape_read_bytes_total", "By", "Bytes of chunks brought back from tape, by media pool.");
 
         meter.CreateObservableGauge("bdfu_sessions_running", () =>
             Enum.GetValues<SessionKind>().Select(kind => new Measurement<int>(running.Count(kind), new KeyValuePair<string, object?>("kind", Kind(kind)))),
@@ -155,6 +159,19 @@ public sealed class BackupMetrics
     {
         _sessions.Add(1, Tag("kind", Kind(kind)), Tag("result", Result(result)));
         _sessionDuration.Record(duration.TotalSeconds, Tag("kind", Kind(kind)), Tag("result", Result(result)));
+    }
+
+    public void RecordTape(string pool, long writtenBytes, long readBytes)
+    {
+        if (writtenBytes > 0)
+        {
+            _tapeWritten.Add(writtenBytes, Tag("pool", pool));
+        }
+
+        if (readBytes > 0)
+        {
+            _tapeRead.Add(readBytes, Tag("pool", pool));
+        }
     }
 
     public void RecordPacks(string repository, long repackedBytes, long packedLoose)

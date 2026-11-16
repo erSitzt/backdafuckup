@@ -1260,6 +1260,11 @@ What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the S
 | `bdfu_k8s_hooks_total` {cluster, phase, result} | counter | Backup hooks in pods: `pre`/`post`, `ok`/`failed`/`timeout` |
 | `bdfu_k8s_agent_connected` {cluster} | gauge | 1 while a cluster's agent is connected, 0 once it is gone (clusters whose agent connected since the server started) |
 | `bdfu_tape_agent_connected` {agent} | gauge | 1 while a tape agent is connected, 0 once it is gone (agents that connected since the server started) |
+| `bdfu_tape_written_bytes_total` {pool} | counter | Bytes written to tape (blocks with their headers) |
+| `bdfu_tape_read_bytes_total` {pool} | counter | Bytes of chunks brought back from tape |
+| `bdfu_tape_media` {pool, state} | gauge | Tapes of a pool by state (Appendable, Full, Expired, Damaged, …) |
+| `bdfu_tape_media_sets` {pool, state} | gauge | Media sets by state (Open, Closed, Expired) |
+| `bdfu_tape_pool_usable_media` {pool} | gauge | Tapes the pool can write to now (its open set's appendable tape, and expired, free, blank or unread tapes in its library) |
 
 Kubernetes namespaces count in the session metrics (`bdfu_sessions_total` and the others) and per job in `bdfu_vm_*` like VMs; `cluster` in the `bdfu_k8s_*` metrics is the cluster's address, or its connection's name when it is reached through its agent.
 

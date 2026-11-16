@@ -26,7 +26,7 @@ internal sealed record TapeWriteContext(
 
 /// <param name="Copied">Restore points copied.</param>
 /// <param name="NewBytes">Bytes of chunks written (the set had the others already).</param>
-internal sealed record TapeWriteResult(int Copied, int SqlCopied, long NewBytes, long ReusedChunks, IReadOnlyList<string> Tapes);
+internal sealed record TapeWriteResult(int Copied, int SqlCopied, long NewBytes, long ReusedChunks, IReadOnlyList<string> Tapes, long BytesWritten = 0);
 
 /// <summary>
 /// Writes one run's copies into a media set. It picks tapes (the set's last one if it has room, then expired tapes of the
@@ -53,6 +53,7 @@ internal sealed class TapeSetWriter(
     private AesGcmRecordCipher? _cipher;
     private int _copied;
     private int _copiedSql;
+    private long _bytesWritten;
     private long _newBytes;
     private long _reused;
 
@@ -261,7 +262,7 @@ internal sealed class TapeSetWriter(
             await UnloadAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        return new TapeWriteResult(_copied, _copiedSql, _newBytes, _reused, _tapesUsed);
+        return new TapeWriteResult(_copied, _copiedSql, _newBytes, _reused, _tapesUsed, _bytesWritten);
     }
 
     public async ValueTask DisposeAsync()
@@ -292,6 +293,7 @@ internal sealed class TapeSetWriter(
     private TapeFileEntity Finished(TapeFileSummary summary, string type, long startBlock, int fileNumber, Guid? copyId)
     {
         _remaining -= summary.Bytes;
+        _bytesWritten += summary.Bytes;
         _fileNumber = fileNumber + 1;
         _tape!.FileCount = _fileNumber;
         _tape.BytesWritten += summary.Bytes;

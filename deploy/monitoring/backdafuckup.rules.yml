@@ -138,6 +138,24 @@ groups:
           summary: "Tape agent {{ $labels.agent }} is not connected"
           description: "Actions and tape jobs of its libraries fail while it is gone. Check the service backdafuckup-tape-agent on its host (journalctl -u backdafuckup-tape-agent names the server address and the error)."
 
+      - alert: BackdafuckupTapeNoUsableMedia
+        expr: bdfu_tape_pool_usable_media == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Media pool {{ $labels.pool }} has no tape it can write to"
+          description: "Its next tape job fails for want of a tape. Import blank, free or expired cartridges into its library (Tape → Libraries & drives → Import), or mark tapes free that are no longer needed."
+
+      - alert: BackdafuckupTapeJobFailed
+        expr: increase(bdfu_sessions_total{kind="tape_backup",result="failed"}[6h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A tape job failed"
+          description: "Its session log (History, type Backup to tape) names the tape, drive and error. What it committed before is on tape; the next run goes on."
+
       - alert: BackdafuckupClusterSnapshotLongLived
         expr: histogram_quantile(1, sum by (cluster, le) (rate(bdfu_k8s_snapshot_lifetime_seconds_bucket[1d]))) > 7200
         for: 0m

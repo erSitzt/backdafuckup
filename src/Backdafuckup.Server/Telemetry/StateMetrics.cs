@@ -76,6 +76,16 @@ public sealed class StateMetrics
         meter.CreateObservableGauge("bdfu_repository_packing_unfinished", () => Repositories(r => r.Packs is null ? null : r.Packs.LooseChunksMayExist ? 1 : 0),
             description: "1 while a converted repository still has loose chunks of format 1 to pack.");
 
+        meter.CreateObservableGauge("bdfu_tape_media", () =>
+            (_catalog.TapeMedia ?? []).Select(m => new Measurement<int>(m.Count, Tag("pool", m.Pool), Tag("state", m.State))),
+            description: "Tapes in media pools by state (Appendable, Full, Expired, Damaged, ...).");
+        meter.CreateObservableGauge("bdfu_tape_media_sets", () =>
+            (_catalog.TapeSets ?? []).Select(s => new Measurement<int>(s.Count, Tag("pool", s.Pool), Tag("state", s.State))),
+            description: "Media sets by pool and state (Open, Closed, Expired).");
+        meter.CreateObservableGauge("bdfu_tape_pool_usable_media", () =>
+            (_catalog.TapePools ?? []).Select(p => new Measurement<int>(p.Usable, Tag("pool", p.Pool))),
+            description: "Tapes a pool can write to now: its open set's appendable tape, and expired, free, blank or unread tapes in its library.");
+
         meter.CreateObservableGauge("bdfu_agents", () =>
             new[] { new Measurement<int>(_catalog.AgentsOnline, Tag("state", "online")), new Measurement<int>(_catalog.AgentsOffline, Tag("state", "offline")) },
             description: "Guest agents by state (offline: no contact for 10 minutes).");
@@ -201,10 +211,17 @@ public sealed class StateMetrics
         IReadOnlyList<AgentRow> Agents,
         int AgentsOnline,
         int AgentsOffline,
-        IReadOnlyList<SqlLogRow> SqlLogs)
+        IReadOnlyList<SqlLogRow> SqlLogs,
+        IReadOnlyList<TapeCountRow>? TapeMedia = null,
+        IReadOnlyList<TapeCountRow>? TapeSets = null,
+        IReadOnlyList<TapePoolRow>? TapePools = null)
     {
         public static CatalogSnapshot Empty { get; } = new([], [], new Dictionary<string, int>(), 0, [], [], 0, 0, []);
     }
+
+    internal sealed record TapeCountRow(string Pool, string State, int Count);
+
+    internal sealed record TapePoolRow(string Pool, int Usable);
 
     internal sealed record PoolSnapshot(string Pool, bool Success, double Seconds, StorageState? State, DateTimeOffset ReadUtc);
 }
@@ -335,6 +352,22 @@ public sealed class MetricsStateService(
             .Select(d => new StateMetrics.SqlLogRow(d.VmName, d.Instance, d.Name, d.LastLogUtc!.Value.ToUnixTimeSeconds(), sqlJobs[d.JobId!.Value] * 60L))
             .ToList();
 
+        // Tape: tapes and sets by pool and state, and what each pool can write to now.
+        var pools = await db.MediaPools.AsNoTracking().ToListAsync(cancellationToken).ConfigureAwait(false);
+        var poolNames = pools.ToDictionary(p => p.Id, p => p.Name);
+        var tapeMedia = await db.TapeMedia.AsNoTracking().Select(m => new { m.PoolId, m.SetId, m.LibraryId, m.State, m.Kind, m.Location }).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var tapeSets = await db.MediaSets.AsNoTracking().Select(s => new { s.Id, s.PoolId, s.State }).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var openSets = tapeSets.Where(s => s.State == MediaSetState.Open).Select(s => s.Id).ToHashSet();
+        var tapeMediaRows = tapeMedia.Where(m => m.PoolId is { } id && poolNames.ContainsKey(id))
+            .GroupBy(m => (Pool: poolNames[m.PoolId!.Value], m.State)).Select(g => new StateMetrics.TapeCountRow(g.Key.Pool, g.Key.State.ToString(), g.Count())).ToList();
+        var tapeSetRows = tapeSets.Where(s => poolNames.ContainsKey(s.PoolId))
+            .GroupBy(s => (Pool: poolNames[s.PoolId], s.State)).Select(g => new StateMetrics.TapeCountRow(g.Key.Pool, g.Key.State.ToString(), g.Count())).ToList();
+        var tapePoolRows = pools.Select(p => new StateMetrics.TapePoolRow(p.Name, tapeMedia.Count(m =>
+            m.LibraryId == p.LibraryId && m.Location is TapeLocation.Slot or TapeLocation.Drive && m.Kind == (p.WormOnly ? TapeMediumKind.Worm : TapeMediumKind.Data)
+            && (m.State is TapeMediumState.Free or TapeMediumState.Blank or TapeMediumState.Unknown
+                || (m.State == TapeMediumState.Expired && m.PoolId == p.Id)
+                || (m.State == TapeMediumState.Appendable && m.SetId is { } set && openSets.Contains(set) && m.PoolId == p.Id))))).ToList();
+
         return new StateMetrics.CatalogSnapshot(
             vms,
             results,
@@ -344,7 +377,10 @@ public sealed class MetricsStateService(
             [.. agents.Select(a => new StateMetrics.AgentRow(a.HostName, a.LastContactUtc.ToUnixTimeSeconds()))],
             agents.Count(a => a.LastContactUtc >= offlineBefore),
             agents.Count(a => a.LastContactUtc < offlineBefore),
-            sqlLogs);
+            sqlLogs,
+            tapeMediaRows,
+            tapeSetRows,
+            tapePoolRows);
     }
 
     internal async Task ReadPoolsAsync(CancellationToken cancellationToken)

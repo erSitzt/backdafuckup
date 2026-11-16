@@ -27,7 +27,8 @@ public sealed class TapeRestoreRunner(
     CredentialProtector protector,
     SessionEventWriter events,
     Sql.SqlCatalogBackfill sqlBackfill,
-    TimeProvider time)
+    TimeProvider time,
+    Telemetry.BackupMetrics metrics)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -100,6 +101,7 @@ public sealed class TapeRestoreRunner(
                 message => log.Info(message),
                 cancellationToken).ConfigureAwait(false);
             await CatalogAsync(result.Committed, copy, set, request.RepositoryId, session.Id, cancellationToken).ConfigureAwait(false);
+            metrics.RecordTape(pool.Name, 0, copy.StoredBytes);
 
             // The SQL Server backups of the VM from this restore point on: logs for a point-in-time restore.
             foreach (var sqlCopy in sqlCopies)

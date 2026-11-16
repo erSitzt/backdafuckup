@@ -28,7 +28,8 @@ public sealed class TapeBackupRunner(
     SessionEventWriter events,
     ServerPaths paths,
     IOptions<TapeOptions> options,
-    TimeProvider time)
+    TimeProvider time,
+    Telemetry.BackupMetrics metrics)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -123,6 +124,7 @@ public sealed class TapeBackupRunner(
             result = await writer.FinishAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        metrics.RecordTape(pool.Name, result.BytesWritten, 0);
         if (pool.Export == TapeExport.AfterEveryRun)
         {
             await robot.ExportFromSlotsAsync(library, result.Tapes.Distinct().ToList(), holder, log, cancellationToken).ConfigureAwait(false);
