@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
@@ -173,7 +174,40 @@ public sealed class XenProviderTests : IAsyncDisposable
         var line = Assert.Single(_log, l => l.Contains("VDI.list_changed_blocks failed", StringComparison.Ordinal));
         Assert.Contains($"previous backup's tracking data {token!.Value} (type cbt_metadata", line, StringComparison.Ordinal);
         Assert.Contains("this backup's snapshot", line, StringComparison.Ordinal);
-        Assert.Contains("CBT on", line, StringComparison.Ordinal);
+        Assert.Contains("storage Local storage, CBT on", line, StringComparison.Ordinal);
+        var cause = Assert.Single(_log, l => l.Contains("Changed block tracking of app04", StringComparison.Ordinal));
+        Assert.Contains("XAPI recorded no migration of the VM and no host restart since the previous backup's snapshot", cause, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_broken_cbt_chain_names_the_migrations_and_host_restarts_since_the_previous_backup_once_per_vm()
+    {
+        var (vmUuid, _) = _pool.AddVm("app05", DiskSize, DiskSize);
+        await using var session = await Provider().OpenAsync(Settings(), Ct);
+        var token = await FullBackupAsync(session, vmUuid);
+        var since = _pool.SnapshotTime(token!.Value);
+        var second = _pool.AddHost("xcp-host-2");
+        _pool.SetHostBootTime(_pool.HostRef, since.AddDays(-3));
+        _pool.SetHostBootTime(second, since.AddMinutes(50));
+        _pool.RecordMigration(vmUuid, "xcp-host-0", "xcp-host-1", since.AddHours(-2));
+        _pool.RecordMigration(vmUuid, "xcp-host-1", "xcp-host-2", since.AddHours(1));
+        _pool.AddMessage("VM_SNAPSHOTTED", "VM", vmUuid, "VM 'app05' snapshotted", since.AddHours(2));
+        _pool.ChangedBlocksError = new FakeXapiError("SR_BACKEND_FAILURE_460", "", "Failed to calculate changed blocks for given VDIs. [opterr=Source and target VDI are unrelated]", "");
+
+        await using var backup = await session.BeginBackupAsync(Request(vmUuid), Log, _ledger, Ct);
+        var first = await backup.GetChangedExtentsAsync(backup.Disks[0], token, Log, Ct);
+        var other = await backup.GetChangedExtentsAsync(backup.Disks[1], token, Log, Ct);
+
+        Assert.True(first.IsFull);
+        Assert.True(other.IsFull);
+        var cause = Assert.Single(_log, l => l.Contains("Changed block tracking of app05", StringComparison.Ordinal));
+        string Utc(DateTimeOffset t) => t.UtcDateTime.ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture);
+        Assert.Contains(
+            $"since the previous backup's snapshot ({Utc(since)}) XAPI recorded: host xcp-host-2 was restarted at {Utc(since.AddMinutes(50))}; " +
+            $"app05 was migrated from host xcp-host-1 to host xcp-host-2 at {Utc(since.AddHours(1))}. On XCP-ng a migration",
+            cause, StringComparison.Ordinal);
+        Assert.DoesNotContain("xcp-host-0", cause, StringComparison.Ordinal);
+        Assert.DoesNotContain("xcp-host-1 was restarted", cause, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -190,6 +224,7 @@ public sealed class XenProviderTests : IAsyncDisposable
 
         Assert.True(reset.IsFull);
         Assert.Contains("re-)enabled", reset.FullReason, StringComparison.Ordinal);
+        Assert.Contains(_log, l => l.Contains("Changed block tracking of app03: XAPI recorded no migration", StringComparison.Ordinal));
         Assert.True(missing.IsFull);
         Assert.Contains("no longer exists", missing.FullReason, StringComparison.Ordinal);
     }

@@ -112,6 +112,21 @@ ss -ltnp | grep 10809
 
 backdafuckup enables CBT on every disk it backs up. While CBT is enabled on a disk, **storage live migration** of that disk is not possible. When a disk is reset, for example after a host crash, the next backup reads it in full.
 
+**Migrations and host updates.** On XCP-ng a migration of a VM can reset its CBT, also within the pool and on the same storage, for example when hosts are evacuated for a rolling pool update. The previous backup's tracking data then no longer leads to the new snapshot. XAPI answers `SR_BACKEND_FAILURE_460 … Source and target VDI are unrelated`, and the backup reads the VM's disks in full, with a warning. The backups after it are incremental again. Another backup product with CBT on the same disks does not break the chain by itself: each product keeps its own tracking data.
+
+When the chain of a VM breaks, the session log shows two kinds of warning:
+- **Per disk:** XAPI's answer and the state of the chain. That is the previous backup's tracking data, this backup's snapshot and the disk, each with its type, format, storage, CBT flag and the time of the snapshot.
+- **Once per VM:** what XAPI recorded since the previous backup's snapshot, found with `message.get` (VM_MIGRATED) and the hosts' `other_config:boot_time`. That is the VM's migrations (from which host to which, when) and the hosts' restarts. For example:
+
+  ```
+  Changed block tracking of app01: since the previous backup's snapshot (2026-11-06 15:01 UTC) XAPI recorded:
+  host xcp-host-1 was restarted at 2026-11-07 08:50 UTC; app01 was migrated from host xcp-host-2 to host xcp-host-1 at 2026-11-07 08:55 UTC; …
+  ```
+
+  When XAPI recorded neither, the line says so and names the other causes: the disk moved to another storage, or CBT was turned off and on again. XAPI keeps only a limited number of messages, so on a busy pool older migrations may be missing.
+
+Plan for one full read of the migrated VMs after each host update. With the HTTP export every backup reads the whole allocated disk anyway, so the time stays the same; with NBD the run after the update takes as long as a full backup.
+
 Incremental backups need no setting. XAPI reports the changed blocks as a bitmap with one bit per 64 KiB block; one byte of it describes 512 KiB of the disk. backdafuckup reads every 512 KiB range whose byte has any bit set. That is right whatever the order of the bits within a byte is, and it reads exactly the chunks a bit-exact reading would when the repository's chunk size is a multiple of 512 KiB (the default is 1 MiB). XenServer documents the most significant bit as the first block; the storage manager (sm) turns blktap's bitmap into that order.
 
 Only with chunks smaller than 512 KiB does a bit-exact reading save reads: set `"Xen": { "CbtBitOrder": "MostSignificantBitFirst" }`, after checking it on your pool with the lab test `Cbt_bit_order_spike` (see "Lab verification" below). A wrong value would make incremental backups miss changes, so leave it unset unless the test confirms it.

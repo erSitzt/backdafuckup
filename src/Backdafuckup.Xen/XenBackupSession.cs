@@ -28,6 +28,7 @@ internal sealed class XenBackupSession : IVmBackupSession
     private readonly Guid _snapshotArtifact;
     private readonly IBackupTelemetry? _telemetry;
     private NbdOverview? _nbdOverview;
+    private int _cbtBreakLogged;
     private bool _committed;
     private bool _commitDeferred;
     private bool _disposed;
@@ -626,7 +627,8 @@ internal sealed class XenBackupSession : IVmBackupSession
 
         if (state.CbtJustEnabled)
         {
-            return ChangedExtents.Full("changed block tracking was (re-)enabled on this disk, e.g. for the first backup or after it was reset by a host or storage crash", FullReadReasons.CbtReenabled);
+            await LogCbtBreakCauseAsync(since.Value, log, cancellationToken).ConfigureAwait(false);
+            return ChangedExtents.Full("changed block tracking was (re-)enabled on this disk, e.g. after it was reset by a migration, a storage move or a host or storage crash", FullReadReasons.CbtReenabled);
         }
 
         if (!XapiRecord.IsNullRef(state.SourceVdiRef))
@@ -634,7 +636,8 @@ internal sealed class XenBackupSession : IVmBackupSession
             var source = await _xapi.GetRecordAsync("VDI", state.SourceVdiRef, cancellationToken).ConfigureAwait(false);
             if (!source.Bool("cbt_enabled"))
             {
-                return ChangedExtents.Full("changed block tracking was disabled on the disk (e.g. after a host or storage crash)", FullReadReasons.CbtDisabled);
+                await LogCbtBreakCauseAsync(since.Value, log, cancellationToken).ConfigureAwait(false);
+                return ChangedExtents.Full("changed block tracking was disabled on the disk (e.g. after a migration or a host or storage crash)", FullReadReasons.CbtDisabled);
             }
         }
 
@@ -660,6 +663,7 @@ internal sealed class XenBackupSession : IVmBackupSession
             var detail = Detail(ex);
             log.Warning($"Disk {disk.Name}: XAPI VDI.list_changed_blocks failed: {ex.Code}{(detail.Length > 0 ? ": " + detail : string.Empty)}. " +
                 await DescribeCbtAsync(baseRef, state, cancellationToken).ConfigureAwait(false));
+            await LogCbtBreakCauseAsync(since.Value, log, cancellationToken).ConfigureAwait(false);
             return ChangedExtents.Full($"changed blocks could not be determined ({ex.Code}{(detail.Length > 0 ? ": " + detail : string.Empty)})", FullReadReasons.CbtError);
         }
         catch (FormatException ex)
@@ -1012,9 +1016,59 @@ internal sealed class XenBackupSession : IVmBackupSession
     private static string Detail(XapiException ex) =>
         string.Join("; ", ex.Parameters.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim()));
 
-    /// <summary>Type, CBT flag and time of the previous backup's tracking data, the new snapshot and the disk (best effort).</summary>
+    /// <summary>
+    /// Once per VM, when a disk's change tracking chain broke: the VM's migrations and the host restarts XAPI recorded since
+    /// the previous backup's snapshot (<paramref name="baseVdiUuid"/>), the usual reason on XCP-ng. Best effort: a failed
+    /// lookup is named in the log and never fails the backup.
+    /// </summary>
+    private async Task LogCbtBreakCauseAsync(string baseVdiUuid, IOperationLog log, CancellationToken cancellationToken)
+    {
+        if (Interlocked.Exchange(ref _cbtBreakLogged, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var baseRef = await _xapi.TryGetByUuidAsync("VDI", baseVdiUuid, cancellationToken).ConfigureAwait(false);
+            var since = baseRef is null ? null : (await _xapi.GetRecordAsync("VDI", baseRef, cancellationToken).ConfigureAwait(false)).Time("snapshot_time");
+            if (since is null)
+            {
+                log.Info($"Changed block tracking of {Vm.Name}: the time of the previous backup's snapshot ({baseVdiUuid}) is unknown, so migrations and host restarts since then are not looked up.");
+                return;
+            }
+
+            log.Warning(await XenCbtBreak.DescribeAsync(_xapi, Vm.VmId, Vm.Name, since.Value, cancellationToken).ConfigureAwait(false));
+        }
+        catch (Exception ex) when (ex is XapiException or HttpRequestException or IOException or System.Text.Json.JsonException)
+        {
+            log.Warning($"Changed block tracking of {Vm.Name}: looking up migrations (XAPI message.get) and host restarts since the previous backup failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>Type, storage, CBT flag and time of the previous backup's tracking data, the new snapshot and the disk (best effort).</summary>
     private async Task<string> DescribeCbtAsync(string baseRef, DiskState state, CancellationToken cancellationToken)
     {
+        var storages = new Dictionary<string, string>(StringComparer.Ordinal);
+        async Task<string> Storage(string srRef)
+        {
+            if (!storages.TryGetValue(srRef, out var name))
+            {
+                try
+                {
+                    name = XapiRecord.IsNullRef(srRef) ? "unknown" : (await _xapi.GetRecordAsync("SR", srRef, cancellationToken).ConfigureAwait(false)).Str("name_label");
+                }
+                catch (XapiException ex)
+                {
+                    name = ex.Code;
+                }
+
+                storages[srRef] = name;
+            }
+
+            return name;
+        }
+
         async Task<string> Describe(string label, string reference)
         {
             try
@@ -1023,7 +1077,8 @@ internal sealed class XenBackupSession : IVmBackupSession
                 var smConfig = vdi.Map("sm_config");
                 var format = smConfig.TryGetValue("vdi_type", out var type) ? type : smConfig.TryGetValue("image-format", out var image) ? image : "unknown";
                 var time = vdi.Bool("is_a_snapshot") ? $", taken {vdi.Str("snapshot_time")}" : string.Empty;
-                return $"{label} {vdi.Str("uuid")} (type {vdi.Str("type")}, format {format}, CBT {(vdi.Bool("cbt_enabled") ? "on" : "off")}{time})";
+                return $"{label} {vdi.Str("uuid")} (type {vdi.Str("type")}, format {format}, storage {await Storage(vdi.Str("SR")).ConfigureAwait(false)}, " +
+                    $"CBT {(vdi.Bool("cbt_enabled") ? "on" : "off")}{time})";
             }
             catch (XapiException ex)
             {

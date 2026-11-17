@@ -27,7 +27,7 @@ public sealed class FakeXenPool : IAsyncDisposable
 
     public FakeXenPool()
     {
-        foreach (var table in new[] { "pool", "host", "VM", "VBD", "VDI", "SR", "PBD", "network", "PIF", "VIF", "task", "VM_guest_metrics" })
+        foreach (var table in new[] { "pool", "host", "VM", "VBD", "VDI", "SR", "PBD", "network", "PIF", "VIF", "task", "VM_guest_metrics", "message" })
         {
             _tables[table] = new(StringComparer.Ordinal);
         }
@@ -221,6 +221,63 @@ public sealed class FakeXenPool : IAsyncDisposable
     }
 
     /// <summary>Simulates CBT being reset (e.g. after a host crash).</summary>
+    /// <summary>A message as XAPI records it (e.g. VM_MIGRATED for a VM), returned by <c>message.get</c>.</summary>
+    public void AddMessage(string name, string cls, string objectUuid, string body, DateTimeOffset time)
+    {
+        lock (_lock)
+        {
+            Add("message", new JsonObject { ["name"] = name, ["priority"] = 5, ["cls"] = cls, ["obj_uuid"] = objectUuid, ["timestamp"] = XapiTime(time), ["body"] = body });
+        }
+    }
+
+    /// <summary>Records a migration of the VM between two hosts like XAPI does (a VM_MIGRATED message).</summary>
+    public void RecordMigration(string vmUuid, string fromHost, string toHost, DateTimeOffset time)
+    {
+        string name;
+        lock (_lock)
+        {
+            name = Get("VM", RefByUuid("VM", vmUuid))["name_label"]!.GetValue<string>();
+        }
+
+        AddMessage("VM_MIGRATED", "VM", vmUuid,
+            $"VM '{name}' (uuid: {vmUuid}) migrated from host '{fromHost}' (uuid: {Guid.NewGuid()}) to host '{toHost}' (uuid: {Guid.NewGuid()})", time);
+    }
+
+    /// <summary>The host's last boot (<c>other_config</c> <c>boot_time</c>, seconds since 1970 with a trailing dot as XAPI writes it).</summary>
+    public void SetHostBootTime(string hostRef, DateTimeOffset time)
+    {
+        lock (_lock)
+        {
+            SetMap(Get("host", hostRef), "other_config", "boot_time", time.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture) + ".");
+        }
+    }
+
+    /// <summary>Adds a pool member (no PIFs, so it offers no NBD endpoint).</summary>
+    public string AddHost(string name)
+    {
+        lock (_lock)
+        {
+            return Add("host", new JsonObject
+            {
+                ["name_label"] = name,
+                ["address"] = name,
+                ["enabled"] = true,
+                ["other_config"] = new JsonObject(),
+                ["software_version"] = new JsonObject { ["product_brand"] = "XCP-ng", ["product_version"] = "8.3.0" },
+            });
+        }
+    }
+
+    /// <summary>The previous backup's change tracking data: when its snapshot was taken.</summary>
+    public DateTimeOffset SnapshotTime(string vdiUuid)
+    {
+        lock (_lock)
+        {
+            return DateTimeOffset.ParseExact(Get("VDI", RefByUuid("VDI", vdiUuid))["snapshot_time"]!.GetValue<string>(), "yyyyMMdd'T'HH:mm:ss'Z'",
+                CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+        }
+    }
+
     public void DisableCbt(string vdiUuid)
     {
         lock (_lock)
@@ -346,6 +403,7 @@ public sealed class FakeXenPool : IAsyncDisposable
             ("VM", "set_is_a_template") => Set(Get("VM", S(1)), "is_a_template", p[2]!.GetValue<bool>()),
             ("VDI", "enable_cbt") => Set(Get("VDI", S(1)), "cbt_enabled", true),
             ("VDI", "list_changed_blocks") => ListChangedBlocks(S(1), S(2)),
+            ("message", "get") => Messages(S(1), S(2), S(3)),
             ("VDI", "data_destroy") => DataDestroy(S(1)),
             ("VBD", "destroy") => DestroyVbd(S(1)),
             ("VDI", "destroy") => DestroyVdi(S(1)),
@@ -360,6 +418,24 @@ public sealed class FakeXenPool : IAsyncDisposable
         };
 
         return isAsync ? CompletedTask(result?.ToString() ?? string.Empty) : result;
+    }
+
+    /// <summary>message.get(cls, obj_uuid, since): the object's messages from <c>since</c> on, as a map ref → record.</summary>
+    private JsonObject Messages(string cls, string objectUuid, string since)
+    {
+        var from = DateTimeOffset.ParseExact(since, "yyyyMMdd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+        var result = new JsonObject();
+        foreach (var (reference, message) in _tables["message"])
+        {
+            var at = DateTimeOffset.ParseExact(message["timestamp"]!.GetValue<string>(), "yyyyMMdd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+            if (message["cls"]!.GetValue<string>() == cls && message["obj_uuid"]!.GetValue<string>() == objectUuid && at >= from)
+            {
+                result[reference] = message.DeepClone();
+            }
+        }
+
+        return result;
     }
 
     private JsonNode? Logout(string session)
