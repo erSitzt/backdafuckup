@@ -555,7 +555,8 @@ internal sealed class TapeSetWriter(
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var last = await db.TapeMedia.AsNoTracking().Where(m => m.SetId == Set.Id).OrderByDescending(m => m.Sequence).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-        if (last is { State: TapeMediumState.Appendable, Location: TapeLocation.Slot or TapeLocation.Drive } && last.LibraryId == context.Library.Id && !_skipped.Contains(last.Id))
+        if (last is { State: TapeMediumState.Appendable, Location: TapeLocation.Slot or TapeLocation.Drive } && last.LibraryId == context.Library.Id && !_skipped.Contains(last.Id)
+            && !robot.InBusyDrive(context.Library, context.Drive, last))
         {
             _skipped.Add(last.Id);
             return (last, true);
@@ -566,9 +567,12 @@ internal sealed class TapeSetWriter(
         var media = await db.TapeMedia.AsNoTracking()
             .Where(m => m.LibraryId == context.Library.Id && (m.Location == TapeLocation.Slot || m.Location == TapeLocation.Drive) && m.Kind == kind && usable.Contains(m.State))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+        // Tapes in a drive another session holds are left alone; one in this drive or a slot comes before one that
+        // has to be taken out of another drive first.
         var choice = media
-            .Where(m => !_skipped.Contains(m.Id) && (m.State != TapeMediumState.Expired || m.PoolId == context.Pool.Id))
+            .Where(m => !_skipped.Contains(m.Id) && (m.State != TapeMediumState.Expired || m.PoolId == context.Pool.Id) && !robot.InBusyDrive(context.Library, context.Drive, m))
             .OrderBy(m => Array.IndexOf(usable, m.State))
+            .ThenBy(m => m.Location != TapeLocation.Drive ? 1 : m.Address == context.Drive.ElementAddress ? 0 : 2)
             .ThenBy(m => m.Barcode, StringComparer.Ordinal)
             .FirstOrDefault()
             ?? throw new IOException(

@@ -1154,7 +1154,7 @@ A **media pool** is the tapes of one library used for one purpose (*Tape → Med
 
 - **Sets.** Copies go into the pool's open **media set**. Chunks are written once per set, so a restore needs tapes of one set only. A new set starts by the pool's rule: every run, daily, weekly (the default; weeks begin on Monday), monthly, or never. The old set then closes.
 - **Retention.** A closed set is kept for the pool's days, then it **expires**: its tapes are labelled again when the pool needs tapes. WORM tapes are never reused.
-- **Tapes.** A run appends to the set's last tape while it has room. Then it takes an expired tape of the pool, a free one, a blank one, or one it has not read yet. A tape with other data (not backdafuckup's, or another pool's set that has not expired) is never written to. New tapes are labelled on first use.
+- **Tapes.** A run appends to the set's last tape while it has room. Then it takes an expired tape of the pool, a free one, a blank one, or one it has not read yet. A tape with other data (not backdafuckup's, or another pool's set that has not expired) is never written to. New tapes are labelled on first use. A tape left in another drive is taken from there when no session uses that drive; a tape in a drive that another session holds is left alone.
 - **WORM only.** The pool takes only WORM cartridges.
 - **Block size.** 256 KiB by default, which reads back on every host and through iSCSI.
 - **The end of a tape.** A file is started only where it fits, with a reserve before the end (`Tape:ReserveMiB`, 128 MiB, or 0.25 % of a larger cartridge). An archive stops at the reserve or at the drive's early warning and goes on on the next tape. A file cut off by the end of the tape is written again on the next one.

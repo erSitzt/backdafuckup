@@ -74,14 +74,33 @@ public sealed class TapeSessionRunner(TapeLibraries libraries, TapeLocks locks, 
                 }
                 else
                 {
-                    if (source.Type == Cdb.ElementType.DataTransfer)
-                    {
-                        throw new TapeRequestException($"{barcode} is in {TapeLibraries.Describe(library, source)}; unload it there first.");
-                    }
-
                     if (TapeLibraries.KindFromBarcode(barcode) == TapeMediumKind.Cleaning)
                     {
                         throw new TapeRequestException($"{barcode} is a cleaning cartridge; it is only loaded to clean a drive.");
+                    }
+
+                    if (source.Type == Cdb.ElementType.DataTransfer)
+                    {
+                        // Left in another drive (a load from the console, a run that ended there): taken from there
+                        // when no session uses that drive.
+                        var other = library.Drives.FirstOrDefault(d => d.ElementAddress == source.Address);
+                        var lease = other is null ? null : locks.Drive(other.Id).TryAcquire(holder);
+                        if (lease is null)
+                        {
+                            var user = other is null ? null : locks.Drive(other.Id).Snapshot().Holder;
+                            throw new TapeRequestException(
+                                $"{barcode} is in {TapeLibraries.Describe(library, source)}{(user is null ? string.Empty : $", which '{user}' uses")}; unload it there first.");
+                        }
+
+                        await using (lease.ConfigureAwait(false))
+                        {
+                            log.Info($"{barcode} is in {other!.Name}, which no session uses; it goes back to a slot first.");
+                            await UnloadToSlotAsync(library, other, changer, inventory, log, cancellationToken).ConfigureAwait(false);
+                        }
+
+                        inventory = await changer.Changer.ReadInventoryAsync(cancellationToken).ConfigureAwait(false);
+                        source = inventory.Find(barcode) ?? throw new TapeRequestException($"{barcode} is not in {library.Name} after unloading {other.Name}: the changer does not report it in any slot, mail slot or drive.");
+                        target = inventory.At(Address(drive))!;
                     }
 
                     if (target.Full)
@@ -412,6 +431,13 @@ public sealed class TapeSessionRunner(TapeLibraries libraries, TapeLocks locks, 
         log.Info($"Rewinding and unloading {drive.Name}.");
         await opened.Drive.UnloadAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Whether <paramref name="medium"/> sits in a drive of the library other than <paramref name="own"/> that a session holds.</summary>
+    internal bool InBusyDrive(TapeLibraryEntity library, TapeDriveEntity own, TapeMediumEntity medium) =>
+        medium.Location == TapeLocation.Drive
+        && library.Drives.FirstOrDefault(d => d.ElementAddress == medium.Address) is { } drive
+        && drive.Id != own.Id
+        && locks.Drive(drive.Id).Snapshot().Holder is not null;
 
     /// <summary>The drive asked for, else a free empty one, else a free one, else the first (waiting for it).</summary>
     internal async Task<(TapeDriveEntity Drive, IAsyncDisposable Lease)> ChooseDriveAsync(TapeLibraryEntity library, Guid? driveId, string holder, IOperationLog log, CancellationToken cancellationToken)

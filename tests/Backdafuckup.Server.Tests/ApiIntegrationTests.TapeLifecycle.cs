@@ -75,4 +75,42 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal("Unknown", (await MediumAsync("BDF003L9")).State);
         Assert.Equal("Damaged", (await MediumAsync("BDF002L9")).State);
     }
+
+    [Fact]
+    public async Task A_tape_left_in_another_drive_is_taken_from_there_unless_a_session_uses_that_drive()
+    {
+        var client = await SignedInClientAsync();
+        var fake = _tapeHost.Libraries[0];
+        fake.BecomingReadyPolls = 1;
+        fake.AddCartridge("BDF000L9", 12L << 20);
+
+        var point = await BackUpImageAsync(client, "db01", RandomNumberGenerator.GetBytes(1 << 20));
+        var library = await Read<TapeLibraryDto>(client.PostAsJsonAsync(
+            "/api/tape/libraries", new CreateTapeLibraryDto("Lab", "local", "LIB0001", [new("DRV0001", 256, null), new("DRV0002", 257, null)]), Ct));
+        var drive2 = library.Drives.Single(d => d.Element == 257);
+        var pool = await Read<MediaPoolDto>(client.PostAsJsonAsync("/api/tape/pools", new MediaPoolRequestDto("Daily", library.Id), Ct));
+        var job = await Read<TapeJobDto>(client.PostAsJsonAsync("/api/tape/jobs", new TapeJobRequestDto("To tape", pool.Id, [point.JobId!.Value]), Ct));
+        async Task<Guid> RunAsync() => (await Read<StartedDto>(client.PostAsync($"/api/tape/jobs/{job.Id}/run", null, Ct))).SessionId;
+        async Task<List<string>> Log(Guid session) => (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{session}/log", Ct))!.Select(l => l.Message).ToList();
+
+        // The only tape is being loaded into Drive 2 (still not ready): the job in Drive 1 leaves it alone.
+        fake.BecomingReadyPolls = 1_000_000;
+        var load = (await Read<StartedDto>(client.PostAsJsonAsync($"/api/tape/libraries/{library.Id}/actions", new TapeActionDto("load", "BDF000L9", drive2.Id), Ct))).SessionId;
+        await Until(async () => (await Log(load)).Any(l => l.StartsWith("Waiting for Drive 2 to be ready", StringComparison.Ordinal)));
+        fake.BecomingReadyPolls = 1;
+        var refused = (await WaitForSessionAsync(client, await RunAsync())).Session;
+        Assert.Equal("Failed", refused.State);
+        Assert.Contains("No tape in Lab can take tape #1 of the set", refused.Summary, StringComparison.Ordinal);
+        Assert.Equal((ushort?)257, fake.LocationOf("BDF000L9"));
+
+        // Once no session uses Drive 2, the job takes the tape from there.
+        Assert.Equal(HttpStatusCode.NoContent, (await client.PostAsync($"/api/sessions/{load}/stop", null, Ct)).StatusCode);
+        await WaitForSessionAsync(client, load);
+        var run = await RunAsync();
+        var copied = (await WaitForSessionAsync(client, run)).Session;
+        Assert.True(copied.State == "Succeeded", copied.Summary);
+        var log = await Log(run);
+        Assert.Contains("BDF000L9 is in Drive 2, which no session uses; it goes back to a slot first.", log);
+        Assert.Contains(log, l => l.StartsWith("Writing to BDF000L9 (tape #1 of the set) in Drive 1", StringComparison.Ordinal));
+    }
 }
