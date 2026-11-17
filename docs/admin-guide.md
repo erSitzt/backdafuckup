@@ -99,6 +99,10 @@ xe network-param-add param-name=purpose param-key=nbd uuid=<network-uuid>
 
 The backup server must reach that network on port 10809. Use `insecure_nbd` (no TLS) only in isolated test labs; in that case also tick "Allow unencrypted NBD" for the pool in the console.
 
+If NBD connections time out ("no answer to the TCP connection"), the packets are dropped on the way, or the host's answers never come back. Check two things:
+- **Firewall:** a firewall between the backup server and the hosts, or the hosts' iptables, may block TCP 10809.
+- **Route back:** the hosts' interfaces in the NBD network need a route back to the backup server. Either they have a gateway, or the backup server has an address in the same subnet. An NBD network without a gateway, which no backup server is connected to directly, accepts no connections from outside it.
+
 If NBD connections fail with "Connection refused", run these commands on a host. They show which network has the NBD purpose, which IP each host has on it, and whether `xapi-nbd` listens:
 
 ```bash

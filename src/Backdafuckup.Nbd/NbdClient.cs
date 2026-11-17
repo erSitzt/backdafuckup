@@ -102,7 +102,7 @@ public sealed class NbdClient : IAsyncDisposable
             tcp.Dispose();
             throw new TimeoutException(connected
                 ? $"NBD connection to {options.Host}:{options.Port}: the server accepted the TCP connection but did not complete the NBD/TLS handshake within {options.ConnectTimeout.TotalSeconds:0} s."
-                : $"NBD connection to {options.Host}:{options.Port}: no answer to the TCP connection within {options.ConnectTimeout.TotalSeconds:0} s. The connection attempts are dropped, not refused: most likely a firewall between the backup server and the host (or the host's iptables) blocks TCP {options.Port}.");
+                : $"NBD connection to {options.Host}:{options.Port}: no answer to the TCP connection within {options.ConnectTimeout.TotalSeconds:0} s. The connection attempts are dropped, not refused: either a firewall between the backup server and the host (or the host's iptables) blocks TCP {options.Port}, or the host cannot answer because it has no route back to the backup server (its interface in this network has no gateway, and the backup server is not in that subnet).");
         }
         catch (EndOfStreamException ex)
         {
