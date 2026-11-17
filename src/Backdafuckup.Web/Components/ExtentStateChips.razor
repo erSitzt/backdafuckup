@@ -1,0 +1,23 @@
+@* An extent's state: online or offline, active, sealed or evacuating, and maintenance. *@
+<div class="d-flex flex-wrap gap-1">
+    <StateChip State="@Extent.State" />
+    @if (Extent.ExtentState is "Sealed")
+    {
+        <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Default" Icon="@Icons.Material.Filled.Lock" Class="state-chip">Sealed</MudChip>
+    }
+    else if (Extent.ExtentState is "Evacuating")
+    {
+        <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Warning" Icon="@Icons.Material.Filled.DriveFileMove" Class="state-chip">Evacuating</MudChip>
+    }
+
+    @if (Extent.Maintenance)
+    {
+        <MudTooltip Text="@($"Since {Fmt.Time(Extent.MaintenanceSinceUtc)}: nothing is read or written there.")">
+            <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Warning" Icon="@Icons.Material.Filled.Build" Class="state-chip">Maintenance</MudChip>
+        </MudTooltip>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public RepositoryDto Extent { get; set; } = default!;
+}

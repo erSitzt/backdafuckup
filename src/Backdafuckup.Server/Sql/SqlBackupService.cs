@@ -56,7 +56,8 @@ public sealed class SqlBackupService(
     IOptions<SqlBackupOptions> options,
     IOptions<EngineOptions> engine,
     TimeProvider time,
-    ILogger<SqlBackupService> logger) : BackgroundService
+    ILogger<SqlBackupService> logger,
+    ScaleOut.RepositoryPlacement placement) : BackgroundService
 {
     private readonly ConcurrentDictionary<(Guid Job, string Vm), Task> _running = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _sessionLocks = new();
@@ -105,6 +106,9 @@ public sealed class SqlBackupService(
 
     /// <summary>Waits until the runs started so far have finished (tests).</summary>
     public Task WaitIdleAsync() => Task.WhenAll(_running.Values);
+
+    /// <summary>The SQL Server backup run of a VM of a job in progress, if any (a scale-out move waits for it before moving what it wrote).</summary>
+    public Task? RunningFor(Guid jobId, string vmNativeId) => _running.TryGetValue((jobId, vmNativeId), out var run) ? run : null;
 
     /// <summary>Starts the runs that are due (also called by tests).</summary>
     public async Task TickAsync(CancellationToken cancellationToken)
@@ -285,9 +289,12 @@ public sealed class SqlBackupService(
             return;
         }
 
-        var repository = await repositories.GetAsync(job.RepositoryId, cancellationToken).ConfigureAwait(false);
+        // The VM's chain's extent of a scale-out repository (or the repository itself).
+        var scope = await placement.ScopeAsync(job.RepositoryId, cancellationToken).ConfigureAwait(false);
+        var (repositoryId, _) = await placement.ForSqlAsync(scope, job, vm.NativeId, cancellationToken).ConfigureAwait(false);
+        var repository = await repositories.GetAsync(repositoryId, cancellationToken).ConfigureAwait(false);
         var source = new ManifestSource(job.Connection.Kind, job.Connection.PlatformId ?? job.ConnectionId.ToString(), vm.NativeId, vm.CachedName, null);
-        var context = new RunContext(job, vm, agent.Id, host, account, repository, source, sessionId, log, run);
+        var context = new RunContext(job, vm, agent.Id, host, account, repository, repositoryId, source, sessionId, log, run);
 
         if (work.Log)
         {
@@ -389,7 +396,7 @@ public sealed class SqlBackupService(
     private async Task<(SqlJobResult Result, SqlBackupReceiver Receiver)> RunJobAsync(RunContext context, SqlJobRequest request, TimeSpan timeout, CancellationToken cancellationToken)
     {
         var receiver = new SqlBackupReceiver(
-            context.Repository, context.Job.RepositoryId, context.Source, new ManifestJob(context.Job.Id, context.Job.Name), context.SessionId, dbFactory, time);
+            context.Repository, context.RepositoryId, context.Source, new ManifestJob(context.Job.Id, context.Job.Name), context.SessionId, dbFactory, time);
         try
         {
             var result = await jobs.RunAsync(context.AgentId, request, timeout, cancellationToken, receiver).ConfigureAwait(false);
@@ -808,29 +815,33 @@ public sealed class SqlBackupService(
         keep.UnionWith(backups.Where(b => b.Kind == SqlBackupKind.Log && b.CreatedUtc >= logsFrom).Select(b => b.Id));
 
         var removed = 0;
+        var touched = new HashSet<Guid>();
         foreach (var backup in backups.Where(b => !keep.Contains(b.Id)))
         {
+            // Marked first (compare-and-set): a scale-out move cannot switch it meanwhile, and its repository is fixed.
+            if (await CatalogDeletes.MarkSqlBackupAsync(db, backup.Id, cancellationToken).ConfigureAwait(false) is not { } repositoryId)
+            {
+                continue; // moved or deleted meanwhile: the next run decides again
+            }
+
             try
             {
-                var repository = await repositories.GetAsync(backup.RepositoryId, cancellationToken).ConfigureAwait(false);
-                backup.State = SqlBackupState.Deleting;
-                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                var repository = await repositories.GetAsync(repositoryId, cancellationToken).ConfigureAwait(false);
                 await repository.DeleteSqlBackupAsync(backup.Id, cancellationToken).ConfigureAwait(false);
                 db.SqlBackups.Remove(backup);
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                touched.Add(repositoryId);
                 removed++;
             }
-            catch (SqlBackupPinnedException)
+            catch (Exception ex) when (ex is SqlBackupPinnedException or IOException or UnauthorizedAccessException)
             {
-                // In use by a restore: removed with a later run.
-                backup.State = SqlBackupState.Available;
-                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                // In use by a restore, or its repository unreachable now: removed with a later run.
+                await CatalogDeletes.UnmarkSqlBackupAsync(db, backup.Id, cancellationToken).ConfigureAwait(false);
             }
         }
 
-        if (removed > 0)
+        foreach (var repositoryId in touched)
         {
-            var repositoryId = backups[0].RepositoryId;
             var name = await db.Repositories.Where(r => r.Id == repositoryId).Select(r => r.Name).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? "repository";
             try
             {
@@ -859,7 +870,7 @@ public sealed class SqlBackupService(
     }
 
     private sealed record RunContext(
-        BackupJob Job, BackupJobObject Vm, Guid AgentId, string Host, SqlAccount Account, IBackupRepository Repository, ManifestSource Source,
+        BackupJob Job, BackupJobObject Vm, Guid AgentId, string Host, SqlAccount Account, IBackupRepository Repository, Guid RepositoryId, ManifestSource Source,
         Guid SessionId, IOperationLog Log, RunOutcome Run);
 
     /// <summary>A run's result, collected while it runs and written to the session at its end.</summary>

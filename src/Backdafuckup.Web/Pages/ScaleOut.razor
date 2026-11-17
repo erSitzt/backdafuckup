@@ -1,0 +1,365 @@
+@page "/infrastructure/repositories/{Id:guid}"
+@implements IDisposable
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+@inject NavigationManager Navigation
+
+<PageTitle>@(_scaleOut?.Name ?? "Scale-out repository") – backdafuckup</PageTitle>
+<PageHeader Title="@(_scaleOut?.Name ?? "Scale-out repository")" Description="Extents on different volumes form one repository: each chain (a job's restore points of one VM or namespace) lives on one extent.">
+    <Actions>
+        <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Filled.ArrowBack" Href="/infrastructure/repositories">Repositories</MudButton>
+        <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Balance" OnClick="PlanAsync" Disabled="_planning">Rebalance…</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add extent</MudButton>
+    </Actions>
+</PageHeader>
+
+@if (_adding)
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="2">
+        <MudText Typo="Typo.h6" Class="mb-2">Add extent</MudText>
+        <MudText Typo="Typo.body2" Class="mb-3">A directory on another volume. New chains go to the extent with the most room; existing chains stay where they are until they are moved.</MudText>
+        <MudGrid>
+            <MudItem xs="12" md="4"><MudTextField @bind-Value="_extentName" Label="Name" Variant="Variant.Outlined" /></MudItem>
+            <MudItem xs="12" md="8"><MudTextField @bind-Value="_extentPath" Label="Path (e.g. E:\backup or /mnt/lun2/repo)" Variant="Variant.Outlined" /></MudItem>
+        </MudGrid>
+        <div class="d-flex gap-2 mt-4">
+            <MudButton OnClick="@(() => _adding = false)">Cancel</MudButton>
+            <MudSpacer />
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="AddExtentAsync">Add</MudButton>
+        </div>
+    </MudPaper>
+}
+
+@if (_plan is not null)
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="2">
+        <MudText Typo="Typo.h6" Class="mb-1">Rebalance</MudText>
+        <MudText Typo="Typo.body2" Class="mb-3">@_plan.Note Sizes are estimates (≈, from the new data of each restore point); each chain keeps its restore point ids.</MudText>
+        <MudSimpleTable Dense="true" Elevation="0" Class="mb-3">
+            <thead><tr><th>Extent</th><th>Free now</th><th>Free after</th></tr></thead>
+            <tbody>
+                @foreach (var e in _plan.Extents)
+                {
+                    <tr>
+                        <td>@e.Name</td>
+                        <td>@Fmt.Bytes(e.FreeBefore) of @Fmt.Bytes(e.TotalBytes)</td>
+                        <td>@Fmt.Bytes(e.FreeAfter) <span class="cell-sub">@(e.TotalBytes > 0 ? $"{100.0 * (e.TotalBytes - e.FreeAfter) / e.TotalBytes:0} % used" : "")</span></td>
+                    </tr>
+                }
+            </tbody>
+        </MudSimpleTable>
+        @if (_plan.Moves.Count > 0)
+        {
+            <MudSimpleTable Dense="true" Elevation="0">
+                <thead><tr><th>Chain</th><th>From</th><th>To</th><th class="num">≈ Size</th></tr></thead>
+                <tbody>
+                    @foreach (var m in _plan.Moves)
+                    {
+                        <tr><td>@m.ObjectName</td><td>@m.FromExtentName</td><td>@m.ToExtentName</td><td class="num">@Fmt.Bytes(m.Bytes)</td></tr>
+                    }
+                </tbody>
+            </MudSimpleTable>
+        }
+        <div class="d-flex gap-2 mt-4">
+            <MudButton OnClick="@(() => _plan = null)">Close</MudButton>
+            <MudSpacer />
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || _plan.Moves.Count == 0)" OnClick="RunPlanAsync">Move @_plan.Moves.Count chain(s), ≈ @Fmt.Bytes(_plan.Bytes)</MudButton>
+        </div>
+    </MudPaper>
+}
+
+@if (_scaleOut is null || _extents is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else
+{
+    <MudTabs Elevation="0" Rounded="true" TabPanelsClass="pt-3" @bind-ActivePanelIndex="_tab">
+        <MudTabPanel Text="@($"Extents ({_extents.Count})")">
+            <div class="cq">
+                <MudTable Items="_extents" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
+                    <HeaderContent>
+                        <MudTh>Extent</MudTh><MudTh>State</MudTh><MudTh Class="c-560">Capacity</MudTh><MudTh Class="c-760">Chains</MudTh><MudTh Class="c-760">Restore points</MudTh><MudTh></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>@context.Name<span class="cell-sub mono">@context.Path</span></MudTd>
+                        <MudTd><ExtentStateChips Extent="context" /></MudTd>
+                        <MudTd Class="c-560"><CapacityBar Repository="context" /></MudTd>
+                        <MudTd Class="c-760">@context.Chains</MudTd>
+                        <MudTd Class="c-760">@context.RestorePoints<span class="cell-sub">@Fmt.Bytes(context.LogicalBytes) of VM disks</span></MudTd>
+                        <MudTd Style="text-align:right; white-space:nowrap"><ExtentMenu Extent="context" Changed="LoadAsync" /></MudTd>
+                    </RowTemplate>
+                </MudTable>
+            </div>
+        </MudTabPanel>
+
+        <MudTabPanel Text="@($"Chains ({_chains?.Total ?? 0})")">
+            <MudTextField T="string" Value="_query" ValueChanged="@(async q => { _query = q; await LoadChainsAsync(); })" Placeholder="Filter by VM, namespace or job" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Variant="Variant.Outlined" Margin="Margin.Dense" Class="mb-3" Style="max-width:420px" DebounceInterval="300" />
+            <div class="cq">
+                <MudTable Items="@(_chains?.Items ?? [])" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
+                    <HeaderContent>
+                        <MudTh>VM / namespace</MudTh><MudTh Class="c-560">Job</MudTh><MudTh>New data goes to</MudTh><MudTh Class="c-760">On the extents</MudTh><MudTh Class="c-950">Last</MudTh><MudTh></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>@context.ObjectName@if (context.Busy is { } busy) { <span class="cell-sub">@busy</span> }</MudTd>
+                        <MudTd Class="c-560">@(context.JobName ?? "no job")</MudTd>
+                        <MudTd>@(context.PlacedExtentName ?? "–")<span class="cell-sub">@context.Reason</span></MudTd>
+                        <MudTd Class="c-760">
+                            @foreach (var part in context.Extents)
+                            {
+                                <div class="nowrap">@part.ExtentName: @part.RestorePoints point(s)@(part.SqlBackups > 0 ? $", {part.SqlBackups} SQL" : ""), ≈ @Fmt.Bytes(part.Bytes)</div>
+                            }
+                        </MudTd>
+                        <MudTd Class="c-950">@Fmt.Time(context.NewestUtc)</MudTd>
+                        <MudTd Style="text-align:right; white-space:nowrap">
+                            @if (context.Extents.Count > 0 && context.Busy is null)
+                            {
+                                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Move {context.ObjectName}")">
+                                    @foreach (var target in _extents.Where(e => e.ExtentState == "Active" && !e.Maintenance))
+                                    {
+                                        var from = context.Extents.Where(p => p.ExtentId != target.Id).OrderByDescending(p => p.Bytes).FirstOrDefault();
+                                        @if (from is not null)
+                                        {
+                                            <MudMenuItem Icon="@Icons.Material.Filled.DriveFileMove" OnClick="@(() => MoveAsync(context, from.ExtentId, target))">Move@(context.Extents.Count > 1 ? $" its part on {from.ExtentName}" : "") to @target.Name</MudMenuItem>
+                                        }
+                                    }
+                                </MudMenu>
+                            }
+                        </MudTd>
+                    </RowTemplate>
+                    <NoRecordsContent><MudText>No chains yet: they appear with the first backups.</MudText></NoRecordsContent>
+                </MudTable>
+            </div>
+        </MudTabPanel>
+
+        <MudTabPanel Text="Settings">
+            @if (_settings is not null)
+            {
+                <MudPaper Class="pa-4" Elevation="1" Style="max-width:900px">
+                    <MudText Typo="Typo.subtitle1" Class="mb-2">Placement</MudText>
+                    <MudGrid>
+                        <MudItem xs="12" md="6"><MudNumericField @bind-Value="_newChainMin" Label="Keep free for new chains (%)" Min="0" Max="50" Variant="Variant.Outlined" HelperText="New chains go only to extents with at least this much free." /></MudItem>
+                        <MudItem xs="12" md="6"><MudSwitch @bind-Value="_fullWhenUnavailable" Color="Color.Primary" Label="Chain on an extent in maintenance or offline: new full on another extent (off: skip the VM with a warning)" /></MudItem>
+                    </MudGrid>
+                    <MudText Typo="Typo.subtitle1" Class="mt-4 mb-2">Automatic rebalance</MudText>
+                    <MudGrid>
+                        <MudItem xs="12"><MudSwitch @bind-Value="_auto" Color="Color.Primary" Label="Move chains by itself in the window when an extent runs low or the extents are too unequal" /></MudItem>
+                        <MudItem xs="6" md="3"><MudTextField @bind-Value="_windowStart" Label="Window from (HH:mm)" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="6" md="3"><MudTextField @bind-Value="_windowEnd" Label="to (HH:mm, next day if earlier)" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="12" md="6"><MudTextField @bind-Value="_timeZone" Label="Time zone" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="12">
+                            <MudChipSet T="DayOfWeek" @bind-SelectedValues="_days" SelectionMode="SelectionMode.MultiSelection" CheckMark="true">
+                                @foreach (var day in new[] { DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday, DayOfWeek.Saturday, DayOfWeek.Sunday })
+                                {
+                                    <MudChip T="DayOfWeek" Value="day" Text="@day.ToString()[..3]" />
+                                }
+                            </MudChipSet>
+                        </MudItem>
+                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_lowFree" Label="Low free space (%)" Min="1" Max="50" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_imbalance" Label="Imbalance (% points)" Min="1" Max="100" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_maxGiB" Label="At most GiB per run (0 = no limit)" Min="0" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_cooldown" Label="Days before a chain moves again" Min="0" Max="365" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_maxMBps" Label="Move at most MB/s (0 = no limit)" Min="0" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_switchWait" Label="Wait for a running backup (min)" Min="1" Max="1440" Variant="Variant.Outlined" /></MudItem>
+                    </MudGrid>
+                    <div class="d-flex mt-4"><MudSpacer /><MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="SaveSettingsAsync">Save</MudButton></div>
+                </MudPaper>
+            }
+        </MudTabPanel>
+    </MudTabs>
+}
+
+@code {
+    [Parameter] public Guid Id { get; set; }
+
+    private RepositoryDto? _scaleOut;
+    private List<RepositoryDto>? _extents;
+    private ChainPageDto? _chains;
+    private RebalancePlanDto? _plan;
+    private ScaleOutSettingsDto? _settings;
+    private string? _query;
+    private int _tab;
+    private bool _adding;
+    private bool _busy;
+    private bool _planning;
+    private string _extentName = string.Empty;
+    private string _extentPath = string.Empty;
+    private Timer? _timer;
+    private int _refreshing;
+
+    private int _newChainMin;
+    private bool _fullWhenUnavailable;
+    private bool _auto;
+    private string _windowStart = "22:00";
+    private string _windowEnd = "06:00";
+    private string _timeZone = "UTC";
+    private IReadOnlyCollection<DayOfWeek> _days = [];
+    private int _lowFree;
+    private int _imbalance;
+    private long _maxGiB;
+    private int _cooldown;
+    private int _maxMBps;
+    private int _switchWait;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        _timer = new Timer(_ => _ = RefreshAsync(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    public void Dispose() => _timer?.Dispose();
+
+    private async Task RefreshAsync()
+    {
+        if (Interlocked.Exchange(ref _refreshing, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                await LoadAsync(keepSettings: true);
+                StateHasChanged();
+            });
+        }
+        catch (Exception)
+        {
+            // The next tick tries again.
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _refreshing, 0);
+        }
+    }
+
+    private async Task LoadAsync() => await LoadAsync(keepSettings: false);
+
+    private async Task LoadAsync(bool keepSettings)
+    {
+        var all = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
+        _scaleOut = all.FirstOrDefault(r => r.Id == Id);
+        _extents = [.. all.Where(r => r.ScaleOutId == Id)];
+        await LoadChainsAsync();
+        if (!keepSettings && _scaleOut?.Settings is { } s)
+        {
+            _settings = s;
+            (_newChainMin, _fullWhenUnavailable, _auto, _windowStart, _windowEnd, _timeZone, _days) = (s.NewChainMinFreePercent, s.FullWhenExtentUnavailable, s.AutoRebalance, s.WindowStart, s.WindowEnd, s.TimeZoneId, s.WindowDays.ToList());
+            (_lowFree, _imbalance, _maxGiB, _cooldown, _maxMBps, _switchWait) = (s.LowFreePercent, s.ImbalancePercent, (s.MaxBytesPerRun ?? 0) >> 30, s.CooldownDays, s.MaxMoveMBps ?? 0, s.MoveSwitchWaitMinutes);
+        }
+    }
+
+    private async Task LoadChainsAsync() =>
+        _chains = await Api.GetAsync<ChainPageDto>($"api/repositories/{Id}/chains?limit=500{(string.IsNullOrWhiteSpace(_query) ? "" : "&q=" + Uri.EscapeDataString(_query))}");
+
+    private async Task AddExtentAsync()
+    {
+        _busy = true;
+        try
+        {
+            await Api.PostAsync($"api/repositories/{Id}/extents", new AddExtentDto { Name = _extentName.Trim(), Path = _extentPath.Trim() });
+            Snackbar.Add($"Extent {_extentName} added.", Severity.Success);
+            (_adding, _extentName, _extentPath) = (false, string.Empty, string.Empty);
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task PlanAsync()
+    {
+        _planning = true;
+        try
+        {
+            _plan = await Api.PostAsync<RebalancePlanDto>($"api/repositories/{Id}/rebalance/plan");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _planning = false;
+        }
+    }
+
+    private async Task RunPlanAsync()
+    {
+        _busy = true;
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/repositories/{Id}/moves",
+                new StartMovesDto([.. _plan!.Moves.Select(m => new ChainMoveDto(m.JobId, m.ObjectNativeId, m.FromExtentId, m.ToExtentId))], Rebalance: true));
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task MoveAsync(ChainDto chain, Guid from, RepositoryDto target)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Move chain",
+                $"Move {chain.ObjectName}{(chain.JobName is null ? "" : $" ({chain.JobName})")} to {target.Name}? Its restore points keep their ids; restores and backups go on, " +
+                "and the switch waits for a backup of it that is running.", yesText: "Move", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/repositories/{Id}/moves", new StartMovesDto([new ChainMoveDto(chain.JobId, chain.ObjectNativeId, from, target.Id)]));
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task SaveSettingsAsync()
+    {
+        _busy = true;
+        try
+        {
+            _settings = await Api.PutAsync<ScaleOutSettingsDto>($"api/repositories/{Id}/settings", new ScaleOutSettingsDto
+            {
+                NewChainMinFreePercent = _newChainMin,
+                FullWhenExtentUnavailable = _fullWhenUnavailable,
+                AutoRebalance = _auto,
+                WindowStart = _windowStart.Trim(),
+                WindowEnd = _windowEnd.Trim(),
+                TimeZoneId = _timeZone.Trim(),
+                WindowDays = [.. _days],
+                LowFreePercent = _lowFree,
+                ImbalancePercent = _imbalance,
+                MaxBytesPerRun = _maxGiB > 0 ? _maxGiB << 30 : null,
+                CooldownDays = _cooldown,
+                MaxMoveMBps = _maxMBps > 0 ? _maxMBps : null,
+                MoveSwitchWaitMinutes = _switchWait,
+            });
+            Snackbar.Add("Settings saved.", Severity.Success);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

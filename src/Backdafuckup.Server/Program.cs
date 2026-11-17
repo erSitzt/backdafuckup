@@ -187,6 +187,7 @@ try
     app.MapAuthEndpoints();
     app.MapApiTokenEndpoints();
     app.MapInfrastructureEndpoints();
+    app.MapScaleOutEndpoints();
     app.MapOperationEndpoints();
     app.UseWebSockets();
     app.MapAgentEndpoints();

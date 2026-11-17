@@ -48,7 +48,7 @@ public static class OperationEndpoints
             return Results.Ok(new StartedDto(id));
         });
 
-        app.MapGet("/api/kubernetes/cluster-runs/{sessionId:guid}", async (Guid sessionId, AppDbContext db, RepositoryManager repositories, CancellationToken ct) =>
+        app.MapGet("/api/kubernetes/cluster-runs/{sessionId:guid}", async (Guid sessionId, AppDbContext db, RestorePointAccess access, CancellationToken ct) =>
         {
             if (await ClusterRuns.LoadAsync(db, sessionId, ct) is not { } run)
             {
@@ -58,9 +58,8 @@ public static class OperationEndpoints
             var namespaces = new List<ClusterRunNamespaceDto>();
             foreach (var (name, point, fromRun) in run.Namespaces)
             {
-                var repository = await repositories.GetAsync(point.RepositoryId, ct);
-                await using var reader = await repository.OpenRestorePointAsync(point.Id, ct);
-                var volumes = reader.Manifest.Kubernetes?.Volumes ?? [];
+                await using var opened = await access.OpenRestorePointAsync(point, ct);
+                var volumes = opened.Reader.Manifest.Kubernetes?.Volumes ?? [];
                 namespaces.Add(new ClusterRunNamespaceDto(
                     name, point.Id, fromRun, point.CreatedUtc, volumes.Count, volumes.Count(v => v.HasData),
                     [.. volumes.Select(v => v.StorageClass).OfType<string>().Where(c => c.Length > 0).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)]));
@@ -69,9 +68,8 @@ public static class OperationEndpoints
             var cluster = run.ClusterPoint;
             var objects = 0;
             {
-                var repository = await repositories.GetAsync(cluster.RepositoryId, ct);
-                await using var reader = await repository.OpenRestorePointAsync(cluster.Id, ct);
-                objects = reader.Manifest.Kubernetes?.ObjectCount ?? 0;
+                await using var opened = await access.OpenRestorePointAsync(cluster, ct);
+                objects = opened.Reader.Manifest.Kubernetes?.ObjectCount ?? 0;
             }
 
             var clusterName = cluster.ConnectionId is { } connectionId
@@ -180,6 +178,12 @@ public static class OperationEndpoints
                 return Results.Problem("The repository cannot be changed while the job is running.", statusCode: StatusCodes.Status409Conflict);
             }
 
+            if (job.RepositoryId != request.RepositoryId)
+            {
+                // Its chains start anew in the other repository; the placements of the old one no longer apply.
+                await db.ChainPlacements.Where(p => p.JobId == id).ExecuteDeleteAsync(ct);
+            }
+
             db.JobObjects.RemoveRange(job.Objects);
             job.Objects = [];
             Apply(job, request, time);
@@ -266,7 +270,7 @@ public static class OperationEndpoints
 
     /// <summary>A namespace's restore point: the entity, its Kubernetes descriptor and its objects; or the problem why not.</summary>
     private static async Task<(RestorePointEntity? Point, KubernetesNamespaceDescriptor? Space, byte[]? Content, IResult? Problem)> NamespaceAsync(
-        Guid id, AppDbContext db, RepositoryManager repositories, CancellationToken ct)
+        Guid id, AppDbContext db, RestorePointAccess access, CancellationToken ct)
     {
         var point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == id && r.State == RestorePointState.Available, ct);
         if (point is null)
@@ -274,8 +278,8 @@ public static class OperationEndpoints
             return (null, null, null, Results.Problem("The restore point does not exist or is not available.", statusCode: StatusCodes.Status404NotFound));
         }
 
-        var repository = await repositories.GetAsync(point.RepositoryId, ct);
-        await using var reader = await repository.OpenRestorePointAsync(id, ct);
+        await using var opened = await access.OpenRestorePointAsync(point, ct);
+        var reader = opened.Reader;
         if (reader.Manifest is not { Kubernetes: { ClusterScope: false } space, Metadata: { } metadata })
         {
             return (point, null, null, Results.Problem(
@@ -293,7 +297,7 @@ public static class OperationEndpoints
 
     private static void MapRestorePoints(RouteGroupBuilder points)
     {
-        points.MapGet("/{id:guid}/kubernetes", async (Guid id, AppDbContext db, RepositoryManager repositories, CancellationToken ct) =>
+        points.MapGet("/{id:guid}/kubernetes", async (Guid id, AppDbContext db, RestorePointAccess access, CancellationToken ct) =>
         {
             var point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == id && r.State == RestorePointState.Available, ct);
             if (point is null)
@@ -301,8 +305,8 @@ public static class OperationEndpoints
                 return Results.Problem("The restore point does not exist or is not available.", statusCode: StatusCodes.Status404NotFound);
             }
 
-            var repository = await repositories.GetAsync(point.RepositoryId, ct);
-            await using var reader = await repository.OpenRestorePointAsync(id, ct);
+            await using var opened = await access.OpenRestorePointAsync(point, ct);
+            var reader = opened.Reader;
             if (reader.Manifest is not { Kubernetes: { } space, Metadata: { } metadata })
             {
                 return Results.Problem("The restore point is not one of a Kubernetes namespace.", statusCode: StatusCodes.Status400BadRequest);
@@ -328,9 +332,9 @@ public static class OperationEndpoints
                 space.UsageSource));
         }).WithDescription("A restore point of a Kubernetes namespace: its volumes (with or without data), its objects (with their app and, for workloads, what a restore of them brings along) and its hooks.");
 
-        points.MapGet("/{id:guid}/kubernetes/compare", async (Guid id, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, TimeProvider time, CancellationToken ct) =>
+        points.MapGet("/{id:guid}/kubernetes/compare", async (Guid id, AppDbContext db, RestorePointAccess access, ConnectionManager connections, TimeProvider time, CancellationToken ct) =>
         {
-            var (point, space, content, problem) = await NamespaceAsync(id, db, repositories, ct);
+            var (point, space, content, problem) = await NamespaceAsync(id, db, access, ct);
             if (problem is not null)
             {
                 return problem;
@@ -355,9 +359,9 @@ public static class OperationEndpoints
         }).WithDescription("Compares the objects of a namespace's restore point with the live namespace: same, changed, missing (deleted since) or new (made since).");
 
         points.MapPost("/{id:guid}/kubernetes/restore-plan", async (
-            Guid id, KubernetesRestorePlanRequestDto request, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, CancellationToken ct) =>
+            Guid id, KubernetesRestorePlanRequestDto request, AppDbContext db, RestorePointAccess access, ConnectionManager connections, CancellationToken ct) =>
         {
-            var (point, space, content, problem) = await NamespaceAsync(id, db, repositories, ct);
+            var (point, space, content, problem) = await NamespaceAsync(id, db, access, ct);
             if (problem is not null)
             {
                 return problem;
@@ -387,9 +391,9 @@ public static class OperationEndpoints
             }
         }).WithDescription("Previews a namespace restore into a cluster (the restore point's or another one, with StorageClasses mapped): each PVC's class and data path there (block, files, objects only, missing), warnings and what would stop it; with Objects or OnlyClaims, of what that restore brings back only. Writes nothing.");
 
-        points.MapGet("/{id:guid}/kubernetes/object", async (Guid id, string kind, string name, bool? live, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, CancellationToken ct) =>
+        points.MapGet("/{id:guid}/kubernetes/object", async (Guid id, string kind, string name, bool? live, AppDbContext db, RestorePointAccess access, ConnectionManager connections, CancellationToken ct) =>
         {
-            var (point, space, content, problem) = await NamespaceAsync(id, db, repositories, ct);
+            var (point, space, content, problem) = await NamespaceAsync(id, db, access, ct);
             if (problem is not null)
             {
                 return problem;
@@ -467,17 +471,33 @@ public static class OperationEndpoints
                 : point.ToDto());
         });
 
-        points.MapPost("/{id:guid}/verify", async (Guid id, bool? full, AppDbContext db, RepositoryManager repositories, CancellationToken ct) =>
+        points.MapPost("/{id:guid}/verify", async (Guid id, bool? full, AppDbContext db, RestorePointAccess access, CancellationToken ct) =>
         {
-            var point = await db.RestorePoints.FindAsync([id], ct);
+            var point = await db.RestorePoints.AsNoTracking().FirstOrDefaultAsync(r => r.Id == id, ct);
             if (point is null)
             {
                 return Results.NotFound();
             }
 
-            var repository = await repositories.GetAsync(point.RepositoryId, ct);
-            var result = await repository.VerifyAsync(id, full == true ? VerifyDepth.Full : VerifyDepth.Quick, null, ct);
-            return Results.Ok(new VerifyResultDto(result.Ok, result.CheckedChunks, result.Problems));
+            try
+            {
+                using var pinned = await access.PinRestorePointAsync(point, ct);
+                var result = await pinned.Repository.VerifyAsync(id, full == true ? VerifyDepth.Full : VerifyDepth.Quick, null, ct);
+                return Results.Ok(new VerifyResultDto(result.Ok, result.CheckedChunks, result.Problems));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+            }
+            catch (KeyNotFoundException ex)
+            {
+                return Results.Problem(ex.Message, statusCode: StatusCodes.Status404NotFound);
+            }
+            catch (IOException ex)
+            {
+                // Its repository cannot be reached (an extent in maintenance or offline, a missing directory).
+                return Results.Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
         });
 
         points.MapDelete("/{id:guid}", async (Guid id, AppDbContext db, RepositoryManager repositories, ConnectionManager connections, SessionQueue queue, CancellationToken ct) =>
@@ -488,14 +508,32 @@ public static class OperationEndpoints
                 return Results.NotFound();
             }
 
-            var repository = await repositories.GetAsync(point.RepositoryId, ct);
+            // An available point is marked first (compare-and-set), so a scale-out move cannot switch it meanwhile.
+            var repositoryId = point.RepositoryId;
+            if (point.State == RestorePointState.Available)
+            {
+                if (await CatalogDeletes.MarkRestorePointAsync(db, id, ct) is not { } marked)
+                {
+                    return Results.Problem("The restore point is being moved or deleted right now; try again in a moment.", statusCode: StatusCodes.Status409Conflict);
+                }
+
+                repositoryId = marked;
+            }
+
             try
             {
+                var repository = await repositories.GetAsync(repositoryId, ct);
                 await repository.DeleteRestorePointAsync(id, ct);
             }
             catch (RestorePointPinnedException ex)
             {
+                await CatalogDeletes.UnmarkRestorePointAsync(db, id, ct);
                 return Results.Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                await CatalogDeletes.UnmarkRestorePointAsync(db, id, ct);
+                return Results.Problem($"The restore point could not be deleted: {ex.Message}", statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
             var tokens = point.Disks.Where(d => d.ChangeTokenValue is not null).Select(d => new ChangeToken(d.ChangeTokenKind!, d.ChangeTokenValue!)).ToList();
@@ -514,8 +552,8 @@ public static class OperationEndpoints
 
             db.RestorePoints.Remove(point);
             await db.SaveChangesAsync(ct);
-            var repositoryName = (await db.Repositories.FindAsync([point.RepositoryId], ct))?.Name ?? "repository";
-            await queue.EnqueueMaintenanceAsync(point.RepositoryId, repositoryName, "Restore point deleted", ct);
+            var repositoryName = (await db.Repositories.FindAsync([repositoryId], ct))?.Name ?? "repository";
+            await queue.EnqueueMaintenanceAsync(repositoryId, repositoryName, "Restore point deleted", ct);
             return Results.NoContent();
         });
     }
@@ -595,9 +633,14 @@ public static class OperationEndpoints
             errors["connectionId"] = ["Unknown pool or cluster."];
         }
 
-        if (!await db.Repositories.AnyAsync(r => r.Id == request.RepositoryId, ct))
+        var repository = await db.Repositories.Where(r => r.Id == request.RepositoryId).Select(r => new { r.ScaleOutId }).FirstOrDefaultAsync(ct);
+        if (repository is null)
         {
             errors["repositoryId"] = ["Unknown repository."];
+        }
+        else if (repository.ScaleOutId is not null)
+        {
+            errors["repositoryId"] = ["This is an extent of a scale-out repository: choose the scale-out repository; it places each VM on an extent."];
         }
 
         if (!Enum.TryParse<Backdafuckup.Core.DataMover.DiskTransportMode>(request.TransportMode, true, out _) || int.TryParse(request.TransportMode, out _))

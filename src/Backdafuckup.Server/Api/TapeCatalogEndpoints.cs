@@ -85,6 +85,11 @@ public static class TapeCatalogEndpoints
 
             var repository = await db.Repositories.AsNoTracking().FirstOrDefaultAsync(r => r.Id == request.RepositoryId, ct)
                 ?? throw new TapeRequestException($"Repository {request.RepositoryId} does not exist.", StatusCodes.Status404NotFound);
+            if (repository.ScaleOutId is not null)
+            {
+                throw new TapeRequestException($"{repository.Name} is an extent: choose its scale-out repository, which puts the copy on the extent with the most room.");
+            }
+
             var manifest = System.Text.Json.JsonSerializer.Deserialize(copy.Manifest, Core.Repository.CoreJsonContext.Default.RestorePointManifest)!;
             if (manifest.Chunking.ChunkSize != repository.ChunkSize)
             {

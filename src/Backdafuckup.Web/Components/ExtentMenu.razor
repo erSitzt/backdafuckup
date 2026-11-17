@@ -1,0 +1,152 @@
+@* What can be done with an extent of a scale-out repository. *@
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+@inject NavigationManager Navigation
+
+<MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {Extent.Name}")">
+    @if (Extent.ExtentState == "Active")
+    {
+        <MudMenuItem Icon="@Icons.Material.Filled.Lock" OnClick="@(() => SetAsync(new ExtentStateDto(Sealed: true), $"{Extent.Name} is sealed: new chains go elsewhere, and its chains start anew elsewhere with their next backup."))">Seal (no new data)</MudMenuItem>
+    }
+    else if (Extent.ExtentState == "Sealed")
+    {
+        <MudMenuItem Icon="@Icons.Material.Filled.LockOpen" OnClick="@(() => SetAsync(new ExtentStateDto(Sealed: false), $"{Extent.Name} takes new chains again."))">Unseal</MudMenuItem>
+    }
+
+    @if (Extent.ExtentState == "Evacuating")
+    {
+        <MudMenuItem Icon="@Icons.Material.Filled.Stop" OnClick="CancelEvacuationAsync">Stop evacuating (stays sealed)</MudMenuItem>
+    }
+    else
+    {
+        <MudMenuItem Icon="@Icons.Material.Filled.DriveFileMove" OnClick="EvacuateAsync">Evacuate (move all chains away)…</MudMenuItem>
+    }
+
+    @if (Extent.Maintenance)
+    {
+        <MudMenuItem Icon="@Icons.Material.Filled.PlayArrow" OnClick="@(() => SetAsync(new ExtentStateDto(Maintenance: false), $"{Extent.Name} is back in use."))">End maintenance</MudMenuItem>
+    }
+    else
+    {
+        <MudMenuItem Icon="@Icons.Material.Filled.Build" OnClick="MaintenanceAsync">Maintenance…</MudMenuItem>
+    }
+
+    <MudMenuItem Icon="@Icons.Material.Filled.CleaningServices" OnClick="CollectGarbageAsync">Remove unreferenced data now</MudMenuItem>
+    <MudDivider />
+    <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="RemoveAsync">Remove extent (only when empty)</MudMenuItem>
+</MudMenu>
+
+@code {
+    [Parameter, EditorRequired] public RepositoryDto Extent { get; set; } = default!;
+
+    [Parameter] public EventCallback Changed { get; set; }
+
+    private async Task SetAsync(ExtentStateDto request, string done)
+    {
+        try
+        {
+            var note = await Api.SendForMessageAsync(HttpMethod.Put, $"api/repositories/{Extent.Id}/extent", request);
+            Snackbar.Add(note ?? done, note is null ? Severity.Success : Severity.Info);
+            await Changed.InvokeAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task MaintenanceAsync()
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Maintenance",
+                $"Put {Extent.Name} ({Extent.Path}) into maintenance? Nothing is read or written there until you end it: restores of its restore points wait, " +
+                "and its chains start anew on another extent with their next backup (or are skipped, as the scale-out's settings say). " +
+                "It closes once the restores, browsers and backups using it now have finished.",
+                yesText: "Start maintenance", cancelText: "Cancel") == true)
+        {
+            await SetAsync(new ExtentStateDto(Maintenance: true), $"{Extent.Name} is in maintenance and closed.");
+        }
+    }
+
+    private async Task EvacuateAsync()
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Evacuate extent",
+                $"Move every chain of {Extent.Name} to the other active extents? It takes no new chains from now on; its chains keep their backups there until each is moved. " +
+                "When it is empty, it stays sealed and can be removed.",
+                yesText: "Evacuate", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            using var response = await Api.PostRawAsync($"api/repositories/{Extent.Id}/evacuate", null);
+            if (!response.IsSuccessStatusCode)
+            {
+                Snackbar.Add(await ApiClient.ReadProblemAsync(response), Severity.Error);
+                return;
+            }
+
+            var started = response.StatusCode == System.Net.HttpStatusCode.OK ? await response.Content.ReadFromJsonAsync<StartedDto>() : null;
+            if (started is not null)
+            {
+                Navigation.NavigateTo($"/sessions/{started.SessionId}");
+            }
+            else
+            {
+                Snackbar.Add($"{Extent.Name} is evacuated when the move running now has finished.", Severity.Info);
+                await Changed.InvokeAsync();
+            }
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task CancelEvacuationAsync()
+    {
+        try
+        {
+            await Api.DeleteAsync($"api/repositories/{Extent.Id}/evacuate");
+            Snackbar.Add($"{Extent.Name} is no longer evacuated; it stays sealed.", Severity.Success);
+            await Changed.InvokeAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task CollectGarbageAsync()
+    {
+        try
+        {
+            var started = await Api.PostAsync<StartedDto>($"api/repositories/{Extent.Id}/gc");
+            Navigation.NavigateTo($"/sessions/{started.SessionId}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+
+    private async Task RemoveAsync()
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Remove extent", $"Remove the empty extent {Extent.Name} from its scale-out repository? The directory {Extent.Path} is kept.", yesText: "Remove", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        try
+        {
+            await Api.DeleteAsync($"api/repositories/{Extent.Id}");
+            Snackbar.Add($"{Extent.Name} removed.", Severity.Success);
+            await Changed.InvokeAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+    }
+}

@@ -109,6 +109,128 @@ public abstract class LocalDirectoryRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task A_chain_moves_with_its_ids_reading_only_missing_chunks_and_the_source_copy_goes_when_free()
+    {
+        await using var source = await CreateAsync();
+        var first = RandomDisk(6);
+        var second = (byte[])first.Clone();
+        RandomNumberGenerator.Fill(second.AsSpan(0, 2 * ChunkSize)); // two chunks changed, four shared
+        var (firstId, _) = await BackupAsync(source, "vm-1", first);
+        var (secondId, _) = await BackupAsync(source, "vm-1", second);
+
+        var targetRoot = _root + "-extent";
+        try
+        {
+            await using var target = await LocalDirectoryRepository.CreateAsync(targetRoot, Ct, ChunkSize, 3, _time, PackTargetSize == 0 ? 64L * 1024 * 1024 : 0);
+            async Task<int> CopyAsync(Guid id)
+            {
+                var files = await source.ReadRestorePointFilesAsync(id, Ct);
+                var manifest = System.Text.Json.JsonSerializer.Deserialize(files[0].Content, CoreJsonContext.Default.RestorePointManifest)!;
+                await using var import = target.BeginImport(id, manifest);
+                var missing = (await source.ListRestorePointChunksAsync(id, Ct)).Where(c => !import.TryReuseChunk(c)).ToList();
+                await foreach (var chunk in ((IChunkLocator)source).ReadStoredAsync(((IChunkLocator)source).PlanRead(missing), Ct))
+                {
+                    await import.PutEncodedChunkAsync(chunk.Id, chunk.Record, Ct);
+                }
+
+                foreach (var file in files.Skip(1))
+                {
+                    await import.WriteFileAsync(file.Name, file.Content, Ct);
+                }
+
+                var info = await import.CommitAsync(null, Ct);
+                Assert.Equal((id, target.Info.RepositoryId), (info.Manifest.RestorePointId, info.Manifest.RepositoryId));
+                return missing.Count;
+            }
+
+            // Oldest first: the second point reads only its two changed chunks; both keep their ids.
+            Assert.Equal(6, await CopyAsync(firstId));
+            Assert.Equal(2, await CopyAsync(secondId));
+            Assert.True(target.ContainsRestorePoint(firstId) && target.ContainsRestorePoint(secondId));
+            Assert.False(target.ContainsSqlBackup(firstId));
+
+            // The source copy: not while a reader holds it, nor while garbage collection holds the repository.
+            using (source.Pin(firstId))
+            {
+                Assert.Equal(new RepositoryActivity(1, 0, false), source.Activity);
+                Assert.Equal(DeleteOutcome.Pinned, await source.TryDeleteRestorePointAsync(firstId, TimeSpan.FromSeconds(5), Ct));
+            }
+
+            var marking = new TaskCompletionSource();
+            var proceed = new TaskCompletionSource();
+            var gc = Task.Run(() => source.CollectGarbageAsync(new BlockingProgress(marking, proceed.Task), Ct), Ct);
+            await marking.Task.WaitAsync(TimeSpan.FromSeconds(30), Ct);
+            Assert.True(source.Activity.Collecting);
+            Assert.Equal(DeleteOutcome.Busy, await source.TryDeleteRestorePointAsync(firstId, TimeSpan.FromMilliseconds(50), Ct));
+            proceed.SetResult();
+            await gc;
+            Assert.True(source.Activity.Idle, source.Activity.ToString());
+            Assert.Equal(DeleteOutcome.Deleted, await source.TryDeleteRestorePointAsync(firstId, TimeSpan.FromSeconds(5), Ct));
+            Assert.Equal(DeleteOutcome.NotFound, await source.TryDeleteRestorePointAsync(firstId, TimeSpan.FromSeconds(5), Ct));
+            Assert.Equal(DeleteOutcome.Deleted, await source.TryDeleteRestorePointAsync(secondId, TimeSpan.FromSeconds(5), Ct));
+
+            foreach (var (id, disk) in new[] { (firstId, first), (secondId, second) })
+            {
+                var verify = await target.VerifyAsync(id, VerifyDepth.Full, null, Ct);
+                Assert.True(verify.Ok, string.Join("; ", verify.Problems));
+                await using var reader = await target.OpenRestorePointAsync(id, Ct);
+                Assert.Equal(disk, await RestoreAsync(reader.Chunks, await reader.ReadDiskIndexAsync("0", Ct)));
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(targetRoot))
+            {
+                Directory.Delete(targetRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task A_chunk_reused_by_an_import_survives_garbage_collection_before_the_commit()
+    {
+        await using var target = await CreateAsync();
+        var disk = RandomDisk(4);
+        var (oldId, _) = await BackupAsync(target, "vm-1", disk);
+        var files = await target.ReadRestorePointFilesAsync(oldId, Ct);
+        var manifest = System.Text.Json.JsonSerializer.Deserialize(files[0].Content, CoreJsonContext.Default.RestorePointManifest)!;
+        var ids = await target.ListRestorePointChunksAsync(oldId, Ct);
+        var (otherId, _) = await BackupAsync(target, "vm-2", RandomDisk(3));
+        await target.DeleteRestorePointAsync(oldId, Ct); // both points' chunks are unreferenced now
+        await target.DeleteRestorePointAsync(otherId, Ct);
+        _time.Advance(TimeSpan.FromHours(1)); // and older than the safety window
+
+        var movedId = Guid.NewGuid();
+        await using (var import = target.BeginImport(movedId, manifest))
+        {
+            Assert.All(ids, id => Assert.True(import.TryReuseChunk(id)));
+            await target.CollectGarbageAsync(null, Ct);
+            Assert.Equal(ids.Count, target.CountStoredChunks()); // the other point's chunks are gone, the reused ones kept
+            foreach (var file in files.Skip(1))
+            {
+                await import.WriteFileAsync(file.Name, file.Content, Ct);
+            }
+
+            await import.CommitAsync(null, Ct);
+        }
+
+        var verify = await target.VerifyAsync(movedId, VerifyDepth.Full, null, Ct);
+        Assert.True(verify.Ok, string.Join("; ", verify.Problems));
+        await using var reader = await target.OpenRestorePointAsync(movedId, Ct);
+        Assert.Equal(disk, await RestoreAsync(reader.Chunks, await reader.ReadDiskIndexAsync("0", Ct)));
+    }
+
+    /// <summary>Holds garbage collection at its first progress report (it holds the repository's GC mutex there).</summary>
+    private sealed class BlockingProgress(TaskCompletionSource reached, Task proceed) : IProgress<string>
+    {
+        public void Report(string value)
+        {
+            reached.TrySetResult();
+            proceed.Wait();
+        }
+    }
+
+    [Fact]
     public async Task Identical_chunks_are_stored_once_and_zero_chunks_not_at_all()
     {
         await using var repo = await CreateAsync();

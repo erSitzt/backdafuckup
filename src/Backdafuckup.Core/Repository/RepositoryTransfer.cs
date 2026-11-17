@@ -29,12 +29,57 @@ public interface IRepositoryTransfer
 
     /// <summary>Starts bringing a SQL Server backup object in under <paramref name="sqlBackupId"/>.</summary>
     ISqlBackupImport BeginSqlImport(Guid sqlBackupId, SqlBackupManifest original);
+
+    /// <summary>Whether a committed restore point with this id is here (a copy that a move left, for example).</summary>
+    bool ContainsRestorePoint(Guid restorePointId);
+
+    /// <summary>Whether a committed SQL Server backup object with this id is here.</summary>
+    bool ContainsSqlBackup(Guid sqlBackupId);
+
+    /// <summary>
+    /// Deletes a restore point unless it is pinned, or unless garbage collection or packing holds the repository for
+    /// longer than <paramref name="wait"/> (then <see cref="DeleteOutcome.Busy"/>: try again later). Its chunks are left
+    /// for garbage collection.
+    /// </summary>
+    Task<DeleteOutcome> TryDeleteRestorePointAsync(Guid restorePointId, TimeSpan wait, CancellationToken cancellationToken);
+
+    /// <summary>Deletes a SQL Server backup object, like <see cref="TryDeleteRestorePointAsync"/>.</summary>
+    Task<DeleteOutcome> TryDeleteSqlBackupAsync(Guid sqlBackupId, TimeSpan wait, CancellationToken cancellationToken);
+
+    /// <summary>What is going on in the repository now: before it is closed for maintenance.</summary>
+    RepositoryActivity Activity { get; }
+}
+
+/// <summary>The result of <see cref="IRepositoryTransfer.TryDeleteRestorePointAsync"/>.</summary>
+public enum DeleteOutcome
+{
+    Deleted,
+    Pinned,
+    Busy,
+    NotFound,
+}
+
+/// <summary>Readers holding pins, writers not yet committed or discarded, and whether garbage collection or packing runs.</summary>
+public readonly record struct RepositoryActivity(int Pins, int Writers, bool Collecting)
+{
+    public bool Idle => Pins == 0 && Writers == 0 && !Collecting;
+
+    public override string ToString() =>
+        Idle ? "idle" : string.Join(", ", new[]
+        {
+            Pins > 0 ? $"{Pins} restore point(s) or SQL Server backup(s) in use" : null,
+            Writers > 0 ? $"{Writers} backup(s) writing" : null,
+            Collecting ? "garbage collection or packing" : null,
+        }.OfType<string>());
 }
 
 /// <summary>One SQL Server backup object coming in, like <see cref="IRestorePointImport"/>.</summary>
 public interface ISqlBackupImport : IAsyncDisposable
 {
     Guid SqlBackupId { get; }
+
+    /// <summary>Like <see cref="IRestorePointImport.TryReuseChunk"/>.</summary>
+    bool TryReuseChunk(ChunkId id);
 
     ValueTask<ChunkPutResult> PutEncodedChunkAsync(ChunkId id, ReadOnlyMemory<byte> stored, CancellationToken cancellationToken);
 
@@ -50,6 +95,12 @@ public interface ISqlBackupImport : IAsyncDisposable
 public interface IRestorePointImport : IAsyncDisposable
 {
     Guid RestorePointId { get; }
+
+    /// <summary>
+    /// Whether this repository already holds the chunk. If so, it is kept for this import (garbage collection running at
+    /// the same time does not remove it) and need not be read from the source and put.
+    /// </summary>
+    bool TryReuseChunk(ChunkId id);
 
     /// <summary>Stores a chunk's record unchanged after decoding it and checking its hash (<see cref="ChunkCorruptException"/> if damaged).</summary>
     ValueTask<ChunkPutResult> PutEncodedChunkAsync(ChunkId id, ReadOnlyMemory<byte> stored, CancellationToken cancellationToken);

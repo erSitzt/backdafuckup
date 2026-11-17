@@ -35,6 +35,7 @@ public sealed class TapeRestoreRunner(
     TapeOperatorRequests requests,
     RestoreSessionRunner vmRestore,
     SessionTracker tracker,
+    ScaleOut.RepositoryPlacement placement,
     Hosting.ServerPaths paths,
     Microsoft.Extensions.Options.IOptions<TapeOptions> options)
 {
@@ -80,8 +81,9 @@ public sealed class TapeRestoreRunner(
             pool = await db.MediaPools.AsNoTracking().FirstAsync(p => p.Id == set.PoolId, cancellationToken).ConfigureAwait(false);
             media = await db.TapeMedia.AsNoTracking().Where(m => m.SetId == set.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
             files = await db.TapeFiles.AsNoTracking().Where(f => f.SetId == set.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+            var sameRepository = await ScaleOut.RepositoryGroups.MembersAsync(db, copy.RepositoryId, cancellationToken).ConfigureAwait(false);
             sqlCopies = !request.IncludeSql || request.Vm is not null || copy.Kind != TapeFileTypes.RestorePoint ? [] : await db.TapeCopies.AsNoTracking()
-                .Where(c => c.SetId == set.Id && c.Kind == TapeFileTypes.Sql && c.VmId == copy.VmId && c.RepositoryId == copy.RepositoryId && c.CreatedUtc >= copy.CreatedUtc)
+                .Where(c => c.SetId == set.Id && c.Kind == TapeFileTypes.Sql && c.VmId == copy.VmId && sameRepository.Contains(c.RepositoryId) && c.CreatedUtc >= copy.CreatedUtc)
                 .OrderBy(c => c.CreatedUtc)
                 .ToListAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -98,9 +100,11 @@ public sealed class TapeRestoreRunner(
         IRepositoryTransfer transfer;
         LocalDirectoryRepository? cache = null;
         string? cacheDirectory = null;
+        // Into a scale-out repository: the extent with the most room.
+        var targetId = request.Vm is null ? (await placement.ForImportAsync(request.RepositoryId, copy.StoredBytes, cancellationToken).ConfigureAwait(false)).RepositoryId : request.RepositoryId;
         if (request.Vm is null)
         {
-            var repository = await repositories.GetAsync(request.RepositoryId, cancellationToken).ConfigureAwait(false);
+            var repository = await repositories.GetAsync(targetId, cancellationToken).ConfigureAwait(false);
             transfer = repository as IRepositoryTransfer ?? throw new InvalidOperationException("This repository cannot take copies from tape.");
             var free = repository.GetStorageStats().FreeBytes;
             if (free < copy.StoredBytes + (copy.StoredBytes / 20))
@@ -180,7 +184,7 @@ public sealed class TapeRestoreRunner(
                 return await RestoreVmAsync(session, vm, copy, set, result.Committed, cache!, log, cancellationToken).ConfigureAwait(false);
             }
 
-            await CatalogAsync(result.Committed, copy, set, request.RepositoryId, session.Id, cancellationToken).ConfigureAwait(false);
+            await CatalogAsync(result.Committed, copy, set, targetId, session.Id, cancellationToken).ConfigureAwait(false);
 
             // The SQL Server backups of the VM from this restore point on: logs for a point-in-time restore.
             foreach (var sqlCopy in sqlCopies)
@@ -188,7 +192,7 @@ public sealed class TapeRestoreRunner(
                 var (info, _) = await TapeSetReader.RestoreSqlAsync(
                     tapes, blockSize, cipher, sqlCopy.Sequence, sqlCopy.FileStartBlock, FileOf, transfer, Guid.CreateVersion7(), m => m with { Job = null }, cancellationToken).ConfigureAwait(false);
                 await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-                await Sql.SqlBackupCatalog.RecordSqlBackupAsync(db, request.RepositoryId, info, time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+                await Sql.SqlBackupCatalog.RecordSqlBackupAsync(db, targetId, info, time.GetUtcNow(), cancellationToken).ConfigureAwait(false);
                 await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             }
 

@@ -24,9 +24,28 @@ internal static class ApiMapping
     /// <param name="format">Format version from the repository's repo.json (0 = unknown).</param>
     /// <param name="packSize">Pack size of a format 2 repository.</param>
     /// <param name="packingUnfinished">Format 2 with loose chunks left from format 1.</param>
-    public static RepositoryDto ToDto(this BackupRepositoryEntity r, int restorePoints, long logicalBytes, int format = 0, long packSize = 0, bool packingUnfinished = false) => new(
+    public static RepositoryDto ToDto(this BackupRepositoryEntity r, int restorePoints, long logicalBytes, int format = 0, long packSize = 0, bool packingUnfinished = false, int chains = 0, int extents = 0) => new(
         r.Id, r.Name, r.Kind.ToString(), r.Path, r.RepositoryUuid, r.ChunkSize, r.CompressionLevel, r.MaxConcurrentTasks,
-        r.State.ToString(), r.TotalBytes, r.FreeBytes, restorePoints, logicalBytes, r.LastError, format, packSize, packingUnfinished);
+        r.State.ToString(), r.TotalBytes, r.FreeBytes, restorePoints, logicalBytes, r.LastError, format, packSize, packingUnfinished,
+        r.ScaleOutId, r.ScaleOutId is null ? null : r.ExtentState.ToString(), r.Maintenance, r.MaintenanceSinceUtc, chains, extents,
+        r.Kind == RepositoryKind.ScaleOut ? (r.ScaleOutSettings ?? new ScaleOutSettings()).ToDto() : null);
+
+    public static ScaleOutSettingsDto ToDto(this ScaleOutSettings s) => new()
+    {
+        NewChainMinFreePercent = s.NewChainMinFreePercent,
+        FullWhenExtentUnavailable = s.FullWhenExtentUnavailable,
+        AutoRebalance = s.AutoRebalance,
+        WindowDays = s.Window.Days,
+        WindowStart = s.Window.Start,
+        WindowEnd = s.Window.End,
+        TimeZoneId = s.Window.TimeZoneId,
+        LowFreePercent = s.LowFreePercent,
+        ImbalancePercent = s.ImbalancePercent,
+        MaxBytesPerRun = s.MaxBytesPerRun,
+        CooldownDays = s.CooldownDays,
+        MaxMoveMBps = s.MaxMoveMBps,
+        MoveSwitchWaitMinutes = s.MoveSwitchWaitMinutes,
+    };
 
     public static ScheduleDto ToDto(this JobSchedule s) => new(
         s.Kind.ToString(),

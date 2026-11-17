@@ -316,7 +316,7 @@ else
             var repositories = Api.GetAsync<List<RepositoryDto>>("api/repositories");
             var connections = Api.GetAsync<List<ConnectionDto>>("api/connections");
             _jobs = (await jobs).OrderBy(j => j.Name, StringComparer.OrdinalIgnoreCase).ToList();
-            _repositories = await repositories;
+            _repositories = [.. (await repositories).Where(r => r.ScaleOutId is null)];
             _connections = (await connections).ToDictionary(c => c.Id);
             _listsVersion++;
             StateHasChanged();

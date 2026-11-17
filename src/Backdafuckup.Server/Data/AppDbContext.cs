@@ -21,6 +21,10 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<BackupRepositoryEntity> Repositories => Set<BackupRepositoryEntity>();
 
+    public DbSet<ChainPlacementEntity> ChainPlacements => Set<ChainPlacementEntity>();
+
+    public DbSet<RepositoryMoveItemEntity> RepositoryMoveItems => Set<RepositoryMoveItemEntity>();
+
     public DbSet<BackupJob> Jobs => Set<BackupJob>();
 
     public DbSet<BackupJobObject> JobObjects => Set<BackupJobObject>();
@@ -265,6 +269,36 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasIndex(x => x.Name).IsUnique();
             e.HasIndex(x => x.RepositoryUuid).IsUnique();
             e.Property(x => x.Version).IsRowVersion();
+            e.HasOne<BackupRepositoryEntity>().WithMany().HasForeignKey(x => x.ScaleOutId).OnDelete(DeleteBehavior.Restrict);
+            e.Property(x => x.ExtentState).HasConversion<string>().HasMaxLength(16).HasDefaultValue(ExtentState.Active);
+            e.Property(x => x.ScaleOutSettings).HasColumnType("jsonb").HasConversion(
+                v => v == null ? null : JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+                v => v == null ? null : JsonSerializer.Deserialize<ScaleOutSettings>(v, JsonSerializerOptions.Default));
+        });
+
+        builder.Entity<ChainPlacementEntity>(e =>
+        {
+            e.ToTable("chain_placements");
+            e.Property(x => x.ObjectNativeId).HasMaxLength(256);
+            e.Property(x => x.Reason).HasMaxLength(500);
+            e.HasOne<BackupRepositoryEntity>().WithMany().HasForeignKey(x => x.ScaleOutId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<BackupRepositoryEntity>().WithMany().HasForeignKey(x => x.ExtentId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne<BackupJob>().WithMany().HasForeignKey(x => x.JobId).OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => new { x.JobId, x.ObjectNativeId }).IsUnique();
+            e.HasIndex(x => x.ExtentId);
+        });
+
+        builder.Entity<RepositoryMoveItemEntity>(e =>
+        {
+            e.ToTable("repository_move_items");
+            e.Property(x => x.ObjectNativeId).HasMaxLength(256);
+            e.Property(x => x.ObjectType).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.State).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.Error).HasMaxLength(2000);
+            e.Property(x => x.TargetPath).HasMaxLength(1000);
+            e.HasIndex(x => new { x.SourceExtentId, x.State });
+            e.HasIndex(x => new { x.TargetExtentId, x.State });
+            e.HasIndex(x => x.ObjectId);
         });
 
         builder.Entity<BackupJob>(e =>

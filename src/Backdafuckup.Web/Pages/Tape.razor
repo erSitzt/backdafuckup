@@ -1006,7 +1006,7 @@ else
     private async Task LoadFormsDataAsync()
     {
         _backupJobs = await Api.GetAsync<List<JobDto>>("api/jobs");
-        _repositories = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
+        _repositories = [.. (await Api.GetAsync<List<RepositoryDto>>("api/repositories")).Where(r => r.ScaleOutId is null)];
     }
 
     private void NewPool()

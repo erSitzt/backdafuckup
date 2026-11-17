@@ -40,6 +40,9 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
     /// <summary>What a test's node agent answers to <c>node-request</c> (by agent pod and standard input); null: none.</summary>
     private volatile Func<string, string, Task<(int, string)>>? _nodeRequests;
 
+    /// <summary>Free space and reachability of directories, as scale-out placement sees them (tests set them per path).</summary>
+    private readonly FakeVolumeSpace _volumes = new();
+
     /// <summary>The Prometheus every cluster's usage source reaches.</summary>
     private readonly Backdafuckup.Testing.Kubernetes.FakePrometheus _prometheus = new();
 
@@ -83,8 +86,14 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
             builder.UseSetting("Tape:KdfMemoryKiB", "8192");
             builder.UseSetting("Tape:KdfIterations", "1");
             builder.UseSetting("Tape:KdfParallelism", "1");
+            // Extents are temporary directories on one volume; the balancer runs when a test calls it.
+            builder.UseSetting("ScaleOut:AllowSameVolume", "true");
+            builder.UseSetting("ScaleOut:BalancerInterval", "00:00:00");
+            builder.UseSetting("ScaleOut:MaintenanceWait", "00:00:01");
             builder.ConfigureTestServices(services =>
             {
+                services.RemoveAll<Backdafuckup.Server.ScaleOut.IVolumeSpace>();
+                services.AddSingleton<Backdafuckup.Server.ScaleOut.IVolumeSpace>(_volumes);
                 services.RemoveAll<Backdafuckup.Tape.Devices.ITapeHost>();
                 services.AddSingleton<Backdafuckup.Tape.Devices.ITapeHost>(_tapeHost);
                 services.RemoveAll<Backdafuckup.Smb.ISmbShareConnector>();

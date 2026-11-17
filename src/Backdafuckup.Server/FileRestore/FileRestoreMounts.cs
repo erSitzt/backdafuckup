@@ -19,7 +19,7 @@ namespace Backdafuckup.Server.FileRestore;
 /// </summary>
 public sealed class FileRestoreMounts(
     IDbContextFactory<AppDbContext> dbFactory,
-    RepositoryManager repositories,
+    RestorePointAccess access,
     RunningSessions running,
     SessionEventWriter events,
     SessionTracker tracker,
@@ -281,27 +281,19 @@ public sealed class FileRestoreMounts(
             throw new InvalidOperationException($"The restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} is not available ({point.State}).");
         }
 
-        var repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
-        var pin = repository.Pin(point.Id);
+        // Pinned where the catalog says, checked again after pinning (retention or a move may have changed it).
+        var pinned = await access.PinRestorePointAsync(point, cancellationToken).ConfigureAwait(false);
+        var repository = pinned.Repository;
+        var pin = pinned.Pin;
         IRestorePointReader? reader = null;
         GuestImage? image = null;
         Guid? sessionId = null;
         try
         {
-            // Pin first, then check again: retention may have started deleting it in between.
-            await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var state = await db.RestorePoints.Where(r => r.Id == point.Id).Select(r => (RestorePointState?)r.State).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-                if (state != RestorePointState.Available)
-                {
-                    throw new InvalidOperationException($"The restore point of {point.VmName} is being deleted.");
-                }
-            }
-
             reader = await repository.OpenRestorePointAsync(point.Id, cancellationToken).ConfigureAwait(false);
             var disks = await OpenDisksAsync(reader, cache, cancellationToken).ConfigureAwait(false);
 
-            var browsed = new BrowsedRestorePoint(point.Id, point.RepositoryId, point.VmName, point.VmNativeId, point.CreatedUtc, point.Consistency, point.ConsistencyReason, point.ConsistencyWarning, point.ObjectKind);
+            var browsed = new BrowsedRestorePoint(point.Id, pinned.RepositoryId, point.VmName, point.VmNativeId, point.CreatedUtc, point.Consistency, point.ConsistencyReason, point.ConsistencyWarning, point.ObjectKind);
             sessionId = await CreateSessionAsync(browsed, user, cancellationToken).ConfigureAwait(false);
             var log = events.CreateLog(sessionId.Value, null);
             log.Info($"Opened by {user}: restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} ({point.Consistency}-consistent), {disks.Count} disk(s).");

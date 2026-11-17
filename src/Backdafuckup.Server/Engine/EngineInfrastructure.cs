@@ -170,8 +170,16 @@ public sealed class RepositoryManager(
 {
     private readonly ConcurrentDictionary<Guid, Lazy<Task<IBackupRepository>>> _open = new();
 
+    // Extents entering or in maintenance: new opens are refused with the reason, what is open is closed once idle.
+    private readonly ConcurrentDictionary<Guid, string> _unavailable = new();
+
     public async Task<IBackupRepository> GetAsync(Guid repositoryId, CancellationToken cancellationToken)
     {
+        if (_unavailable.TryGetValue(repositoryId, out var reason))
+        {
+            throw new RepositoryUnavailableException(reason);
+        }
+
         var lazy = _open.GetOrAdd(repositoryId, id => new Lazy<Task<IBackupRepository>>(() => OpenAsync(id)));
         try
         {
@@ -189,6 +197,32 @@ public sealed class RepositoryManager(
         _open.TryGetValue(repositoryId, out var lazy) && lazy.IsValueCreated && lazy.Value.IsCompletedSuccessfully
             ? lazy.Value.Result as LocalDirectoryRepository
             : null;
+
+    /// <summary>
+    /// Refuses new opens of the repository with <paramref name="reason"/>, waits up to <paramref name="wait"/> until
+    /// what is open is idle (no pins, writers or garbage collection), then closes it, which releases its directory.
+    /// Returns null once closed, else what it is still waiting for (new opens stay refused; call again later).
+    /// </summary>
+    public async Task<RepositoryActivity?> CloseForMaintenanceAsync(Guid repositoryId, string reason, TimeSpan wait, CancellationToken cancellationToken)
+    {
+        _unavailable[repositoryId] = reason;
+        var deadline = time.GetUtcNow() + wait;
+        while (TryGetOpen(repositoryId) is { } open && !open.Activity.Idle)
+        {
+            if (time.GetUtcNow() >= deadline)
+            {
+                return open.Activity;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(200), time, cancellationToken).ConfigureAwait(false);
+        }
+
+        await CloseAsync(repositoryId).ConfigureAwait(false);
+        return null;
+    }
+
+    /// <summary>Allows opening the repository again (maintenance switched off).</summary>
+    public void Reopen(Guid repositoryId) => _unavailable.TryRemove(repositoryId, out _);
 
     public async Task CloseAsync(Guid repositoryId)
     {
@@ -217,6 +251,17 @@ public sealed class RepositoryManager(
         await using var db = await dbFactory.CreateDbContextAsync().ConfigureAwait(false);
         var entity = await db.Repositories.FindAsync(repositoryId).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"Repository {repositoryId} does not exist.");
+        if (entity.Kind == RepositoryKind.ScaleOut)
+        {
+            throw new InvalidOperationException($"{entity.Name} is a scale-out repository: its data is on its extents, which are opened one by one.");
+        }
+
+        if (entity.Maintenance)
+        {
+            var scaleOut = entity.ScaleOutId is { } scaleOutId ? await db.Repositories.Where(r => r.Id == scaleOutId).Select(r => r.Name).FirstOrDefaultAsync().ConfigureAwait(false) : null;
+            throw new RepositoryUnavailableException(MaintenanceReason(entity, scaleOut));
+        }
+
         var repository = await LocalDirectoryRepository.OpenAsync(entity.Path, CancellationToken.None, time).ConfigureAwait(false);
         if (repository.Info.RepositoryId != entity.RepositoryUuid)
         {
@@ -233,7 +278,16 @@ public sealed class RepositoryManager(
 
         return repository;
     }
+
+    /// <summary>Why an extent in maintenance cannot be used, naming it, its path and its scale-out repository.</summary>
+    public static string MaintenanceReason(BackupRepositoryEntity extent, string? scaleOutName) =>
+        $"The extent {extent.Name} ({extent.Path}){(scaleOutName is null ? string.Empty : $" of {scaleOutName}")} is in maintenance" +
+        (extent.MaintenanceSinceUtc is { } since ? $" since {since.ToLocalTime():g}" : string.Empty) +
+        "; nothing is read or written there until maintenance is switched off.";
 }
+
+/// <summary>A repository (an extent) that cannot be used now: in maintenance or offline. The message names it and why.</summary>
+public sealed class RepositoryUnavailableException(string message) : IOException(message);
 
 /// <summary>Running sessions of this process and their cancellation sources (Stop button).</summary>
 public sealed class RunningSessions

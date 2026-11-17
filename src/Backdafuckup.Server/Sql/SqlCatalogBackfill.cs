@@ -11,7 +11,7 @@ namespace Backdafuckup.Server.Sql;
 /// guest metadata. Runs in the background after startup; a restore point that cannot be read stays
 /// unknown and is tried again at the next start.
 /// </summary>
-public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory, RepositoryManager repositories, ILogger<SqlCatalogBackfill> logger) : BackgroundService
+public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory, RestorePointAccess access, ILogger<SqlCatalogBackfill> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -48,9 +48,8 @@ public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory
             StoredGuestMetadata? metadata;
             try
             {
-                var repository = await repositories.GetAsync(repositoryId, cancellationToken).ConfigureAwait(false);
-                using var pin = repository.Pin(id);
-                await using var reader = await repository.OpenRestorePointAsync(id, cancellationToken).ConfigureAwait(false);
+                using var pinned = await access.PinRestorePointAsync(id, repositoryId, cancellationToken).ConfigureAwait(false);
+                await using var reader = await pinned.Repository.OpenRestorePointAsync(id, cancellationToken).ConfigureAwait(false);
                 metadata = await StoredGuestMetadata.ReadAsync(reader, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -125,11 +124,11 @@ public sealed class SqlCatalogBackfill(IDbContextFactory<AppDbContext> dbFactory
 
             try
             {
-                var repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
-                using var pin = repository.Pin(id);
-                await using var reader = await repository.OpenRestorePointAsync(id, cancellationToken).ConfigureAwait(false);
+                // The point is recorded as read (SqlBackupSetsRecorded); its sets name the repository it is pinned in now.
+                using var pinned = await access.PinRestorePointAsync(point, cancellationToken).ConfigureAwait(false);
+                await using var reader = await pinned.Repository.OpenRestorePointAsync(id, cancellationToken).ConfigureAwait(false);
                 var snapshot = await StoredSqlSnapshot.ReadAsync(reader, cancellationToken).ConfigureAwait(false);
-                await SqlBackupCatalog.RecordSnapshotAsync(db, point, snapshot?.Instances ?? [], DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
+                await SqlBackupCatalog.RecordSnapshotAsync(db, point, snapshot?.Instances ?? [], DateTimeOffset.UtcNow, cancellationToken, pinned.RepositoryId).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

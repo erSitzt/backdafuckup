@@ -266,6 +266,25 @@ The lab VTL from `deploy/vtl` (Holo VTL, an HPE MSL6480 with two HPE Ultrium 9 d
 | T30 | Throughput: a tape job and a bringing back through the agent and directly. | The log and the metrics name the rates and how long the drive waited. |
 | T31 | The real library (MSL6480, LTO-9): hardware encryption, early-warning sense, TapeAlert, calibration on the first load, speed. | Open until there is time on the real library. |
 
+### S. Scale-out repositories
+
+A backup server with two (or three) volumes, e.g. two LUNs or two virtual disks, each with a repository directory, and a few lab VMs with CBT.
+
+| # | Do | Expect |
+|---|---|---|
+| S1 | A repository with a job of 3 VMs (one with SQL Server log backups); *Add extent (makes it a scale-out repository)* with a directory on the second volume. | The scale-out lists both extents; the job writes to it; its next run is incremental on extent 1 ("Extent … of …" in each VM's log). |
+| S2 | A directory on the same volume as an extent, and one with another block size. | Both refused, naming the volume or the block sizes. |
+| S3 | A second job with new VMs. | New chains go to the extent with the most room; several VMs of one run spread (reservations). |
+| S4 | *Move to …* for a VM with several restore points and SQL Server logs, while its next backup starts. | The move waits for the backup, then switches; ids unchanged; the next backup is a CBT incremental on the target; a point-in-time restore over the moved logs works; the source copies are deleted, then GC frees the space. |
+| S5 | A file browser open on a point of a chain while it moves. | The browser keeps working; the source copy stays until the browser closes, then the cleanup deletes it. |
+| S6 | Seal extent 2; run the jobs. | Its chains start anew on extent 1 with a full (warning); new chains avoid it; its old points restore. |
+| S7 | Maintenance on extent 1 with a restore running. | "Entering maintenance … waiting for" until the restore ends; then closed; restores of its points refused with its name; chains start anew elsewhere (or are skipped with the setting off). |
+| S8 | Unplug (or unmount) an extent's volume. | Within a minute it is offline (console, `bdfu_repository_extent_state`, alert after 15 minutes); its chains start anew elsewhere. |
+| S9 | *Evacuate* an extent with chains, a tape-imported point and a SQL-only VM. | Everything moves; the extent ends empty and sealed; *Remove extent* works; the last extent cannot be removed. |
+| S10 | *Rebalance…* with unequal extents. | The plan shows moves and the free space before and after; running it moves those chains; planning again shows nothing to do. |
+| S11 | Automatic rebalance on, a window of the next hour, *At most GiB per run* small. | It starts in the window, stops at the limit or the window end, and continues in the next window. |
+| S12 | Restart the service during a move, before and after a switch. | The move session fails ("resumes"); the next move of the chain reuses the copies; switched source copies are deleted by the cleanup; nothing appears twice after a rescan. |
+
 ## Results
 
 | Check | Date | Server / agent version | Result | Notes |

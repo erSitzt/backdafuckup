@@ -14,12 +14,12 @@ namespace Backdafuckup.Server.Engine;
 public sealed partial class RestoreSessionRunner(
     IDbContextFactory<AppDbContext> dbFactory,
     ConnectionManager connections,
-    RepositoryManager repositories,
     SessionEventWriter events,
     SessionTracker tracker,
     Telemetry.BackupMetrics metrics,
     TimeProvider time,
-    Backdafuckup.FileLevel.ChunkCache cache)
+    Backdafuckup.FileLevel.ChunkCache cache,
+    RestorePointAccess access)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -41,20 +41,7 @@ public sealed partial class RestoreSessionRunner(
                 ?? throw new KeyNotFoundException("The restore point no longer exists.");
         }
 
-        return await RestoreAsync(session, request, point, async token =>
-        {
-            var repository = await repositories.GetAsync(point.RepositoryId, token).ConfigureAwait(false);
-            var pin = repository.Pin(point.Id);
-            try
-            {
-                return new OpenedRestorePoint(await repository.OpenRestorePointAsync(point.Id, token).ConfigureAwait(false), pin);
-            }
-            catch
-            {
-                pin.Dispose();
-                throw;
-            }
-        }, cancellationToken).ConfigureAwait(false);
+        return await RestoreAsync(session, request, point, token => access.OpenRestorePointAsync(point, token), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

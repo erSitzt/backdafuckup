@@ -119,7 +119,7 @@ public sealed class AdExplore
 /// </summary>
 public sealed class AdExplores(
     IDbContextFactory<AppDbContext> dbFactory,
-    RepositoryManager repositories,
+    RestorePointAccess access,
     ChunkCache cache,
     RunningSessions running,
     SessionEventWriter events,
@@ -483,9 +483,9 @@ public sealed class AdExplores(
 
         var point = explore.Point;
         var domain = LiveDomain(explore) ?? throw new InvalidOperationException("The live domain is unknown.");
-        var repository = await repositories.GetAsync(point.RepositoryId, CancellationToken.None).ConfigureAwait(false);
-        using var pin = repository.Pin(point.Id);
-        await using var reader = await repository.OpenRestorePointAsync(point.Id, CancellationToken.None).ConfigureAwait(false);
+        // Opened again where the catalog says now (a scale-out move may have moved it since the explore opened).
+        await using var opened = await access.OpenRestorePointAsync(point, CancellationToken.None).ConfigureAwait(false);
+        var reader = opened.Reader;
         var disks = await FileRestoreMounts.OpenDisksAsync(reader, cache, CancellationToken.None).ConfigureAwait(false);
         var stored = await StoredGuestMetadata.ReadAsync(reader, CancellationToken.None).ConfigureAwait(false);
         foreach (var gpo in staged.GpoStaging)
@@ -712,11 +712,10 @@ public sealed class AdExplores(
         var point = explore.Point;
         try
         {
-            var repository = await repositories.GetAsync(point.RepositoryId, stop).ConfigureAwait(false);
             List<AdDatabaseFile> files;
-            using (var pin = repository.Pin(point.Id))
-            await using (var reader = await repository.OpenRestorePointAsync(point.Id, stop).ConfigureAwait(false))
+            await using (var opened = await access.OpenRestorePointAsync(point, stop).ConfigureAwait(false))
             {
+                var reader = opened.Reader;
                 explore.Step = "Finding the directory database in the restore point";
                 var disks = await FileRestoreMounts.OpenDisksAsync(reader, cache, stop).ConfigureAwait(false);
                 var stored = await StoredGuestMetadata.ReadAsync(reader, stop).ConfigureAwait(false);

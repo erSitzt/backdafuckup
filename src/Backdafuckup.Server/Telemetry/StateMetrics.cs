@@ -76,6 +76,23 @@ public sealed class StateMetrics
         meter.CreateObservableGauge("bdfu_repository_packing_unfinished", () => Repositories(r => r.Packs is null ? null : r.Packs.LooseChunksMayExist ? 1 : 0),
             description: "1 while a converted repository still has loose chunks of format 1 to pack.");
 
+        meter.CreateObservableGauge("bdfu_repository_extent_state", () =>
+            (_catalog.Extents ?? []).Select(e => new Measurement<int>(1, Tag("repository", e.Name), Tag("scale_out", e.ScaleOut), Tag("state", e.State))),
+            description: "1 for the state of each extent of a scale-out repository: active, sealed, evacuating, maintenance or offline.");
+        meter.CreateObservableGauge("bdfu_repository_chains", () =>
+            (_catalog.Extents ?? []).Select(e => new Measurement<int>(e.Chains, Tag("repository", e.Name), Tag("scale_out", e.ScaleOut))),
+            description: "Chains (a job's restore points of one VM or namespace) whose new data goes to the extent.");
+        meter.CreateObservableGauge("bdfu_scaleout_size_bytes", () =>
+            (_catalog.ScaleOuts ?? []).Select(o => new Measurement<long>(o.SizeBytes, Tag("scale_out", o.Name))), "By", "Size of all extents of the scale-out repository.");
+        meter.CreateObservableGauge("bdfu_scaleout_free_bytes", () =>
+            (_catalog.ScaleOuts ?? []).Select(o => new Measurement<long>(o.FreeBytes, Tag("scale_out", o.Name))), "By", "Free space on the extents that take new chains (active, not in maintenance, online).");
+        meter.CreateObservableGauge("bdfu_scaleout_max_free_ratio", () =>
+            (_catalog.ScaleOuts ?? []).Select(o => new Measurement<double>(o.MaxFreeRatio, Tag("scale_out", o.Name))),
+            description: "The largest free share of any extent that takes new chains (0 when none does): below about 0.1 new chains soon find no room.");
+        meter.CreateObservableGauge("bdfu_scaleout_pending_source_deletes", () =>
+            (_catalog.ScaleOuts ?? []).Select(o => new Measurement<int>(o.PendingDeletes, Tag("scale_out", o.Name))),
+            description: "Copies a move left that are still to be deleted (in use, or their extent unavailable).");
+
         meter.CreateObservableGauge("bdfu_tape_media", () =>
             (_catalog.TapeMedia ?? []).Select(m => new Measurement<int>(m.Count, Tag("pool", m.Pool), Tag("state", m.State))),
             description: "Tapes in media pools by state (Appendable, Full, Expired, Damaged, ...).");
@@ -218,10 +235,16 @@ public sealed class StateMetrics
         IReadOnlyList<TapeCountRow>? TapeMedia = null,
         IReadOnlyList<TapeCountRow>? TapeSets = null,
         IReadOnlyList<TapePoolRow>? TapePools = null,
-        int TapeRequestsPending = 0)
+        int TapeRequestsPending = 0,
+        IReadOnlyList<ExtentRow>? Extents = null,
+        IReadOnlyList<ScaleOutRow>? ScaleOuts = null)
     {
         public static CatalogSnapshot Empty { get; } = new([], [], new Dictionary<string, int>(), 0, [], [], 0, 0, []);
     }
+
+    internal sealed record ExtentRow(string Name, string ScaleOut, string State, int Chains);
+
+    internal sealed record ScaleOutRow(string Name, long SizeBytes, long FreeBytes, double MaxFreeRatio, int PendingDeletes);
 
     internal sealed record TapeCountRow(string Pool, string State, int Count);
 
@@ -314,10 +337,19 @@ public sealed class MetricsStateService(
             .GroupBy(r => r.RepositoryId).Select(g => new { g.Key, Count = g.LongCount(), Stored = g.Sum(r => r.NewStoredBytes) })
             .ToDictionaryAsync(g => g.Key, cancellationToken).ConfigureAwait(false);
         var repositoryRows = new List<StateMetrics.RepositoryRow>();
-        foreach (var repository in await db.Repositories.AsNoTracking().ToListAsync(cancellationToken).ConfigureAwait(false))
+        var allRepositories = await db.Repositories.AsNoTracking().ToListAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var repository in allRepositories.Where(r => r.Kind != RepositoryKind.ScaleOut))
         {
             long? size = null, free = null, format = null;
             Backdafuckup.Storage.RepositoryPackStats? packs = null;
+            if (repository.Maintenance)
+            {
+                // Not opened: an extent in maintenance stays closed. Its space as the balancer last saw it.
+                pointsByRepository.TryGetValue(repository.Id, out var kept);
+                repositoryRows.Add(new StateMetrics.RepositoryRow(repository.Name, repository.TotalBytes, repository.FreeBytes, kept?.Stored ?? 0, kept?.Count ?? 0));
+                continue;
+            }
+
             try
             {
                 var open = await repositories.GetAsync(repository.Id, cancellationToken).ConfigureAwait(false);
@@ -336,6 +368,31 @@ public sealed class MetricsStateService(
 
             pointsByRepository.TryGetValue(repository.Id, out var points);
             repositoryRows.Add(new StateMetrics.RepositoryRow(repository.Name, size, free, points?.Stored ?? 0, points?.Count ?? 0, format, packs));
+        }
+
+        // Scale-out repositories: each extent's state and chains, and per scale-out its space and what moves left behind.
+        var chainsByExtent = await db.ChainPlacements.GroupBy(p => p.ExtentId).Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(g => g.Key, g => g.Count, cancellationToken).ConfigureAwait(false);
+        var pendingByScaleOut = await db.RepositoryMoveItems.Where(m => m.State == MoveItemState.Switched || m.State == MoveItemState.Abandoned)
+            .GroupBy(m => m.ScaleOutId).Select(g => new { g.Key, Count = g.Count() }).ToDictionaryAsync(g => g.Key, g => g.Count, cancellationToken).ConfigureAwait(false);
+        var extentRows = new List<StateMetrics.ExtentRow>();
+        var scaleOutRows = new List<StateMetrics.ScaleOutRow>();
+        foreach (var scaleOut in allRepositories.Where(r => r.Kind == RepositoryKind.ScaleOut))
+        {
+            var extents = allRepositories.Where(r => r.ScaleOutId == scaleOut.Id).ToList();
+            var takesChains = extents.Where(e => e.ExtentState == ExtentState.Active && !e.Maintenance && e.State == RepositoryState.Online).ToList();
+            foreach (var extent in extents)
+            {
+                var state = extent.Maintenance ? "maintenance" : extent.State != RepositoryState.Online ? "offline" : extent.ExtentState.ToString().ToLowerInvariant();
+                extentRows.Add(new StateMetrics.ExtentRow(extent.Name, scaleOut.Name, state, chainsByExtent.GetValueOrDefault(extent.Id)));
+            }
+
+            scaleOutRows.Add(new StateMetrics.ScaleOutRow(
+                scaleOut.Name,
+                extents.Sum(e => e.TotalBytes ?? 0),
+                takesChains.Sum(e => e.FreeBytes ?? 0),
+                takesChains.Where(e => e.TotalBytes is > 0).Select(e => (double)(e.FreeBytes ?? 0) / e.TotalBytes!.Value).DefaultIfEmpty(0).Max(),
+                pendingByScaleOut.GetValueOrDefault(scaleOut.Id)));
         }
 
         var agents = await db.Agents.AsNoTracking().Select(a => new { a.HostName, a.LastContactUtc }).ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -385,7 +442,9 @@ public sealed class MetricsStateService(
             tapeMediaRows,
             tapeSetRows,
             tapePoolRows,
-            await db.TapeOperatorRequests.CountAsync(r => r.ResolvedUtc == null, cancellationToken).ConfigureAwait(false));
+            await db.TapeOperatorRequests.CountAsync(r => r.ResolvedUtc == null, cancellationToken).ConfigureAwait(false),
+            extentRows,
+            scaleOutRows);
     }
 
     internal async Task ReadPoolsAsync(CancellationToken cancellationToken)

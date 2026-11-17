@@ -203,7 +203,14 @@ public sealed record RepositoryDto(
     string? LastError,
     int Format = 0,
     long PackSize = 0,
-    bool PackingUnfinished = false);
+    bool PackingUnfinished = false,
+    Guid? ScaleOutId = null,
+    string? ExtentState = null,
+    bool Maintenance = false,
+    DateTimeOffset? MaintenanceSinceUtc = null,
+    int Chains = 0,
+    int Extents = 0,
+    ScaleOutSettingsDto? Settings = null);
 
 // ---- Jobs ----
 public sealed record ScheduleDto(string Kind, string TimeOfDay, IReadOnlyList<DayOfWeek> Days, string TimeZoneId);

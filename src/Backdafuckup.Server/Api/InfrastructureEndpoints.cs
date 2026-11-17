@@ -387,7 +387,7 @@ public static class InfrastructureEndpoints
                 await db.SaveChangesAsync(ct);
                 if (import)
                 {
-                    await ImportRestorePointsAsync(entity.Id, repository, db, time, ct);
+                    _ = await ImportRestorePointsAsync(entity.Id, repository, db, time, ct);
                 }
 
                 created = entity;
@@ -405,9 +405,25 @@ public static class InfrastructureEndpoints
         });
 
         repositories.MapPost("/{id:guid}/gc", async (Guid id, AppDbContext db, SessionQueue queue, CancellationToken ct) =>
-            await db.Repositories.FindAsync([id], ct) is { } repository
-                ? Results.Ok(new StartedDto(await queue.EnqueueMaintenanceAsync(id, repository.Name, "User", ct)))
-                : Results.NotFound());
+        {
+            if (await db.Repositories.FindAsync([id], ct) is not { } repository)
+            {
+                return Results.NotFound();
+            }
+
+            // A scale-out repository: one maintenance session per extent (in maintenance ones are left out).
+            var targets = repository.Kind == RepositoryKind.ScaleOut
+                ? await db.Repositories.Where(r => r.ScaleOutId == id && !r.Maintenance).OrderBy(r => r.Name).ToListAsync(ct)
+                : [repository];
+            Guid? first = null;
+            foreach (var target in targets)
+            {
+                var queued = await queue.EnqueueMaintenanceAsync(target.Id, target.Name, "User", ct);
+                first ??= queued;
+            }
+
+            return first is { } started ? Results.Ok(new StartedDto(started)) : Results.Problem($"{repository.Name} has no extent that is not in maintenance.", statusCode: StatusCodes.Status409Conflict);
+        });
 
         repositories.MapPost("/{id:guid}/packs", async (Guid id, ConvertRepositoryDto request, AppDbContext db, RepositoryManager manager, SessionQueue queue, CancellationToken ct) =>
         {
@@ -438,11 +454,24 @@ public static class InfrastructureEndpoints
 
         repositories.MapPost("/{id:guid}/rescan", async (Guid id, AppDbContext db, RepositoryManager manager, TimeProvider time, Sql.SqlCatalogBackfill backfill, CancellationToken ct) =>
         {
-            var repository = await manager.GetAsync(id, ct);
-            var imported = await ImportRestorePointsAsync(id, repository, db, time, ct);
+            var ids = await db.Repositories.Where(r => r.ScaleOutId == id && !r.Maintenance).Select(r => r.Id).ToListAsync(ct);
+            if (ids.Count == 0)
+            {
+                ids.Add(id);
+            }
+
+            var (imported, elsewhere) = (0, 0);
+            foreach (var repositoryId in ids)
+            {
+                var repository = await manager.GetAsync(repositoryId, ct);
+                var (added, other) = await ImportRestorePointsAsync(repositoryId, repository, db, time, ct);
+                (imported, elsewhere) = (imported + added, elsewhere + other);
+            }
+
             await backfill.RecordSnapshotFullsAsync(ct);
-            return Results.Ok(new { imported });
-        });
+            return Results.Ok(new { imported, elsewhere });
+        })
+        .WithDescription("Adds restore points and SQL Server backups found in the directory (or each extent) but missing in the catalog. elsewhere: copies of ones the catalog has in another repository (left by a move, or a copied directory); they are not added.");
 
         repositories.MapDelete("/{id:guid}", async (Guid id, AppDbContext db, RepositoryManager manager, FileRestore.FileRestoreMounts mounts, CancellationToken ct) =>
         {
@@ -458,6 +487,37 @@ public static class InfrastructureEndpoints
             if (await db.Jobs.AnyAsync(j => j.RepositoryId == id, ct))
             {
                 return Results.Problem("The repository is still used by backup jobs.", statusCode: StatusCodes.Status409Conflict);
+            }
+
+            if (await db.Repositories.FindAsync([id], ct) is not { } entity)
+            {
+                return Results.NotFound();
+            }
+
+            if (entity.Kind == RepositoryKind.ScaleOut && await db.Repositories.AnyAsync(r => r.ScaleOutId == id, ct))
+            {
+                return Results.Problem($"{entity.Name} still has extents: evacuate and remove them first.", statusCode: StatusCodes.Status409Conflict);
+            }
+
+            if (entity.ScaleOutId is { } scaleOutId)
+            {
+                // An extent goes only empty: its restore points would otherwise vanish from the catalog.
+                var reason =
+                    await db.RestorePoints.AnyAsync(r => r.RepositoryId == id, ct) || await db.SqlBackups.AnyAsync(b => b.RepositoryId == id, ct)
+                        ? $"{entity.Name} still holds restore points or SQL Server backups: evacuate it first."
+                    : await db.ChainPlacements.AnyAsync(p => p.ExtentId == id, ct)
+                        ? $"Chains are still placed on {entity.Name}: evacuate it first."
+                    : await db.RepositoryMoveItems.AnyAsync(m => (m.SourceExtentId == id || m.TargetExtentId == id) && (m.State == MoveItemState.Copied || m.State == MoveItemState.Switched || m.State == MoveItemState.Abandoned), ct)
+                        ? $"Copies of a move on {entity.Name} are not cleaned up yet; try again in a few minutes."
+                    : await db.Sessions.AnyAsync(s => s.Kind == SessionKind.RepositoryMove && (s.State == SessionState.Queued || s.State == SessionState.Running || s.State == SessionState.Stopping), ct)
+                        ? "A move between extents is running; remove the extent when it has finished."
+                    : !await db.Repositories.AnyAsync(r => r.ScaleOutId == scaleOutId && r.Id != id, ct)
+                        ? $"{entity.Name} is the last extent of its scale-out repository."
+                    : null;
+                if (reason is not null)
+                {
+                    return Results.Problem(reason, statusCode: StatusCodes.Status409Conflict);
+                }
             }
 
             if (mounts.HasMounts(id))
@@ -478,7 +538,8 @@ public static class InfrastructureEndpoints
         var repositories = await db.Repositories.OrderBy(r => r.Name).ToListAsync(ct);
         var stats = await db.RestorePoints.Where(r => r.State == RestorePointState.Available)
             .GroupBy(r => r.RepositoryId).Select(g => new { g.Key, Count = g.Count(), Bytes = g.Sum(r => r.LogicalBytes) }).ToListAsync(ct);
-        foreach (var repository in repositories)
+        var chains = await db.ChainPlacements.GroupBy(p => p.ExtentId).Select(g => new { g.Key, Count = g.Count() }).ToListAsync(ct);
+        foreach (var repository in repositories.Where(r => r.Kind != RepositoryKind.ScaleOut))
         {
             try
             {
@@ -493,12 +554,32 @@ public static class InfrastructureEndpoints
             }
         }
 
+        // A scale-out repository adds up its extents: all of them for the size, the active ones for the free space.
+        foreach (var scaleOut in repositories.Where(r => r.Kind == RepositoryKind.ScaleOut))
+        {
+            var extents = repositories.Where(r => r.ScaleOutId == scaleOut.Id).ToList();
+            scaleOut.TotalBytes = extents.Sum(e => e.TotalBytes ?? 0);
+            scaleOut.FreeBytes = extents.Where(e => e.ExtentState == ExtentState.Active && !e.Maintenance && e.State == RepositoryState.Online).Sum(e => e.FreeBytes ?? 0);
+            scaleOut.State = extents.Count > 0 && extents.All(e => e.State == RepositoryState.Online) ? RepositoryState.Online
+                : extents.Any(e => e.State == RepositoryState.Online) ? RepositoryState.Error
+                : RepositoryState.Offline;
+            scaleOut.LastError = extents.Where(e => e.State != RepositoryState.Online).Select(e => $"extent {e.Name} ({e.Path}) is offline").FirstOrDefault();
+        }
+
         return repositories.Select(r =>
         {
+            if (r.Kind == RepositoryKind.ScaleOut)
+            {
+                var members = repositories.Where(e => e.ScaleOutId == r.Id).Select(e => e.Id).ToList();
+                return r.ToDto(
+                    stats.Where(x => members.Contains(x.Key)).Sum(x => x.Count), stats.Where(x => members.Contains(x.Key)).Sum(x => x.Bytes),
+                    chains: chains.Where(c => members.Contains(c.Key)).Sum(c => c.Count), extents: members.Count);
+            }
+
             var s = stats.FirstOrDefault(x => x.Key == r.Id);
             var (format, packSize) = ReadFormat(r.Path);
             var packing = format == 2 && manager.TryGetOpen(r.Id) is { LooseChunksMayExist: true };
-            return r.ToDto(s?.Count ?? 0, s?.Bytes ?? 0, format, packSize, packing);
+            return r.ToDto(s?.Count ?? 0, s?.Bytes ?? 0, format, packSize, packing, chains.FirstOrDefault(c => c.Key == r.Id)?.Count ?? 0);
         }).ToList();
     }
 
@@ -521,14 +602,18 @@ public static class InfrastructureEndpoints
     /// Adds restore points and SQL backups found in the repository but missing in the catalog (disaster recovery of the
     /// server). The snapshot fulls of imported restore points are recorded by <see cref="Sql.SqlCatalogBackfill"/>.
     /// </summary>
-    private static async Task<int> ImportRestorePointsAsync(Guid repositoryId, IBackupRepository repository, AppDbContext db, TimeProvider time, CancellationToken ct)
+    internal static async Task<(int Imported, int Elsewhere)> ImportRestorePointsAsync(Guid repositoryId, IBackupRepository repository, AppDbContext db, TimeProvider time, CancellationToken ct)
     {
-        var known = await db.RestorePoints.Where(r => r.RepositoryId == repositoryId).Select(r => r.Id).ToListAsync(ct);
+        // Ids are global: one catalogued in another repository is a copy (a move's, or a copied directory) and is never added twice.
+        var known = (await db.RestorePoints.Select(r => r.Id).ToListAsync(ct)).ToHashSet();
+        var here = (await db.RestorePoints.Where(r => r.RepositoryId == repositoryId).Select(r => r.Id).ToListAsync(ct)).ToHashSet();
         var imported = 0;
+        var elsewhere = 0;
         await foreach (var info in repository.ListRestorePointsAsync(ct))
         {
             if (known.Contains(info.RestorePointId))
             {
+                elsewhere += here.Contains(info.RestorePointId) ? 0 : 1;
                 continue;
             }
 
@@ -551,11 +636,13 @@ public static class InfrastructureEndpoints
 
         await db.SaveChangesAsync(ct);
 
-        var knownSqlBackups = await db.SqlBackups.Where(b => b.RepositoryId == repositoryId).Select(b => b.Id).ToListAsync(ct);
+        var knownSqlBackups = (await db.SqlBackups.Select(b => b.Id).ToListAsync(ct)).ToHashSet();
+        var sqlHere = (await db.SqlBackups.Where(b => b.RepositoryId == repositoryId).Select(b => b.Id).ToListAsync(ct)).ToHashSet();
         await foreach (var info in repository.ListSqlBackupsAsync(ct))
         {
             if (knownSqlBackups.Contains(info.SqlBackupId))
             {
+                elsewhere += sqlHere.Contains(info.SqlBackupId) ? 0 : 1;
                 continue;
             }
 
@@ -564,7 +651,7 @@ public static class InfrastructureEndpoints
             imported++;
         }
 
-        return imported;
+        return (imported, elsewhere);
     }
 
     /// <summary>

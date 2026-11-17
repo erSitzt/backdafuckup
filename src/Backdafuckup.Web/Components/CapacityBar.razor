@@ -1,0 +1,8 @@
+@* Used space of a repository's volume (a scale-out: all extents, free on the active ones). *@
+@{ var used = Repository.TotalBytes is > 0 && Repository.FreeBytes is { } free ? 100.0 * (Repository.TotalBytes.Value - free) / Repository.TotalBytes.Value : 0; }
+<MudProgressLinear Value="@used" Rounded="true" Size="Size.Small" Color="@(used > 90 ? Color.Error : used > 75 ? Color.Warning : Color.Primary)" Style="max-width:220px" />
+<span class="cell-sub nowrap">@Fmt.Bytes(Repository.FreeBytes) free of @Fmt.Bytes(Repository.TotalBytes)</span>
+
+@code {
+    [Parameter, EditorRequired] public RepositoryDto Repository { get; set; } = default!;
+}

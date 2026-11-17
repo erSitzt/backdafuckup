@@ -28,7 +28,7 @@ namespace Backdafuckup.Server.Sql;
 /// </summary>
 public sealed class SqlRestoreSessionRunner(
     IDbContextFactory<AppDbContext> dbFactory,
-    RepositoryManager repositories,
+    RestorePointAccess access,
     ChunkCache cache,
     SessionEventWriter events,
     SessionTracker tracker,
@@ -86,18 +86,8 @@ public sealed class SqlRestoreSessionRunner(
         await tracker.UpdateTaskAsync(task.Id, t => { t.State = SessionState.Running; t.StartedUtc = time.GetUtcNow(); }, CancellationToken.None).ConfigureAwait(false);
         try
         {
-            var repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
-            using var pin = repository.Pin(point.Id);
-            await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var pointState = await db.RestorePoints.Where(r => r.Id == point.Id).Select(r => (RestorePointState?)r.State).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-                if (pointState != RestorePointState.Available)
-                {
-                    throw new InvalidOperationException($"The restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} is not available ({pointState?.ToString() ?? "deleted"}).");
-                }
-            }
-
-            await using var reader = await repository.OpenRestorePointAsync(point.Id, cancellationToken).ConfigureAwait(false);
+            await using var opened = await access.OpenRestorePointAsync(point, cancellationToken).ConfigureAwait(false);
+            var reader = opened.Reader;
             var sources = await FileRestoreMounts.OpenDisksAsync(reader, cache, cancellationToken).ConfigureAwait(false);
             var stored = await StoredGuestMetadata.ReadAsync(reader, cancellationToken).ConfigureAwait(false);
             SqlMountDto? described = null;
@@ -514,9 +504,9 @@ public sealed class SqlRestoreSessionRunner(
 
             async Task<IBackupRepository> PinAsync(SqlBackupSetEntity set)
             {
-                var repository = await repositories.GetAsync(set.RepositoryId, CancellationToken.None).ConfigureAwait(false);
-                pins.Add(repository.PinSqlBackup(set.SqlBackupId!.Value));
-                return repository;
+                var pinned = await access.PinSqlBackupAsync(set.SqlBackupId!.Value, set.RepositoryId, CancellationToken.None).ConfigureAwait(false);
+                pins.Add(pinned);
+                return pinned.Repository;
             }
 
             var request = new SqlChainRestoreRequest

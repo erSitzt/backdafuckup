@@ -26,7 +26,9 @@ public sealed class BackupSessionRunner(
     Telemetry.BackupMetrics metrics,
     Microsoft.Extensions.Options.IOptions<EngineOptions> engineOptions,
     TimeProvider time,
-    ILogger<BackupSessionRunner> logger)
+    ILogger<BackupSessionRunner> logger,
+    ScaleOut.RepositoryPlacement placement,
+    ScaleOut.ChainLocks chainLocks)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -46,7 +48,18 @@ public sealed class BackupSessionRunner(
             return (SessionState.Warning, $"No {objects.Replace("(s)", "s", StringComparison.Ordinal)} in job.");
         }
 
-        var repository = await repositories.GetAsync(job.RepositoryId, cancellationToken).ConfigureAwait(false);
+        // A standalone repository, or a scale-out one whose extents each chain is placed on.
+        var scope = await placement.ScopeAsync(job.RepositoryId, cancellationToken).ConfigureAwait(false);
+        if (scope.IsScaleOut && scope.Extents.Count == 0)
+        {
+            throw new InvalidOperationException($"The scale-out repository {scope.Repository.Name} has no extents.");
+        }
+
+        if (!scope.IsScaleOut)
+        {
+            _ = await repositories.GetAsync(scope.Repository.Id, cancellationToken).ConfigureAwait(false); // fails early when it cannot be opened
+        }
+
         await using var hypervisor = await connections.OpenAsync(job.ConnectionId, cancellationToken).ConfigureAwait(false);
 
         // A cluster's platforms, recognised at every run: they decide what is left out as made by them, and are recorded
@@ -64,7 +77,8 @@ public sealed class BackupSessionRunner(
 
         // Namespaces chosen by their labels: those that have them now, next to the ones chosen by name.
         var (members, selections) = await ExpandSelectorsAsync(job, hypervisor, cancellationToken).ConfigureAwait(false);
-        log.Info($"Job started ({(session.RunMode == SessionRunMode.ActiveFull ? "active full" : "incremental")}), {members.Count} {objects}, repository {job.Repository.Name}.");
+        log.Info($"Job started ({(session.RunMode == SessionRunMode.ActiveFull ? "active full" : "incremental")}), {members.Count} {objects}, repository {scope.Repository.Name}" +
+            (scope.IsScaleOut ? $" (scale-out: {string.Join(", ", scope.Extents.Select(e => e.Name))})." : "."));
         foreach (var (selector, names, whole) in selections)
         {
             if (whole)
@@ -108,7 +122,8 @@ public sealed class BackupSessionRunner(
                 await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, metrics, engineOptions.Value.CheckpointWithVss, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1, repository, hypervisor);
+                    var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, metrics, engineOptions.Value.CheckpointWithVss, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1,
+                        new ChainTargets(scope, placement, chainLocks, repositories), hypervisor);
                     return (item, State: await task.RunAsync(cancellationToken).ConfigureAwait(false));
                 }
                 finally
@@ -128,7 +143,7 @@ public sealed class BackupSessionRunner(
 
         if (!cancellationToken.IsCancellationRequested)
         {
-            await ApplyRetentionAsync(job, repository, hypervisor, log, cancellationToken).ConfigureAwait(false);
+            await ApplyRetentionAsync(job, scope, hypervisor, log, cancellationToken).ConfigureAwait(false);
         }
 
         var failed = outcomes.Values.Count(s => s == SessionState.Failed);
@@ -214,23 +229,29 @@ public sealed class BackupSessionRunner(
     }
 
     /// <summary>Keeps the newest N restore points per VM of the job; deletes older ones and queues garbage collection.</summary>
-    private async Task ApplyRetentionAsync(BackupJob job, IBackupRepository repository, IHypervisorSession hypervisor, IOperationLog log, CancellationToken cancellationToken)
+    private async Task ApplyRetentionAsync(BackupJob job, ScaleOut.RepositoryScope scope, IHypervisorSession hypervisor, IOperationLog log, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var repositoryIds = scope.RepositoryIds.ToList();
         var points = await db.RestorePoints.Include(r => r.Disks)
-            .Where(r => r.JobId == job.Id && r.RepositoryId == job.RepositoryId && r.State == RestorePointState.Available)
+            .Where(r => r.JobId == job.Id && repositoryIds.Contains(r.RepositoryId) && r.State == RestorePointState.Available)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var deleted = 0;
+        var touched = new HashSet<Guid>();
         foreach (var group in points.GroupBy(p => p.VmNativeId))
         {
             foreach (var old in group.OrderByDescending(p => p.CreatedUtc).Skip(Math.Max(1, job.RetentionPoints)))
             {
+                // Marked first (compare-and-set): a scale-out move cannot switch it meanwhile, and its repository is fixed.
+                if (await CatalogDeletes.MarkRestorePointAsync(db, old.Id, cancellationToken).ConfigureAwait(false) is not { } repositoryId)
+                {
+                    continue; // moved or deleted meanwhile: the next run decides again
+                }
+
                 try
                 {
-                    old.State = RestorePointState.Deleting;
-                    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                    await repository.DeleteRestorePointAsync(old.Id, cancellationToken).ConfigureAwait(false);
+                    var holder = await repositories.GetAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+                    await holder.DeleteRestorePointAsync(old.Id, cancellationToken).ConfigureAwait(false);
                     var tokens = old.Disks.Where(d => d.ChangeTokenValue is not null).Select(d => new ChangeToken(d.ChangeTokenKind!, d.ChangeTokenValue!)).ToList();
                     if (tokens.Count > 0)
                     {
@@ -239,21 +260,26 @@ public sealed class BackupSessionRunner(
 
                     db.RestorePoints.Remove(old);
                     await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                    deleted++;
+                    touched.Add(repositoryId);
                     log.Info($"Retention: removed restore point of {old.VmName} from {old.CreatedUtc.ToLocalTime():g}.");
                 }
                 catch (RestorePointPinnedException)
                 {
-                    old.State = RestorePointState.Available;
-                    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                    await CatalogDeletes.UnmarkRestorePointAsync(db, old.Id, cancellationToken).ConfigureAwait(false);
                     log.Info($"Retention: restore point of {old.VmName} from {old.CreatedUtc.ToLocalTime():g} is in use and will be removed later.");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    await CatalogDeletes.UnmarkRestorePointAsync(db, old.Id, cancellationToken).ConfigureAwait(false);
+                    log.Info($"Retention: restore point of {old.VmName} from {old.CreatedUtc.ToLocalTime():g} cannot be removed now ({ex.Message}); it is removed later.");
                 }
             }
         }
 
-        if (deleted > 0)
+        foreach (var repositoryId in touched)
         {
-            await queue.EnqueueMaintenanceAsync(job.RepositoryId, job.Repository.Name, "Retention", cancellationToken).ConfigureAwait(false);
+            var name = await db.Repositories.Where(r => r.Id == repositoryId).Select(r => r.Name).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? job.Repository.Name;
+            await queue.EnqueueMaintenanceAsync(repositoryId, name, "Retention", cancellationToken).ConfigureAwait(false);
         }
     }
 }
@@ -273,10 +299,14 @@ internal sealed class VmBackupTask(
     BackupJobObject vm,
     Guid taskId,
     int attempt,
-    IBackupRepository repository,
+    ChainTargets targets,
     IHypervisorSession hypervisor)
 {
     private readonly IOperationLog _log = events.CreateLog(session.Id, taskId, vm.CachedName);
+
+    // Set once the chain's extent is chosen (under the chain's lease).
+    private IBackupRepository repository = null!;
+    private Guid _repositoryId;
     private long _readBytes;
     private long _storedBytes;
     private long _totalBytes = 1;
@@ -314,9 +344,20 @@ internal sealed class VmBackupTask(
 
         IRestorePointPin? basePin = null;
         IRestorePointReader? baseReader = null;
+        ChainTarget? chain = null;
         var restorePointCreated = false;
         try
         {
+            // The chain's lease (a move switching this chain waits for this attempt, and the other way round), then its extent.
+            chain = await targets.AcquireAsync(job, vm, _log, cancellationToken).ConfigureAwait(false);
+            repository = chain.Repository;
+            _repositoryId = chain.Target.RepositoryId;
+            if (targets.Scope.IsScaleOut)
+            {
+                _log.Info($"Extent {chain.Target.Name} of {targets.Scope.Repository.Name}{(chain.Target.NewChain ? $" (new chain: {chain.Target.Reason})" : string.Empty)}.");
+            }
+
+            var previousHead = chain.Target.NewChain ? await FindHeadElsewhereAsync(cancellationToken).ConfigureAwait(false) : null;
             var baseline = session.RunMode == SessionRunMode.ActiveFull ? null : await FindBaseAsync(cancellationToken).ConfigureAwait(false);
             if (baseline is not null)
             {
@@ -337,7 +378,7 @@ internal sealed class VmBackupTask(
                 db.RestorePoints.Add(new RestorePointEntity
                 {
                     Id = restorePointId,
-                    RepositoryId = job.RepositoryId,
+                    RepositoryId = _repositoryId,
                     JobId = job.Id,
                     JobName = job.Name,
                     SessionId = session.Id,
@@ -570,13 +611,13 @@ internal sealed class VmBackupTask(
                     metrics.RecordRelease(Pool, snapshotFacts, release);
                 }
 
-                await ReleaseBaseTokensAsync(baseline, manifestDisks).ConfigureAwait(false);
+                await ReleaseBaseTokensAsync(baseline ?? previousHead, manifestDisks).ConfigureAwait(false);
             }
             catch (SnapshotCleanupDeferredException ex)
             {
                 warnings = true;
                 _log.Warning(ex.Message);
-                await ReleaseBaseTokensAsync(baseline, manifestDisks).ConfigureAwait(false);
+                await ReleaseBaseTokensAsync(baseline ?? previousHead, manifestDisks).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -587,8 +628,17 @@ internal sealed class VmBackupTask(
             }
 
             _log.Info($"Backup finished ({kind}): {MetricsText.Describe(CurrentMetrics())}.", "summary");
+
+            // A chain that had to start anew on another extent (its own sealed, in maintenance or offline) is worth a look.
+            warnings |= chain.Target.NewChain && previousHead is not null;
             await FinishTaskAsync(warnings ? SessionState.Warning : SessionState.Succeeded, null, restorePointId).ConfigureAwait(false);
             return warnings ? SessionState.Warning : SessionState.Succeeded;
+        }
+        catch (ScaleOut.ChainSkippedException ex)
+        {
+            _log.Warning(ex.Message);
+            await FinishTaskAsync(SessionState.Warning, ex.Message, null).ConfigureAwait(false);
+            return SessionState.Warning;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -615,6 +665,10 @@ internal sealed class VmBackupTask(
             }
 
             basePin?.Dispose();
+            if (chain is not null)
+            {
+                await chain.DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 
@@ -1026,7 +1080,18 @@ internal sealed class VmBackupTask(
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         return await db.RestorePoints.Include(r => r.Disks).AsNoTracking()
-            .Where(r => r.JobId == job.Id && r.RepositoryId == job.RepositoryId && r.VmNativeId == vm.NativeId && r.State == RestorePointState.Available)
+            .Where(r => r.JobId == job.Id && r.RepositoryId == _repositoryId && r.VmNativeId == vm.NativeId && r.State == RestorePointState.Available)
+            .OrderByDescending(r => r.CreatedUtc)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>When a chain starts anew on another extent: its newest restore point elsewhere, whose change tokens the new full supersedes.</summary>
+    private async Task<RestorePointEntity?> FindHeadElsewhereAsync(CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var others = targets.Scope.RepositoryIds.Where(id => id != _repositoryId).ToList();
+        return await db.RestorePoints.Include(r => r.Disks).AsNoTracking()
+            .Where(r => r.JobId == job.Id && others.Contains(r.RepositoryId) && r.VmNativeId == vm.NativeId && r.State == RestorePointState.Available)
             .OrderByDescending(r => r.CreatedUtc)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -1249,5 +1314,50 @@ internal sealed class VmBackupTask(
     private sealed class Progress(VmBackupTask owner, SnapshotDisk disk, string key) : IProgress<DiskBackupProgress>
     {
         public void Report(DiskBackupProgress value) => owner.ReportProgress(disk, key, value);
+    }
+}
+
+/// <summary>Picks the extent for each VM of a backup session (or the standalone repository), under the chain's lease.</summary>
+internal sealed class ChainTargets(ScaleOut.RepositoryScope scope, ScaleOut.RepositoryPlacement placement, ScaleOut.ChainLocks locks, RepositoryManager repositories)
+{
+    public ScaleOut.RepositoryScope Scope => scope;
+
+    public async Task<ChainTarget> AcquireAsync(BackupJob job, BackupJobObject vm, IOperationLog log, CancellationToken cancellationToken)
+    {
+        var lease = await locks.For(job.Id, vm.NativeId)
+            .AcquireAsync($"Backup of {vm.CachedName}", holder => log.Info($"Waiting for '{holder}' of this chain to finish."), cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            var target = await placement.ForBackupAsync(scope, job, vm.NativeId, vm.CachedName, log, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return new ChainTarget(target, await repositories.GetAsync(target.RepositoryId, cancellationToken).ConfigureAwait(false), lease);
+            }
+            catch
+            {
+                target.Reservation.Dispose();
+                throw;
+            }
+        }
+        catch
+        {
+            await lease.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+}
+
+/// <summary>The extent of a VM's backup attempt, its reservation and the chain's lease; disposing releases both.</summary>
+internal sealed class ChainTarget(ScaleOut.PlacementTarget target, IBackupRepository repository, IAsyncDisposable lease) : IAsyncDisposable
+{
+    public ScaleOut.PlacementTarget Target => target;
+
+    public IBackupRepository Repository => repository;
+
+    public async ValueTask DisposeAsync()
+    {
+        target.Reservation.Dispose();
+        await lease.DisposeAsync().ConfigureAwait(false);
     }
 }

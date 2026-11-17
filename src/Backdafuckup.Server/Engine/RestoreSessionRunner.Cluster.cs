@@ -60,15 +60,13 @@ public sealed partial class RestoreSessionRunner
 
             byte[] objects;
             IReadOnlyList<string>? sourcePlatforms;
-            var repository = await repositories.GetAsync(run.ClusterPoint.RepositoryId, cancellationToken).ConfigureAwait(false);
-            using (repository.Pin(run.ClusterPoint.Id))
-            await using (var reader = await repository.OpenRestorePointAsync(run.ClusterPoint.Id, cancellationToken).ConfigureAwait(false))
-            await using (var blob = await reader.OpenBlobAsync(reader.Manifest.Metadata ?? throw new InvalidDataException("The restore point holds no objects."), cancellationToken).ConfigureAwait(false))
+            await using (var opened = await access.OpenRestorePointAsync(run.ClusterPoint, cancellationToken).ConfigureAwait(false))
+            await using (var blob = await opened.Reader.OpenBlobAsync(opened.Reader.Manifest.Metadata ?? throw new InvalidDataException("The restore point holds no objects."), cancellationToken).ConfigureAwait(false))
             {
                 using var memory = new MemoryStream();
                 await blob.CopyToAsync(memory, cancellationToken).ConfigureAwait(false);
                 objects = memory.ToArray();
-                sourcePlatforms = reader.Manifest.Kubernetes?.Platforms;
+                sourcePlatforms = opened.Reader.Manifest.Kubernetes?.Platforms;
             }
 
             log.Info($"Restoring the cluster-scoped objects of {run.ClusterPoint.CreatedUtc.ToLocalTime():g} ({run.ClusterPoint.VmName}), then {chosen.Count} namespace(s): {string.Join(", ", chosen.Select(c => c.Namespace))}.");

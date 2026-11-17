@@ -114,6 +114,8 @@ public sealed partial class LocalDirectoryRepository : IRepositoryTransfer
     {
         public Guid SqlBackupId => writer.SqlBackupId;
 
+        public bool TryReuseChunk(ChunkId id) => writer.TryReuseChunk(id);
+
         public ValueTask<ChunkPutResult> PutEncodedChunkAsync(ChunkId id, ReadOnlyMemory<byte> stored, CancellationToken cancellationToken) =>
             writer.PutEncodedChunkAsync(id, stored, cancellationToken);
 
@@ -134,6 +136,55 @@ public sealed partial class LocalDirectoryRepository : IRepositoryTransfer
         }
 
         public ValueTask DisposeAsync() => writer.DisposeAsync();
+    }
+
+    public bool ContainsRestorePoint(Guid restorePointId)
+    {
+        ThrowIfDisposed();
+        return _restorePoints.ContainsKey(restorePointId);
+    }
+
+    public bool ContainsSqlBackup(Guid sqlBackupId)
+    {
+        ThrowIfDisposed();
+        return _sqlBackups.ContainsKey(sqlBackupId);
+    }
+
+    public Task<DeleteOutcome> TryDeleteRestorePointAsync(Guid restorePointId, TimeSpan wait, CancellationToken cancellationToken) =>
+        TryDeleteAsync(_restorePoints, restorePointId, wait, cancellationToken);
+
+    public Task<DeleteOutcome> TryDeleteSqlBackupAsync(Guid sqlBackupId, TimeSpan wait, CancellationToken cancellationToken) =>
+        TryDeleteAsync(_sqlBackups, sqlBackupId, wait, cancellationToken);
+
+    public RepositoryActivity Activity => new(_pins.Values.Count(c => c > 0), _activeWriters.Count, _gcMutex.CurrentCount == 0);
+
+    private async Task<DeleteOutcome> TryDeleteAsync(System.Collections.Concurrent.ConcurrentDictionary<Guid, string> objects, Guid id, TimeSpan wait, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        if (!await _gcMutex.WaitAsync(wait, cancellationToken).ConfigureAwait(false))
+        {
+            return DeleteOutcome.Busy;
+        }
+
+        try
+        {
+            if (_pins.TryGetValue(id, out var count) && count > 0)
+            {
+                return DeleteOutcome.Pinned;
+            }
+
+            if (!objects.TryGetValue(id, out var directory))
+            {
+                return DeleteOutcome.NotFound;
+            }
+
+            RemoveObjectDirectory(objects, id, directory);
+            return DeleteOutcome.Deleted;
+        }
+        finally
+        {
+            _gcMutex.Release();
+        }
     }
 
     /// <summary>
@@ -170,6 +221,8 @@ public sealed partial class LocalDirectoryRepository : IRepositoryTransfer
     private sealed class Import(LocalDirectoryRepository repository, Writer writer, RestorePointManifest original) : IRestorePointImport
     {
         public Guid RestorePointId => writer.RestorePointId;
+
+        public bool TryReuseChunk(ChunkId id) => writer.TryReuseChunk(id);
 
         public ValueTask<ChunkPutResult> PutEncodedChunkAsync(ChunkId id, ReadOnlyMemory<byte> stored, CancellationToken cancellationToken) =>
             writer.PutEncodedChunkAsync(id, stored, cancellationToken);

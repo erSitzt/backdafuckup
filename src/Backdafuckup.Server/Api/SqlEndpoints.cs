@@ -440,7 +440,7 @@ public static class SqlEndpoints
     /// the first byte aborts the connection, so the browser reports a failed download instead of saving a short file.
     /// </summary>
     private static async Task<IResult> DownloadBackupAsync(
-        string token, AppDbContext db, SqlBackupDownloads downloads, RepositoryManager repositories, ILoggerFactory loggers, HttpContext http, CancellationToken ct)
+        string token, AppDbContext db, SqlBackupDownloads downloads, RestorePointAccess access, ILoggerFactory loggers, HttpContext http, CancellationToken ct)
     {
         var user = http.User.Identity?.Name ?? string.Empty;
         var set = downloads.Redeem(token, user) is { } id ? await DownloadableSets(db).FirstOrDefaultAsync(s => s.Id == id, ct) : null;
@@ -451,9 +451,8 @@ public static class SqlEndpoints
 
         var database = await db.SqlDatabases.AsNoTracking().FirstAsync(d => d.Id == set.SqlDatabaseId, ct);
         var logger = loggers.CreateLogger("Backdafuckup.Server.Sql.SqlBackupDownloads");
-        var repository = await repositories.GetAsync(set.RepositoryId, ct);
-        using var pin = repository.PinSqlBackup(set.SqlBackupId!.Value);
-        await using var reader = await repository.OpenSqlBackupAsync(set.SqlBackupId.Value, ct);
+        using var pinned = await access.PinSqlBackupAsync(set.SqlBackupId!.Value, set.RepositoryId, ct);
+        await using var reader = await pinned.Repository.OpenSqlBackupAsync(set.SqlBackupId.Value, ct);
         await using var stream = await reader.OpenFileAsync(set.FileKey!, ct);
         var name = DownloadName(database, set);
         http.Response.ContentType = "application/octet-stream";
@@ -474,7 +473,7 @@ public static class SqlEndpoints
     }
 
     /// <summary>What a restore to <paramref name="at"/> (null: the latest point) applies; 400 with the reason if nothing reaches it.</summary>
-    private static async Task<IResult> PlanAsync(Guid id, DateTimeOffset? at, AppDbContext db, RepositoryManager repositories, CancellationToken ct)
+    private static async Task<IResult> PlanAsync(Guid id, DateTimeOffset? at, AppDbContext db, RestorePointAccess access, CancellationToken ct)
     {
         SqlRestoreSessionRunner.ChainChoice chain;
         try
@@ -494,8 +493,8 @@ public static class SqlEndpoints
         else
         {
             // A snapshot base: the files as the restore point's guest metadata lists them.
-            var repository = await repositories.GetAsync(chain.Base.RepositoryId, ct);
-            await using var reader = await repository.OpenRestorePointAsync(chain.Base.RestorePointId!.Value, ct);
+            using var pinned = await access.PinRestorePointAsync(chain.Base.RestorePointId!.Value, chain.Base.RepositoryId, ct);
+            await using var reader = await pinned.Repository.OpenRestorePointAsync(chain.Base.RestorePointId!.Value, ct);
             var stored = await StoredGuestMetadata.ReadAsync(reader, ct);
             var guest = stored?.SqlDatabases.FirstOrDefault(d =>
                 string.Equals(d.Instance, chain.Database.Instance, StringComparison.OrdinalIgnoreCase) && string.Equals(d.Database, chain.Database.Name, StringComparison.OrdinalIgnoreCase));

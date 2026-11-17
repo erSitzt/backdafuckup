@@ -23,7 +23,6 @@ public sealed class TapeBackupRunner(
     TapeLibraries libraries,
     TapeLocks locks,
     TapeSessionRunner robot,
-    RepositoryManager repositories,
     CredentialProtector protector,
     SessionEventWriter events,
     ServerPaths paths,
@@ -31,7 +30,8 @@ public sealed class TapeBackupRunner(
     TimeProvider time,
     Telemetry.BackupMetrics metrics,
     TapeOperatorRequests requests,
-    SessionTracker tracker)
+    SessionTracker tracker,
+    RestorePointAccess access)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -89,20 +89,32 @@ public sealed class TapeBackupRunner(
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     current = await TaskProgress.BeginAsync(tracker, session.Id, point.VmNativeId, point.VmName, time, cancellationToken).ConfigureAwait(false);
-                    Core.Repository.IBackupRepository repository;
+                    // Pinned where the catalog says now: the rows were read at the start, and the point may have moved since.
+                    PinnedObject pinned;
                     try
                     {
-                        repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
+                        pinned = await access.PinRestorePointAsync(point, cancellationToken).ConfigureAwait(false);
                     }
-                    catch (Exception ex) when (ex is IOException or InvalidOperationException or KeyNotFoundException)
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                     {
                         log.Warning($"{point.VmName}: its repository cannot be read ({ex.Message}); it is copied with the next run.");
                         await current.FinishAsync(SessionState.Failed, $"Its repository cannot be read: {ex.Message}").ConfigureAwait(false);
                         failed++;
                         continue;
                     }
+                    catch (Exception ex) when (ex is InvalidOperationException or KeyNotFoundException)
+                    {
+                        log.Warning($"{point.VmName}: {ex.Message} It is not copied.");
+                        await current.FinishAsync(SessionState.Failed, ex.Message).ConfigureAwait(false);
+                        failed++;
+                        continue;
+                    }
 
-                    await writer.CopyRestorePointAsync(point, repository, current.Report, cancellationToken).ConfigureAwait(false);
+                    using (pinned)
+                    {
+                        await writer.CopyRestorePointAsync(point, pinned.Repository, current.Report, cancellationToken).ConfigureAwait(false);
+                    }
+
                     await current.FinishAsync(SessionState.Succeeded, null).ConfigureAwait(false);
                 }
 
@@ -115,20 +127,30 @@ public sealed class TapeBackupRunner(
                     foreach (var backup in sqlBackups)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        Core.Repository.IBackupRepository repository;
+                        PinnedObject pinned;
                         try
                         {
-                            repository = await repositories.GetAsync(backup.RepositoryId, cancellationToken).ConfigureAwait(false);
+                            pinned = await access.PinSqlBackupAsync(backup.Id, backup.RepositoryId, cancellationToken).ConfigureAwait(false);
                         }
-                        catch (Exception ex) when (ex is IOException or InvalidOperationException or KeyNotFoundException)
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                         {
                             log.Warning($"{backup.VmName}: the repository of its SQL Server backups cannot be read ({ex.Message}); they are copied with the next run.");
                             skipped = $"{sqlBackups.Count - done} not copied: the repository cannot be read ({ex.Message}).";
                             failed++;
                             break;
                         }
+                        catch (Exception ex) when (ex is InvalidOperationException or KeyNotFoundException)
+                        {
+                            log.Info($"{backup.VmName}: {ex.Message} It is not copied.");
+                            current.Report(++done, sqlBackups.Count);
+                            continue;
+                        }
 
-                        await writer.CopySqlBackupAsync(backup, repository, cancellationToken).ConfigureAwait(false);
+                        using (pinned)
+                        {
+                            await writer.CopySqlBackupAsync(backup, pinned.Repository, cancellationToken).ConfigureAwait(false);
+                        }
+
                         current.Report(++done, sqlBackups.Count);
                     }
 
@@ -305,8 +327,11 @@ public sealed class TapeBackupRunner(
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var inSet = await db.TapeCopies.AsNoTracking().Where(c => c.SetId == set.Id).Select(c => new { c.Kind, c.OriginalId, c.VmId, c.RepositoryId, c.CreatedUtc })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-        var vms = inSet.Where(c => c.Kind == TapeFileTypes.RestorePoint).Select(c => (c.VmId, c.RepositoryId, c.CreatedUtc))
-            .Concat(points.Select(p => (VmId: p.VmNativeId, p.RepositoryId, p.CreatedUtc)))
+        // By logical repository: the extents of a scale-out count as one (a VM's points and logs may be on different ones).
+        var logical = await ScaleOut.RepositoryGroups.LogicalAsync(db, cancellationToken).ConfigureAwait(false);
+        Guid Logical(Guid id) => logical.GetValueOrDefault(id, id);
+        var vms = inSet.Where(c => c.Kind == TapeFileTypes.RestorePoint).Select(c => (c.VmId, RepositoryId: Logical(c.RepositoryId), c.CreatedUtc))
+            .Concat(points.Select(p => (VmId: p.VmNativeId, RepositoryId: Logical(p.RepositoryId), p.CreatedUtc)))
             .GroupBy(v => (v.VmId, v.RepositoryId))
             .Select(g => (g.Key.VmId, g.Key.RepositoryId, Since: g.Min(v => v.CreatedUtc)))
             .ToList();
@@ -314,8 +339,9 @@ public sealed class TapeBackupRunner(
         var result = new List<SqlBackupEntity>();
         foreach (var (vmId, repositoryId, since) in vms)
         {
+            var members = logical.Where(l => l.Value == repositoryId).Select(l => l.Key).Append(repositoryId).Distinct().ToList();
             var backups = await db.SqlBackups.AsNoTracking()
-                .Where(b => b.VmNativeId == vmId && b.RepositoryId == repositoryId && b.State == SqlBackupState.Available && b.CreatedUtc >= since)
+                .Where(b => b.VmNativeId == vmId && members.Contains(b.RepositoryId) && b.State == SqlBackupState.Available && b.CreatedUtc >= since)
                 .OrderBy(b => b.CreatedUtc)
                 .ToListAsync(cancellationToken).ConfigureAwait(false);
             result.AddRange(backups.Where(b => !copied.Contains(b.Id)));

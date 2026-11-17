@@ -16,7 +16,8 @@ namespace Backdafuckup.Server.Sql;
 public static class SqlBackupCatalog
 {
     /// <summary>Records the databases a restore point's SQL Server snapshot recorded in msdb as snapshot fulls.</summary>
-    public static async Task RecordSnapshotAsync(AppDbContext db, RestorePointEntity point, IReadOnlyList<SqlSnapshotInstance> instances, DateTimeOffset now, CancellationToken cancellationToken)
+    /// <param name="repositoryId">Where the point is now, when it may differ from its (tracked) row's value: pinned after a scale-out move.</param>
+    public static async Task RecordSnapshotAsync(AppDbContext db, RestorePointEntity point, IReadOnlyList<SqlSnapshotInstance> instances, DateTimeOffset now, CancellationToken cancellationToken, Guid? repositoryId = null)
     {
         foreach (var instance in instances)
         {
@@ -43,7 +44,7 @@ public static class SqlBackupCatalog
                 {
                     SqlDatabaseId = row.Id,
                     Kind = SqlBackupSetKind.SnapshotFull,
-                    RepositoryId = point.RepositoryId,
+                    RepositoryId = repositoryId ?? point.RepositoryId,
                     RestorePointId = point.Id,
                     BackupSetUuid = uuid,
                     FirstLsn = Lsn(facts?.FirstLsn ?? database.FirstLsn!),

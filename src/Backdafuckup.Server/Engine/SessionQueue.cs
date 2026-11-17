@@ -252,6 +252,29 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Queues a move between the extents of a scale-out repository; one queued or running at a time per scale-out.</summary>
+    public async Task<Guid> EnqueueMoveAsync(ScaleOut.RepositoryMoveRequest request, string name, string triggeredBy, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        if (await db.Sessions.AnyAsync(s => s.Kind == SessionKind.RepositoryMove && s.RepositoryId == request.ScaleOutId
+                && (s.State == SessionState.Queued || s.State == SessionState.Running || s.State == SessionState.Stopping), cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidOperationException("A move of this scale-out repository is queued or running already.");
+        }
+
+        var session = new SessionEntity
+        {
+            Kind = SessionKind.RepositoryMove,
+            RepositoryId = request.ScaleOutId,
+            Name = name,
+            TriggeredBy = triggeredBy,
+            State = SessionState.Queued,
+            CreatedUtc = time.GetUtcNow(),
+            Parameters = ScaleOut.RepositoryMoveRunner.Serialize(request),
+        };
+        return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
+    }
+
     private static async Task<string?> ObjectKindAsync(AppDbContext db, Guid restorePointId, CancellationToken cancellationToken) =>
         await db.RestorePoints.Where(r => r.Id == restorePointId).Select(r => r.ObjectKind).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 

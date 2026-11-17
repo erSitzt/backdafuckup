@@ -42,6 +42,7 @@ public static class ObjectKindUi
                 "SqlBackup" or "SqlPublish" or "SqlRestore" or "SqlExport" => (AppIcons.Database, "kind-other", "SQL Server"),
                 "AdExplore" or "AdRestore" => (AppIcons.ActiveDirectory, "kind-other", "Active Directory"),
                 "RepositoryMaintenance" => (AppIcons.Repository, "kind-other", "Repository"),
+                "RepositoryMove" => (AppIcons.Repository, "kind-other", "Repository"),
                 "AgentDeployment" => (AppIcons.Agent, "kind-other", "Guest agents"),
                 _ => (AppIcons.Vm, VmCss, "VM"),
             },

@@ -121,6 +121,9 @@ Both contain the same 15 alerts:
 | BackdafuckupTapeJobFailed | a tape job failed in the last 6 hours |
 | BackdafuckupTapeOperatorWaiting | a tape session has waited 30 minutes for a cartridge in a standalone drive |
 | BackdafuckupClusterSnapshotLongLived | a volume snapshot of a Kubernetes cluster lived over 2 hours (in the last day) |
+| BackdafuckupScaleOutNoRoom | no extent of a scale-out repository that takes new chains has 10 % free (30 minutes) |
+| BackdafuckupExtentOffline | an extent of a scale-out repository cannot be reached (15 minutes) |
+| BackdafuckupEvacuationStuck | an extent being evacuated still holds restore points and nothing moved for 6 hours |
 
 After changing `backdafuckup.rules.yml`, check it and regenerate the `PrometheusRule`:
 

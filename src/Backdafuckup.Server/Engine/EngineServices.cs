@@ -26,6 +26,7 @@ public sealed class SessionRunnerService(
     Tape.TapeBackupRunner tapeBackups,
     Tape.TapeRestoreRunner tapeRestores,
     Tape.TapeCatalogRebuild tapeRebuild,
+    ScaleOut.RepositoryMoveRunner moves,
     StartupRecovery recovery,
     Telemetry.BackupMetrics metrics,
     IOptions<EngineOptions> options,
@@ -106,6 +107,9 @@ public sealed class SessionRunnerService(
 
         // Tape sessions wait for their drive and the robot themselves (FIFO, the holder named in the log).
         SessionKind.TapeMaintenance or SessionKind.TapeBackup or SessionKind.TapeRestore => true,
+
+        // Moves between extents run next to backups (each chain's switch waits for its backup), one at a time.
+        SessionKind.RepositoryMove => running.Count(SessionKind.RepositoryMove) == 0,
         _ => false,
     };
 
@@ -132,6 +136,7 @@ public sealed class SessionRunnerService(
                     : await tapes.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.TapeBackup => await tapeBackups.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.TapeRestore => await tapeRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.RepositoryMove => await moves.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 _ => (SessionState.Failed, "Unknown session kind."),
             };
 
@@ -592,6 +597,15 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Clusters.ClusterAgents>();
         services.AddSingleton<ConnectionManager>();
         services.AddSingleton<RepositoryManager>();
+        services.AddSingleton<RestorePointAccess>();
+        services.TryAddSingleton<ScaleOut.IVolumeSpace, ScaleOut.DriveVolumeSpace>();
+        services.AddSingleton<ScaleOut.RepositoryPlacement>();
+        services.AddSingleton<ScaleOut.ChainLocks>();
+        services.AddSingleton<ScaleOut.ScaleOutAdmin>();
+        services.AddSingleton<ScaleOut.ChainMover>();
+        services.AddSingleton<ScaleOut.RepositoryMoveRunner>();
+        services.AddSingleton<ScaleOut.ScaleOutBalancer>();
+        services.AddHostedService(sp => sp.GetRequiredService<ScaleOut.ScaleOutBalancer>());
         services.AddSingleton<RunningSessions>();
         services.AddSingleton<SessionQueue>();
         services.AddSingleton<SessionTracker>();
@@ -602,6 +616,7 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<RestoreSessionRunner>();
         services.AddSingleton<MaintenanceSessionRunner>();
         services.Configure<Tape.TapeOptions>(configuration.GetSection("Tape"));
+        services.Configure<ScaleOut.ScaleOutOptions>(configuration.GetSection("ScaleOut"));
         services.TryAddSingleton<Backdafuckup.Tape.Devices.ITapeHost, Backdafuckup.Tape.Devices.LocalTapeHost>();
         services.AddSingleton<Tape.TapeAgents>();
         services.AddSingleton<Tape.TapeHosts>();

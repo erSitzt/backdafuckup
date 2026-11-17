@@ -70,6 +70,29 @@ public sealed class ApiClient(HttpClient http)
         await EnsureSuccessAsync(response);
     }
 
+    /// <summary>PUT or POST whose success may carry a note (<c>{ "message": … }</c>, e.g. 202 "waiting for …"); null without one.</summary>
+    public async Task<string?> SendForMessageAsync(HttpMethod method, string url, object? body = null)
+    {
+        using var request = new HttpRequestMessage(method, url) { Content = JsonContent.Create(body, options: Json) };
+        using var response = await http.SendAsync(request);
+        await EnsureSuccessAsync(response);
+        var text = await response.Content.ReadAsStringAsync();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            return doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("message", out var message) ? message.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     public async Task DeleteAsync(string url)
     {
         using var response = await http.DeleteAsync(url);

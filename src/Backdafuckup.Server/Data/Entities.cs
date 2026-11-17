@@ -270,6 +270,22 @@ public sealed class InventoryEntry
 public enum RepositoryKind
 {
     LocalDirectory,
+
+    /// <summary>A scale-out repository: no directory of its own, its data is on its extents (directory repositories).</summary>
+    ScaleOut,
+}
+
+/// <summary>What new data may do on an extent of a scale-out repository.</summary>
+public enum ExtentState
+{
+    /// <summary>New chains and new restore points of its chains.</summary>
+    Active,
+
+    /// <summary>No new chains; a chain's next backup starts anew on another extent. Its points stay until retention removes them.</summary>
+    Sealed,
+
+    /// <summary>Its chains are being moved to other extents; until a chain is switched, its backups still go here.</summary>
+    Evacuating,
 }
 
 public enum RepositoryState
@@ -307,6 +323,20 @@ public sealed class BackupRepositoryEntity
     public string? LastError { get; set; }
 
     public uint Version { get; set; }
+
+    /// <summary>The scale-out repository this directory is an extent of; null for standalone repositories and scale-out rows.</summary>
+    public Guid? ScaleOutId { get; set; }
+
+    /// <summary>For extents: what new data may do here.</summary>
+    public ExtentState ExtentState { get; set; }
+
+    /// <summary>For extents: closed for maintenance (nothing is read or written until it is switched off).</summary>
+    public bool Maintenance { get; set; }
+
+    public DateTimeOffset? MaintenanceSinceUtc { get; set; }
+
+    /// <summary>For scale-out rows: placement and balancing settings.</summary>
+    public ScaleOutSettings? ScaleOutSettings { get; set; }
 }
 
 public enum ScheduleKind
@@ -660,6 +690,9 @@ public enum SessionKind
 
     /// <summary>A copy brought back from tape into a repository.</summary>
     TapeRestore,
+
+    /// <summary>Moves chains between the extents of a scale-out repository (by hand, rebalance, evacuation).</summary>
+    RepositoryMove,
 }
 
 public enum GuestProcessingMode

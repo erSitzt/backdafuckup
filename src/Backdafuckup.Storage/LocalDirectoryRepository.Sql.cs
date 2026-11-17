@@ -70,21 +70,10 @@ public sealed partial class LocalDirectoryRepository
                 throw new SqlBackupPinnedException(sqlBackupId);
             }
 
-            if (!_sqlBackups.TryGetValue(sqlBackupId, out var directory))
+            if (_sqlBackups.TryGetValue(sqlBackupId, out var directory))
             {
-                return;
+                RemoveObjectDirectory(_sqlBackups, sqlBackupId, directory);
             }
-
-            var manifest = Path.Combine(directory, ManifestFileName);
-            if (File.Exists(manifest))
-            {
-                File.Move(manifest, Path.Combine(directory, DeletedManifestFileName), overwrite: true);
-                AtomicFile.SyncDirectory(directory);
-            }
-
-            _sqlBackups.TryRemove(sqlBackupId, out _);
-            Directory.Delete(directory, recursive: true);
-            TryDeleteEmptyDirectory(Path.GetDirectoryName(directory)!);
         }
         finally
         {

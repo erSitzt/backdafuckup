@@ -283,6 +283,62 @@ One run packs for at most 4 hours (`Engine:PackLooseMaxDuration`) and queues the
 
 A verify of the restore points names the chunks that are damaged or missing, with the pack file and the offset.
 
+### Scale-out repositories
+
+Several directory repositories on different volumes (**extents**) form one **scale-out repository**. Jobs write to the scale-out repository; it decides on which extent each chain lives.
+
+- **A chain** is one job's restore points of one VM, Kubernetes namespace or cluster scope, together with that VM's SQL Server backups. It lives on one extent: an incremental reuses the chunks of its previous restore point, and chunks are deduplicated only within one extent.
+- **New chains** go to the active extent with the most room. Room is its free space minus what running backups reserve (their expected size), minus a share kept free (*Keep free for new chains*, 5 % by default). With less than 2 % between two extents, the one with fewer running backups wins.
+- **Restore points keep their ids** wherever they move. Restores, verify, tape jobs and file-level restore read each restore point from the extent it is on.
+
+**Making one.** *Backup Infrastructure → Repositories → ⋮ → Add extent (makes it a scale-out repository)…* (`POST /api/repositories/{id}/extents`):
+- The repository becomes the first extent of a new scale-out repository, keeping its name.
+- Its jobs write to the scale-out from then on, and its chains stay where they are.
+- More extents are added the same way on the scale-out repository.
+- **Rules for extents:** every extent of one scale-out uses the same block size. Two extents on the same volume are refused, or free space would count twice.
+- **An existing directory:** it is imported as the extent, with its restore points.
+
+**Extent states**
+
+| Extent | New chains | Next backup of a chain on it | Restores |
+|---|---|---|---|
+| Active | yes | incremental there; with little space too (a rebalance relieves it) | yes |
+| Sealed | no | a new full on another extent; the older points stay until retention removes them | yes |
+| Evacuating | no | incremental there until the move switches the chain | yes |
+| Maintenance | no | a new full on another extent (or the VM is skipped, see below) | no |
+| Offline (directory unreachable) | no | as in maintenance | no |
+
+- **Seal** an extent that should no longer grow (*⋮ → Seal*).
+- **Maintenance** closes an extent for work on its volume. Nothing is read or written there until it ends; it closes once the restores, file browsers and backups using it have finished (`PUT /api/repositories/{id}/extent`).
+- **Unavailable extent** (maintenance or offline): with *Chain on an extent in maintenance or offline: new full on another extent* switched off, such VMs are skipped with a warning instead.
+- **SQL Server log backups** of such a VM go to another extent for that run only.
+
+**Moving chains.** *Repositories → the scale-out → Chains → ⋮ → Move to …* (`POST /api/repositories/{id}/moves`) copies a chain to another extent and then switches it:
+1. **Copying:** its restore points are copied oldest first, while backups and restores go on. Only chunks the target does not have yet are read, and they are stored as they are, checked.
+2. **SQL Server backups:** they follow one by one.
+3. **The switch:** it waits for a running backup of that chain (*Wait for a running backup*, 6 hours), copies what that backup wrote, and switches the restore points to the target in one step. Every next backup of the chain is an incremental on the target.
+4. **Deleting the source copies:** only once nobody reads them any more. A file browser or a published database keeps its copy until it is closed.
+5. **Garbage collection** then frees the space on the source.
+
+The session shows one task per chain with its progress. A move that is interrupted (service restart) leaves its copies for the next move of the chain; nothing is lost or counted twice. *Move at most MB/s* keeps moves from slowing backups on the same disks.
+
+**Evacuating** (*⋮ → Evacuate*, `POST /api/repositories/{id}/evacuate`) moves every chain off an extent to the active extents with the most room:
+- **Points without a job** (brought back from tape, of deleted jobs) are moved one by one.
+- **When it is done,** the extent is empty and sealed, and can be removed (*⋮ → Remove extent*).
+- **Removal is refused** while the extent holds anything or is the last extent.
+- **On disk:** the directory itself is kept.
+
+**Rebalancing**
+- *Rebalance…* shows a plan first: which chains move where, their size (≈, from each restore point's new data) and each extent's free space before and after. *Move* runs it.
+- **What it changes:** it moves chains from the fullest active extent to the one with the most room, choosing the chain after whose move the two are most even. It stops when the extents are within the limits.
+- **Chains it leaves alone:** those that are backing up, were moved recently (*Days before a chain moves again*), or are due within the hour.
+- **Automatic rebalance** runs in the window (days, from–to, time zone) when an active extent has less than *Low free space* or the extents differ by more than *Imbalance* percentage points of use. *At most GiB per run* caps a run; a run that reaches the end of the window pauses and continues in the next one.
+
+**Limits**
+- Deduplication works within an extent, not across extents. VMs that share much data (clones of one template) deduplicate best on one extent.
+- Extents are directories for now; SMB, NFS and S3 extents come with those repository types.
+- **A lost database:** add each extent's directory as a repository again, then add them as extents of a new scale-out repository. Their restore points are imported with their ids.
+
 ## Backups & Restore
 
 The page lists every VM and Kubernetes namespace with restore points once, with its newest restore point. Expanding one loads all its restore points (Restore, Verify, Delete); its *Restore* button restores from its newest one.
@@ -1287,6 +1343,9 @@ What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the S
 | `bdfu_repository_format`, `bdfu_repository_packs`, `bdfu_repository_pack_bytes`, `bdfu_repository_index_entries`, `bdfu_repository_index_memory_bytes` {repository} | gauge | Format (1 = one file per chunk, 2 = pack files) and the packs and index of each repository |
 | `bdfu_repository_unused_bytes`, `bdfu_repository_packing_unfinished` {repository} | gauge | Unused bytes left in packs after the last garbage collection; 1 while a converted repository still has chunk files to pack |
 | `bdfu_repository_repacked_bytes_total`, `bdfu_repository_packed_loose_chunks_total` {repository} | counter | Bytes copied out of sparse packs by garbage collection; chunk files moved into packs after a conversion |
+| `bdfu_repository_extent_state` {repository, scale_out, state}, `bdfu_repository_chains` {repository, scale_out} | gauge | 1 for each extent's state (active, sealed, evacuating, maintenance, offline); the chains whose new data goes there |
+| `bdfu_scaleout_size_bytes`, `bdfu_scaleout_free_bytes`, `bdfu_scaleout_max_free_ratio`, `bdfu_scaleout_pending_source_deletes` {scale_out} | gauge | All extents' size; free space on the extents that take new chains, and the largest free share among them; copies of moves still to delete |
+| `bdfu_repository_move_bytes_total` {scale_out} | counter | Bytes copied between extents by moves |
 | `bdfu_agents` {state}, `bdfu_agent_last_contact_timestamp_seconds` {agent} | gauge | Guest agents online and offline |
 | `bdfu_sql_last_log_backup_timestamp_seconds`, `bdfu_sql_log_backup_interval_seconds` {vm, sql_instance, database} | gauge | Newest log backup per database and the job's interval. A database that the newest run of its VM no longer saw (dropped) is left out |
 | `bdfu_artifacts_pending` | gauge | Snapshots and disks still to be removed or reduced (retried every 10 minutes) |

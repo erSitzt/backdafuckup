@@ -45,6 +45,37 @@
     </MudPaper>
 }
 
+@if (_extentFor is { } owner)
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="2">
+        <MudText Typo="Typo.h6" Class="mb-2">@(owner.Kind == "ScaleOut" ? $"Add an extent to {owner.Name}" : $"Add an extent to {owner.Name}: make it a scale-out repository")</MudText>
+        <MudText Typo="Typo.body2" Class="mb-3">
+            @if (owner.Kind == "ScaleOut")
+            {
+                <span>A directory on another volume. New chains go to the extent with the most room; existing chains stay where they are until they are moved.</span>
+            }
+            else
+            {
+                <span>@owner.Name becomes the first extent of a new scale-out repository; its jobs write to the scale-out from then on, and its restore points stay where they are.
+                Each chain (a job's restore points of one VM) lives on one extent; new chains go where there is most room.</span>
+            }
+        </MudText>
+        <MudGrid>
+            @if (owner.Kind != "ScaleOut")
+            {
+                <MudItem xs="12" md="4"><MudTextField @bind-Value="_scaleOutName" Label="Name of the scale-out repository" Variant="Variant.Outlined" /></MudItem>
+            }
+            <MudItem xs="12" md="4"><MudTextField @bind-Value="_extentName" Label="Name of the new extent" Variant="Variant.Outlined" /></MudItem>
+            <MudItem xs="12" md="@(owner.Kind == "ScaleOut" ? 8 : 4)"><MudTextField @bind-Value="_extentPath" Label="Path on another volume" Variant="Variant.Outlined" /></MudItem>
+        </MudGrid>
+        <div class="d-flex gap-2 mt-4">
+            <MudButton OnClick="@(() => _extentFor = null)">Cancel</MudButton>
+            <MudSpacer />
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="AddExtentAsync">Add extent</MudButton>
+        </div>
+    </MudPaper>
+}
+
 @if (_items is null)
 {
     <MudProgressLinear Indeterminate="true" />
@@ -52,18 +83,23 @@
 else
 {
     <div class="cq">
-    <MudTable Items="_items" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
+    <MudTable Items="@(_items.Where(r => r.ScaleOutId is null))" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
         <HeaderContent>
             <MudTh>Name</MudTh><MudTh>State</MudTh><MudTh Class="c-560">Capacity</MudTh><MudTh Class="c-760">Restore points</MudTh><MudTh Class="c-950 num">Block size</MudTh><MudTh Class="c-950">Storage</MudTh><MudTh></MudTh>
         </HeaderContent>
         <RowTemplate>
-            <MudTd>@context.Name<span class="cell-sub mono">@context.Path</span></MudTd>
-            <MudTd><StateChip State="@context.State" /></MudTd>
-            <MudTd Class="c-560">
-                @{ var used = context.TotalBytes is > 0 && context.FreeBytes is { } free ? 100.0 * (context.TotalBytes.Value - free) / context.TotalBytes.Value : 0; }
-                <MudProgressLinear Value="@used" Rounded="true" Size="Size.Small" Color="@(used > 90 ? Color.Error : used > 75 ? Color.Warning : Color.Primary)" Style="max-width:220px" />
-                <span class="cell-sub nowrap">@Fmt.Bytes(context.FreeBytes) free of @Fmt.Bytes(context.TotalBytes)</span>
+            <MudTd>
+                @if (context.Kind == "ScaleOut")
+                {
+                    <MudLink Href="@($"/infrastructure/repositories/{context.Id}")">@context.Name</MudLink><span class="cell-sub">scale-out, @context.Extents extent(s), @context.Chains chain(s)</span>
+                }
+                else
+                {
+                    @context.Name<span class="cell-sub mono">@context.Path</span>
+                }
             </MudTd>
+            <MudTd><StateChip State="@context.State" /></MudTd>
+            <MudTd Class="c-560"><CapacityBar Repository="context" /></MudTd>
             <MudTd Class="c-760">@context.RestorePoints<span class="cell-sub">@Fmt.Bytes(context.LogicalBytes) of VM disks</span></MudTd>
             <MudTd Class="c-950 num">@Fmt.Bytes(context.ChunkSize)</MudTd>
             <MudTd Class="c-950">
@@ -78,9 +114,17 @@ else
             </MudTd>
             <MudTd Style="text-align:right; white-space:nowrap">
                 <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                    @if (context.Kind == "ScaleOut")
+                    {
+                        <MudMenuItem Icon="@Icons.Material.Filled.OpenInNew" Href="@($"/infrastructure/repositories/{context.Id}")">Open: chains, rebalance, settings</MudMenuItem>
+                    }
+                    <MudMenuItem Icon="@Icons.Material.Filled.AddBox" OnClick="@(() => StartExtent(context))">@(context.Kind == "ScaleOut" ? "Add extent…" : "Add extent (makes it a scale-out repository)…")</MudMenuItem>
                     <MudMenuItem Icon="@Icons.Material.Filled.CleaningServices" OnClick="@(() => CollectGarbageAsync(context))">Remove unreferenced data now</MudMenuItem>
                     <MudMenuItem Icon="@Icons.Material.Filled.Sync" OnClick="@(() => RescanAsync(context))">Import restore points missing in the catalog</MudMenuItem>
-                    @if (context.Format == 1)
+                    @if (context.Kind == "ScaleOut")
+                    {
+                    }
+                    else if (context.Format == 1)
                     {
                         <MudMenuItem Icon="@Icons.Material.Filled.Inventory2" OnClick="@(() => ConvertAsync(context))">Convert to pack files…</MudMenuItem>
                     }
@@ -93,6 +137,20 @@ else
                 </MudMenu>
             </MudTd>
         </RowTemplate>
+        <ChildRowContent>
+            @foreach (var extent in _items.Where(e => e.ScaleOutId == context.Id))
+            {
+                <MudTr>
+                    <MudTd><div class="pl-6">@extent.Name<span class="cell-sub mono">@extent.Path</span></div></MudTd>
+                    <MudTd><ExtentStateChips Extent="extent" /></MudTd>
+                    <MudTd Class="c-560"><CapacityBar Repository="extent" /></MudTd>
+                    <MudTd Class="c-760">@extent.RestorePoints<span class="cell-sub">@extent.Chains chain(s)</span></MudTd>
+                    <MudTd Class="c-950 num">@Fmt.Bytes(extent.ChunkSize)</MudTd>
+                    <MudTd Class="c-950">@(extent.Format == 2 ? "Pack files" : extent.Format == 1 ? "One file per chunk" : "")</MudTd>
+                    <MudTd Style="text-align:right; white-space:nowrap"><ExtentMenu Extent="extent" Changed="LoadAsync" /></MudTd>
+                </MudTr>
+            }
+        </ChildRowContent>
         <NoRecordsContent><MudText>No repository yet.</MudText></NoRecordsContent>
     </MudTable>
     </div>
@@ -108,8 +166,44 @@ else
     private int _compression = 3;
     private int _maxTasks = 4;
     private int _packMiB = 64;
+    private RepositoryDto? _extentFor;
+    private string _scaleOutName = string.Empty;
+    private string _extentName = string.Empty;
+    private string _extentPath = string.Empty;
 
     protected override Task OnInitializedAsync() => LoadAsync();
+
+    private void StartExtent(RepositoryDto owner)
+    {
+        _extentFor = owner;
+        _scaleOutName = owner.Kind == "ScaleOut" ? string.Empty : $"{owner.Name} (scale-out)";
+        _extentName = string.Empty;
+        _extentPath = string.Empty;
+    }
+
+    private async Task AddExtentAsync()
+    {
+        _busy = true;
+        try
+        {
+            var owner = _extentFor!;
+            await Api.PostAsync($"api/repositories/{owner.Id}/extents", new AddExtentDto
+            {
+                Name = _extentName.Trim(), Path = _extentPath.Trim(), ScaleOutName = owner.Kind == "ScaleOut" ? null : _scaleOutName.Trim(),
+            });
+            Snackbar.Add(owner.Kind == "ScaleOut" ? $"Extent {_extentName} added to {owner.Name}." : $"{owner.Name} is now an extent of {_scaleOutName}, with {_extentName}.", Severity.Success);
+            _extentFor = null;
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
 
     private async Task LoadAsync() => _items = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
 

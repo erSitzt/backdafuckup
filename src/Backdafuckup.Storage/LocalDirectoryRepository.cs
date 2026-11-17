@@ -240,26 +240,33 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
                 throw new RestorePointPinnedException(restorePointId);
             }
 
-            if (!_restorePoints.TryGetValue(restorePointId, out var directory))
+            if (_restorePoints.TryGetValue(restorePointId, out var directory))
             {
-                return;
+                RemoveObjectDirectory(_restorePoints, restorePointId, directory);
             }
-
-            var manifest = Path.Combine(directory, ManifestFileName);
-            if (File.Exists(manifest))
-            {
-                File.Move(manifest, Path.Combine(directory, DeletedManifestFileName), overwrite: true);
-                AtomicFile.SyncDirectory(directory);
-            }
-
-            _restorePoints.TryRemove(restorePointId, out _);
-            Directory.Delete(directory, recursive: true);
-            TryDeleteEmptyDirectory(Path.GetDirectoryName(directory)!);
         }
         finally
         {
             _gcMutex.Release();
         }
+    }
+
+    /// <summary>
+    /// Under the GC mutex: renames the manifest first (an interrupted delete leaves no committed object behind), then
+    /// removes the object's directory.
+    /// </summary>
+    private void RemoveObjectDirectory(ConcurrentDictionary<Guid, string> objects, Guid id, string directory)
+    {
+        var manifest = Path.Combine(directory, ManifestFileName);
+        if (File.Exists(manifest))
+        {
+            File.Move(manifest, Path.Combine(directory, DeletedManifestFileName), overwrite: true);
+            AtomicFile.SyncDirectory(directory);
+        }
+
+        objects.TryRemove(id, out _);
+        Directory.Delete(directory, recursive: true);
+        TryDeleteEmptyDirectory(Path.GetDirectoryName(directory)!);
     }
 
     public async Task<GcResult> CollectGarbageAsync(IProgress<string>? progress, CancellationToken cancellationToken)

@@ -214,7 +214,7 @@ else
                         <MudSelect T="Guid" @bind-Value="_repositoryId" Label="Backup repository" Variant="Variant.Outlined">
                             @foreach (var repository in _repositories)
                             {
-                                <MudSelectItem T="Guid" Value="repository.Id">@repository.Name (@Fmt.Bytes(repository.FreeBytes) free)</MudSelectItem>
+                                <MudSelectItem T="Guid" Value="repository.Id">@repository.Name (@(repository.Kind == "ScaleOut" ? $"scale-out, {repository.Extents} extents, " : "")@Fmt.Bytes(repository.FreeBytes) free)</MudSelectItem>
                             }
                         </MudSelect>
                         <MudNumericField @bind-Value="_retention" Label="Restore points to keep" Min="1" Max="10000" Variant="Variant.Outlined"
@@ -788,7 +788,8 @@ else
     protected override async Task OnInitializedAsync()
     {
         _pools = [.. (await Api.GetAsync<List<ConnectionDto>>("api/connections")).OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase)];
-        _repositories = await Api.GetAsync<List<RepositoryDto>>("api/repositories");
+        // Extents are no target of their own: their scale-out repository places each VM on one.
+        _repositories = [.. (await Api.GetAsync<List<RepositoryDto>>("api/repositories")).Where(r => r.ScaleOutId is null)];
         _credentials = await Api.GetAsync<List<WindowsCredentialDto>>("api/credentials");
         var logins = await Api.GetAsync<List<SqlCredentialDto>>("api/credentials/sql");
         _sqlAccounts = [.. _credentials.Select(c => (c.Id, $"{c.UserName} (Windows)")), .. logins.Select(c => (c.Id, $"{c.UserName} (SQL login)"))];

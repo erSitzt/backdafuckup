@@ -31,6 +31,7 @@ public sealed class BackupMetrics
     private readonly Histogram<double> _freeze;
     private readonly Counter<long> _snapshots;
     private readonly Counter<long> _tapeWritten;
+    private readonly Counter<long> _moveBytes;
     private readonly Counter<long> _tapeRead;
     private readonly Counter<long> _diskBytes;
     private readonly Counter<double> _diskReadSeconds;
@@ -69,6 +70,7 @@ public sealed class BackupMetrics
         _repackedBytes = meter.CreateCounter<long>("bdfu_repository_repacked_bytes_total", "By", "Bytes of chunks still in use that garbage collection copied out of sparse packs.");
         _packedLoose = meter.CreateCounter<long>("bdfu_repository_packed_loose_chunks_total", description: "Loose chunks of format 1 moved into packs after a conversion.");
         _tapeWritten = meter.CreateCounter<long>("bdfu_tape_written_bytes_total", "By", "Bytes written to tape (blocks with their headers), by media pool.");
+        _moveBytes = meter.CreateCounter<long>("bdfu_repository_move_bytes_total", "By", "Bytes copied between the extents of a scale-out repository by moves, by scale-out repository.");
         _tapeRead = meter.CreateCounter<long>("bdfu_tape_read_bytes_total", "By", "Bytes of chunks brought back from tape, by media pool.");
 
         meter.CreateObservableGauge("bdfu_sessions_running", () =>
@@ -161,6 +163,15 @@ public sealed class BackupMetrics
         _sessionDuration.Record(duration.TotalSeconds, Tag("kind", Kind(kind)), Tag("result", Result(result)));
     }
 
+    /// <summary>Bytes a move between the extents of a scale-out repository copied.</summary>
+    public void RecordMove(string scaleOut, long bytes)
+    {
+        if (bytes > 0)
+        {
+            _moveBytes.Add(bytes, new KeyValuePair<string, object?>("scale_out", scaleOut));
+        }
+    }
+
     public void RecordTape(string pool, long writtenBytes, long readBytes)
     {
         if (writtenBytes > 0)
@@ -209,6 +220,7 @@ public sealed class BackupMetrics
         SessionKind.TapeMaintenance => "tape_maintenance",
         SessionKind.TapeBackup => "tape_backup",
         SessionKind.TapeRestore => "tape_restore",
+        SessionKind.RepositoryMove => "repository_move",
         _ => kind.ToString().ToLowerInvariant(),
     };
 

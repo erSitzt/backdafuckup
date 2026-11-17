@@ -63,6 +63,10 @@
   - Device layer: SCSI commands from the public T10 standards, Windows pass-through and Linux SG_IO on the server, and a Linux tape agent for libraries on other hosts; libraries and standalone drives; WORM; LTO hardware encryption
   - Tape jobs: media pools and media sets with deduplication inside a set, our own documented format with a label and a catalog on every tape, software encryption by passphrase, SQL log backups along with their restore points
   - Restore: back into a repository, or a VM directly through a temporary cache; a recovery command that works without the server
+- **Scale-out repositories (user request 2026-11-17; spec `2026-11-17-1250-scale-out-repositories`):** several directory repositories on different volumes (extents) form one repository that jobs target
+  - Placement: each chain (one job's restore points of a VM or namespace, with its SQL Server backups) lives on one extent; new chains go where there is most room; a chain whose extent is sealed, in maintenance or offline starts a new full elsewhere
+  - Operations: move chains between extents (same ids, only missing chunks copied), seal, maintenance, evacuate, add and remove extents, convert an existing repository by adding an extent
+  - Balancing: by hand with a preview, or automatically in a time window when an extent runs low or the extents are too unequal
 - **Offsite / immutable copy:** backup copies to a secondary site, S3 or immutable storage
 - **SQL Server, follow-ups:** differential backups; automatic restore tests (restore to a point in time into a test instance and `DBCC CHECKDB` on a schedule); mail/webhook alerts for chain breaks and RPO; availability groups and failover cluster instances; streaming fulls without staging space in the VM (VDI); resumable uploads; repository pack files for the many small log backup objects
 - **Publish for file-level restore:** mount a restore point's volumes into a VM over the same loopback iSCSI as the SQL publish

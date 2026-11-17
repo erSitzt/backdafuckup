@@ -102,13 +102,46 @@ spec:
             description: "Reading the storages of pool {{ $labels.pool }} failed for 15 minutes; the storage metrics keep their last values. The server log names the error."
 
         - alert: BackdafuckupRepositoryLow
-          expr: bdfu_repository_free_bytes / bdfu_repository_size_bytes < 0.10
+          # Sealed and evacuating extents of a scale-out repository may fill up: they take no new data.
+          expr: |
+            bdfu_repository_free_bytes / bdfu_repository_size_bytes < 0.10
+              unless on(repository) bdfu_repository_extent_state{state=~"sealed|evacuating"} == 1
           for: 30m
           labels:
             severity: warning
           annotations:
             summary: "Repository {{ $labels.repository }} has less than 10 % free"
             description: "The volume of repository {{ $labels.repository }} is running out of space."
+
+        - alert: BackdafuckupScaleOutNoRoom
+          expr: bdfu_scaleout_max_free_ratio < 0.10
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Scale-out repository {{ $labels.scale_out }} has no extent with 10 % free"
+            description: "New chains of {{ $labels.scale_out }} soon find no extent with room: add an extent, unseal one, or end a maintenance."
+
+        - alert: BackdafuckupExtentOffline
+          expr: bdfu_repository_extent_state{state="offline"} == 1
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Extent {{ $labels.repository }} of {{ $labels.scale_out }} is offline"
+            description: "Its directory cannot be reached: its restore points cannot be restored, and its chains start anew on other extents (or are skipped)."
+
+        - alert: BackdafuckupEvacuationStuck
+          expr: |
+            bdfu_repository_extent_state{state="evacuating"} == 1
+              and on(repository) bdfu_repository_restore_points > 0
+              and on(repository) changes(bdfu_repository_restore_points[6h]) == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Evacuating extent {{ $labels.repository }} has not moved anything for 6 hours"
+            description: "Look at the last move session of {{ $labels.scale_out }}: chains whose backup runs long, chains that failed to move, or no extent with room."
 
         - alert: BackdafuckupSqlLogBackupLate
           expr: time() - bdfu_sql_last_log_backup_timestamp_seconds > 2 * bdfu_sql_log_backup_interval_seconds

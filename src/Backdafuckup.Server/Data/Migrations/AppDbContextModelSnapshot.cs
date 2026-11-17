@@ -470,6 +470,14 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("compression_level");
 
+                    b.Property<string>("ExtentState")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("Active")
+                        .HasColumnName("extent_state");
+
                     b.Property<long?>("FreeBytes")
                         .HasColumnType("bigint")
                         .HasColumnName("free_bytes");
@@ -483,6 +491,14 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<string>("LastError")
                         .HasColumnType("text")
                         .HasColumnName("last_error");
+
+                    b.Property<bool>("Maintenance")
+                        .HasColumnType("boolean")
+                        .HasColumnName("maintenance");
+
+                    b.Property<DateTimeOffset?>("MaintenanceSinceUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("maintenance_since_utc");
 
                     b.Property<int>("MaxConcurrentTasks")
                         .HasColumnType("integer")
@@ -501,6 +517,14 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<Guid>("RepositoryUuid")
                         .HasColumnType("uuid")
                         .HasColumnName("repository_uuid");
+
+                    b.Property<Guid?>("ScaleOutId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("scale_out_id");
+
+                    b.Property<string>("ScaleOutSettings")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("scale_out_settings");
 
                     b.Property<string>("State")
                         .IsRequired()
@@ -529,7 +553,68 @@ namespace Backdafuckup.Server.Data.Migrations
                         .IsUnique()
                         .HasDatabaseName("ix_repositories_repository_uuid");
 
+                    b.HasIndex("ScaleOutId")
+                        .HasDatabaseName("ix_repositories_scale_out_id");
+
                     b.ToTable("repositories", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.ChainPlacementEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<long?>("EstimateBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("estimate_bytes");
+
+                    b.Property<Guid>("ExtentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("extent_id");
+
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("job_id");
+
+                    b.Property<Guid?>("MoveSessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("move_session_id");
+
+                    b.Property<string>("ObjectNativeId")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)")
+                        .HasColumnName("object_native_id");
+
+                    b.Property<DateTimeOffset>("PlacedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("placed_utc");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("reason");
+
+                    b.Property<Guid>("ScaleOutId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("scale_out_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_chain_placements");
+
+                    b.HasIndex("ExtentId")
+                        .HasDatabaseName("ix_chain_placements_extent_id");
+
+                    b.HasIndex("ScaleOutId")
+                        .HasDatabaseName("ix_chain_placements_scale_out_id");
+
+                    b.HasIndex("JobId", "ObjectNativeId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_chain_placements_job_id_object_native_id");
+
+                    b.ToTable("chain_placements", (string)null);
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.ConnectionHost", b =>
@@ -981,6 +1066,95 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasDatabaseName("ix_provider_artifacts_connection_id_state");
 
                     b.ToTable("provider_artifacts", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.RepositoryMoveItemEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer")
+                        .HasColumnName("attempts");
+
+                    b.Property<long>("BytesWritten")
+                        .HasColumnType("bigint")
+                        .HasColumnName("bytes_written");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<string>("Error")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)")
+                        .HasColumnName("error");
+
+                    b.Property<Guid?>("JobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("job_id");
+
+                    b.Property<Guid>("ObjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("object_id");
+
+                    b.Property<string>("ObjectNativeId")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)")
+                        .HasColumnName("object_native_id");
+
+                    b.Property<string>("ObjectType")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("object_type");
+
+                    b.Property<Guid>("ScaleOutId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("scale_out_id");
+
+                    b.Property<Guid>("SessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("session_id");
+
+                    b.Property<Guid>("SourceExtentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("source_extent_id");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("state");
+
+                    b.Property<Guid>("TargetExtentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("target_extent_id");
+
+                    b.Property<string>("TargetPath")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("target_path");
+
+                    b.Property<DateTimeOffset>("UpdatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_utc");
+
+                    b.HasKey("Id")
+                        .HasName("pk_repository_move_items");
+
+                    b.HasIndex("ObjectId")
+                        .HasDatabaseName("ix_repository_move_items_object_id");
+
+                    b.HasIndex("SourceExtentId", "State")
+                        .HasDatabaseName("ix_repository_move_items_source_extent_id_state");
+
+                    b.HasIndex("TargetExtentId", "State")
+                        .HasDatabaseName("ix_repository_move_items_target_extent_id_state");
+
+                    b.ToTable("repository_move_items", (string)null);
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.RestorePointDisk", b =>
@@ -2967,6 +3141,39 @@ namespace Backdafuckup.Server.Data.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("fk_job_objects_jobs_job_id");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.BackupRepositoryEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.BackupRepositoryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ScaleOutId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_repositories_repositories_scale_out_id");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.ChainPlacementEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.BackupRepositoryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ExtentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_chain_placements_repositories_extent_id");
+
+                    b.HasOne("Backdafuckup.Server.Data.BackupJob", null)
+                        .WithMany()
+                        .HasForeignKey("JobId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_chain_placements_jobs_job_id");
+
+                    b.HasOne("Backdafuckup.Server.Data.BackupRepositoryEntity", null)
+                        .WithMany()
+                        .HasForeignKey("ScaleOutId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_chain_placements_repositories_scale_out_id");
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.ConnectionHost", b =>

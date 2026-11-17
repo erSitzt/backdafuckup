@@ -24,7 +24,7 @@ namespace Backdafuckup.Server.Sql;
 /// </summary>
 public sealed class SqlPublishSessionRunner(
     IDbContextFactory<AppDbContext> dbFactory,
-    RepositoryManager repositories,
+    RestorePointAccess access,
     ChunkCache cache,
     SessionEventWriter events,
     SessionTracker tracker,
@@ -86,10 +86,10 @@ public sealed class SqlPublishSessionRunner(
                 var logs = new List<SqlChainFile>();
                 foreach (var set in chain.Logs)
                 {
-                    var repository = await repositories.GetAsync(set.RepositoryId, cancellationToken).ConfigureAwait(false);
-                    chainPins.Add(repository.PinSqlBackup(set.SqlBackupId!.Value));
+                    var pinned = await access.PinSqlBackupAsync(set.SqlBackupId!.Value, set.RepositoryId, cancellationToken).ConfigureAwait(false);
+                    chainPins.Add(pinned);
                     var id = set.Id.ToString("N");
-                    chainFiles[id] = new SqlJobFile(repository, set.SqlBackupId.Value, set.FileKey!, set.FileName ?? id, set.Size);
+                    chainFiles[id] = new SqlJobFile(pinned.Repository, set.SqlBackupId.Value, set.FileKey!, set.FileName ?? id, set.Size);
                     logs.Add(new SqlChainFile { FileId = id, FileName = set.FileName ?? id + ".trn", Length = set.Size, Sha256 = set.Sha256 ?? string.Empty });
                 }
 
@@ -224,20 +224,12 @@ public sealed class SqlPublishSessionRunner(
     /// </summary>
     private async Task<Setup> SetUpAsync(SqlPublishRequestDto request, RestorePointEntity point, string verb, string[] capabilities, CancellationToken cancellationToken)
     {
-        var repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
-        var pin = repository.Pin(point.Id);
+        var pinned = await access.PinRestorePointAsync(point, cancellationToken).ConfigureAwait(false);
+        var repository = pinned.Repository;
+        var pin = pinned.Pin;
         IRestorePointReader? reader = null;
         try
         {
-            await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var pointState = await db.RestorePoints.Where(r => r.Id == point.Id).Select(r => (RestorePointState?)r.State).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
-                if (pointState != RestorePointState.Available)
-                {
-                    throw new InvalidOperationException($"The restore point of {point.VmName} from {point.CreatedUtc.ToLocalTime():g} is not available ({pointState?.ToString() ?? "deleted"}).");
-                }
-            }
-
             reader = await repository.OpenRestorePointAsync(point.Id, cancellationToken).ConfigureAwait(false);
             var sources = await FileRestoreMounts.OpenDisksAsync(reader, cache, cancellationToken).ConfigureAwait(false);
             var stored = await StoredGuestMetadata.ReadAsync(reader, cancellationToken).ConfigureAwait(false);

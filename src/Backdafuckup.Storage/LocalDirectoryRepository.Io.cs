@@ -355,6 +355,30 @@ public sealed partial class LocalDirectoryRepository
                 : await StoreLooseAsync(id, Encode, cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Whether the repository holds the chunk already; it is then protected for this writer's commit like a
+        /// deduplicated put (an import need not copy it).
+        /// </summary>
+        public bool TryReuseChunk(ChunkId id)
+        {
+            ThrowIfClosed();
+            if (id.IsZero)
+            {
+                return true;
+            }
+
+            var repository = Repository;
+            lock (repository._stripes[id.Stripe(StripeCount)])
+            {
+                lock (_protectedLock)
+                {
+                    _protected.Add(id);
+                }
+
+                return repository._packs is { } packs ? TryDeduplicate(packs, id) : File.Exists(repository.ChunkPath(id.ToHex()));
+            }
+        }
+
         /// <summary>A chunk's stored record; <paramref name="Pooled"/> buffers go back to the shared pool.</summary>
         protected readonly record struct EncodedChunk(byte[] Buffer, int Length, bool Pooled);
 

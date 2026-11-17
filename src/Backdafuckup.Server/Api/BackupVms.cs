@@ -65,6 +65,8 @@ public static class BackupVms
     {
         // One row per VM, job and repository (a job's repository can change), each with its newest restore point. Namespaces
         // are only unique within their cluster: theirs are told apart by the cluster's platform id (a VM's id is unique).
+        // Extents count as their scale-out repository (a VM's points may be on several of them).
+        var logical = await ScaleOut.RepositoryGroups.LogicalAsync(db, ct);
         var groups = await db.RestorePoints.AsNoTracking()
             .Where(r => r.State == RestorePointState.Available)
             .GroupBy(r => new { r.VmNativeId, Scope = r.ObjectKind != RestorePointObjectKinds.Vm ? r.PlatformId : null, r.JobId, r.RepositoryId })
@@ -111,7 +113,7 @@ public static class BackupVms
                 l.SqlDatabaseCount ?? 0, l.DomainController == true, l.AdDomain, l.MemoryImageBytes, l.SqlConsistentCount, l.ConsistencyWarning, l.SqlUserDatabaseCount, l.ObjectKind);
             var job = vmJob.Key.JobId is { } id ? jobs.GetValueOrDefault(id) : null;
             entries.Add(new Entry(vmJob.Key.VmNativeId, vmJob.Key.Scope, l.VmName, l.ConnectionId ?? job?.ConnectionId, Describe(job, vmJob.Key.JobId, job?.Name ?? l.JobName,
-                vmJob.Sum(g => g.Count), vmJob.Sum(g => g.Stored), [.. vmJob.Select(g => g.RepositoryId).Distinct()], latest, now)));
+                vmJob.Sum(g => g.Count), vmJob.Sum(g => g.Stored), [.. vmJob.Select(g => logical.GetValueOrDefault(g.RepositoryId, g.RepositoryId)).Distinct()], latest, now)));
         }
 
         // Job members without a restore point of that job.
