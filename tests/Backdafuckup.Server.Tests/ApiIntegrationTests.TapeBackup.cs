@@ -78,6 +78,10 @@ public sealed partial class ApiIntegrationTests
         var first = await RunAsync();
         Assert.True(first.Session.State == "Succeeded", first.Session.Summary + string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{first.Session.Id}/log", Ct))!.Select(l => l.Message)));
         Assert.Contains("1 restore point(s) and 1 SQL Server backup(s) copied", first.Session.Summary, StringComparison.Ordinal);
+        // A task per restore point and one for the SQL Server backups, all done; the session at 100 %.
+        Assert.Equal([("web01", "Succeeded", 100.0), ("SQL Server backups (1)", "Succeeded", 100.0)],
+            first.Tasks.OrderBy(t => t.StartedUtc).Select(t => (t.ObjectName, t.State, t.Progress)).ToArray());
+        Assert.Equal(100.0, first.Session.Progress);
         var copy = Assert.Single((await client.GetFromJsonAsync<List<TapeCopyDto>>("/api/tape/copies", Ct))!, c => c.Kind == "restore-point");
         var sqlCopy = Assert.Single((await client.GetFromJsonAsync<List<TapeCopyDto>>("/api/tape/copies", Ct))!, c => c.Kind == "sql");
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync($"/api/tape/copies/{sqlCopy.Id}/restore", new TapeRestoreRequestDto(point.RepositoryId), Ct)).StatusCode);

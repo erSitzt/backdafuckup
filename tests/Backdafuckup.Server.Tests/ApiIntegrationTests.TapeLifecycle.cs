@@ -98,9 +98,13 @@ public sealed partial class ApiIntegrationTests
         var load = (await Read<StartedDto>(client.PostAsJsonAsync($"/api/tape/libraries/{library.Id}/actions", new TapeActionDto("load", "BDF000L9", drive2.Id), Ct))).SessionId;
         await Until(async () => (await Log(load)).Any(l => l.StartsWith("Waiting for Drive 2 to be ready", StringComparison.Ordinal)));
         fake.BecomingReadyPolls = 1;
-        var refused = (await WaitForSessionAsync(client, await RunAsync())).Session;
+        var refusedRun = await WaitForSessionAsync(client, await RunAsync());
+        var refused = refusedRun.Session;
         Assert.Equal("Failed", refused.State);
         Assert.Contains("No tape in Lab can take tape #1 of the set", refused.Summary, StringComparison.Ordinal);
+        var failedTask = Assert.Single(refusedRun.Tasks);
+        Assert.Equal(("db01", "Failed"), (failedTask.ObjectName, failedTask.State));
+        Assert.Contains("No tape in Lab can take", failedTask.Error, StringComparison.Ordinal);
         Assert.Equal((ushort?)257, fake.LocationOf("BDF000L9"));
 
         // Once no session uses Drive 2, the job takes the tape from there.

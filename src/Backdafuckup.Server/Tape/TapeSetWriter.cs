@@ -66,7 +66,8 @@ internal sealed class TapeSetWriter(
     /// <summary>Room for files on the current tape, keeping the reserve before its end.</summary>
     private long Available => _remaining - Reserve(_tape?.CapacityBytes);
 
-    public async Task CopyRestorePointAsync(RestorePointEntity point, IBackupRepository repository, CancellationToken cancellationToken)
+    /// <summary>Copies a restore point into the set; <paramref name="progress"/> is told the stored bytes written of those the set lacked.</summary>
+    public async Task CopyRestorePointAsync(RestorePointEntity point, IBackupRepository repository, Action<long, long>? progress, CancellationToken cancellationToken)
     {
         var (transfer, locator) = Transfer(repository, point.VmName);
         using var pin = repository.Pin(point.Id);
@@ -74,7 +75,7 @@ internal sealed class TapeSetWriter(
             TapeFileTypes.RestorePoint, point.Id, point.RepositoryId, point.JobName, point.VmNativeId, point.VmName, point.ObjectKind, point.CreatedUtc,
             await transfer.ReadRestorePointFilesAsync(point.Id, cancellationToken).ConfigureAwait(false),
             await transfer.ListRestorePointChunksAsync(point.Id, cancellationToken).ConfigureAwait(false));
-        await CopyAsync(source, locator, cancellationToken).ConfigureAwait(false);
+        await CopyAsync(source, locator, progress, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>A SQL Server backup object (log or full) of a VM whose restore points go to the set.</summary>
@@ -85,7 +86,7 @@ internal sealed class TapeSetWriter(
             TapeFileTypes.Sql, backup.Id, backup.RepositoryId, null, backup.VmNativeId, backup.VmName, $"sql-{backup.Kind}".ToLowerInvariant(), backup.CreatedUtc,
             await transfer.ReadSqlBackupFilesAsync(backup.Id, cancellationToken).ConfigureAwait(false),
             await transfer.ListSqlBackupChunksAsync(backup.Id, cancellationToken).ConfigureAwait(false));
-        await CopyAsync(source, locator, cancellationToken).ConfigureAwait(false);
+        await CopyAsync(source, locator, null, cancellationToken).ConfigureAwait(false);
     }
 
     private static (IRepositoryTransfer Transfer, IChunkLocator Locator) Transfer(IBackupRepository repository, string vmName) =>
@@ -93,7 +94,7 @@ internal sealed class TapeSetWriter(
             ? (transfer, locator)
             : throw new InvalidOperationException($"The repository of {vmName} cannot copy to tape.");
 
-    private async Task CopyAsync(TapeCopySource source, IChunkLocator locator, CancellationToken cancellationToken)
+    private async Task CopyAsync(TapeCopySource source, IChunkLocator locator, Action<long, long>? progress, CancellationToken cancellationToken)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var driveBefore = _clock.Elapsed;
@@ -116,6 +117,10 @@ internal sealed class TapeSetWriter(
 
         var reused = ids.Count - queue.Count;
         long newBytes = 0;
+        // Progress: stored bytes of the chunks the set lacked; a cut-off archive's chunks count again only once rewritten.
+        var total = progress is null || queue.Count == 0 ? 0 : locator.PlanRead(queue).StoredBytes;
+        long committedBytes = 0;
+        progress?.Invoke(0, total);
         while (queue.Count > 0)
         {
             await EnsureTapeAsync(cancellationToken).ConfigureAwait(false);
@@ -127,6 +132,7 @@ internal sealed class TapeSetWriter(
 
             var (file, start, number) = await BeginFileAsync(TapeFileTypes.Archive, null, cancellationToken).ConfigureAwait(false);
             var written = new List<ChunkLocation>();
+            long fileBytes = 0;
             var stopped = false;
             try
             {
@@ -143,6 +149,8 @@ internal sealed class TapeSetWriter(
 
                     var position = await file.WriteRecordAsync(TapeFormat.Chunk, body, encrypt: true, cancellationToken).ConfigureAwait(false);
                     written.Add(new ChunkLocation(chunk.Id, _tape!.Sequence!.Value, number, position.Block, position.Offset, length));
+                    fileBytes += chunk.Record.Length;
+                    progress?.Invoke(Math.Min(committedBytes + fileBytes, total), total);
                 }
 
                 await file.WriteRecordAsync(TapeFormat.ArchiveIndex, ChunkLocations.Encode(written), encrypt: true, cancellationToken).ConfigureAwait(false);
@@ -154,6 +162,8 @@ internal sealed class TapeSetWriter(
                     locations[location.Id] = location;
                     newBytes += location.Length;
                 }
+
+                committedBytes += fileBytes;
 
                 var done = written.Select(l => l.Id).ToHashSet();
                 queue.RemoveAll(done.Contains);

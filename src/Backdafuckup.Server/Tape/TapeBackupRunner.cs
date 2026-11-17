@@ -30,7 +30,8 @@ public sealed class TapeBackupRunner(
     IOptions<TapeOptions> options,
     TimeProvider time,
     Telemetry.BackupMetrics metrics,
-    TapeOperatorRequests requests)
+    TapeOperatorRequests requests,
+    SessionTracker tracker)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -80,41 +81,64 @@ public sealed class TapeBackupRunner(
         var failed = 0;
         await using (var writer = new TapeSetWriter(context, dbFactory, libraries, robot, requests, options.Value, time))
         {
-            foreach (var point in points)
+            // One task per restore point (its progress the bytes written of those the set lacked), one for the SQL Server backups.
+            TaskProgress? current = null;
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                Core.Repository.IBackupRepository repository;
-                try
+                foreach (var point in points)
                 {
-                    repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex) when (ex is IOException or InvalidOperationException or KeyNotFoundException)
-                {
-                    log.Warning($"{point.VmName}: its repository cannot be read ({ex.Message}); it is copied with the next run.");
-                    failed++;
-                    continue;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    current = await TaskProgress.BeginAsync(tracker, session.Id, point.VmNativeId, point.VmName, time, cancellationToken).ConfigureAwait(false);
+                    Core.Repository.IBackupRepository repository;
+                    try
+                    {
+                        repository = await repositories.GetAsync(point.RepositoryId, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is IOException or InvalidOperationException or KeyNotFoundException)
+                    {
+                        log.Warning($"{point.VmName}: its repository cannot be read ({ex.Message}); it is copied with the next run.");
+                        await current.FinishAsync(SessionState.Failed, $"Its repository cannot be read: {ex.Message}").ConfigureAwait(false);
+                        failed++;
+                        continue;
+                    }
+
+                    await writer.CopyRestorePointAsync(point, repository, current.Report, cancellationToken).ConfigureAwait(false);
+                    await current.FinishAsync(SessionState.Succeeded, null).ConfigureAwait(false);
                 }
 
-                await writer.CopyRestorePointAsync(point, repository, cancellationToken).ConfigureAwait(false);
+                // SQL Server backups after the restore points they belong to, oldest first, so that a log chain on tape grows in order.
+                if (sqlBackups.Count > 0)
+                {
+                    current = await TaskProgress.BeginAsync(tracker, session.Id, "sql-backups", $"SQL Server backups ({sqlBackups.Count})", time, cancellationToken).ConfigureAwait(false);
+                    var done = 0;
+                    string? skipped = null;
+                    foreach (var backup in sqlBackups)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        Core.Repository.IBackupRepository repository;
+                        try
+                        {
+                            repository = await repositories.GetAsync(backup.RepositoryId, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is IOException or InvalidOperationException or KeyNotFoundException)
+                        {
+                            log.Warning($"{backup.VmName}: the repository of its SQL Server backups cannot be read ({ex.Message}); they are copied with the next run.");
+                            skipped = $"{sqlBackups.Count - done} not copied: the repository cannot be read ({ex.Message}).";
+                            failed++;
+                            break;
+                        }
+
+                        await writer.CopySqlBackupAsync(backup, repository, cancellationToken).ConfigureAwait(false);
+                        current.Report(++done, sqlBackups.Count);
+                    }
+
+                    await current.FinishAsync(skipped is null ? SessionState.Succeeded : SessionState.Warning, skipped).ConfigureAwait(false);
+                }
             }
-
-            // SQL Server backups after the restore points they belong to, oldest first, so that a log chain on tape grows in order.
-            foreach (var backup in sqlBackups)
+            catch (Exception ex) when (current is { Finished: false })
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                Core.Repository.IBackupRepository repository;
-                try
-                {
-                    repository = await repositories.GetAsync(backup.RepositoryId, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex) when (ex is IOException or InvalidOperationException or KeyNotFoundException)
-                {
-                    log.Warning($"{backup.VmName}: the repository of its SQL Server backups cannot be read ({ex.Message}); they are copied with the next run.");
-                    failed++;
-                    break;
-                }
-
-                await writer.CopySqlBackupAsync(backup, repository, cancellationToken).ConfigureAwait(false);
+                await current.FinishAsync(cancellationToken.IsCancellationRequested ? SessionState.Stopped : SessionState.Failed, ex.Message).ConfigureAwait(false);
+                throw;
             }
 
             result = await writer.FinishAsync(cancellationToken).ConfigureAwait(false);

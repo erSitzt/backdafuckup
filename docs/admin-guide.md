@@ -1176,7 +1176,7 @@ A tape job copies restore points of backup jobs into a pool (*Tape → Tape jobs
 - **SQL Server backups** (*Include SQL Server backups*, on by default): the log and full backups of every VM whose restore points are in the set, from the oldest of those restore points on. Each run adds the newer logs, so a point-in-time restore from tape reaches up to the last run.
 - **One copy at a time.** Each copy is written as archives with the chunks the set lacks, then a restore-point file with its indexes and where all its chunks are. A synchronizing filemark commits it before the database records it. The set's catalog is written at the end of every run and before every tape change.
 - **Repository contents.** The restore points are read from the repository's pack files in storage order, without decompressing them. Pack files keep the drive streaming.
-- **Logs.** The log names each tape, its number in the set, and how much was new.
+- **Logs.** The log names each tape, its number in the set, and how much was new. Each restore point is a task of the session, its progress the share of its new data written; the SQL Server backups are one task.
 
 ### Bring a copy back
 
