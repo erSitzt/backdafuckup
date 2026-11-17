@@ -1180,7 +1180,7 @@ A tape job copies restore points of backup jobs into a pool (*Tape → Tape jobs
 
 ### Bring a copy back
 
-*Tape → On tape → Bring back…* (`POST /api/tape/copies/{id}/restore`) reads the copy into a repository with the same block size. It loads the tapes it needs in order and reads only the needed parts of each file. The copy becomes a restore point of its own, named *Imported from tape*, that belongs to no job: job retention never deletes it. From there it is restored like any other (VM, files, SQL Server, Active Directory). The VM's SQL Server backups on tape from that restore point on come back with it, for point-in-time restores. The tapes it needs must be in the library; offline ones are named.
+*Tape → On tape → Bring back…* (`POST /api/tape/copies/{id}/restore`) reads the copy into a repository with the same block size. It loads the tapes it needs in order and reads only the needed parts of each file. The copy becomes a restore point of its own, named *Imported from tape*, that belongs to no job: job retention never deletes it. From there it is restored like any other (VM, files, SQL Server, Active Directory). The VM's SQL Server backups on tape from that restore point on come back with it, for point-in-time restores. The tapes it needs must be in the library; offline ones are named. The session's task *<VM> from tape* shows how much of the copy has been read; a direct VM restore adds the VM's own task after it.
 
 ### Restore a VM directly from tape
 

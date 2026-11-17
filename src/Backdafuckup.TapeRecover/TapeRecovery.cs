@@ -145,6 +145,7 @@ internal sealed class TapeRecovery(ITapeHost host, TextWriter output, TextReader
             Guid.CreateVersion7(), // a new id, as the server gives imports: the original may still be in a catalog
             m => m with { Job = null, BaseRestorePointId = null },
             output.WriteLine,
+            null,
             cancellationToken).ConfigureAwait(false);
         var restored = result.Committed.RestorePointId;
         output.WriteLine($"{result.Chunks} chunk(s) read from {result.Tapes} tape(s); restore point {restored} (copy of {copy.OriginalId}) is in {directory}.");

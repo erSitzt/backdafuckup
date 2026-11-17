@@ -122,6 +122,8 @@ public sealed partial class ApiIntegrationTests
         var restored = await WaitForSessionAsync(client, restore.SessionId);
         Assert.True(restored.Session.State == "Succeeded", restored.Session.Summary + string.Join("\n", (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{restore.SessionId}/log", Ct))!.Select(l => l.Message)));
         Assert.Contains("with 1 SQL Server backup(s)", restored.Session.Summary, StringComparison.Ordinal);
+        var reading = Assert.Single(restored.Tasks);
+        Assert.Equal(("web01 from tape", "Succeeded", 100.0, 100.0), (reading.ObjectName, reading.State, reading.Progress, restored.Session.Progress));
         var imported = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>("/api/restore-points", Ct))!, r => r.RepositoryId == target.Id);
         Assert.Null(imported.JobId);
         Assert.StartsWith("Imported from tape", imported.JobName, StringComparison.Ordinal);

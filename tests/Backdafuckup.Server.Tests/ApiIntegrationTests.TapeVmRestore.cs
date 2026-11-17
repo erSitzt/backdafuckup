@@ -42,6 +42,11 @@ public sealed partial class ApiIntegrationTests
         Assert.True(done.Session.State == "Succeeded", done.Session.Summary + "\n" + string.Join("\n", log));
         Assert.Equal("Restored as 'app02-from-tape'.", done.Session.Summary);
         Assert.Contains(log, m => m.Contains("into the cache; Drive 1 is free again.", StringComparison.Ordinal));
+        // Two tasks: reading from tape (its progress the stored bytes), then the VM; the session at 100 %.
+        Assert.Equal([("app02 from tape", "Succeeded"), ("app02", "Succeeded")], done.Tasks.OrderBy(t => t.StartedUtc).Select(t => (t.ObjectName, t.State)).ToArray());
+        var reading = done.Tasks.Single(t => t.ObjectName == "app02 from tape");
+        Assert.Equal((100.0, copy.StoredBytes), (reading.Progress, reading.ReadBytes));
+        Assert.Equal(100.0, done.Session.Progress);
         var vm = _pool.Records("VM").Single(v => v.Str("name_label") == "app02-from-tape");
         var disk = _pool.Records("VBD").Where(b => _pool.Uuid("VM", b.Str("VM")) == vm.Str("uuid")).Select(b => b.Str("VDI"))
             .Select(r => _pool.Records("VDI").Single(v => v.Str("uuid") == _pool.Uuid("VDI", r)))

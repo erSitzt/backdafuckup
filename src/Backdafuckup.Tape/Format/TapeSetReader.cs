@@ -85,7 +85,8 @@ public static class TapeSetReader
     /// <summary>
     /// Brings a copy back into <paramref name="target"/> under <paramref name="newId"/>: its restore-point file, then its
     /// chunks tape by tape and file by file (from the first needed record of a file to its last), stored unchanged after
-    /// checking. <paramref name="fileOf"/> gives a file's first block and id from the set's catalog.
+    /// checking. <paramref name="fileOf"/> gives a file's first block and id from the set's catalog. <paramref name="progress"/>
+    /// is told the stored bytes of the chunks done so far and of all the copy needs.
     /// </summary>
     public static async Task<TapeRestoreResult> RestoreAsync(
         ITapeVolumes tapes,
@@ -98,6 +99,7 @@ public static class TapeSetReader
         Guid newId,
         Func<RestorePointManifest, RestorePointManifest>? adjust,
         Action<string> log,
+        Action<long, long>? progress,
         CancellationToken cancellationToken)
     {
         var (entries, locations) = await ReadCopyFileAsync(tapes, blockSize, cipher, sequence, startBlock, cancellationToken).ConfigureAwait(false);
@@ -106,7 +108,10 @@ public static class TapeSetReader
         log($"Restore-point file of {manifest.Vm.Name} read from tape #{sequence}: {entries.Count} entries, {locations.Count} chunk(s) on tape(s) {string.Join(", ", locations.Select(l => l.Sequence).Distinct().Order().Select(s => $"#{s}"))}.");
 
         await using var import = target.BeginImport(newId, manifest);
-        var chunks = await ReadChunksAsync(tapes, blockSize, cipher, locations, fileOf, import.PutEncodedChunkAsync, manifest.Vm.Name, cancellationToken).ConfigureAwait(false);
+        var total = locations.Sum(l => (long)l.Length);
+        progress?.Invoke(0, total);
+        var chunks = await ReadChunksAsync(
+            tapes, blockSize, cipher, locations, fileOf, import.PutEncodedChunkAsync, manifest.Vm.Name, progress is null ? null : done => progress(done, total), cancellationToken).ConfigureAwait(false);
         foreach (var (name, content) in entries.Where(e => e.Name is not ("copy.json" or "manifest.json")))
         {
             await import.WriteFileAsync(name, content, cancellationToken).ConfigureAwait(false);
@@ -133,7 +138,7 @@ public static class TapeSetReader
         var manifestJson = entries.FirstOrDefault(e => e.Name == "manifest.json").Content ?? throw new InvalidDataException("The SQL backup file has no manifest.");
         var manifest = JsonSerializer.Deserialize(manifestJson, SqlBackupJsonContext.Default.SqlBackupManifest)!;
         await using var import = target.BeginSqlImport(newId, manifest);
-        var chunks = await ReadChunksAsync(tapes, blockSize, cipher, locations, fileOf, import.PutEncodedChunkAsync, $"SQL backup {manifest.SqlBackupId}", cancellationToken).ConfigureAwait(false);
+        var chunks = await ReadChunksAsync(tapes, blockSize, cipher, locations, fileOf, import.PutEncodedChunkAsync, $"SQL backup {manifest.SqlBackupId}", null, cancellationToken).ConfigureAwait(false);
         foreach (var (name, content) in entries.Where(e => e.Name is not ("copy.json" or "manifest.json")))
         {
             await import.WriteFileAsync(name, content, cancellationToken).ConfigureAwait(false);
@@ -178,9 +183,11 @@ public static class TapeSetReader
         Func<int, int, (long StartBlock, ulong FileId)> fileOf,
         Func<ChunkId, ReadOnlyMemory<byte>, CancellationToken, ValueTask<ChunkPutResult>> put,
         string what,
+        Action<long>? stored,
         CancellationToken cancellationToken)
     {
         long chunks = 0;
+        long bytes = 0;
         foreach (var group in locations.GroupBy(l => (l.Sequence, l.FileNumber)).OrderBy(g => g.Key.Sequence).ThenBy(g => g.Key.FileNumber))
         {
             var (fileStart, fileId) = fileOf(group.Key.Sequence, group.Key.FileNumber);
@@ -194,11 +201,13 @@ public static class TapeSetReader
                     continue;
                 }
 
-                var (id, stored) = TapeEntries.DecodeChunk(record.Body);
-                if (needed.Remove(id))
+                var (id, body) = TapeEntries.DecodeChunk(record.Body);
+                if (needed.Remove(id, out var location))
                 {
-                    await put(id, stored, cancellationToken).ConfigureAwait(false);
+                    await put(id, body, cancellationToken).ConfigureAwait(false);
                     chunks++;
+                    bytes += location.Length;
+                    stored?.Invoke(bytes);
                     if (needed.Count == 0)
                     {
                         break;
