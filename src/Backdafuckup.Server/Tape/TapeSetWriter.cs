@@ -258,7 +258,7 @@ internal sealed class TapeSetWriter(
         var seconds = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds;
         var onTape = _bytesWritten - writtenBefore;
         Log.Info($"{source.VmName} ({(source.Kind == TapeFileTypes.Sql ? $"SQL Server backup ({source.ObjectKind})" : "restore point")} of {source.CreatedUtc:yyyy-MM-dd HH:mm} UTC) is on tape: {Format(newBytes)} of new chunks, {reused} chunk(s) the set had already; tapes {string.Join(", ", needed.Select(s => $"#{s}"))}. " +
-            $"{Format(onTape)} written in {seconds:0.0} s ({Format((long)(onTape / Math.Max(0.001, seconds)))}/s); waiting for the drive took {(_clock.Elapsed - driveBefore).TotalSeconds:0.0} s of it, the rest went to reading the repository.");
+            $"{Format(onTape)} written in {MetricsText.Duration(seconds)} ({MetricsText.Rate(onTape / Math.Max(0.001, seconds))}); waiting for the drive took {MetricsText.Duration((_clock.Elapsed - driveBefore).TotalSeconds)} of it, the rest went to reading the repository.");
     }
 
     /// <summary>The catalog on the current tape, then the tape back into its slot.</summary>

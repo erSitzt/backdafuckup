@@ -163,8 +163,8 @@ public sealed class TapeRestoreRunner(
                 cancellationToken).ConfigureAwait(false);
             metrics.RecordTape(pool.Name, 0, copy.StoredBytes);
             var readSeconds = System.Diagnostics.Stopwatch.GetElapsedTime(readStarted).TotalSeconds;
-            log.Info($"{VmBackupTask.Format(copy.StoredBytes)} read in {readSeconds:0.0} s ({VmBackupTask.Format((long)(copy.StoredBytes / Math.Max(0.001, readSeconds)))}/s); " +
-                $"waiting for the drive took {tapes.Clock.Elapsed.TotalSeconds:0.0} s of it, the rest went to checking and storing the chunks.");
+            log.Info($"{VmBackupTask.Format(copy.StoredBytes)} read in {MetricsText.Duration(readSeconds)} ({MetricsText.Rate(copy.StoredBytes / Math.Max(0.001, readSeconds))}); " +
+                $"waiting for the drive took {MetricsText.Duration(tapes.Clock.Elapsed.TotalSeconds)} of it, the rest went to checking and storing the chunks.");
             if (request.Vm is { } vm)
             {
                 // The drive is free again before the VM goes to the pool.
