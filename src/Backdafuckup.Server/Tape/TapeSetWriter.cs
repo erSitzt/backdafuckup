@@ -55,6 +55,7 @@ internal sealed class TapeSetWriter(
     private int _copied;
     private int _copiedSql;
     private long _bytesWritten;
+    private readonly TransferClock _clock = new();
     private long _newBytes;
     private long _reused;
 
@@ -94,6 +95,9 @@ internal sealed class TapeSetWriter(
 
     private async Task CopyAsync(TapeCopySource source, IChunkLocator locator, CancellationToken cancellationToken)
     {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var driveBefore = _clock.Elapsed;
+        var writtenBefore = _bytesWritten;
         var files = source.Files;
         var ids = source.Chunks;
         var locations = new Dictionary<ChunkId, ChunkLocation>(ids.Count);
@@ -251,7 +255,10 @@ internal sealed class TapeSetWriter(
 
         _newBytes += newBytes;
         _reused += reused;
-        Log.Info($"{source.VmName} ({(source.Kind == TapeFileTypes.Sql ? $"SQL Server backup ({source.ObjectKind})" : "restore point")} of {source.CreatedUtc:yyyy-MM-dd HH:mm} UTC) is on tape: {Format(newBytes)} of new chunks, {reused} chunk(s) the set had already; tapes {string.Join(", ", needed.Select(s => $"#{s}"))}.");
+        var seconds = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds;
+        var onTape = _bytesWritten - writtenBefore;
+        Log.Info($"{source.VmName} ({(source.Kind == TapeFileTypes.Sql ? $"SQL Server backup ({source.ObjectKind})" : "restore point")} of {source.CreatedUtc:yyyy-MM-dd HH:mm} UTC) is on tape: {Format(newBytes)} of new chunks, {reused} chunk(s) the set had already; tapes {string.Join(", ", needed.Select(s => $"#{s}"))}. " +
+            $"{Format(onTape)} written in {seconds:0.0} s ({Format((long)(onTape / Math.Max(0.001, seconds)))}/s); waiting for the drive took {(_clock.Elapsed - driveBefore).TotalSeconds:0.0} s of it, the rest went to reading the repository.");
     }
 
     /// <summary>The catalog on the current tape, then the tape back into its slot.</summary>
@@ -287,7 +294,7 @@ internal sealed class TapeSetWriter(
         {
             Type = type, FileId = NewFileId(), SetId = Set.Id, Sequence = _tape!.Sequence!.Value, FileNumber = _fileNumber, CreatedUtc = time.GetUtcNow(), CopyId = copyId,
         };
-        var writer = await TapeFileWriter.BeginAsync(new DriveBlocks(_drive.Drive), context.Pool.BlockSize, header, _cipher, cancellationToken).ConfigureAwait(false);
+        var writer = await TapeFileWriter.BeginAsync(new DriveBlocks(_drive.Drive, _clock), context.Pool.BlockSize, header, _cipher, cancellationToken).ConfigureAwait(false);
         return (writer, position.Block, _fileNumber);
     }
 
@@ -593,7 +600,7 @@ internal sealed class TapeSetWriter(
 
         await _drive!.Drive.RewindAsync(cancellationToken).ConfigureAwait(false);
         var header = new TapeFileHeader { Type = TapeFileTypes.Label, FileId = NewFileId(), SetId = Set.Id, Sequence = sequence, FileNumber = 0, CreatedUtc = label.CreatedUtc };
-        var writer = await TapeFileWriter.BeginAsync(new DriveBlocks(_drive.Drive), context.Pool.BlockSize, header, null, cancellationToken).ConfigureAwait(false);
+        var writer = await TapeFileWriter.BeginAsync(new DriveBlocks(_drive.Drive, _clock), context.Pool.BlockSize, header, null, cancellationToken).ConfigureAwait(false);
         await writer.WriteRecordAsync(TapeFormat.Label, TapeJson.Serialize(label), encrypt: false, cancellationToken).ConfigureAwait(false);
         var summary = await writer.FinishAsync(synchronize: true, cancellationToken).ConfigureAwait(false);
         if (standalone)

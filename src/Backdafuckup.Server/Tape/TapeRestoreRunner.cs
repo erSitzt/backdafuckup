@@ -146,6 +146,7 @@ public sealed class TapeRestoreRunner(
             files.FirstOrDefault(f => f.Sequence == sequence && f.FileNumber == number) is { } f
                 ? (f.StartBlock, f.FileId)
                 : throw new InvalidDataException($"Tape #{sequence} file {number} is not in the set's catalog.");
+        var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             var result = await TapeSetReader.RestoreAsync(
@@ -161,6 +162,9 @@ public sealed class TapeRestoreRunner(
                 message => log.Info(message),
                 cancellationToken).ConfigureAwait(false);
             metrics.RecordTape(pool.Name, 0, copy.StoredBytes);
+            var readSeconds = System.Diagnostics.Stopwatch.GetElapsedTime(readStarted).TotalSeconds;
+            log.Info($"{VmBackupTask.Format(copy.StoredBytes)} read in {readSeconds:0.0} s ({VmBackupTask.Format((long)(copy.StoredBytes / Math.Max(0.001, readSeconds)))}/s); " +
+                $"waiting for the drive took {tapes.Clock.Elapsed.TotalSeconds:0.0} s of it, the rest went to checking and storing the chunks.");
             if (request.Vm is { } vm)
             {
                 // The drive is free again before the VM goes to the pool.
@@ -302,6 +306,9 @@ internal sealed class TapeReaderSession(
 
     public HashSet<int> Loaded { get; } = [];
 
+    /// <summary>Time spent waiting for the drive while reading.</summary>
+    public TransferClock Clock { get; } = new();
+
     public async Task<DriveBlocks> AtAsync(int sequence, long block, CancellationToken cancellationToken)
     {
         if (_sequence != sequence)
@@ -355,7 +362,7 @@ internal sealed class TapeReaderSession(
         }
 
         await _drive!.Drive.LocateBlockAsync(block, cancellationToken).ConfigureAwait(false);
-        return new DriveBlocks(_drive.Drive);
+        return new DriveBlocks(_drive.Drive, Clock);
     }
 
     public async ValueTask DisposeAsync()

@@ -86,14 +86,60 @@ public interface ITapeBlockReader
 }
 
 /// <summary>A drive as block writer and reader.</summary>
-public sealed class DriveBlocks(TapeDrive drive) : ITapeBlockWriter, ITapeBlockReader
+public sealed class DriveBlocks(TapeDrive drive, TransferClock? clock = null) : ITapeBlockWriter, ITapeBlockReader
 {
-    public Task<WriteOutcome> WriteBlockAsync(ReadOnlyMemory<byte> block, CancellationToken cancellationToken) => drive.WriteBlockAsync(block, cancellationToken);
+    public async Task<WriteOutcome> WriteBlockAsync(ReadOnlyMemory<byte> block, CancellationToken cancellationToken)
+    {
+        var start = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            return await drive.WriteBlockAsync(block, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            clock?.Add(start);
+        }
+    }
 
-    public Task<WriteOutcome> WriteFilemarkAsync(bool synchronize, CancellationToken cancellationToken) => drive.WriteFilemarksAsync(1, immediate: !synchronize, cancellationToken);
+    public async Task<WriteOutcome> WriteFilemarkAsync(bool synchronize, CancellationToken cancellationToken)
+    {
+        var start = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            return await drive.WriteFilemarksAsync(1, immediate: !synchronize, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            clock?.Add(start);
+        }
+    }
 
     /// <summary>Reads ahead through a tape agent: callers of these blocks locate to a block before they move otherwise.</summary>
-    public Task<ReadOutcome> ReadBlockAsync(Memory<byte> destination, CancellationToken cancellationToken) => drive.ReadBlockAsync(destination, cancellationToken, readAhead: true);
+    public async Task<ReadOutcome> ReadBlockAsync(Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        var start = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            return await drive.ReadBlockAsync(destination, cancellationToken, readAhead: true).ConfigureAwait(false);
+        }
+        finally
+        {
+            clock?.Add(start);
+        }
+    }
+}
+
+/// <summary>
+/// Time spent waiting for the drive (its reads and writes, through an agent with the network) during a transfer; the
+/// rest of the transfer's time went to the repository, compression or encryption.
+/// </summary>
+public sealed class TransferClock
+{
+    private long _ticks;
+
+    public TimeSpan Elapsed => TimeSpan.FromSeconds(Interlocked.Read(ref _ticks) / (double)System.Diagnostics.Stopwatch.Frequency);
+
+    public void Add(long startTimestamp) => Interlocked.Add(ref _ticks, System.Diagnostics.Stopwatch.GetTimestamp() - startTimestamp);
 }
 
 /// <summary>A file was cut off (a filemark or the end of data before its trailer): it is torn and is not used.</summary>
