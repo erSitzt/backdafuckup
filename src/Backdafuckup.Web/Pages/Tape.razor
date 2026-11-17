@@ -160,7 +160,7 @@ else
                         </span>
                         <MudSpacer />
                         <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Refresh" OnClick="@(() => InventoryAsync(library))">Inventory</MudButton>
-                        <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {library.Name}")">
+                        <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" AriaLabel="@($"Actions for {library.Name}")">
                             @if (library.ChangerSerial is not null)
                             {
                                 <MudMenuItem Icon="@Icons.Material.Filled.MoveToInbox" OnClick="@(() => ActAsync(library, new TapeActionDto(TapeActions.Import), "Import from the mail slots"))">Import from the mail slots</MudMenuItem>
@@ -338,7 +338,7 @@ else
                         <MudTd Style="text-align:right; white-space:nowrap">
                             @if (_libraries.FirstOrDefault(l => l.Id == context.LibraryId) is { ChangerSerial: not null } library && context.Location != "Offline")
                             {
-                                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Barcode}")">
+                                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" AriaLabel="@($"Actions for {context.Barcode}")">
                                     @if (context.Location == "Drive")
                                     {
                                         var drive = library.Drives.FirstOrDefault(d => d.Barcode == context.Barcode);
@@ -389,7 +389,7 @@ else
                         <MudTd Class="c-560">@(context.Encryption == "None" ? "none" : $"{(context.Encryption == "Software" ? "by the server" : "by the drive")} · key {context.KeyFingerprint}")</MudTd>
                         <MudTd Class="c-760">@(context.Media.Count == 0 ? "–" : string.Join(", ", context.Media.Select(m => $"{m.Value} {m.Key.ToLowerInvariant()}")))</MudTd>
                         <MudTd Style="text-align:right; white-space:nowrap">
-                            <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                            <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" AriaLabel="@($"Actions for {context.Name}")">
                                 <MudMenuItem Icon="@Icons.Material.Filled.Edit" OnClick="@(() => EditPool(context))">Edit</MudMenuItem>
                                 @if (context.OpenSet is not null)
                                 {
@@ -536,7 +536,7 @@ else
                         <MudTd Class="c-760">@(context.LastRunUtc is null ? "–" : $"{Fmt.Time(context.LastRunUtc)} · {context.LastResult}")</MudTd>
                         <MudTd Style="text-align:right; white-space:nowrap">
                             <MudButton Size="Size.Small" StartIcon="@Icons.Material.Filled.PlayArrow" OnClick="@(() => RunTapeJobAsync(context))">Run now</MudButton>
-                            <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                            <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" AriaLabel="@($"Actions for {context.Name}")">
                                 <MudMenuItem Icon="@Icons.Material.Filled.Edit" OnClick="@(() => EditTapeJob(context))">Edit</MudMenuItem>
                                 <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => DeleteAsync($"api/tape/jobs/{context.Id}", $"Remove tape job {context.Name}? What it copied stays on tape."))">Remove</MudMenuItem>
                             </MudMenu>
@@ -710,7 +710,7 @@ else
                         <MudTd Class="c-560">@(context.Online ? context.Devices.ToString(System.Globalization.CultureInfo.CurrentCulture) : "–")</MudTd>
                         <MudTd Class="c-760">@(context.Libraries.Count == 0 ? "–" : string.Join(", ", context.Libraries))</MudTd>
                         <MudTd Style="text-align:right; white-space:nowrap">
-                            <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                            <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" AriaLabel="@($"Actions for {context.Name}")">
                                 <MudMenuItem Icon="@Icons.Material.Filled.Key" OnClick="@(() => RenewAgentAsync(context))">New connect token…</MudMenuItem>
                                 <MudDivider />
                                 <MudMenuItem Icon="@Icons.Material.Filled.Delete" IconColor="Color.Error" OnClick="@(() => RemoveAgentAsync(context))">Remove</MudMenuItem>

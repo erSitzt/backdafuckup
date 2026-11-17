@@ -113,7 +113,7 @@ else
                 }
             </MudTd>
             <MudTd Style="text-align:right; white-space:nowrap">
-                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" AriaLabel="@($"Actions for {context.Name}")">
                     @if (context.Kind == "ScaleOut")
                     {
                         <MudMenuItem Icon="@Icons.Material.Filled.OpenInNew" Href="@($"/infrastructure/repositories/{context.Id}")">Open: chains, rebalance, settings</MudMenuItem>

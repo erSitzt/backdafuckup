@@ -209,6 +209,17 @@ else
     {
         // A library action has no data to count: its log says what happened.
     }
+    else if (_session.Kind == "RepositoryMove")
+    {
+        // A move copies chunks the target lacks: no source disks, dedupe or compression to show.
+        var seconds = _session.StartedUtc is { } from ? ((_session.EndedUtc ?? DateTimeOffset.UtcNow) - from).TotalSeconds : 0;
+        <MudGrid Spacing="2" Class="mb-2">
+            <MudItem xs="6" md="3"><StatTile Title="Duration" Value="@Fmt.Duration(_session.StartedUtc, _session.EndedUtc)" Detail="@($"{_tasks.Count} chain(s)")" Icon="@Icons.Material.Filled.Timer" Color="Color.Primary" /></MudItem>
+            <MudItem xs="6" md="3"><StatTile Title="Chains" Value="@($"{_tasks.Values.Count(t => t.State is "Succeeded")} of {_tasks.Count}")" Detail="@($"moved · {_tasks.Values.Count(t => t.State is "Warning")} left for later · {_tasks.Values.Count(t => t.State is "Failed")} failed")" Icon="@Icons.Material.Filled.DriveFileMove" Color="Color.Primary" /></MudItem>
+            <MudItem xs="6" md="3"><StatTile Title="Copied" Value="@Fmt.Bytes(_session.ReadBytes)" Detail="chunks the target extent did not have" Icon="@Icons.Material.Filled.ContentCopy" Color="Color.Primary" /></MudItem>
+            <MudItem xs="6" md="3"><StatTile Title="Copy rate" Value="@Fmt.Rate(seconds > 0 ? _session.ReadBytes / seconds : null)" Detail="between the extents" Icon="@AppIcons.Performance" Color="Color.Primary" /></MudItem>
+        </MudGrid>
+    }
     else if (_session.Kind == "Restore")
     {
         <MudGrid Spacing="2" Class="mb-2">
@@ -337,6 +348,14 @@ else
                             <StateChip State="@t.State" />
                         </div>
                         <MudProgressLinear Value="@t.Progress" Color="@Fmt.StateColor(t.State)" />
+                        @if (_session.Kind == "RepositoryMove")
+                        {
+                            <MudText Typo="Typo.caption" Class="d-block mb-3">
+                                @Fmt.Bytes(t.ReadBytes) copied · @Fmt.Duration(t.StartedUtc, t.EndedUtc)
+                                @if (t.Error is not null) { <span style="color:#c62828"> · @t.Error</span> }
+                            </MudText>
+                            continue;
+                        }
                         <MudText Typo="Typo.caption" Class="d-block mb-3">
                             @Fmt.Bytes(t.ReadBytes) read · @Fmt.Bytes(t.TransferredBytes) transferred · @Fmt.Rate(tm?.ProcessingRate)
                             @if (t.State == "Running" && tm is not null) { <span> (now @Fmt.Rate(tm.CurrentBytesPerSecond))</span> }

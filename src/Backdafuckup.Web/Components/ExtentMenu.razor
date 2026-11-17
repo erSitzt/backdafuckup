@@ -4,7 +4,7 @@
 @inject IDialogService Dialogs
 @inject NavigationManager Navigation
 
-<MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {Extent.Name}")">
+<MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" AriaLabel="@($"Actions for {Extent.Name}")">
     @if (Extent.ExtentState == "Active")
     {
         <MudMenuItem Icon="@Icons.Material.Filled.Lock" OnClick="@(() => SetAsync(new ExtentStateDto(Sealed: true), $"{Extent.Name} is sealed: new chains go elsewhere, and its chains start anew elsewhere with their next backup."))">Seal (no new data)</MudMenuItem>

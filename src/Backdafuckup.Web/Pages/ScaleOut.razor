@@ -115,7 +115,7 @@ else
                         <MudTd Style="text-align:right; white-space:nowrap">
                             @if (context.Extents.Count > 0 && context.Busy is null)
                             {
-                                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Move {context.ObjectName}")">
+                                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" AriaLabel="@($"Move {context.ObjectName}")">
                                     @foreach (var target in _extents.Where(e => e.ExtentState == "Active" && !e.Maintenance))
                                     {
                                         var from = context.Extents.Where(p => p.ExtentId != target.Id).OrderByDescending(p => p.Bytes).FirstOrDefault();
@@ -158,10 +158,10 @@ else
                         </MudItem>
                         <MudItem xs="6" md="3"><MudNumericField @bind-Value="_lowFree" Label="Low free space (%)" Min="1" Max="50" Variant="Variant.Outlined" /></MudItem>
                         <MudItem xs="6" md="3"><MudNumericField @bind-Value="_imbalance" Label="Imbalance (% points)" Min="1" Max="100" Variant="Variant.Outlined" /></MudItem>
-                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_maxGiB" Label="At most GiB per run (0 = no limit)" Min="0" Variant="Variant.Outlined" /></MudItem>
-                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_cooldown" Label="Days before a chain moves again" Min="0" Max="365" Variant="Variant.Outlined" /></MudItem>
-                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_maxMBps" Label="Move at most MB/s (0 = no limit)" Min="0" Variant="Variant.Outlined" /></MudItem>
-                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_switchWait" Label="Wait for a running backup (min)" Min="1" Max="1440" Variant="Variant.Outlined" /></MudItem>
+                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_maxGiB" Label="At most GiB per run" Min="0" Variant="Variant.Outlined" HelperText="0 = no limit" /></MudItem>
+                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_cooldown" Label="Rest after a move (days)" Min="0" Max="365" Variant="Variant.Outlined" HelperText="before a moved chain moves again" /></MudItem>
+                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_maxMBps" Label="Move at most MB/s" Min="0" Variant="Variant.Outlined" HelperText="0 = no limit" /></MudItem>
+                        <MudItem xs="6" md="3"><MudNumericField @bind-Value="_switchWait" Label="Wait for its backup (min)" Min="1" Max="1440" Variant="Variant.Outlined" HelperText="before the switch; then the chain waits for the next run" /></MudItem>
                     </MudGrid>
                     <div class="d-flex mt-4"><MudSpacer /><MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="SaveSettingsAsync">Save</MudButton></div>
                 </MudPaper>

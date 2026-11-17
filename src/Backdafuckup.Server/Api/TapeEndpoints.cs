@@ -119,7 +119,7 @@ public static class TapeEndpoints
     public static void MapTapeAgentEndpoints(this IEndpointRouteBuilder app)
     {
         var accept = new WebSocketAcceptContext { KeepAliveInterval = TimeSpan.FromSeconds(20), KeepAliveTimeout = TimeSpan.FromSeconds(60) };
-        app.MapGet("/api/agent/tape-hosts/{id:guid}/control", async (Guid id, TapeAgents agents, HttpContext http, CancellationToken ct) =>
+        app.MapGet("/api/agent/tape-hosts/{id:guid}/control", async (Guid id, TapeAgents agents, IHostApplicationLifetime lifetime, HttpContext http, CancellationToken ct) =>
         {
             if (!http.WebSockets.IsWebSocketRequest)
             {
@@ -134,7 +134,7 @@ public static class TapeEndpoints
 
             using var socket = await http.WebSockets.AcceptWebSocketAsync(accept);
             var address = http.Connection.RemoteIpAddress is { IsIPv4MappedToIPv6: true } mapped ? mapped.MapToIPv4() : http.Connection.RemoteIpAddress;
-            await agents.RunControlAsync(agent, socket, $"{address}:{http.Connection.RemotePort}", ct);
+            await Agents.AgentSocketShutdown.RunAsync(socket, lifetime, ct, token => agents.RunControlAsync(agent, socket, $"{address}:{http.Connection.RemotePort}", token));
             return Results.Empty;
         }).AllowAnonymous().ExcludeFromDescription();
     }

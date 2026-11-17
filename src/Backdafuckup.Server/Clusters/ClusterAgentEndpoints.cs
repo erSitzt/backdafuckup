@@ -14,7 +14,7 @@ public static class ClusterAgentEndpoints
     {
         var clusters = app.MapGroup("/api/agent/clusters").AllowAnonymous().ExcludeFromDescription();
 
-        clusters.MapGet("/{id:guid}/control", async (Guid id, ClusterAgents agents, HttpContext http, CancellationToken ct) =>
+        clusters.MapGet("/{id:guid}/control", async (Guid id, ClusterAgents agents, IHostApplicationLifetime lifetime, HttpContext http, CancellationToken ct) =>
         {
             if (!http.WebSockets.IsWebSocketRequest)
             {
@@ -27,11 +27,11 @@ public static class ClusterAgentEndpoints
             }
 
             using var socket = await http.WebSockets.AcceptWebSocketAsync(Accept);
-            await agents.RunControlAsync(connection, socket, $"{http.Connection.RemoteIpAddress}:{http.Connection.RemotePort}", ct);
+            await Agents.AgentSocketShutdown.RunAsync(socket, lifetime, ct, token => agents.RunControlAsync(connection, socket, $"{http.Connection.RemoteIpAddress}:{http.Connection.RemotePort}", token));
             return Results.Empty;
         });
 
-        clusters.MapGet("/{id:guid}/tunnel/{stream:guid}", async (Guid id, Guid stream, ClusterAgents agents, HttpContext http, CancellationToken ct) =>
+        clusters.MapGet("/{id:guid}/tunnel/{stream:guid}", async (Guid id, Guid stream, ClusterAgents agents, IHostApplicationLifetime lifetime, HttpContext http, CancellationToken ct) =>
         {
             if (!http.WebSockets.IsWebSocketRequest)
             {
@@ -44,7 +44,7 @@ public static class ClusterAgentEndpoints
             }
 
             using var socket = await http.WebSockets.AcceptWebSocketAsync(Accept);
-            await agents.RunTunnelAsync(id, stream, socket, ct);
+            await Agents.AgentSocketShutdown.RunAsync(socket, lifetime, ct, token => agents.RunTunnelAsync(id, stream, socket, token));
             return Results.Empty;
         });
     }

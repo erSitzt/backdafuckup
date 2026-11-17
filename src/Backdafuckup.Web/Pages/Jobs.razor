@@ -56,7 +56,7 @@ else
                 {
                     <MudTooltip Text="Run now (incremental)"><MudIconButton Icon="@Icons.Material.Filled.PlayArrow" Color="Color.Primary" OnClick="@(() => RunAsync(context, false))" aria-label="@($"Run {context.Name} now")" /></MudTooltip>
                 }
-                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" aria-label="@($"Actions for {context.Name}")">
+                <MudMenu Icon="@Icons.Material.Filled.MoreVert" AnchorOrigin="Origin.BottomRight" TransformOrigin="Origin.TopRight" Dense="true" AriaLabel="@($"Actions for {context.Name}")">
                     <MudMenuItem Icon="@Icons.Material.Filled.FastForward" Disabled="context.IsRunning" OnClick="@(() => RunAsync(context, true))">Run an active full</MudMenuItem>
                     <MudMenuItem Icon="@Icons.Material.Filled.Edit" Href="@($"/jobs/{context.Id}")">Edit</MudMenuItem>
                     <MudMenuItem Icon="@(context.Enabled ? Icons.Material.Filled.PauseCircle : Icons.Material.Filled.PlayCircle)" OnClick="@(() => ToggleAsync(context))">@(context.Enabled ? "Disable" : "Enable")</MudMenuItem>

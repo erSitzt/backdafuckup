@@ -6,6 +6,7 @@ using Backdafuckup.Server.Agents;
 using Backdafuckup.Tape.Agent;
 using Backdafuckup.Testing.Tape;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace Backdafuckup.Server.Tests;
 
@@ -156,6 +157,38 @@ public sealed partial class ApiIntegrationTests
         Assert.Contains("Media pool(s) Remote pool use Remote", await refused.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
         await stop.CancelAsync();
         await running;
+    }
+
+    [Fact]
+    public async Task When_the_server_stops_it_lets_its_agents_go_at_once_and_they_hear_why()
+    {
+        var client = await SignedInClientAsync();
+        await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://localhost/", Ct);
+        var created = await Read<TapeAgentSecretDto>(client.PostAsJsonAsync("/api/tape/agents", new CreateTapeAgentDto("lab-02"), Ct));
+        var token = Settings(created.EnvironmentFile)["BDFU_TAPE_AGENT_TOKEN"];
+        var control = new Uri(new Uri("http://localhost/"), TapeAgentProtocol.ControlPath(created.Agent.Id));
+        var log = new ConcurrentQueue<string>();
+        var agent = new TapeAgentClient(new FakeTapeHost(new FakeTapeLibrary(drives: 1, slots: 2, mailSlots: 0)), ct => ConnectAgentSocketAsync(control, token, ct), "the test server", "test", log.Enqueue)
+        {
+            MaxPause = TimeSpan.FromSeconds(30),
+        };
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var running = agent.RunAsync(stop.Token);
+        try
+        {
+            await Until(() => Task.FromResult(log.Any(l => l.StartsWith("Connected to the backup server", StringComparison.Ordinal))));
+
+            // The host would otherwise wait its whole shutdown timeout for the connection (30 s); the agent hears a close.
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            _factory.Services.GetRequiredService<IHostApplicationLifetime>().StopApplication();
+            await Until(() => Task.FromResult(log.Any(l => l.StartsWith("The backup server the test server closed the connection", StringComparison.Ordinal))));
+            Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"let go after {watch.Elapsed}");
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
     }
 
     private static Dictionary<string, string> Settings(string environmentFile) =>
