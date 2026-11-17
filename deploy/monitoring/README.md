@@ -8,7 +8,7 @@ This folder contains:
 |---|---|
 | `backdafuckup.rules.yml` | Alert rules as a plain Prometheus rule group (`rule_files:`) |
 | `prometheusrule.yaml` | The same rules as a `PrometheusRule` for the Prometheus Operator (kube-prometheus-stack), generated from the rule group |
-| `grafana-dashboard.json` | A Grafana dashboard: backups, VM snapshots, disks and transports, pool storage, server |
+| `grafana-dashboard.json` | A Grafana dashboard: backups, VM snapshots, disks and transports, pool storage, server, scale-out repositories |
 
 The metric names and their meaning are listed in the admin guide (`docs/admin-guide.md`, *Monitoring with Prometheus*).
 
@@ -145,3 +145,5 @@ In Grafana go to *Dashboards* → *New* → *Import*, upload `grafana-dashboard.
 - pool.
 
 Snapshot times are shown against a red 10 s line, the limit of a VSS freeze. Histograms of nightly events are summed per day, so the curves start after the first backups.
+
+The row *Scale-out repositories* shows each scale-out's free space for new chains, its extents with state and chains, the bytes moves copied per day, the free space per extent over time, and source copies that moves left because a reader still held them.

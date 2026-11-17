@@ -127,7 +127,7 @@ public sealed class ChainMover(
             }
 
             // 4. The source copies, then what SQL Server runs that started before the switch still wrote there.
-            var left = await CleanUpAsync(chain.FromExtentId, chain.ToExtentId, cancellationToken).ConfigureAwait(false);
+            await CleanUpAsync(chain.FromExtentId, chain.ToExtentId, cancellationToken).ConfigureAwait(false);
             if (chain.JobId is { } job && sqlBackups.RunningFor(job, chain.ObjectNativeId) is { } running)
             {
                 log.Info($"{chain.ObjectName}: waiting for its SQL Server backup run to finish, then its backups follow the chain.");
@@ -135,7 +135,7 @@ public sealed class ChainMover(
             }
 
             sql += await MoveSqlBackupsAsync(chain, sessionId, source, target, throttle, Copied, log, cancellationToken).ConfigureAwait(false);
-            left += await CleanUpAsync(chain.FromExtentId, chain.ToExtentId, cancellationToken).ConfigureAwait(false);
+            var left = await CleanUpAsync(chain.FromExtentId, chain.ToExtentId, cancellationToken).ConfigureAwait(false);
             await QueueGcAsync(chain.FromExtentId, cancellationToken).ConfigureAwait(false);
 
             var summary = $"{Describe(chain)}: {points} restore point(s) and {sql} SQL Server backup(s) moved from {sourceName} to {targetName}, {VmBackupTask.Format(copied)} copied" +

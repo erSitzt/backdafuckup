@@ -1,7 +1,7 @@
 {
   "title": "backdafuckup",
   "uid": "backdafuckup-overview",
-  "description": "Backups, VM snapshots, transports, pool storage and the server of backdafuckup (metrics at /metrics).",
+  "description": "Backups, VM snapshots, transports, pool storage, the server and scale-out repositories of backdafuckup (metrics at /metrics).",
   "tags": [
     "backdafuckup",
     "backup",
@@ -1808,6 +1808,306 @@
       "fieldConfig": {
         "defaults": {
           "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "type": "row",
+      "title": "Scale-out repositories",
+      "id": 38,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 85
+      },
+      "panels": []
+    },
+    {
+      "type": "bargauge",
+      "title": "Scale-out free space",
+      "id": 39,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Free space on the extents that take new chains (active, not in maintenance, online), of the size of all extents.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 86
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "100 * bdfu_scaleout_free_bytes / bdfu_scaleout_size_bytes",
+          "legendFormat": "{{scale_out}}",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "green",
+                "value": 20
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Extents",
+      "id": 40,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Each extent with its state (active, sealed, evacuating, maintenance, offline) and its chains.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 86
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bdfu_repository_extent_state == 1",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bdfu_repository_chains",
+          "legendFormat": "",
+          "refId": "B",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "otel_scope_name": true,
+              "instance": true,
+              "job": true,
+              "Value #A": true
+            },
+            "renameByName": {
+              "scale_out": "Scale-out",
+              "repository": "Extent",
+              "state": "State",
+              "Value #B": "Chains"
+            },
+            "indexByName": {
+              "scale_out": 0,
+              "repository": 1,
+              "state": 2,
+              "Value #B": 3
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Scale-out",
+            "desc": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Source copies waiting",
+      "id": 41,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Copies that moves left on their source extent because a reader still holds them or the extent is unavailable; the cleanup deletes them later.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 86
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(bdfu_scaleout_pending_source_deletes)",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Bytes moved between extents (per day)",
+      "id": 42,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Bytes that moves and rebalancing copied between the extents of each scale-out repository.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 92
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (scale_out) (increase(bdfu_repository_move_bytes_total[1d]))",
+          "legendFormat": "{{scale_out}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      },
+      "options": {},
+      "interval": "1d"
+    },
+    {
+      "type": "timeseries",
+      "title": "Extent free space",
+      "id": 43,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Free space per extent over time; rebalancing evens it out.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 92
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "100 * bdfu_repository_free_bytes / bdfu_repository_size_bytes and on (repository) bdfu_repository_extent_state",
+          "legendFormat": "{{repository}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
         },
         "overrides": []
       },

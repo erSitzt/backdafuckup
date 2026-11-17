@@ -413,11 +413,23 @@ public sealed class StartupRecovery(
                 continue;
             }
 
+            if (session.Kind == SessionKind.RepositoryMove)
+            {
+                // The journal says what happened: switched chains stay switched (the cleanup deletes their source
+                // copies), copies of the others are reused by their next move or removed after a day.
+                await db.ChainPlacements.Where(p => p.MoveSessionId == session.Id)
+                    .ExecuteUpdateAsync(u => u.SetProperty(p => p.MoveSessionId, (Guid?)null), cancellationToken).ConfigureAwait(false);
+            }
+
             session.State = SessionState.Failed;
             session.EndedUtc = time.GetUtcNow();
-            session.Summary = session.Kind == SessionKind.SqlRestore
-                ? Sql.SqlRestoreRecovery.Summary(session.Parameters)
-                : "The backup service was restarted while this session was running.";
+            session.Summary = session.Kind switch
+            {
+                SessionKind.SqlRestore => Sql.SqlRestoreRecovery.Summary(session.Parameters),
+                SessionKind.RepositoryMove => "The backup service was restarted during the move. Chains switched before stay on their new extent and their old copies are deleted by the cleanup; "
+                    + "the copies of the others are reused when those chains are moved again, or removed after a day. An evacuation continues by itself.",
+                _ => "The backup service was restarted while this session was running.",
+            };
             if (session.Kind == SessionKind.SqlRestore && Sql.SqlRestoreRecovery.NeedsCleanup(session.Parameters))
             {
                 // SqlRestoreCleanup checks the target once its agent is back and removes what no database uses.
