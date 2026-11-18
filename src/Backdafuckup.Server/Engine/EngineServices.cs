@@ -641,6 +641,8 @@ public static class EngineServiceCollectionExtensions
         services.Configure<ScaleOut.ScaleOutOptions>(configuration.GetSection("ScaleOut"));
         services.TryAddSingleton<Backdafuckup.Tape.Devices.ITapeHost, Backdafuckup.Tape.Devices.LocalTapeHost>();
         services.AddSingleton<Tape.TapeAgents>();
+        services.AddSingleton<Proxies.ProxyAgents>();
+        services.AddSingleton<Backdafuckup.Core.Proxies.IProxyPool>(sp => sp.GetRequiredService<Proxies.ProxyAgents>());
         services.AddSingleton<Tape.TapeHosts>();
         services.AddSingleton<Tape.TapeLocks>();
         services.AddSingleton<Tape.TapeLibraries>();

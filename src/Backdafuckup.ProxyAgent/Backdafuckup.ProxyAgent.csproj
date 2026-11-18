@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The backup proxy agent: runs on a Linux VM (vSphere HotAdd) or a Linux host with SAN access, attaches disks the
+       server names and serves them to the server as NBD over WebSocket tunnels. Built as one self-contained file by
+       scripts/build-proxy.sh. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>backdafuckup-proxy</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Proxy\Backdafuckup.Proxy.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Contracts\Backdafuckup.Contracts.csproj" />
+  </ItemGroup>
+</Project>

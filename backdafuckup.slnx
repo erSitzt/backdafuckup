@@ -10,6 +10,8 @@
     <Project Path="src/Backdafuckup.Kubernetes/Backdafuckup.Kubernetes.csproj" />
     <Project Path="src/Backdafuckup.Mover/Backdafuckup.Mover.csproj" />
     <Project Path="src/Backdafuckup.Nbd/Backdafuckup.Nbd.csproj" />
+    <Project Path="src/Backdafuckup.Proxy/Backdafuckup.Proxy.csproj" />
+    <Project Path="src/Backdafuckup.ProxyAgent/Backdafuckup.ProxyAgent.csproj" />
     <Project Path="src/Backdafuckup.Server/Backdafuckup.Server.csproj" />
     <Project Path="src/Backdafuckup.Smb/Backdafuckup.Smb.csproj" />
     <Project Path="src/Backdafuckup.Ssh/Backdafuckup.Ssh.csproj" />

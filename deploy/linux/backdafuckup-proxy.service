@@ -1,0 +1,28 @@
+# systemd unit for the backdafuckup backup proxy: attaches the disks the backup server names (vSphere HotAdd, SAN LUNs)
+# and serves them to the server over WebSocket tunnels. It runs as root: it rescans SCSI hosts, sets devices read-only
+# and removes them from the kernel before they are detached. Install:
+#   install -D -m 755 backdafuckup-proxy /opt/backdafuckup-proxy/backdafuckup-proxy
+#   /opt/backdafuckup-proxy/backdafuckup-proxy enroll --server … --proxy … --token … --pins …   (the console's command)
+#   install -m 644 backdafuckup-proxy.service /etc/systemd/system/ && systemctl enable --now backdafuckup-proxy
+# Keep LVM and udisks away from attached disks (see the admin guide: LVM devices file, multipath blacklist).
+[Unit]
+Description=backdafuckup backup proxy
+Wants=network-online.target
+After=network-online.target systemd-udevd.service
+
+[Service]
+Type=simple
+ExecStart=/opt/backdafuckup-proxy/backdafuckup-proxy run
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/sys/class/scsi_host /sys/block /sys/devices
+ProtectHome=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

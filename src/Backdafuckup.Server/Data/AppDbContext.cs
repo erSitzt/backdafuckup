@@ -69,6 +69,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<TapeAgentEntity> TapeAgents => Set<TapeAgentEntity>();
 
+    public DbSet<ProxyEntity> Proxies => Set<ProxyEntity>();
+
     public DbSet<TapeKeyEntity> TapeKeys => Set<TapeKeyEntity>();
 
     public DbSet<MediaPoolEntity> MediaPools => Set<MediaPoolEntity>();
@@ -202,6 +204,18 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.ToTable("tape_operator_requests");
             e.Property(x => x.Message).HasMaxLength(1000);
             e.HasIndex(x => x.ResolvedUtc);
+        });
+
+        builder.Entity<ProxyEntity>(e =>
+        {
+            e.ToTable("proxies");
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.HostName).HasMaxLength(255);
+            e.Property(x => x.AgentVersion).HasMaxLength(64);
+            e.Property(x => x.LastAddress).HasMaxLength(64);
+            e.Property(x => x.SmbiosUuid).HasMaxLength(64);
+            e.Property(x => x.BiosSerial).HasMaxLength(128);
+            e.HasIndex(x => x.Name).IsUnique();
         });
 
         builder.Entity<TapeAgentEntity>(e =>

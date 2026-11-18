@@ -1068,6 +1068,77 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.ToTable("provider_artifacts", (string)null);
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.ProxyEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("AgentVersion")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("agent_version");
+
+                    b.Property<string>("BiosSerial")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("bios_serial");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<DateTimeOffset?>("EnrolledUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("enrolled_utc");
+
+                    b.Property<string>("HostName")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("host_name");
+
+                    b.Property<DateTimeOffset?>("InstallTokenExpiresUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("install_token_expires_utc");
+
+                    b.Property<byte[]>("InstallTokenHash")
+                        .HasColumnType("bytea")
+                        .HasColumnName("install_token_hash");
+
+                    b.Property<byte[]>("KeyHash")
+                        .HasColumnType("bytea")
+                        .HasColumnName("key_hash");
+
+                    b.Property<string>("LastAddress")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("last_address");
+
+                    b.Property<DateTimeOffset?>("LastSeenUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_seen_utc");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("SmbiosUuid")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("smbios_uuid");
+
+                    b.HasKey("Id")
+                        .HasName("pk_proxies");
+
+                    b.HasIndex("Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_proxies_name");
+
+                    b.ToTable("proxies", (string)null);
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.RepositoryMoveItemEntity", b =>
                 {
                     b.Property<Guid>("Id")

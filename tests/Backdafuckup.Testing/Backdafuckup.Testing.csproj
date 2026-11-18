@@ -13,5 +13,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Backdafuckup.Core\Backdafuckup.Core.csproj" />
     <ProjectReference Include="..\..\src\Backdafuckup.Tape\Backdafuckup.Tape.csproj" />
+    <ProjectReference Include="..\..\src\Backdafuckup.Proxy\Backdafuckup.Proxy.csproj" />
   </ItemGroup>
 </Project>

@@ -1,7 +1,7 @@
-using System.Buffers.Binary;
 using System.Net.WebSockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Backdafuckup.Core.Agents;
 using Backdafuckup.Tape.Scsi;
 
 namespace Backdafuckup.Tape.Agent;
@@ -26,58 +26,12 @@ public static class TapeAgentProtocol
 
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 
-    public static async Task SendAsync(WebSocket socket, SemaphoreSlim sendLock, TapeAgentMessage header, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
-    {
-        var json = JsonSerializer.SerializeToUtf8Bytes(header, Json);
-        var message = new byte[4 + json.Length + data.Length];
-        BinaryPrimitives.WriteInt32BigEndian(message, json.Length);
-        json.CopyTo(message, 4);
-        data.Span.CopyTo(message.AsSpan(4 + json.Length));
-        await sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            await socket.SendAsync(message, WebSocketMessageType.Binary, endOfMessage: true, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            sendLock.Release();
-        }
-    }
+    public static Task SendAsync(WebSocket socket, SemaphoreSlim sendLock, TapeAgentMessage header, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        AgentSocketFraming.SendAsync(socket, sendLock, header, data, Json, cancellationToken);
 
     /// <summary>The next message, or null when the other side closed.</summary>
-    public static async Task<(TapeAgentMessage Header, byte[] Data)?> ReceiveAsync(WebSocket socket, CancellationToken cancellationToken)
-    {
-        var buffer = new byte[64 * 1024];
-        using var message = new MemoryStream();
-        while (true)
-        {
-            var result = await socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
-            if (result.MessageType == WebSocketMessageType.Close)
-            {
-                return null;
-            }
-
-            if (message.Length + result.Count > MaxMessage)
-            {
-                throw new InvalidDataException($"A tape agent message is larger than {MaxMessage} bytes.");
-            }
-
-            message.Write(buffer, 0, result.Count);
-            if (result.EndOfMessage)
-            {
-                break;
-            }
-        }
-
-        var bytes = message.GetBuffer().AsSpan(0, (int)message.Length);
-        if (bytes.Length < 4 || BinaryPrimitives.ReadInt32BigEndian(bytes) is var length && (length < 2 || 4 + length > bytes.Length))
-        {
-            throw new InvalidDataException("A tape agent message has no valid header.");
-        }
-
-        var header = JsonSerializer.Deserialize<TapeAgentMessage>(bytes.Slice(4, length), Json) ?? throw new InvalidDataException("A tape agent message has an empty header.");
-        return (header, bytes[(4 + length)..].ToArray());
-    }
+    public static Task<(TapeAgentMessage Header, byte[] Data)?> ReceiveAsync(WebSocket socket, CancellationToken cancellationToken) =>
+        AgentSocketFraming.ReceiveAsync<TapeAgentMessage>(socket, MaxMessage, Json, "tape agent", cancellationToken);
 }
 
 public static class TapeAgentMessageTypes

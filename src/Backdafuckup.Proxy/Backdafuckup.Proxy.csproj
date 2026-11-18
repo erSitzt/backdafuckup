@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Nbd\Backdafuckup.Nbd.csproj" />
+  </ItemGroup>
+</Project>
