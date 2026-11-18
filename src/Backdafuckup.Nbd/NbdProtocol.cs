@@ -67,6 +67,21 @@ public static class NbdProtocol
     public const ushort CmdWrite = 1;
     public const ushort CmdDisc = 2;
     public const ushort CmdFlush = 3;
+    public const ushort CmdTrim = 4;
+    public const ushort CmdWriteZeroes = 6;
+
+    // Command flags
+    public const ushort CmdFlagFua = 1 << 0;
+    public const ushort CmdFlagNoHole = 1 << 1;
+
+    // Error numbers of replies (the spec's errno values)
+    public const uint ErrPerm = 1;
+    public const uint ErrIo = 5;
+    public const uint ErrInvalid = 22;
+    public const uint ErrNoSpace = 28;
+    public const uint ErrOverflow = 75;
+    public const uint ErrNotSupported = 95;
+    public const uint ErrShutdown = 108;
 
     public const int RequestHeaderSize = 28;
     public const int SimpleReplyHeaderSize = 16;

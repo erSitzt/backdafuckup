@@ -19,7 +19,7 @@ public sealed class NbdClient : IAsyncDisposable
     private const int StateAbandoned = 2;
     private const int MaxOptionReplyLength = 16 * 1024 * 1024;
 
-    private readonly TcpClient _tcp;
+    private readonly IDisposable? _owner;
     private readonly Stream _stream;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly SemaphoreSlim _inFlightLimit;
@@ -31,9 +31,9 @@ public sealed class NbdClient : IAsyncDisposable
     private int _disposed;
     private volatile Exception? _fault;
 
-    private NbdClient(TcpClient tcp, Stream stream, NegotiationResult negotiated, int maxInFlight)
+    private NbdClient(IDisposable? owner, Stream stream, NegotiationResult negotiated, int maxInFlight)
     {
-        _tcp = tcp;
+        _owner = owner;
         _stream = stream;
         Size = negotiated.Size;
         TransmissionFlags = negotiated.TransmissionFlags;
@@ -121,6 +121,39 @@ public sealed class NbdClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Negotiates over an existing stream (e.g. a WebSocket tunnel to the proxy agent, whose TLS protects it already; use
+    /// <see cref="NbdTlsMode.Disabled"/>). The client owns the stream afterwards. <see cref="NbdConnectOptions.Host"/> only
+    /// names the other side in messages.
+    /// </summary>
+    public static async Task<NbdClient> ConnectAsync(Stream stream, NbdConnectOptions options, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        ArgumentNullException.ThrowIfNull(options);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(options.ConnectTimeout);
+        try
+        {
+            var (negotiatedStream, negotiated) = await NegotiateAsync(stream, options, timeout.Token).ConfigureAwait(false);
+            return new NbdClient(null, negotiatedStream, negotiated, options.MaxInFlight);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+            throw new TimeoutException($"NBD connection to {options.Host}: the NBD handshake did not complete within {options.ConnectTimeout.TotalSeconds:0} s.");
+        }
+        catch (EndOfStreamException ex)
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+            throw new NbdException($"NBD server {options.Host} closed the connection during negotiation.", ex);
+        }
+        catch
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
     /// <summary>Reads exactly <paramref name="destination"/>.Length bytes at <paramref name="offset"/>.</summary>
     public async ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken)
     {
@@ -150,6 +183,43 @@ public sealed class NbdClient : IAsyncDisposable
             await ExecuteAsync(NbdProtocol.CmdWrite, offset + position, length, default, data.Slice(position, length), cancellationToken)
                 .ConfigureAwait(false);
             position += length;
+        }
+    }
+
+    public bool CanWriteZeroes => (TransmissionFlags & NbdProtocol.TransSendWriteZeroes) != 0;
+
+    /// <summary>
+    /// Writes zeros over <paramref name="length"/> bytes: with WRITE_ZEROES when the server offers it (no data on the wire),
+    /// else as ordinary writes of zero buffers.
+    /// </summary>
+    public async ValueTask WriteZeroesAsync(long offset, long length, CancellationToken cancellationToken)
+    {
+        if (IsReadOnly)
+        {
+            throw new InvalidOperationException("The NBD export is read-only.");
+        }
+
+        if (offset < 0 || length < 0 || offset + length > Size)
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset), $"Range {offset}+{length} is outside the export (size {Size}).");
+        }
+
+        var zeros = CanWriteZeroes ? null : new byte[Math.Min(MaxPayload, (int)Math.Min(length, int.MaxValue))];
+        var position = 0L;
+        while (position < length)
+        {
+            if (zeros is null)
+            {
+                var piece = (int)Math.Min(1L << 30, length - position);
+                await ExecuteAsync(NbdProtocol.CmdWriteZeroes, offset + position, piece, default, default, cancellationToken).ConfigureAwait(false);
+                position += piece;
+            }
+            else
+            {
+                var piece = (int)Math.Min(zeros.Length, length - position);
+                await ExecuteAsync(NbdProtocol.CmdWrite, offset + position, piece, default, zeros.AsMemory(0, piece), cancellationToken).ConfigureAwait(false);
+                position += piece;
+            }
         }
     }
 
@@ -194,7 +264,7 @@ public sealed class NbdClient : IAsyncDisposable
         Fault(new ObjectDisposedException(nameof(NbdClient)));
         await _shutdown.CancelAsync().ConfigureAwait(false);
         await _stream.DisposeAsync().ConfigureAwait(false);
-        _tcp.Dispose();
+        _owner?.Dispose();
         try
         {
             await _receiveLoop.ConfigureAwait(false);
