@@ -38,5 +38,7 @@ Specifications implemented from public documents (no code copied):
 - XAPI / XenServer changed block tracking developer documentation
 - Microsoft Volume Shadow Copy Service documentation (requester, provider, COM+ registration)
 - MS-SCMR (Service Control Manager Remote Protocol) and MS-RPCE (NDR), for the svcctl client of the push installation
+- VMware vSphere Web Services API reference (vim25 WSDL and XSD as vCenter serves them), for our own vim25 client
+- HPE Alletra Storage MP WS-APIv3 OpenAPI description (version 2.5.0), for the shapes and field names of the array client
 - Microsoft VHD image format specification (VHD stream reader and writer)
 - PKWARE APPNOTE.TXT (ZIP and ZIP64 format), for the streaming ZIP writer of file-level restore downloads

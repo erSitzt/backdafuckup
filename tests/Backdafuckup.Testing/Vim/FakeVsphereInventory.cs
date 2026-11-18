@@ -43,6 +43,16 @@ public static class FakeVsphereInventory
             ("summary.capacity", Val.Long(capacity)), ("summary.freeSpace", Val.Long(free)), ("summary.accessible", Val.Bool(true)));
     }
 
+    /// <summary>The datastore is VMFS of this major version on these LUNs (extent disk names "naa.…").</summary>
+    public static void SetVmfs(this FakeVcenter vcenter, (string Type, string Value) datastore, int majorVersion, params string[] diskNames)
+    {
+        ArgumentNullException.ThrowIfNull(vcenter);
+        ArgumentNullException.ThrowIfNull(diskNames);
+        vcenter.Set(datastore, "info", Val.Obj("val", "VmfsDatastoreInfo",
+            Val.F("name", vcenter.Get(datastore, "summary.name")?.Value),
+            new XElement(FakeVcenter.Ns + "vmfs", Val.F("majorVersion", majorVersion), diskNames.Select(d => new XElement(FakeVcenter.Ns + "extent", Val.F("diskName", d), Val.F("partition", 1))))));
+    }
+
     public static (string Type, string Value) AddNetwork(this FakeVcenter vcenter, string name, string type = "Network")
     {
         ArgumentNullException.ThrowIfNull(vcenter);

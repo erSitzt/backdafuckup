@@ -311,6 +311,20 @@ public sealed class FakeXenPool : IAsyncDisposable
         return certificate.ExportCertificatePem();
     }
 
+    /// <summary>An LVM over iSCSI SR (lvmoiscsi) on the LUN with this SCSI id ("3" + WWN): its PBD names it in device_config.</summary>
+    public (string Ref, string Uuid) AddLunSr(string name, string scsiId)
+    {
+        var srRef = AddSr(name, shared: true);
+        var sr = _tables["SR"][srRef];
+        sr["type"] = "lvmoiscsi";
+        foreach (var pbd in ((JsonArray)sr["PBDs"]!).Select(p => p!.GetValue<string>()))
+        {
+            _tables["PBD"][pbd]["device_config"] = new JsonObject { ["SCSIid"] = scsiId, ["target"] = "10.26.101.10", ["targetIQN"] = "iqn.2000-05.com.3pardata:20210002ac000001" };
+        }
+
+        return (srRef, sr["uuid"]!.GetValue<string>());
+    }
+
     private string AddSr(string name, bool shared)
     {
         var srRef = Add("SR", new JsonObject

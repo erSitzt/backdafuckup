@@ -18,7 +18,9 @@ public sealed class CredentialProtector(IDataProtectionProvider provider)
 }
 
 /// <summary>Artifact ledger stored in the catalog database (crash recovery of platform objects).</summary>
-public sealed class DbArtifactLedger(IDbContextFactory<AppDbContext> dbFactory, Guid connectionId, Guid? sessionId, Guid? restorePointId, TimeProvider time) : IArtifactLedger
+/// <param name="storageSystemId">Rows of objects on a storage array: the cleanup removes them through that array.</param>
+public sealed class DbArtifactLedger(
+    IDbContextFactory<AppDbContext> dbFactory, Guid connectionId, Guid? sessionId, Guid? restorePointId, TimeProvider time, Guid? storageSystemId = null) : IArtifactLedger
 {
     public async Task<Guid> RecordAsync(string kind, string nativeId, string? nativeRef, string? data, CancellationToken cancellationToken)
     {
@@ -27,6 +29,7 @@ public sealed class DbArtifactLedger(IDbContextFactory<AppDbContext> dbFactory, 
         var entity = new ProviderArtifactEntity
         {
             ConnectionId = connectionId,
+            StorageSystemId = storageSystemId,
             Kind = kind,
             NativeId = nativeId,
             NativeRef = nativeRef,

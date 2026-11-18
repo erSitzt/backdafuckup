@@ -43,6 +43,10 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<ProviderArtifactEntity> Artifacts => Set<ProviderArtifactEntity>();
 
+    public DbSet<StorageSystemEntity> StorageSystems => Set<StorageSystemEntity>();
+
+    public DbSet<StorageVolumeMapping> StorageVolumes => Set<StorageVolumeMapping>();
+
     public DbSet<AppSetting> Settings => Set<AppSetting>();
 
     public DbSet<AgentEntity> Agents => Set<AgentEntity>();
@@ -261,6 +265,42 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
         });
 
         builder.Entity<ConnectionHost>(e => e.HasIndex(x => new { x.ConnectionId, x.Address }).IsUnique());
+
+        builder.Entity<StorageSystemEntity>(e =>
+        {
+            e.Property(x => x.Kind).HasMaxLength(32);
+            e.Property(x => x.Name).HasMaxLength(200);
+            e.Property(x => x.Address).HasMaxLength(255);
+            e.Property(x => x.TrustMode).HasConversion<string>().HasMaxLength(32);
+            e.Property(x => x.Status).HasConversion<string>().HasMaxLength(32);
+            e.HasIndex(x => x.Name).IsUnique();
+            e.HasOne(x => x.Credential).WithMany().HasForeignKey(x => x.CredentialId).OnDelete(DeleteBehavior.Restrict);
+            e.Property(x => x.Version).IsRowVersion();
+            ConfigureJsonList(e.Property(x => x.PinnedSpki));
+            e.Property(x => x.Options).HasColumnType("jsonb").HasConversion(
+                v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+                v => JsonSerializer.Deserialize<StorageSystemOptions>(v, JsonSerializerOptions.Default) ?? new StorageSystemOptions(),
+                new ValueComparer<StorageSystemOptions>(
+                    (a, b) => JsonSerializer.Serialize(a, JsonSerializerOptions.Default) == JsonSerializer.Serialize(b, JsonSerializerOptions.Default),
+                    v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default).GetHashCode(StringComparison.Ordinal),
+                    v => JsonSerializer.Deserialize<StorageSystemOptions>(JsonSerializer.Serialize(v, JsonSerializerOptions.Default), JsonSerializerOptions.Default)!));
+            e.Property(x => x.Facts).HasColumnType("jsonb").HasConversion(
+                v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+                v => JsonSerializer.Deserialize<Backdafuckup.Core.Arrays.ArrayInfo>(v, JsonSerializerOptions.Default));
+        });
+
+        builder.Entity<StorageVolumeMapping>(e =>
+        {
+            e.Property(x => x.VolumeUid).HasMaxLength(128);
+            e.Property(x => x.VolumeName).HasMaxLength(200);
+            e.Property(x => x.Wwn).HasMaxLength(64);
+            e.Property(x => x.StorageNativeId).HasMaxLength(128);
+            e.Property(x => x.StorageName).HasMaxLength(200);
+            e.Property(x => x.Layout).HasConversion<string>().HasMaxLength(16);
+            e.HasIndex(x => new { x.StorageSystemId, x.VolumeUid }).IsUnique();
+            e.HasIndex(x => new { x.ConnectionId, x.StorageNativeId });
+            e.HasOne<StorageSystemEntity>().WithMany().HasForeignKey(x => x.StorageSystemId).OnDelete(DeleteBehavior.Cascade);
+        });
 
         builder.Entity<InventoryEntry>(e =>
         {

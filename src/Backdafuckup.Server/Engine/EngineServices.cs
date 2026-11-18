@@ -339,7 +339,8 @@ public sealed class StartupRecovery(
     IOptions<EngineOptions> options,
     TimeProvider time,
     ILogger<StartupRecovery> logger,
-    Tape.TapeRestoreRunner tapeRestores)
+    Tape.TapeRestoreRunner tapeRestores,
+    Arrays.StorageSystems storageSystems)
 {
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -511,6 +512,9 @@ public sealed class StartupRecovery(
                 continue;
             }
 
+            // Objects on storage arrays are removed through the array, in the same reverse order of creation: a proxy's
+            // device and hot-added disk, a temporary datastore, the array's presentation, its snapshot, the VM snapshot.
+            var arrays = new Dictionary<Guid, Core.Arrays.IStorageArraySession>();
             await using (session.ConfigureAwait(false))
             {
                 var log = new LoggerOperationLog(logger);
@@ -519,7 +523,16 @@ public sealed class StartupRecovery(
                     var record = new ProviderArtifact(artifact.Id, artifact.Kind, artifact.NativeId, artifact.NativeRef, artifact.SessionId, artifact.RestorePointId, artifact.State, artifact.Data);
                     try
                     {
-                        if (artifact.State == ArtifactState.CommitPending)
+                        if (artifact.StorageSystemId is { } storageSystemId)
+                        {
+                            if (!arrays.TryGetValue(storageSystemId, out var array))
+                            {
+                                arrays[storageSystemId] = array = await storageSystems.OpenAsync(storageSystemId, cancellationToken).ConfigureAwait(false);
+                            }
+
+                            await array.CleanupArtifactAsync(record, log, cancellationToken).ConfigureAwait(false);
+                        }
+                        else if (artifact.State == ArtifactState.CommitPending)
                         {
                             await session.CommitArtifactAsync(record, log, cancellationToken).ConfigureAwait(false);
                         }
@@ -538,6 +551,11 @@ public sealed class StartupRecovery(
 
                     artifact.UpdatedUtc = time.GetUtcNow();
                 }
+            }
+
+            foreach (var array in arrays.Values)
+            {
+                await array.DisposeAsync().ConfigureAwait(false);
             }
 
             await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -642,6 +660,8 @@ public static class EngineServiceCollectionExtensions
         services.TryAddSingleton<Backdafuckup.Tape.Devices.ITapeHost, Backdafuckup.Tape.Devices.LocalTapeHost>();
         services.AddSingleton<Tape.TapeAgents>();
         services.AddSingleton<Proxies.ProxyAgents>();
+        services.AddSingleton<Core.Arrays.IStorageArrayProvider>(new Backdafuckup.Arrays.Alletra.AlletraProvider());
+        services.AddSingleton<Arrays.StorageSystems>();
         services.AddSingleton<Backdafuckup.Core.Proxies.IProxyPool>(sp => sp.GetRequiredService<Proxies.ProxyAgents>());
         services.AddSingleton<Tape.TapeHosts>();
         services.AddSingleton<Tape.TapeLocks>();
@@ -719,7 +739,8 @@ public static class EngineServiceCollectionExtensions
 }
 
 /// <summary>Every 10 minutes: finishes snapshot cleanups that could not be completed during a backup.</summary>
-public sealed class PendingArtifactRetryService(StartupRecovery recovery, RunningSessions running, ILogger<PendingArtifactRetryService> logger) : BackgroundService
+public sealed class PendingArtifactRetryService(StartupRecovery recovery, RunningSessions running, Arrays.StorageSystems storageSystems, ILogger<PendingArtifactRetryService> logger)
+    : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -729,6 +750,9 @@ public sealed class PendingArtifactRetryService(StartupRecovery recovery, Runnin
             try
             {
                 await recovery.RetryPendingArtifactsAsync(running, stoppingToken).ConfigureAwait(false);
+
+                // Our objects on storage arrays that no ledger row names any more (the array's expiry is the last net).
+                await storageSystems.ScanOrphansAsync(stoppingToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

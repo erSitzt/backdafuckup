@@ -1063,6 +1063,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(32)")
                         .HasColumnName("state");
 
+                    b.Property<Guid?>("StorageSystemId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("storage_system_id");
+
                     b.Property<DateTimeOffset>("UpdatedUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_utc");
@@ -2169,6 +2173,171 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasDatabaseName("ix_ssh_host_keys_host_port");
 
                     b.ToTable("ssh_host_keys", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.StorageSystemEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Address")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("address");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<Guid>("CredentialId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("credential_id");
+
+                    b.Property<string>("Facts")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("facts");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("kind");
+
+                    b.Property<DateTimeOffset?>("LastCheckedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_checked_utc");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("text")
+                        .HasColumnName("last_error");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("Options")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("options");
+
+                    b.Property<string>("PinnedSpki")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("pinned_spki");
+
+                    b.Property<int>("Port")
+                        .HasColumnType("integer")
+                        .HasColumnName("port");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("status");
+
+                    b.Property<string>("TrustMode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("trust_mode");
+
+                    b.Property<uint>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("xid")
+                        .HasColumnName("xmin");
+
+                    b.HasKey("Id")
+                        .HasName("pk_storage_systems");
+
+                    b.HasIndex("CredentialId")
+                        .HasDatabaseName("ix_storage_systems_credential_id");
+
+                    b.HasIndex("Name")
+                        .IsUnique()
+                        .HasDatabaseName("ix_storage_systems_name");
+
+                    b.ToTable("storage_systems", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.StorageVolumeMapping", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid?>("ConnectionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("connection_id");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("boolean")
+                        .HasColumnName("enabled");
+
+                    b.Property<string>("Layout")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("layout");
+
+                    b.Property<string>("Refusal")
+                        .HasColumnType("text")
+                        .HasColumnName("refusal");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("size_bytes");
+
+                    b.Property<string>("StorageName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("storage_name");
+
+                    b.Property<string>("StorageNativeId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("storage_native_id");
+
+                    b.Property<Guid>("StorageSystemId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("storage_system_id");
+
+                    b.Property<DateTimeOffset>("UpdatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_utc");
+
+                    b.Property<string>("VolumeName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("volume_name");
+
+                    b.Property<string>("VolumeUid")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("volume_uid");
+
+                    b.Property<string>("Wwn")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("wwn");
+
+                    b.HasKey("Id")
+                        .HasName("pk_storage_volumes");
+
+                    b.HasIndex("ConnectionId", "StorageNativeId")
+                        .HasDatabaseName("ix_storage_volumes_connection_id_storage_native_id");
+
+                    b.HasIndex("StorageSystemId", "VolumeUid")
+                        .IsUnique()
+                        .HasDatabaseName("ix_storage_volumes_storage_system_id_volume_uid");
+
+                    b.ToTable("storage_volumes", (string)null);
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.TapeAgentEntity", b =>
@@ -3373,6 +3542,28 @@ namespace Backdafuckup.Server.Data.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("fk_sql_backup_sets_sql_databases_sql_database_id");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.StorageSystemEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.Credential", "Credential")
+                        .WithMany()
+                        .HasForeignKey("CredentialId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_storage_systems_credentials_credential_id");
+
+                    b.Navigation("Credential");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.StorageVolumeMapping", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.StorageSystemEntity", null)
+                        .WithMany()
+                        .HasForeignKey("StorageSystemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_storage_volumes_storage_systems_storage_system_id");
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.TapeCopyEntity", b =>

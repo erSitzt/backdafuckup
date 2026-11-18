@@ -172,6 +172,9 @@ public enum CredentialKind
 
     /// <summary>SQL Server login for SQL restores; the secret is the protected password.</summary>
     SqlServer,
+
+    /// <summary>A storage array's API account (backup from storage snapshots).</summary>
+    StorageArray,
 }
 
 /// <summary>What a Linux credential holds (stored as protected JSON): password or private key, and the sudo password.</summary>
@@ -865,6 +868,9 @@ public sealed class ProviderArtifactEntity
     public string? LastError { get; set; }
 
     public string? Data { get; set; }
+
+    /// <summary>An array object (snapshot, presentation): the storage system it is on; cleaned through that array.</summary>
+    public Guid? StorageSystemId { get; set; }
 
     public DateTimeOffset CreatedUtc { get; set; }
 

@@ -134,6 +134,20 @@ public interface IVmBackupSession : IAsyncDisposable
 
     /// <summary>The restore point is committed: keep only change-tracking state and remove the snapshot data.</summary>
     Task CommitAsync(IOperationLog log, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The VM snapshot may be removed before the disks are read (backup from an array snapshot): the platform keeps change
+    /// tracking across it.
+    /// </summary>
+    bool CanReleaseEarly => false;
+
+    /// <summary>
+    /// Removes the VM snapshot now, after <see cref="GetChangedExtentsAsync"/> was asked for every disk and the disks are read
+    /// from elsewhere (an array snapshot). Afterwards <see cref="OpenReaderAsync"/> throws, and <see cref="CommitAsync"/>
+    /// only completes what is left (ledger rows, change-tracking data).
+    /// </summary>
+    Task ReleaseSnapshotAsync(IOperationLog log, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This platform keeps its VM snapshot until the backup is committed.");
 }
 
 /// <summary>A running VM restore. Disposing without <see cref="CompleteAsync"/> removes everything created so far.</summary>

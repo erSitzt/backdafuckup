@@ -16,6 +16,7 @@
     <ProjectReference Include="..\Backdafuckup.Nbd\Backdafuckup.Nbd.csproj" />
     <ProjectReference Include="..\Backdafuckup.Xen\Backdafuckup.Xen.csproj" />
     <ProjectReference Include="..\Backdafuckup.VSphere\Backdafuckup.VSphere.csproj" />
+    <ProjectReference Include="..\Backdafuckup.Arrays.Alletra\Backdafuckup.Arrays.Alletra.csproj" />
     <ProjectReference Include="..\Backdafuckup.Proxy\Backdafuckup.Proxy.csproj" />
     <ProjectReference Include="..\Backdafuckup.Kubernetes\Backdafuckup.Kubernetes.csproj" />
     <ProjectReference Include="..\Backdafuckup.Contracts\Backdafuckup.Contracts.csproj" />

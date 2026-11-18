@@ -25,6 +25,12 @@ public sealed record SnapshotFacts(TimeSpan Duration, TimeSpan GateWait, int Dis
     /// snapshot is also consistent across the disks. Xen captures them one after another.
     /// </summary>
     public bool DisksAtOnce { get; init; }
+
+    /// <summary>
+    /// How long the VM snapshot existed, from its creation to its removal (set once it is removed). With a backup from an
+    /// array snapshot it is removed before the disks are read: this is the time that feature shortens.
+    /// </summary>
+    public TimeSpan? Lifetime { get; set; }
 }
 
 /// <summary>How a VM snapshot was taken (metric label values).</summary>

@@ -1,5 +1,6 @@
 using Backdafuckup.Core.Extents;
 using Backdafuckup.Core.Hypervisor;
+using Backdafuckup.Core.Operations;
 
 namespace Backdafuckup.Core.DataMover;
 
@@ -68,12 +69,52 @@ public interface IDiskTransport
     Task<IDiskSource> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken);
 }
 
-/// <summary>Hook around the VM snapshot, e.g. for taking a storage-array snapshot while the VM snapshot exists.</summary>
+/// <summary>
+/// The engine's hook around the VM snapshot (backup from storage-array snapshots): called right after the VM snapshot was
+/// taken (the guest is thawed already) and once the backup is finished. Null from <see cref="OnVmSnapshotCreatedAsync"/>
+/// means the disks are read the normal way.
+/// </summary>
 public interface ISnapshotLifecycleHook
 {
-    Task OnVmSnapshotCreatedAsync(IVmBackupSession session, CancellationToken cancellationToken);
+    Task<ArrayReadLease?> OnVmSnapshotCreatedAsync(VmSnapshotContext context, IOperationLog log, CancellationToken cancellationToken);
 
-    Task OnBackupFinishedAsync(IVmBackupSession session, bool success, CancellationToken cancellationToken);
+    Task OnBackupFinishedAsync(VmSnapshotContext context, ArrayReadLease? lease, bool success, IOperationLog log, CancellationToken cancellationToken);
+}
+
+/// <summary>What the hook needs of a VM's backup: its job run, connection, session and the previous change tokens.</summary>
+/// <param name="Previous">The change token of each disk's previous restore point (null: none).</param>
+public sealed record VmSnapshotContext(
+    Guid SessionId, Guid JobId, Guid ConnectionId, IHypervisorSession Hypervisor, IVmBackupSession Session, IReadOnlyDictionary<string, ChangeToken?> Previous);
+
+/// <summary>
+/// The disks of one VM read from an array snapshot instead of from the VM snapshot: their changed extents (asked while the
+/// VM snapshot still existed) and readers. Disposing it gives the VM's share of the array snapshot back; the last VM of a
+/// batch unpresents and deletes it.
+/// </summary>
+public abstract class ArrayReadLease : IAsyncDisposable
+{
+    /// <summary>"array snapshot bdfu-1a2b3c4d-01 of vdi-ds1 on alletra-test", for messages.</summary>
+    public abstract string Description { get; }
+
+    /// <summary>The transport recorded for the disks: <c>array-esxi-hotadd</c>, <c>array-vmfs</c> or <c>array-lvhd</c>.</summary>
+    public abstract string Transport { get; }
+
+    public abstract ChangedExtents GetChangedExtents(SnapshotDisk disk);
+
+    public abstract ChangeToken? GetNewChangeToken(SnapshotDisk disk);
+
+    public abstract Task<IDiskSource> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken);
+
+    /// <summary>A check of the array reader for one disk (verify mode, CBT-unchanged comparison); null if none was made.</summary>
+    public virtual DiskVerification? GetVerification(SnapshotDisk disk) => null;
+
+    public abstract ValueTask DisposeAsync();
+}
+
+/// <summary>A disk read from an array snapshot, checked against another reading: how many regions were compared and how many differed.</summary>
+public sealed record DiskVerification(string Method, int Regions, int Mismatches)
+{
+    public bool Passed => Mismatches == 0;
 }
 
 /// <summary>A disk of a restore point exposed as a virtual disk image.</summary>

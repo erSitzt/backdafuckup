@@ -7,7 +7,7 @@ using Backdafuckup.VSphere.Vim;
 namespace Backdafuckup.VSphere;
 
 /// <summary>An open connection to one vCenter.</summary>
-internal sealed class VSphereHypervisorSession(VSphereProvider provider, ConnectionSettings settings, VimSession vim, PlatformInfo platform) : IHypervisorSession, IGuestOperations
+internal sealed partial class VSphereHypervisorSession(VSphereProvider provider, ConnectionSettings settings, VimSession vim, PlatformInfo platform) : IHypervisorSession, IGuestOperations
 {
     private VSphereGuestOperations? _guest;
 

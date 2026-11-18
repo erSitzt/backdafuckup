@@ -82,6 +82,9 @@ public sealed record RestorePointManifest
     /// <summary>Whether the VM was a domain controller (its directory facts are in <see cref="Guest"/>); null in older manifests.</summary>
     public bool? DomainController { get; init; }
 
+    /// <summary>The disks were read from storage-array snapshots instead of the VM snapshot; null for the normal path.</summary>
+    public ArraySnapshotInfo? ArraySnapshot { get; init; }
+
     /// <summary>The DNS name of the domain controller's domain ("" if the agent could not read it).</summary>
     public string? AdDomain { get; init; }
 
@@ -346,6 +349,9 @@ public sealed record DiskBackupStats
     /// <summary>Transport the disk was read with ("nbd", "http-export-vhd", ...); null in restore points of older versions.</summary>
     public string? Transport { get; init; }
 
+    /// <summary>A disk read from an array snapshot was checked against another reading (null: not checked).</summary>
+    public DataMover.DiskVerification? Verification { get; init; }
+
     /// <summary>Non-zero chunks that were already in the repository (or identical to the previous restore point).</summary>
     public long DedupedChunks { get; init; }
 
@@ -396,3 +402,24 @@ public sealed record RepositoryCompression(string Codec, int Level);
 
 /// <param name="TargetSize">Size at which a pack is sealed and the next one begins, in bytes.</param>
 public sealed record RepositoryPacks(long TargetSize);
+
+/// <summary>A backup read from storage-array snapshots: which array and snapshots, how, and how long the VM snapshot lived.</summary>
+public sealed record ArraySnapshotInfo
+{
+    /// <summary>The array's name (e.g. its system name).</summary>
+    public required string System { get; init; }
+
+    /// <summary>The array kind, e.g. "AlletraMp".</summary>
+    public required string Kind { get; init; }
+
+    /// <summary>The array snapshots the disks were read from.</summary>
+    public required IReadOnlyList<string> Snapshots { get; init; }
+
+    public required DateTimeOffset TakenUtc { get; init; }
+
+    /// <summary>"esxi-hotadd", "vmfs" or "lvhd".</summary>
+    public required string Method { get; init; }
+
+    /// <summary>How long the VM snapshot existed (it was removed before the disks were read).</summary>
+    public TimeSpan? VmSnapshotLifetime { get; init; }
+}
