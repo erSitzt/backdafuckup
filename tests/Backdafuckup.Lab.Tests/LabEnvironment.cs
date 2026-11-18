@@ -21,15 +21,18 @@ internal static class LabEnvironment
     public static string? Get(string name) =>
         Environment.GetEnvironmentVariable(name) is { Length: > 0 } value ? value : FileValues.Value.GetValueOrDefault(name);
 
-    private static Dictionary<string, string> Load()
+    private static Dictionary<string, string> Load() => ReadFile(FilePath);
+
+    /// <summary>KEY=VALUE lines of a settings file (empty if the file does not exist).</summary>
+    public static Dictionary<string, string> ReadFile(string path)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (!File.Exists(FilePath))
+        if (!File.Exists(path))
         {
             return values;
         }
 
-        foreach (var raw in File.ReadAllLines(FilePath))
+        foreach (var raw in File.ReadAllLines(path))
         {
             var line = raw.Trim();
             if (line.StartsWith("export ", StringComparison.Ordinal))
