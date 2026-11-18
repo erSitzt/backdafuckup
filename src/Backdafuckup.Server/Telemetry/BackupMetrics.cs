@@ -38,6 +38,7 @@ public sealed class BackupMetrics
     private readonly Counter<long> _fullReads;
     private readonly Counter<long> _fallbacks;
     private readonly Histogram<double> _nbdConnect;
+    private readonly Histogram<double> _hotAdd;
     private readonly Counter<long> _nbdReconnects;
     private readonly Counter<long> _sessions;
     private readonly Histogram<double> _sessionDuration;
@@ -63,6 +64,7 @@ public sealed class BackupMetrics
         _fallbacks = meter.CreateCounter<long>("bdfu_transport_fallbacks_total", description: "Disks read with another transport than the preferred one (e.g. HTTP export instead of NBD), by reason.");
         _nbdConnect = Seconds(meter, "bdfu_nbd_connect_seconds", "NBD connection attempts by host and result (ok, timeout, refused, tls, error).", ConnectBuckets);
         _nbdReconnects = meter.CreateCounter<long>("bdfu_nbd_reconnects_total", description: "NBD connections that broke and were opened again while a disk was read.");
+        _hotAdd = Seconds(meter, "bdfu_hotadd_attach_seconds", "vSphere HotAdd: attaching a snapshot's disk to a backup proxy VM, by datastore and proxy.", ConnectBuckets);
         _sessions = meter.CreateCounter<long>("bdfu_sessions_total", description: "Finished sessions by kind and result.");
         _sessionDuration = Seconds(meter, "bdfu_session_duration_seconds", "Duration of finished sessions by kind and result.", SessionBuckets);
         _vmBackups = meter.CreateCounter<long>("bdfu_vm_backups_total", description: "Backups of single VMs (each attempt) by job and result.");
@@ -245,6 +247,9 @@ public sealed class BackupMetrics
     {
         public void NbdConnect(string storage, string host, TimeSpan elapsed, string result) =>
             metrics._nbdConnect.Record(elapsed.TotalSeconds, Tag("pool", pool), Tag("host", host), Tag("result", result));
+
+        public void HotAdd(string storage, string proxy, TimeSpan elapsed) =>
+            metrics._hotAdd.Record(elapsed.TotalSeconds, Tag("pool", pool), Tag("storage", storage), Tag("proxy", proxy));
 
         public void TransportFallback(string storage, string from, string to, string reason) =>
             metrics._fallbacks.Add(1, Tag("pool", pool), Tag("storage", storage), Tag("from", from), Tag("to", to), Tag("reason", reason));

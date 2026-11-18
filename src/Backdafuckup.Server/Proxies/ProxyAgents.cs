@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -23,8 +24,12 @@ public sealed class ProxyRequestException(string message, int statusCode = Statu
 /// tunnels the server asks them to open, and the disks the providers attach through them (<see cref="IProxyPool"/>).
 /// </summary>
 public sealed class ProxyAgents(
-    IDbContextFactory<AppDbContext> dbFactory, Agents.AgentSettingsStore settings, TimeProvider time, ILogger<ProxyAgents> logger) : IProxyPool
+    IDbContextFactory<AppDbContext> dbFactory, Agents.AgentSettingsStore settings, TimeProvider time, ILogger<ProxyAgents> logger, System.Diagnostics.Metrics.IMeterFactory meters) : IProxyPool
 {
+    private readonly System.Diagnostics.Metrics.Meter _meter = meters.Create(Telemetry.BackupMetrics.MeterName);
+    private readonly ConcurrentDictionary<Guid, string> _seen = new();
+    private int _gauges;
+
     private static readonly TimeSpan InstallTokenLifetime = TimeSpan.FromHours(24);
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan TunnelTimeout = TimeSpan.FromSeconds(30);
@@ -177,6 +182,8 @@ public sealed class ProxyAgents(
         }
 
         _connections[proxy.Id] = connection;
+        _seen[proxy.Id] = proxy.Name;
+        RegisterGauges();
         await RecordAsync(proxy.Id, hello, remote).ConfigureAwait(false);
         logger.LogInformation(
             "Proxy {Proxy} connected from {Remote} (host {Host}, version {Version}) with {Devices} device(s).",
@@ -191,6 +198,25 @@ public sealed class ProxyAgents(
             await RecordAsync(proxy.Id, null, null).ConfigureAwait(false);
             logger.LogInformation("Proxy {Proxy} ({Remote}) disconnected.", proxy.Name, remote);
         }
+    }
+
+    /// <summary>The proxies' gauges, once a proxy connected (the series are the proxies that connected since the server started).</summary>
+    private void RegisterGauges()
+    {
+        if (Interlocked.Exchange(ref _gauges, 1) != 0)
+        {
+            return;
+        }
+
+        _meter.CreateObservableGauge(
+            "bdfu_proxy_connected",
+            () => _seen.Select(p => new System.Diagnostics.Metrics.Measurement<int>(_connections.ContainsKey(p.Key) ? 1 : 0, new KeyValuePair<string, object?>("proxy", p.Value))),
+            description: "1 while a backup proxy is connected to this server, 0 once it is gone (proxies that connected since the server started).");
+        _meter.CreateObservableGauge(
+            "bdfu_proxy_open_disks",
+            () => _seen.Select(p => new System.Diagnostics.Metrics.Measurement<int>(
+                _connections.TryGetValue(p.Key, out var connection) ? connection.OpenHandles : 0, new KeyValuePair<string, object?>("proxy", p.Value))),
+            description: "Disks the server has open on a backup proxy now (hot-added disks being read or written).");
     }
 
     /// <summary>A tunnel the proxy opened for a stream the server asked for; false when the stream or token is unknown.</summary>

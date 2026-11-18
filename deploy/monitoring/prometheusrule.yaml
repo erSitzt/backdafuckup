@@ -80,8 +80,8 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "A backup snapshot in pool {{ $labels.pool }} is older than 6 hours"
-            description: "A snapshot tagged by backdafuckup is still in the pool. It holds space on thick LVM storage and lengthens the disk chain. The server retries the cleanup every 10 minutes; see bdfu_artifacts_pending and the server log."
+            summary: "A backup snapshot in pool or vCenter {{ $labels.pool }} is older than 6 hours"
+            description: "A snapshot of backdafuckup is still there. It holds space (on thick LVM storage, or the growing delta file on a datastore) and lengthens the disk chain. The server retries the cleanup every 10 minutes; see bdfu_artifacts_pending and the server log."
 
         - alert: BackdafuckupCleanupPending
           expr: bdfu_artifacts_pending > 0
@@ -178,6 +178,24 @@ spec:
           annotations:
             summary: "Tape agent {{ $labels.agent }} is not connected"
             description: "Actions and tape jobs of its libraries fail while it is gone. Check the service backdafuckup-tape-agent on its host (journalctl -u backdafuckup-tape-agent names the server address and the error)."
+
+        - alert: BackdafuckupProxyDisconnected
+          expr: bdfu_proxy_connected == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backup proxy {{ $labels.proxy }} is not connected"
+            description: "vSphere backups and restores that need this proxy fail or use another one that sees the same datastores. Check the service backdafuckup-proxy on the proxy VM (journalctl -u backdafuckup-proxy names the server address and the error)."
+
+        - alert: BackdafuckupProxyDisksOpenWhileIdle
+          expr: bdfu_proxy_open_disks > 0 and on() ((sum(bdfu_sessions_running) or vector(0)) == 0)
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Backup proxy {{ $labels.proxy }} holds disks while no session runs"
+            description: "A disk opened through the proxy was not released. The server's cleanup detaches the hot-added disks it recorded (see bdfu_artifacts_pending); check the server log and journalctl -u backdafuckup-proxy."
 
         - alert: BackdafuckupTapeNoUsableMedia
           expr: bdfu_tape_pool_usable_media == 0

@@ -98,7 +98,7 @@ A scrape interval of 60 s matches how often the server refreshes its catalog gau
 - **Prometheus Operator:** `kubectl apply -f prometheusrule.yaml`. Its label `release` must match the Prometheus' `ruleSelector`.
 - **Plain Prometheus:** add `backdafuckup.rules.yml` under `rule_files:`.
 
-Both contain the same 15 alerts:
+Both contain the same 24 alerts:
 
 | Alert | When |
 |---|---|
@@ -109,7 +109,7 @@ Both contain the same 15 alerts:
 | BackdafuckupStorageBelowMinimum | a storage has less free space than the snapshot minimum |
 | BackdafuckupStorageLow | a storage has less than twice that |
 | BackdafuckupTransportFallback | disks were read with the HTTP export instead of NBD |
-| BackdafuckupSnapshotLeftOver | one of our snapshots is older than 6 h |
+| BackdafuckupSnapshotLeftOver | one of our snapshots (pool or vCenter) is older than 6 h |
 | BackdafuckupCleanupPending | a snapshot cleanup is pending for over 2 h |
 | BackdafuckupPoolUnreadable | a pool cannot be read |
 | BackdafuckupRepositoryLow | a repository has less than 10 % free |
@@ -117,6 +117,8 @@ Both contain the same 15 alerts:
 | BackdafuckupAgentOffline | guest agents are offline |
 | BackdafuckupClusterAgentDisconnected | the agent of a Kubernetes cluster reached through it is gone for 15 minutes |
 | BackdafuckupTapeAgentDisconnected | a tape agent is gone for 15 minutes |
+| BackdafuckupProxyDisconnected | a vSphere backup proxy is gone for 15 minutes |
+| BackdafuckupProxyDisksOpenWhileIdle | a backup proxy has held open disks for 30 minutes while no session runs |
 | BackdafuckupTapeNoUsableMedia | a media pool has had no tape it can write to for 30 minutes |
 | BackdafuckupTapeJobFailed | a tape job failed in the last 6 hours |
 | BackdafuckupTapeOperatorWaiting | a tape session has waited 30 minutes for a cartridge in a standalone drive |

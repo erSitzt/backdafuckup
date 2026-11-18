@@ -52,6 +52,11 @@ public interface IBackupTelemetry
 
     /// <summary>Connections to <paramref name="host"/> that broke and were opened again while a disk was read.</summary>
     void NbdReconnects(string storage, string host, int count);
+
+    /// <summary>A disk was hot-added to <paramref name="proxy"/> (vSphere): the reconfiguration of the proxy VM.</summary>
+    void HotAdd(string storage, string proxy, TimeSpan elapsed)
+    {
+    }
 }
 
 /// <summary>Results of an NBD connection attempt (metric label values).</summary>

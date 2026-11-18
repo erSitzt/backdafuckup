@@ -11,6 +11,7 @@
 | XCP-ng / XenServer | XCP-ng 8.3 or XenServer 8, with a pool admin account for the connection. |
 | NBD network | Recommended: a pool network with the NBD purpose that the backup server can reach. Without it, backups fall back to the slower HTTP export. |
 | Kubernetes (optional) | Clusters with a CSI driver that takes volume snapshots, and a container registry for the mover image. See [Kubernetes namespaces](#kubernetes-namespaces). |
+| VMware vSphere (optional) | vCenter Server 7.0 or later and a Linux backup proxy VM. See [VMware vSphere](#vmware-vsphere). |
 
 ### Network ports
 
@@ -21,6 +22,9 @@
 | Guest agent in the VM → backup server | TCP 9555 (HTTPS) | Agent connection, self-update, file restore into Windows VMs. Outbound from the VM only. |
 | Backup server → XCP-ng hosts | TCP 443 (HTTPS) | XAPI, HTTP export, restore upload |
 | Backup server → XCP-ng hosts on the NBD network | TCP 10809 (TLS) | NBD disk reads |
+| Backup server → vCenter | TCP 443 (HTTPS) | vSphere API |
+| Backup server → ESXi hosts | TCP 443 (HTTPS) | Installing the agent through VMware Tools (file copy into the guest) |
+| Backup proxy → backup server | TCP 9555 (HTTPS, WebSockets) | vSphere disk data and the proxy's control connection. Outbound from the proxy only. |
 | Backup server → Windows VMs | TCP 445 (SMB) | Push installation of the agent |
 | Backup server → file servers, domain controllers, DFS namespace servers | TCP 445 (SMB) | File restore to a network share, DFS referrals |
 | Backup server → Linux VMs | TCP 22 (SSH) | File restore into Linux VMs |
@@ -690,6 +694,80 @@ Only folders named `{GUID}` or `{GUID}.bdfu-*` directly in `Policies` are ever t
   - Authoritative restores (e.g. a deleted OU with everything below it on all DCs, without object restore) are done with `ntdsutil` in Directory Services Restore Mode on a DC restored to an isolated network.
   - Recovering a whole forest follows Microsoft's *AD Forest Recovery* guide.
 
+## VMware vSphere
+
+backdafuckup backs up VMs of a vCenter Server and restores them, with only public vSphere interfaces: the vSphere Web Services API (vim25), changed block tracking (CBT), HotAdd and VMware Tools. It needs no VDDK and no VMware software on the backup server. Disks are read and written by a **backup proxy**: a small Linux VM in the vCenter to which each disk is hot-added.
+
+### Requirements
+
+| Item | Notes |
+|---|---|
+| vCenter Server | 7.0 or later (tested with 7.0.3). A standalone ESXi host is refused: snapshots, CBT and HotAdd need vCenter. The license must allow the vSphere API (not the free ESXi). |
+| vCenter account | An SSO user (e.g. `backup@vsphere.local`) with the privileges in [vCenter account](#vcenter-account). |
+| Backup proxy | At least one Linux VM (x64, any distribution with systemd) in the vCenter, see [Backup proxies](#backup-proxies). |
+| VMs | Hardware version 7 or later (for CBT). VMware Tools for guest processing without the agent, for the agent installation through the Tools and for guest addresses. |
+
+### Network ports
+
+| From → to | Port | Used for |
+|---|---|---|
+| Backup server → vCenter | TCP 443 (HTTPS) | vSphere API |
+| Backup server → ESXi hosts | TCP 443 (HTTPS) | Only for installing the agent through VMware Tools (file copy into the guest) |
+| Backup proxy → backup server | TCP 9555 (HTTPS, WebSockets) | The proxy's control connection and the disk data (NBD inside WebSockets). Outbound from the proxy only. |
+
+### Add a vCenter
+
+*Backup Infrastructure → Virtualization → Add pool or vCenter*, choose *VMware vCenter*. Enter the vCenter's address, check its certificate and trust it. The ESXi hosts' certificates are taken from vCenter (they are only used for file copies into guests). Then the SSO user and password.
+
+### Backup proxies
+
+A proxy reads the disks of the VMs' snapshots and writes the disks of restored VMs. The server attaches each disk to the proxy VM (`ReconfigVM_Task`, mode *independent non-persistent*, never with a file operation), the proxy finds it by its serial number and serves it to the server through its own connection. Nothing of the VM's disk is copied onto the proxy.
+
+The proxy VM:
+- Linux x64 with systemd, 2 vCPUs and 2–4 GB RAM are enough;
+- advanced setting `disk.EnableUUID = TRUE` (the disks' serial numbers must be visible to the guest);
+- a paravirtual SCSI controller with free places for hot-added disks, ideally a second one (bus 1) besides the system disk's;
+- it must see the datastores of the VMs it serves: a proxy on each host with local datastores, one per cluster for shared datastores;
+- it reaches the backup server on port 9555.
+
+Install it under *Backup Infrastructure → Backup Proxies → Add proxy*: download the agent (`backdafuckup-proxy`, one file) and its systemd unit, copy them to `/opt/backdafuckup-proxy/` and `/etc/systemd/system/`, run the shown `enroll` command as root (it holds a one-time install token, valid 24 hours) and start the service. The proxy shows as online within seconds.
+
+A job uses a connected proxy whose VM is powered on, has a free SCSI place and sees all datastores of the VM: one on the VM's host first, then one in its cluster, then the one with the fewest disks attached. The session log names the proxy and why others were not used.
+
+### Backups
+
+- **Snapshot:** a VM snapshot without memory (`backdafuckup temporary snapshot`), removed after the disks are read. User snapshots are never touched.
+- **CBT:** switched on by the first backup of a VM (a quick reconfiguration, also while it runs). The first backup reads only the allocated areas, later ones only the blocks changed since the previous backup. A reset of CBT (e.g. after a Storage vMotion of some versions, or by the quick rollback) makes the next backup read the allocated areas again, with a warning that names the reason.
+- **Disks left out, with a warning:** independent disks, raw device mappings and multi-writer disks (vSphere does not snapshot them). Snapshots with memory are not offered for vSphere VMs.
+- **Guest processing:** with the backdafuckup agent in a Windows VM, as for XCP-ng (VSS, SQL Server, Active Directory). Without the agent, VMware Tools quiesce the snapshot: VSS in Windows (application-consistent), frozen file systems in Linux (file-system-consistent only, with a warning). If the Tools cannot quiesce, the snapshot is taken again without quiescing, with a warning.
+- **Agent installation:** a missing agent is installed with the job's Windows credentials over SMB, or, when the VM has no address the server reaches on port 445, **through VMware Tools** (guest operations): the files are copied through the VM's ESXi host and the service is created with `sc.exe`. With User Account Control on, use the built-in Administrator account or a domain account in the local Administrators group. Agents are matched to vSphere VMs by the BIOS UUID they report.
+- **After a crash** of the server, leftover backup snapshots and disks still attached to a proxy are removed by the cleanup (they are recorded before they are created).
+
+### Restore
+
+*Backups & Restore → restore point → Restore entire VM*:
+
+- **To a new location:** the disks are created as new thin disks in a folder named after the VM on the chosen datastores, written through a proxy (only their data), and the VM is created from the backed-up configuration: CPUs, memory, firmware and secure boot, hardware version, disk controllers, disks, NICs. Choose the VM folder and resource pool (by default those of the original VM). The copy gets a new BIOS UUID and, by default, new MAC addresses. While the original VM exists, the copy's NICs start **disconnected**, because the guest comes up with the original's addresses and host name; connect them in vCenter when that is sorted out.
+- **To the original location:** the original VM is shut down and renamed `… (replaced <time>)` (or deleted after the restore, if chosen), and the restored VM takes its name, BIOS UUID, MAC addresses and PCI slots, so the guest keeps its network configuration. Its jobs then back up the restored VM, starting with a full backup.
+- **Quick rollback** (original location, VM still there): only the blocks changed since the restore point are written back into the existing VM. The VM is shut down, a safety snapshot taken, CBT lists the changed blocks of each disk, and exactly these are written from the restore point; then the safety snapshot is removed (or kept, if chosen) and CBT is reset, so the next backup reads the disks fully. If anything fails, the VM goes back to the safety snapshot. It needs the same disks (same size) and CBT on since the restore point; it is meant for changes inside the guest (a failed update, ransomware), not for damaged storage. **Not for domain controllers:** a rolled-back DC would keep its VM generation id and Active Directory would not notice that it went back in time (USN rollback); restore it fully instead, the restored VM gets a new generation id.
+
+Not restored: vSphere tags and custom attributes, storage policies, the NVRAM (UEFI boot entries; Windows and Linux boot through their fallback boot loader), a virtual TPM's contents, CD-ROM, USB and serial devices. Disks get new UUIDs: an `/etc/fstab` that names a disk by `/dev/disk/by-id/scsi-36000c29…` must be adjusted (by file system UUID, the usual way, works).
+
+### vCenter account
+
+Create a role with these privileges and assign it to the backup account on the vCenter (with propagation), or on the datacenters, folders, resource pools and datastores used, including the proxy VMs:
+
+| Area | Privileges |
+|---|---|
+| Datastore | Browse datastore · Low level file operations · Allocate space |
+| Network | Assign network (restore) |
+| Resource | Assign virtual machine to resource pool (restore) |
+| Virtual machine → Change Configuration | Add existing disk · Add new disk · Remove disk · Toggle disk change tracking · Modify device settings · Advanced configuration · Rename (restore to the original location) |
+| Virtual machine → Edit Inventory | Create new · Remove (restore, and its cleanup when it fails) |
+| Virtual machine → Guest operations | Guest operation program execution · Guest operation modifications · Guest operation queries (agent installation through VMware Tools) |
+| Virtual machine → Interaction | Power on · Power off · Guest operating system management (shutdown for restores) |
+| Virtual machine → Snapshot management | Create snapshot · Remove snapshot · Revert to snapshot (quick rollback) |
+
 ## Kubernetes namespaces
 
 backdafuckup backs up namespaces of Kubernetes clusters, with their objects and the data of their PVCs, or a whole cluster. It restores:
@@ -1330,7 +1408,7 @@ The server serves Prometheus metrics at `https://<server>:9555/metrics`. It only
   
   A scrape never waits for the database or a pool: it reads the last values.
 
-What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the SR name, or several joined with `+`):
+What is measured (prefix `bdfu_`; `pool` is the connection name of a pool or vCenter, `storage` the SR or datastore name, or several joined with `+`). For vCenters the storage and snapshot gauges show the datastores and the VMs' snapshots; transport `hotadd` is a disk read through a backup proxy:
 
 | Metric | Type | What |
 |---|---|---|
@@ -1346,6 +1424,8 @@ What is measured (prefix `bdfu_`; `pool` is the connection name, `storage` the S
 | `bdfu_transport_fallbacks_total` {pool, storage, from, to, reason} | counter | Disks read with the HTTP export instead of NBD: `no_endpoint`, `insecure_only`, `unreachable` |
 | `bdfu_nbd_connect_seconds` {pool, host, result} | histogram | NBD connection attempts: `ok`, `timeout`, `refused`, `tls`, `error` |
 | `bdfu_nbd_reconnects_total` {pool, host} | counter | NBD connections that broke while a disk was read and were opened again |
+| `bdfu_hotadd_attach_seconds` {pool, storage, proxy} | histogram | vSphere: attaching a snapshot's disk to a backup proxy VM (the reconfiguration of the proxy VM) |
+| `bdfu_proxy_connected`, `bdfu_proxy_open_disks` {proxy} | gauge | Backup proxies: 1 while connected, 0 once gone (proxies that connected since the server started); disks the server has open through each |
 | `bdfu_sessions_total`, `bdfu_session_duration_seconds` {kind, result} | counter, histogram | Finished sessions |
 | `bdfu_sessions_running`, `bdfu_sessions_queued` {kind} | gauge | Sessions now |
 | `bdfu_vm_backups_total` {backup_job, result} | counter | Backups of single VMs, each attempt |

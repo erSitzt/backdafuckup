@@ -63,6 +63,13 @@ public sealed partial class ApiIntegrationTests
             Assert.Equal(2 * 4, lab.Events.Count(e => e.StartsWith("attach", StringComparison.Ordinal) || e.StartsWith("detach", StringComparison.Ordinal)));
             Assert.Equal(4, lab.ProxyDevices.Deleted.Count);
             Assert.Equal(["snapshot", "attach", "attach", "detach", "detach", "remove"], lab.Events.Take(6).Select(e => e.Split(' ')[0]).Select(e => e == "remove" ? "remove" : e));
+
+            // Metrics: the HotAdd time per proxy, the proxy connected and no disk left open on it.
+            var metrics = await client.GetStringAsync("/metrics", Ct);
+            Assert.Contains("bdfu_hotadd_attach_seconds_bucket{", metrics);
+            Assert.Contains("proxy=\"proxy01\"", metrics);
+            Assert.Matches(@"bdfu_proxy_connected\{[^}]*proxy=""proxy01""[^}]*\} 1", metrics);
+            Assert.Matches(@"bdfu_proxy_open_disks\{[^}]*proxy=""proxy01""[^}]*\} 0", metrics);
         }
         finally
         {

@@ -2112,6 +2112,209 @@
         "overrides": []
       },
       "options": {}
+    },
+    {
+      "type": "row",
+      "title": "vSphere: backup proxies",
+      "id": 44,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 99
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Backup proxies connected",
+      "id": 45,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Proxies connected now, of those that connected since the server started (bdfu_proxy_connected).",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 100
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(bdfu_proxy_connected) or vector(0)",
+          "legendFormat": "connected",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "count(bdfu_proxy_connected == 0) or vector(0)",
+          "legendFormat": "gone",
+          "refId": "B",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "type": "table",
+      "title": "Proxies: connected, open disks",
+      "id": 46,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Per proxy: connected (1/0) and the disks the server has open through it now.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 6,
+        "y": 100
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bdfu_proxy_connected",
+          "legendFormat": "",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "bdfu_proxy_open_disks",
+          "legendFormat": "",
+          "refId": "B",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "otel_scope_name": true,
+              "instance": true,
+              "job": true,
+              "Value #A": true
+            },
+            "renameByName": {
+              "scale_out": "Scale-out",
+              "repository": "Extent",
+              "state": "State",
+              "Value #B": "Chains"
+            },
+            "indexByName": {
+              "scale_out": 0,
+              "repository": 1,
+              "state": 2,
+              "Value #B": 3
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "sortBy": [
+          {
+            "displayName": "Scale-out",
+            "desc": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "HotAdd attach p90 by proxy",
+      "id": 47,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Time to attach a snapshot's disk to the proxy VM (ReconfigVM_Task), p90 over 1 h windows.",
+      "gridPos": {
+        "h": 6,
+        "w": 10,
+        "x": 14,
+        "y": 100
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le, proxy) (increase(bdfu_hotadd_attach_seconds_bucket{pool=~\"$pool\"}[1h])))",
+          "legendFormat": "{{proxy}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "interval": "1h"
     }
   ]
 }

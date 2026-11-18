@@ -47,6 +47,7 @@ internal sealed class VSphereBackupSession : IVmBackupSession
 {
     private readonly VSphereHypervisorSession _owner;
     private readonly IArtifactLedger _ledger;
+    private readonly IBackupTelemetry? _telemetry;
     private readonly IOperationLog _log;
     private readonly ManagedObjectReference _snapshot;
     private readonly Guid _snapshotArtifact;
@@ -61,7 +62,8 @@ internal sealed class VSphereBackupSession : IVmBackupSession
     private VSphereBackupSession(
         VSphereHypervisorSession owner, VSphereVm vm, IArtifactLedger ledger, IOperationLog log, ManagedObjectReference snapshot, Guid snapshotArtifact,
         IReadOnlyList<VSphereSnapshotDisk> disks, IReadOnlyList<SnapshotDisk> excluded, IReadOnlyCollection<(string Id, string Name)> datastores, string? vmCluster,
-        VmMetadataBlob metadata, SnapshotFacts facts, GuestFreezeResult? freeze, IReadOnlyList<VmNic> nics, string? firmware, bool secureBoot, string? generationId)
+        VmMetadataBlob metadata, SnapshotFacts facts, GuestFreezeResult? freeze, IReadOnlyList<VmNic> nics, string? firmware, bool secureBoot, string? generationId,
+        IBackupTelemetry? telemetry)
     {
         _owner = owner;
         VmInfo = vm;
@@ -69,6 +71,7 @@ internal sealed class VSphereBackupSession : IVmBackupSession
         _log = log;
         _snapshot = snapshot;
         _snapshotArtifact = snapshotArtifact;
+        _telemetry = telemetry;
         _disks = disks.ToDictionary(d => d.Key, StringComparer.Ordinal);
         _datastores = datastores;
         _vmCluster = vmCluster;
@@ -214,7 +217,7 @@ internal sealed class VSphereBackupSession : IVmBackupSession
                 row.Str("config.bootOptions.efiSecureBootEnabled") is { } secureBoot ? secureBoot == "true" : null)));
             var facts = new SnapshotFacts(watch.Elapsed, TimeSpan.Zero, disks.Count, [.. datastores.Select(d => d.Name).Distinct(StringComparer.Ordinal)], null) { DisksAtOnce = true };
             return new VSphereBackupSession(owner, vm, ledger, log, snapshot, artifact, disks, excluded, datastores, vmCluster, metadata, facts, freezeResult,
-                VSphereDevices.Nics(devices), row.Str("config.firmware"), row.Str("config.bootOptions.efiSecureBootEnabled") == "true", VSphereDevices.GenerationId(row["config.extraConfig"]));
+                VSphereDevices.Nics(devices), row.Str("config.firmware"), row.Str("config.bootOptions.efiSecureBootEnabled") == "true", VSphereDevices.GenerationId(row["config.extraConfig"]), request.Telemetry);
         }
         catch
         {
@@ -285,6 +288,7 @@ internal sealed class VSphereBackupSession : IVmBackupSession
                 $"{proxy.Vm.Value}:{slot.ControllerKey}:{slot.Unit}:{deviceKey.Value.ToString(CultureInfo.InvariantCulture)}", cancellationToken).ConfigureAwait(false);
             proxyDisk = await pool.AttachAsync(proxy.Proxy.Id, info.Uuid, info.CapacityBytes, writable: false, cancellationToken).ConfigureAwait(false);
             var reader = await proxyDisk.OpenReaderAsync(Math.Clamp(options.Connections, 1, 16), Math.Max(1, options.MaxInFlightPerConnection), cancellationToken).ConfigureAwait(false);
+            _telemetry?.HotAdd(_datastores.FirstOrDefault(d => d.Id == info.DatastoreId).Name ?? info.DatastoreId ?? string.Empty, proxy.Proxy.Name, watch.Elapsed);
             _log.Info($"{disk.Name} of {VmInfo.Name}: hot-added to proxy {proxy.Proxy.Name} (VM {proxy.VmName} on {proxy.HostName}, SCSI {slot.Bus}:{slot.Unit}) in " +
                 $"{watch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s; reading {proxyDisk.Description}.");
             var opened = new HotAddReader(this, reader, proxyDisk, proxy, slot, deviceKey.Value, info, artifact.Value);
