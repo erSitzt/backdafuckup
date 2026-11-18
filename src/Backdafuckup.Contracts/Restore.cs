@@ -20,6 +20,21 @@ public sealed record RestoreRequestDto
 
     public string? TargetHostId { get; init; }
 
+    /// <summary>
+    /// Original location: write back into the existing VM only what changed since the restore point (vSphere, needs
+    /// changed block tracking); much faster than a full restore of large disks.
+    /// </summary>
+    public bool QuickRollback { get; init; }
+
+    /// <summary>
+    /// Whether the restored VM's NICs start connected. Null: automatic, i.e. a copy whose original still exists starts with
+    /// its NICs disconnected, so that it does not come up with the original's addresses (vSphere).
+    /// </summary>
+    public bool? ConnectNics { get; init; }
+
+    /// <summary>Quick rollback: keep the safety snapshot (the VM before the rollback) instead of removing it.</summary>
+    public bool KeepSafetySnapshot { get; init; }
+
     /// <summary>vSphere: the VM folder (managed object id, e.g. group-v123). Null: where the backed-up VM was.</summary>
     public string? TargetFolderId { get; init; }
 

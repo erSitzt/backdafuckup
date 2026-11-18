@@ -23,7 +23,7 @@ internal static class VSphereHotAdd
     private static readonly string[] ScsiControllers = ["ParaVirtualSCSIController", "VirtualLsiLogicSASController", "VirtualLsiLogicController", "VirtualBusLogicController"];
 
     /// <summary>The device change that attaches <paramref name="fileName"/> to <paramref name="slot"/> (no fileOperation).</summary>
-    public static XElement AddSpec(ScsiSlot slot, string fileName, long capacityBytes) =>
+    public static XElement AddSpec(ScsiSlot slot, string fileName, long capacityBytes, string diskMode = "independent_nonpersistent") =>
         VimXml.E(
             "spec",
             VimXml.E(
@@ -32,7 +32,7 @@ internal static class VSphereHotAdd
                 VimXml.Typed(
                     "device", "VirtualDisk",
                     VimXml.E("key", -100),
-                    VimXml.Typed("backing", "VirtualDiskFlatVer2BackingInfo", VimXml.E("fileName", fileName), VimXml.E("diskMode", "independent_nonpersistent")),
+                    VimXml.Typed("backing", "VirtualDiskFlatVer2BackingInfo", VimXml.E("fileName", fileName), VimXml.E("diskMode", diskMode)),
                     VimXml.E("controllerKey", slot.ControllerKey),
                     VimXml.E("unitNumber", slot.Unit),
                     VimXml.E("capacityInKB", capacityBytes / 1024))));
@@ -81,13 +81,22 @@ internal static class VSphereHotAdd
                     VimXml.E("capacityInKB", capacityBytes / 1024))));
 
     /// <summary>Attaches the disk and returns its device key on the proxy VM.</summary>
-    public static async Task<int> AttachAsync(VimSession vim, ProxyVm proxy, ScsiSlot slot, string fileName, long capacityBytes, CancellationToken cancellationToken)
+    public static async Task<int> AttachAsync(VimSession vim, ProxyVm proxy, ScsiSlot slot, string fileName, long capacityBytes, CancellationToken cancellationToken) =>
+        (await AttachDiskAsync(vim, proxy, slot, fileName, capacityBytes, "independent_nonpersistent", cancellationToken).ConfigureAwait(false)).DeviceKey;
+
+    /// <summary>
+    /// Attaches a disk file in the given mode; returns its device key on the proxy VM and the UUID vCenter reports for it
+    /// (the SCSI serial the proxy finds it by). A quick rollback attaches the VM's current disk persistent, to write into it.
+    /// </summary>
+    public static async Task<(int DeviceKey, string? Uuid)> AttachDiskAsync(
+        VimSession vim, ProxyVm proxy, ScsiSlot slot, string fileName, long capacityBytes, string diskMode, CancellationToken cancellationToken)
     {
-        var task = await vim.StartTaskAsync("ReconfigVM_Task", proxy.Vm, cancellationToken, AddSpec(slot, fileName, capacityBytes)).ConfigureAwait(false);
+        var task = await vim.StartTaskAsync("ReconfigVM_Task", proxy.Vm, cancellationToken, AddSpec(slot, fileName, capacityBytes, diskMode)).ConfigureAwait(false);
         await vim.WaitForTaskAsync(task, cancellationToken).ConfigureAwait(false);
         var devices = (await vim.RetrievePropertiesAsync([proxy.Vm], ["config.hardware.device"], cancellationToken).ConfigureAwait(false)).FirstOrDefault()?["config.hardware.device"];
-        return devices?.Items.FirstOrDefault(d => d.Type == "VirtualDisk" && d.Int("controllerKey") == slot.ControllerKey && d.Int("unitNumber") == slot.Unit)?.Int("key")
+        var disk = devices?.Items.FirstOrDefault(d => d.Type == "VirtualDisk" && d.Int("controllerKey") == slot.ControllerKey && d.Int("unitNumber") == slot.Unit)
             ?? throw new InvalidDataException($"vCenter {vim.Endpoint}: {fileName} was attached to proxy VM {proxy.VmName}, but the VM shows no disk on SCSI {slot.Bus}:{slot.Unit}.");
+        return (disk.Int("key") ?? 0, disk.Child("backing")?.Str("uuid"));
     }
 
     public static async Task DetachAsync(VimSession vim, ManagedObjectReference proxyVm, int deviceKey, ScsiSlot slot, long capacityBytes, CancellationToken cancellationToken)

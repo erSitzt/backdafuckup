@@ -144,7 +144,9 @@ public sealed partial class ApiIntegrationTests
             Directory.CreateDirectory(directory);
             var paths = new AgentPaths(directory);
             await File.WriteAllBytesAsync(paths.ConfigFile, lab.GuestFiles[$@"{vm}:{folder}\agent.json"], Ct);
-            var runner = new AgentRunner(paths, new SimulatedHost(serial), new SimulatedVss(), new AgentLog(paths.LogFile), _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200));
+            // A domain controller: its restore point may not be rolled back in place (see below).
+            var runner = new AgentRunner(paths, new SimulatedHost(serial, domainController: true), new SimulatedVss(domainController: true), new AgentLog(paths.LogFile),
+                _ => _factory.Server.CreateHandler(), TimeSpan.FromMilliseconds(200));
             await runner.RunAsync(agentStop.Token);
         }, Ct);
 
@@ -173,6 +175,11 @@ public sealed partial class ApiIntegrationTests
             var point = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!);
             Assert.Equal("application", point.Consistency);
             await AssertRestorePointMatchesAsync(point, disks);
+
+            // A domain controller is not rolled back in place: it would keep its VM-Generation-ID (USN rollback).
+            var rollback = await RestoreVsphereAsync(client, new RestoreRequestDto { RestorePointId = point.Id, Mode = RestoreModeDto.OriginalLocation, QuickRollback = true }, "Failed");
+            Assert.Contains(rollback.Log, l => l.Contains("win01 was a domain controller at the restore point. A quick rollback keeps its VM-Generation-ID", StringComparison.Ordinal));
+            Assert.Empty(lab.Snapshots());
         }
         finally
         {
@@ -233,8 +240,9 @@ public sealed partial class ApiIntegrationTests
             Assert.True(lab.Content(copyDisks.Single(d => d.Unit == 0).Uuid).AsSpan().SequenceEqual(backedUp[0]), "disk 0 of the copy differs");
             Assert.True(lab.Content(copyDisks.Single(d => d.Unit == 1).Uuid).AsSpan().SequenceEqual(backedUp[1]), "disk 1 of the copy differs");
             var copyNic = Assert.Single(lab.VmNics(copyVm));
-            Assert.Equal(("VirtualVmxnet3", lab.Network.Value), (copyNic.Type, copyNic.Network));
+            Assert.Equal(("VirtualVmxnet3", lab.Network.Value, (int?)192, false), (copyNic.Type, copyNic.Network, copyNic.PciSlot, copyNic.StartConnected));
             Assert.NotEqual(originalMac, copyNic.Mac);
+            Assert.Contains(copy.Log, l => l.StartsWith("Info: app02: The NICs of app02-copy start disconnected: the original VM app02 still exists", StringComparison.Ordinal));
             Assert.Equal(deviceCount, lab.Vcenter.Get(lab.ProxyVm, "config.hardware.device")!.Elements().Count());
             Assert.Contains(lab.Events, e => e.StartsWith("create [ds-shared-01] app02-copy/app02-copy.vmdk on proxy01", StringComparison.Ordinal));
             Assert.Contains(lab.Events, e => e == "detach [ds-shared-01] app02-copy/app02-copy.vmdk from proxy01");
@@ -265,7 +273,8 @@ public sealed partial class ApiIntegrationTests
             Assert.NotEqual(vmRef, restored);
             Assert.Equal(originalBios, lab.Vcenter.Get(restored, "config.uuid")!.Value);
             Assert.Equal(lab.VmFolder.Value, lab.Vcenter.Get(restored, "parent")!.Value);
-            Assert.Equal(originalMac, Assert.Single(lab.VmNics(restored)).Mac);
+            var restoredNic = Assert.Single(lab.VmNics(restored));
+            Assert.Equal((originalMac, (int?)192, true), (restoredNic.Mac, restoredNic.PciSlot, restoredNic.StartConnected));
             Assert.Equal("poweredOff", lab.Vcenter.Get(restored, "runtime.powerState")!.Value);
             var restoredDisks = lab.VmDisks(restored);
             Assert.Equal("[ds-shared-01] app02_1/app02.vmdk", restoredDisks.Single(d => d.Unit == 0).FileName);
@@ -275,6 +284,64 @@ public sealed partial class ApiIntegrationTests
             // Nothing a restore created is left open in the ledger.
             await using var db = await _factory.Services.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>().CreateDbContextAsync(Ct);
             Assert.Empty(await db.Artifacts.Where(a => a.Kind.StartsWith("vsphere.") && a.State != Backdafuckup.Core.Operations.ArtifactState.Done).ToListAsync(Ct));
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
+    }
+
+    [Fact]
+    public async Task A_quick_rollback_writes_back_only_what_changed_since_the_restore_point_and_a_failed_one_reverts_the_vm()
+    {
+        var client = await SignedInClientAsync();
+        await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://localhost/", Ct);
+        var lab = Vsphere;
+        var (vmRef, vmId, disks) = lab.AddVm("app03", 32L << 20);
+        lab.Write(disks[0], 0, RandomNumberGenerator.GetBytes(6 << 20));
+        lab.Write(disks[0], 28L << 20, RandomNumberGenerator.GetBytes(1 << 20));
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var (vcenter, repository, running) = await StartVsphereAsync(client, stop.Token);
+        try
+        {
+            var job = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", new SaveJobDto
+            {
+                Name = "vSphere rollback", ConnectionId = vcenter.Id, RepositoryId = repository.Id, RetentionPoints = 7, Schedule = new ScheduleDto("None", "22:00", [], "Europe/Berlin"),
+                Objects = [new JobObjectDto(vmId, "app03")], RetryCount = 0,
+            }, Ct));
+            await RunVsphereJobAsync(client, job.Id);
+            var point = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={job.Id}", Ct))!);
+            var backedUp = lab.Content(disks[0]);
+
+            // After the backup: data overwritten, and data zeroed where the restore point has some.
+            lab.Write(disks[0], 4L << 20, RandomNumberGenerator.GetBytes(256 << 10));
+            lab.Write(disks[0], 28L << 20, new byte[64 << 10]);
+            var rollback = await RestoreVsphereAsync(client, new RestoreRequestDto { RestorePointId = point.Id, Mode = RestoreModeDto.OriginalLocation, QuickRollback = true });
+
+            Assert.True(lab.Content(disks[0]).AsSpan().SequenceEqual(backedUp), "the disk is not as at the restore point");
+            Assert.Contains(rollback.Log, l => l.Contains("Hard disk 1 of app03: 0.3 MiB changed since the restore point (2 area(s)); writing them back.", StringComparison.Ordinal));
+            Assert.Contains(rollback.Log, l => l.Contains("Quick rollback of app03: 0.3 MiB changed since the restore point, 0.3 MiB written back.", StringComparison.Ordinal));
+            Assert.Equal(vmRef, lab.FindVm("app03")!.Value);
+            Assert.Equal("poweredOn", lab.Vcenter.Get(vmRef, "runtime.powerState")!.Value);
+            Assert.Empty(lab.Snapshots());
+            Assert.Contains(lab.Events, e => e == "snapshot backdafuckup rollback safety snapshot of app03");
+            Assert.Contains(lab.Events, e => e.StartsWith("attach [ds-shared-01] app03/app03.vmdk to proxy01", StringComparison.Ordinal) && e.EndsWith(" persistent", StringComparison.Ordinal));
+            Assert.Contains(lab.Events, e => e == "cbt off app03");
+
+            // Change tracking was reset: the next backup reads the disk fully.
+            var next = await RunVsphereJobAsync(client, job.Id, "Warning");
+            Assert.Contains(next.Log, l => l.Contains("changed block tracking of the disk was reset since the last backup", StringComparison.Ordinal));
+
+            // A rollback that cannot know the changes (tracking reset since that restore point) fails, and the VM is reverted.
+            lab.Write(disks[0], 1L << 20, RandomNumberGenerator.GetBytes(128 << 10));
+            var before = lab.Content(disks[0]);
+            var failed = await RestoreVsphereAsync(client, new RestoreRequestDto { RestorePointId = point.Id, Mode = RestoreModeDto.OriginalLocation, QuickRollback = true }, "Failed");
+            Assert.Contains(failed.Log, l => l.Contains("vCenter cannot list what changed on Hard disk 1 of app03 since the restore point", StringComparison.Ordinal));
+            Assert.Contains(failed.Log, l => l.Contains("app03 is back as it was before it (reverted to the safety snapshot, which is removed). It was running before: start it again.", StringComparison.Ordinal));
+            Assert.True(lab.Content(disks[0]).AsSpan().SequenceEqual(before), "the failed rollback changed the disk");
+            Assert.Empty(lab.Snapshots());
+            Assert.Contains(lab.Events, e => e == "revert app03");
         }
         finally
         {

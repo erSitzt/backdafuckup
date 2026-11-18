@@ -95,6 +95,11 @@ internal sealed class VSphereHypervisorSession(VSphereProvider provider, Connect
                 }
 
                 break;
+            case VSphereArtifactKinds.RollbackSnapshot when artifact.NativeId is { Length: > 0 } safety:
+                // Reverting or removing it could undo a finished rollback or keep a half one: the administrator decides.
+                log.Warning($"A quick rollback of VM {artifact.NativeRef} was interrupted; its safety snapshot {safety} (\"backdafuckup rollback safety snapshot\") is still there. " +
+                            "Revert the VM to it if the rollback did not finish, else delete it.");
+                break;
             case VSphereArtifactKinds.RestoredVm when artifact.NativeId is { Length: > 0 } vm:
                 await VSphereRestoreSession.DestroyAsync(Vim, new ManagedObjectReference("VirtualMachine", vm), cancellationToken).ConfigureAwait(false);
                 log.Info($"Removed VM {artifact.NativeRef} ({vm}) that an unfinished restore created.");

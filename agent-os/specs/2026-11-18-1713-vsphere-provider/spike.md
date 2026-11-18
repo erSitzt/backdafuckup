@@ -60,6 +60,48 @@
 - whether the proxy's writes during a writable attach are tracked;
 - QCDA on a powered-off VM without a snapshot (needed for quick rollback).
 
+## S2: writable attach (restore)
+
+A restore creates each disk on the proxy VM: `ReconfigVM_Task` add with `fileOperation=create`, mode
+`independent_persistent`, thin, into a folder made with `FileManager.MakeDirectory`. The proxy writes it over NBD;
+the remove carries no `fileOperation`, so the file stays for `CreateVM_Task`.
+
+| Check (2026-11-18, product build 583298a) | Result |
+|---|---|
+| Restore of a 10 GiB Linux VM as a new VM | 9 s in total; 1.9 GB written through the proxy at 209 MB/s; zero pieces left out |
+| The new VM | created in the chosen folder and resource pool, powers on, boots to the login prompt, VMware Tools run |
+| New MACs | the Ubuntu cloud image matches its netplan to the old MAC, so the copy has no address (guest behaviour, expected) |
+
+## S4: VMware Tools quiescing
+
+| Check | Result |
+|---|---|
+| Linux (open-vm-tools), no agent: `CreateSnapshot_Task(quiesce=true)` | 4.7 s; file systems frozen by the Tools; file-system-consistent only, reported as a warning |
+| Windows: our agent installed | the agent's VSS freeze is used and the snapshot is taken with `quiesce=false`: 10 VSS writers stable, writes held 0.5 s |
+
+Not yet tested live: Windows without our agent (Tools VSS), and a failing Tools quiesce.
+
+## S5: guest operations
+
+| Check | Result |
+|---|---|
+| Windows Server 2022 (evaluation), local Administrator, firewall blocks SMB (public network profile) | the installation falls back to the Tools: `InitiateFileTransferToGuest` plus an HTTPS PUT to the ESXi host (certificate pinned from `HostSystem.config.certificate`) copied the agent in 15 s; `sc.exe create`/`start` and the status checks through `StartProgramInGuest` took another 15 s |
+| Agent matching | the agent reports the SMBIOS serial `VMware-42 0b …`; it is matched by the VM's BIOS UUID (`config.uuid`), the VM's id stays the instance UUID |
+| VMware Tools ISO | Tools 12 on ESXi 7.0.3 have only `setup.exe` (no `setup64.exe`); unattended install: `setup.exe /S /v"/qn REBOOT=R"` |
+
+Not yet tested live: an account other than the built-in Administrator with UAC on.
+
+## S7: NBD over WebSocket tunnels
+
+| Check | Result |
+|---|---|
+| Full of the Linux VM, 4 NBD connections through the tunnel | 2.1 GB read at 173 MB/s |
+| Full of the Windows VM (40 GiB, 9.9 GB allocated) | 9.9 GB read at 257 MB/s in 39 s; bottleneck: source (80 %) |
+| Restore (writes) | 209 MB/s |
+
+The source (the array behind the hot-added disk) is the bottleneck, not the tunnel. The goal of 500 MB/s per disk was
+not reached on this datastore; to be checked again on the dedicated test host.
+
 ## Not started yet
 
-S2 (writable attach), S4 (Tools quiescing), S5 (guest operations), S6 (`/folder`), S7 (NBD over WSS throughput).
+S6 (`/folder`).

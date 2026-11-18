@@ -26,6 +26,9 @@ public static class VSphereArtifactKinds
     /// <summary>A disk file a restore created (NativeId: its datastore path; NativeRef: the datacenter).</summary>
     public const string RestoredDisk = "vsphere.restored-disk";
 
+    /// <summary>The safety snapshot of a quick rollback (NativeId: the snapshot; NativeRef: the VM).</summary>
+    public const string RollbackSnapshot = "vsphere.rollback-snapshot";
+
     /// <summary>A VM a restore created (NativeId: its managed object id).</summary>
     public const string RestoredVm = "vsphere.restored-vm";
 }
@@ -58,7 +61,7 @@ internal sealed class VSphereBackupSession : IVmBackupSession
     private VSphereBackupSession(
         VSphereHypervisorSession owner, VSphereVm vm, IArtifactLedger ledger, IOperationLog log, ManagedObjectReference snapshot, Guid snapshotArtifact,
         IReadOnlyList<VSphereSnapshotDisk> disks, IReadOnlyList<SnapshotDisk> excluded, IReadOnlyCollection<(string Id, string Name)> datastores, string? vmCluster,
-        VmMetadataBlob metadata, SnapshotFacts facts, GuestFreezeResult? freeze, IReadOnlyList<VmNic> nics, string? firmware, bool secureBoot)
+        VmMetadataBlob metadata, SnapshotFacts facts, GuestFreezeResult? freeze, IReadOnlyList<VmNic> nics, string? firmware, bool secureBoot, string? generationId)
     {
         _owner = owner;
         VmInfo = vm;
@@ -84,6 +87,7 @@ internal sealed class VSphereBackupSession : IVmBackupSession
             Nics = nics,
             Firmware = firmware,
             SecureBoot = secureBoot,
+            GenerationId = generationId,
         };
         Disks = [.. disks.Select(d => new SnapshotDisk(
             d.Key, d.RootUuid, d.Uuid, d.Label, d.CapacityBytes, d.Key.EndsWith(":0", StringComparison.Ordinal) && d.Key.StartsWith("scsi0", StringComparison.Ordinal),
@@ -166,9 +170,17 @@ internal sealed class VSphereBackupSession : IVmBackupSession
                 toolsResult = windows
                     ? new GuestFreezeResult(true, "quiesced by VMware Tools (VSS in the guest)", TimeSpan.Zero, watch.Elapsed, [])
                     : new GuestFreezeResult(false, "VMware Tools froze the file systems (fsfreeze): file-system-consistent, but applications were not asked to flush their data.", TimeSpan.Zero, watch.Elapsed, []);
-                log.Info(windows
-                    ? $"{vm.Name}: snapshot quiesced by VMware Tools (VSS in the guest) in {watch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s."
-                    : $"{vm.Name}: snapshot quiesced by VMware Tools: the file systems were frozen (fsfreeze) for {watch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s.");
+                var seconds = watch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+                if (windows)
+                {
+                    log.Info($"{vm.Name}: snapshot quiesced by VMware Tools (VSS in the guest) in {seconds} s.");
+                }
+                else
+                {
+                    // Says why the VM ends with a warning: guest processing promised more than file-system consistency.
+                    log.Warning($"{vm.Name}: snapshot quiesced by VMware Tools: the file systems were frozen (fsfreeze) for {seconds} s. The backup is file-system-consistent; " +
+                                "applications were not asked to flush their data (use their own pre-freeze scripts in the VMware Tools for that).");
+                }
             }
         }
         finally
@@ -202,7 +214,7 @@ internal sealed class VSphereBackupSession : IVmBackupSession
                 row.Str("config.bootOptions.efiSecureBootEnabled") is { } secureBoot ? secureBoot == "true" : null)));
             var facts = new SnapshotFacts(watch.Elapsed, TimeSpan.Zero, disks.Count, [.. datastores.Select(d => d.Name).Distinct(StringComparer.Ordinal)], null) { DisksAtOnce = true };
             return new VSphereBackupSession(owner, vm, ledger, log, snapshot, artifact, disks, excluded, datastores, vmCluster, metadata, facts, freezeResult,
-                VSphereDevices.Nics(devices), row.Str("config.firmware"), row.Str("config.bootOptions.efiSecureBootEnabled") == "true");
+                VSphereDevices.Nics(devices), row.Str("config.firmware"), row.Str("config.bootOptions.efiSecureBootEnabled") == "true", VSphereDevices.GenerationId(row["config.extraConfig"]));
         }
         catch
         {
@@ -379,15 +391,21 @@ internal sealed class VSphereBackupSession : IVmBackupSession
         }
     }
 
-    private async Task<IReadOnlyList<DiskExtent>> QueryAsync(VSphereSnapshotDisk disk, string changeId, CancellationToken cancellationToken)
+    private Task<IReadOnlyList<DiskExtent>> QueryAsync(VSphereSnapshotDisk disk, string changeId, CancellationToken cancellationToken) =>
+        QueryChangedAsync(Vim, VmInfo.Ref, VmInfo.Name, _snapshot, disk.DeviceKey, disk.Label, disk.CapacityBytes, changeId, cancellationToken);
+
+    /// <summary>The areas of a disk changed since <paramref name="changeId"/> up to the snapshot ("*": the allocated areas), all pages.</summary>
+    internal static async Task<IReadOnlyList<DiskExtent>> QueryChangedAsync(
+        VimSession vim, ManagedObjectReference vm, string vmName, ManagedObjectReference snapshot, int deviceKey, string label, long capacityBytes, string changeId,
+        CancellationToken cancellationToken)
     {
         var extents = new List<DiskExtent>();
         var offset = 0L;
-        while (offset < disk.CapacityBytes)
+        while (offset < capacityBytes)
         {
-            var info = await Vim.InvokeAsync("QueryChangedDiskAreas", VmInfo.Ref, cancellationToken,
-                    VimXml.Ref("snapshot", _snapshot), VimXml.E("deviceKey", disk.DeviceKey), VimXml.E("startOffset", offset), VimXml.E("changeId", changeId)).ConfigureAwait(false)
-                ?? throw new InvalidDataException($"vCenter {Vim.Endpoint}: QueryChangedDiskAreas of {disk.Label} of {VmInfo.Name} returned nothing.");
+            var info = await vim.InvokeAsync("QueryChangedDiskAreas", vm, cancellationToken,
+                    VimXml.Ref("snapshot", snapshot), VimXml.E("deviceKey", deviceKey), VimXml.E("startOffset", offset), VimXml.E("changeId", changeId)).ConfigureAwait(false)
+                ?? throw new InvalidDataException($"vCenter {vim.Endpoint}: QueryChangedDiskAreas of {label} of {vmName} returned nothing.");
             foreach (var area in info.Children("changedArea"))
             {
                 extents.Add(new DiskExtent(area.Long("start") ?? 0, area.Long("length") ?? 0));

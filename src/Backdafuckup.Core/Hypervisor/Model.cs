@@ -253,6 +253,21 @@ public sealed record VmRestorePlan
 
     public string? TargetHostId { get; init; }
 
+    /// <summary>
+    /// Original location only: write back into the existing VM only the blocks changed since the restore point (vSphere:
+    /// changed block tracking), under a safety snapshot that a failure reverts to.
+    /// </summary>
+    public bool QuickRollback { get; init; }
+
+    /// <summary>
+    /// Whether the restored VM's NICs start connected; null: automatic (vSphere: a copy whose original still exists starts
+    /// disconnected).
+    /// </summary>
+    public bool? ConnectNics { get; init; }
+
+    /// <summary>Quick rollback: keep the safety snapshot afterwards (the VM's state before the rollback), instead of removing it.</summary>
+    public bool KeepSafetySnapshot { get; init; }
+
     /// <summary>vSphere: the VM folder the restored VM goes into (null: where the backed-up VM was).</summary>
     public string? TargetFolderId { get; init; }
 

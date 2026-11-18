@@ -17,7 +17,7 @@ namespace Backdafuckup.VSphere;
 /// from the backed-up configuration (<see cref="VSphereConfig"/>) around these files. Disposing without
 /// <see cref="CompleteAsync"/> removes only what this restore created: its VM, or else its disk files.
 /// </summary>
-internal sealed class VSphereRestoreSession : IVmRestoreSession
+internal sealed partial class VSphereRestoreSession : IVmRestoreSession
 {
     private readonly VSphereHypervisorSession _owner;
     private readonly VmRestorePlan _plan;
@@ -59,6 +59,11 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
         {
             errors.Add($"The restore point holds a VM configuration in format {_plan.Metadata.Format}; a vSphere restore needs {VSphereArtifactKinds.MetadataFormat}.");
             return new RestoreValidation(errors, warnings);
+        }
+
+        if (_plan.QuickRollback)
+        {
+            return await ValidateRollbackAsync(cancellationToken).ConfigureAwait(false);
         }
 
         if (_plan.Resume)
@@ -158,6 +163,10 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
     public async Task<IDiskWriter> CreateDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(target);
+        if (_plan.QuickRollback)
+        {
+            return await RollbackDiskAsync(target, cancellationToken).ConfigureAwait(false);
+        }
         var created = await CreateOnProxyAsync(target, cancellationToken).ConfigureAwait(false);
         var pool = _owner.Provider.Proxies!;
         IProxyDisk? proxyDisk = null;
@@ -185,6 +194,10 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
     public async Task<string> CreateEmptyDiskAsync(RestoreDiskTarget target, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(target);
+        if (_plan.QuickRollback)
+        {
+            return await LeaveDiskAsync(target, cancellationToken).ConfigureAwait(false);
+        }
         var created = await CreateOnProxyAsync(target, cancellationToken).ConfigureAwait(false);
         await DetachAsync(created.Proxy, created.Slot, created.DeviceKey, created.Disk.FileName, target.CapacityBytes, created.HotAddArtifact).ConfigureAwait(false);
         _log.Info($"Created the empty disk {target.Name} as {created.Disk.FileName} ({Bytes(target.CapacityBytes)}): it was not in the backup.");
@@ -194,6 +207,11 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
     public async Task<RestoredVm> CreateVmAsync(IReadOnlyDictionary<string, string> sourceToNewDiskId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(sourceToNewDiskId);
+        if (_plan.QuickRollback)
+        {
+            return await FinishRollbackAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         var config = Config;
         var (folder, pool, problem) = await PlacementAsync(cancellationToken).ConfigureAwait(false);
         if (problem is not null)
@@ -235,16 +253,21 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
         _vm = (await Vim.WaitForTaskAsync(task, cancellationToken).ConfigureAwait(false))?.AsRef()
             ?? throw new InvalidDataException($"vCenter {Vim.Endpoint}: CreateVM_Task for {_plan.VmName} returned no VM.");
         await _ledger.UpdateAsync(_vmArtifact.Value, ArtifactState.Active, _vm.Value, cancellationToken).ConfigureAwait(false);
-        var row = (await Vim.RetrievePropertiesAsync([_vm], ["config.instanceUuid", "config.uuid"], cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+        var row = (await Vim.RetrievePropertiesAsync([_vm], ["config.instanceUuid", "config.uuid", "config.extraConfig"], cancellationToken).ConfigureAwait(false)).FirstOrDefault();
         _vmInstanceUuid = row?.Str("config.instanceUuid") ?? throw new InvalidDataException($"vCenter {Vim.Endpoint}: the new VM {_vm.Value} has no instance UUID.");
         var names = await NamesAsync([folder!, pool!], cancellationToken).ConfigureAwait(false);
         _log.Info($"Created VM '{_plan.VmName}' ({_vmInstanceUuid}, BIOS UUID {row.Str("config.uuid")}) in folder '{names[0]}' and resource pool '{names[1]}' " +
                   $"from the backed-up configuration of {config.Name}; its files are in {vmx[..(vmx.LastIndexOf('/') + 1)]}.");
-        return new RestoredVm(_vmInstanceUuid, _plan.VmName);
+        return new RestoredVm(_vmInstanceUuid, _plan.VmName, VSphereDevices.GenerationId(row["config.extraConfig"]));
     }
 
     public async Task<RestoredVm> CompleteAsync(CancellationToken cancellationToken)
     {
+        if (_plan.QuickRollback)
+        {
+            return await CompleteRollbackAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         var vm = _vm ?? throw new InvalidOperationException("CreateVmAsync must be called first.");
         if (_replaced is { } replaced && _plan.DeleteReplaced)
         {
@@ -272,6 +295,17 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
 
     public async ValueTask DisposeAsync()
     {
+        if (_plan.QuickRollback)
+        {
+            if (!_completed)
+            {
+                await UndoRollbackAsync().ConfigureAwait(false);
+            }
+
+            _lock.Dispose();
+            return;
+        }
+
         if (!_completed)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
@@ -444,7 +478,7 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
             var key = next--;
             keys[controller.Int("key") ?? 0] = key;
             var scsi = VSphereDevices.ScsiControllerTypes.Contains(controller.Type);
-            changes.Add(Add(VimXml.Typed("device", controller.Type!, VimXml.E("key", key), VimXml.E("busNumber", controller.Int("busNumber") ?? 0),
+            changes.Add(Add(VimXml.Typed("device", controller.Type!, VimXml.E("key", key), PciSlot(controller), VimXml.E("busNumber", controller.Int("busNumber") ?? 0),
                 scsi ? VimXml.E("sharedBus", controller.Str("sharedBus") ?? "noSharing") : null)));
         }
 
@@ -477,6 +511,7 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
                 VimXml.E("capacityInKB", disk.Long("capacityInKB") ?? (disk.Long("capacityInBytes") ?? 0) / 1024))));
         }
 
+        var connect = await ConnectNicsAsync(cancellationToken).ConfigureAwait(false);
         foreach (var nic in devices.Where(d => VSphereDevices.NicTypes.Contains(d.Type)))
         {
             var deviceKey = (nic.Int("key") ?? 0).ToString(CultureInfo.InvariantCulture);
@@ -493,7 +528,10 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
                 "device", nic.Type!,
                 VimXml.E("key", next--),
                 backing,
-                VimXml.E("connectable", VimXml.E("startConnected", nic.Child("connectable")?.Str("startConnected") ?? "true"), VimXml.E("allowGuestControl", "true"), VimXml.E("connected", "false")),
+                VimXml.E("connectable", VimXml.E("startConnected", connect ? nic.Child("connectable")?.Str("startConnected") ?? "true" : "false"), VimXml.E("allowGuestControl", "true"),
+                    VimXml.E("connected", "false")),
+                // The guest knows its NICs by PCI slot (Windows keeps a static address with it): the same slot as before.
+                PciSlot(nic),
                 VimXml.E("addressType", keepMac ? "manual" : "generated"),
                 keepMac ? VimXml.E("macAddress", mac) : null)));
         }
@@ -501,6 +539,37 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
         return changes;
 
         static XElement Add(XElement device) => VimXml.E("deviceChange", VimXml.E("operation", "add"), device);
+
+        static XElement? PciSlot(VimObject device) =>
+            device.Child("slotInfo") is { Type: "VirtualDevicePciBusSlotInfo" } slot && slot.Int("pciSlotNumber") is { } number
+                ? VimXml.Typed("slotInfo", "VirtualDevicePciBusSlotInfo", VimXml.E("pciSlotNumber", number))
+                : null;
+    }
+
+    /// <summary>
+    /// Whether the NICs start connected: as asked; else a copy whose original still exists starts with its NICs
+    /// disconnected (the guest would come up with the original's addresses), everything else as it was.
+    /// </summary>
+    private async Task<bool> ConnectNicsAsync(CancellationToken cancellationToken)
+    {
+        if (_plan.ConnectNics is { } asked)
+        {
+            if (!asked)
+            {
+                _log.Info($"The NICs of {_plan.VmName} start disconnected, as asked.");
+            }
+
+            return asked;
+        }
+
+        if (_plan.Mode != RestoreMode.AlternateLocation || await FindOriginalAsync(cancellationToken).ConfigureAwait(false) is not { } original)
+        {
+            return true;
+        }
+
+        _log.Info($"The NICs of {_plan.VmName} start disconnected: the original VM {original.Name} still exists, and the copy would come up with its network settings " +
+                     "(IP addresses, host name). Connect them in vCenter once that is sorted out.");
+        return false;
     }
 
     /// <summary>The NIC backing for a network: a standard network by name and reference, a distributed port group by switch and key.</summary>
@@ -642,7 +711,7 @@ internal sealed class VSphereRestoreSession : IVmRestoreSession
 
         var pool = _owner.Provider.Proxies ?? throw new InvalidOperationException("This server has no proxies to write vSphere disks.");
         var targets = new List<(string Id, string Name)>();
-        foreach (var id in _plan.DiskStorage.Values.Where(s => !string.IsNullOrEmpty(s)).Distinct(StringComparer.Ordinal))
+        foreach (var id in (_rollback?.Datastores ?? _plan.DiskStorage.Values).Where(s => !string.IsNullOrEmpty(s)).Distinct(StringComparer.Ordinal))
         {
             targets.Add((id, (await DatastoreAsync(id, cancellationToken).ConfigureAwait(false)).Name));
         }

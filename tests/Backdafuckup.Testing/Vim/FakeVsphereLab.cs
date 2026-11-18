@@ -62,6 +62,26 @@ public sealed class FakeVsphereLab
         Vcenter.On("ReconfigVM_Task", Reconfigure);
         Vcenter.On("CreateSnapshot_Task", CreateSnapshot);
         Vcenter.On("RemoveSnapshot_Task", RemoveSnapshot);
+        Vcenter.On("RevertToSnapshot_Task", request =>
+        {
+            var snapshot = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
+            return Vcenter.StartTask(snapshot, "VirtualMachineSnapshot.revert", () =>
+            {
+                lock (_lock)
+                {
+                    var state = _snapshots[snapshot.Value];
+                    foreach (var (uuid, (frozen, _, _)) in state.Disks)
+                    {
+                        File.Copy(frozen, _disks[uuid].File, overwrite: true);
+                    }
+
+                    Events.Add($"revert {Vcenter.Name(state.Vm)}");
+                    Vcenter.Set(state.Vm, "runtime.powerState", Val.Str("poweredOff"));
+                }
+
+                return null;
+            });
+        });
         Vcenter.On("QueryChangedDiskAreas", QueryChangedDiskAreas);
 
         AddRestoreSupport();
@@ -299,14 +319,16 @@ public sealed class FakeVsphereLab
         }
     }
 
-    /// <summary>The VM's NICs: device type, MAC and network.</summary>
-    public IReadOnlyList<(string Type, string Mac, string Network)> VmNics((string Type, string Value) vm)
+    /// <summary>The VM's NICs: device type, MAC, network, PCI slot and whether it starts connected.</summary>
+    public IReadOnlyList<(string Type, string Mac, string Network, int? PciSlot, bool StartConnected)> VmNics((string Type, string Value) vm)
     {
         lock (_lock)
         {
             return [.. _devices[vm.Value].Where(d => d.Element(FakeVcenter.Ns + "macAddress") is not null).Select(d => (
                 d.Attribute(FakeVcenter.Xsi + "type")!.Value, d.Element(FakeVcenter.Ns + "macAddress")!.Value,
-                d.Element(FakeVcenter.Ns + "backing")?.Element(FakeVcenter.Ns + "network")?.Value ?? string.Empty))];
+                d.Element(FakeVcenter.Ns + "backing")?.Element(FakeVcenter.Ns + "network")?.Value ?? string.Empty,
+                d.Element(FakeVcenter.Ns + "slotInfo")?.Element(FakeVcenter.Ns + "pciSlotNumber") is { } slot ? int.Parse(slot.Value, CultureInfo.InvariantCulture) : (int?)null,
+                d.Element(FakeVcenter.Ns + "connectable")?.Element(FakeVcenter.Ns + "startConnected")?.Value != "false"))];
         }
     }
 
@@ -415,6 +437,13 @@ public sealed class FakeVsphereLab
         });
     }
 
+    /// <summary>A new VM generation id, as vSphere gives each VM (vm.genid, vm.genidX).</summary>
+    private static XElement GenerationIdConfig() => Val.Array("ArrayOfOptionValue",
+    [
+        Val.Obj("OptionValue", "OptionValue", Val.F("key", "vm.genid"), Val.F("value", Random.Shared.NextInt64().ToString(CultureInfo.InvariantCulture))),
+        Val.Obj("OptionValue", "OptionValue", Val.F("key", "vm.genidX"), Val.F("value", Random.Shared.NextInt64().ToString(CultureInfo.InvariantCulture))),
+    ]);
+
     private XElement PowerTask(XElement request, string state)
     {
         var vm = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
@@ -511,7 +540,9 @@ public sealed class FakeVsphereLab
                     var mac = device.Element(FakeVcenter.Ns + "addressType")?.Value == "manual"
                         ? device.Element(FakeVcenter.Ns + "macAddress")!.Value
                         : $"00:50:56:{Random.Shared.Next(0x80):x2}:{Random.Shared.Next(256):x2}:{Random.Shared.Next(256):x2}";
-                    devices.Add(Val.Obj("VirtualDevice", type, Val.F("key", nextNic++), new XElement(device.Element(FakeVcenter.Ns + "backing")!), Val.F("macAddress", mac)));
+                    devices.Add(Val.Obj("VirtualDevice", type, Val.F("key", nextNic++), new XElement(device.Element(FakeVcenter.Ns + "backing")!),
+                        device.Element(FakeVcenter.Ns + "connectable") is { } connectable ? new XElement(connectable) : null,
+                        device.Element(FakeVcenter.Ns + "slotInfo") is { } slot ? new XElement(slot) : null, Val.F("macAddress", mac)));
                 }
             }
         }
@@ -525,7 +556,8 @@ public sealed class FakeVsphereLab
             ("config.hardware.memoryMB", Val.Int(int.Parse(Text("memoryMB"), CultureInfo.InvariantCulture))),
             ("config.changeTrackingEnabled", Val.Bool(false)), ("config.guestId", Val.Str(Text("guestId"))), ("config.firmware", Val.Str(Text("firmware"))),
             ("config.guestFullName", Val.Str("Ubuntu Linux (64-bit)")), ("parent", Val.Mor(folder.Type, folder.Value)), ("resourcePool", Val.Mor(pool.Type, pool.Value)),
-            ("summary.config.vmPathName", Val.Str(config.Element(FakeVcenter.Ns + "files")!.Element(FakeVcenter.Ns + "vmPathName")!.Value)));
+            ("summary.config.vmPathName", Val.Str(config.Element(FakeVcenter.Ns + "files")!.Element(FakeVcenter.Ns + "vmPathName")!.Value)),
+            ("config.extraConfig", GenerationIdConfig()));
         lock (_lock)
         {
             _devices[vm.Value] = devices;
@@ -573,6 +605,7 @@ public sealed class FakeVsphereLab
         Vcenter.Set(vm, "parent", Val.Mor(VmFolder.Type, VmFolder.Value));
         Vcenter.Set(vm, "resourcePool", Val.Mor(ResourcePool.Type, ResourcePool.Value));
         Vcenter.Set(vm, "config.firmware", Val.Str("efi"));
+        Vcenter.Set(vm, "config.extraConfig", GenerationIdConfig());
         lock (_lock)
         {
             _devices[vm.Value] =
@@ -580,7 +613,8 @@ public sealed class FakeVsphereLab
                 Controller(1000, 0), .. disks.Select(d => Disk(d.Key, 1000, d.Unit, d.FileName, d.CapacityBytes, d.Uuid, null)),
                 Val.Obj("VirtualDevice", "VirtualVmxnet3", Val.F("key", 4000), Val.F("deviceInfo", new XElement(FakeVcenter.Ns + "label", "Network adapter 1")),
                     Val.Obj("backing", "VirtualEthernetCardNetworkBackingInfo", Val.F("deviceName", "VM Network"), Val.Mor("network", Network)),
-                    Val.F("connectable", new XElement(FakeVcenter.Ns + "startConnected", "true")), Val.F("controllerKey", 100), Val.F("unitNumber", 7),
+                    Val.F("connectable", new XElement(FakeVcenter.Ns + "startConnected", "true")),
+                    Val.Obj("slotInfo", "VirtualDevicePciBusSlotInfo", Val.F("pciSlotNumber", 192)), Val.F("controllerKey", 100), Val.F("unitNumber", 7),
                     Val.F("addressType", "assigned"), Val.F("macAddress", $"00:50:56:8b:{Random.Shared.Next(256):x2}:{Random.Shared.Next(256):x2}")),
             ];
         }
@@ -648,6 +682,21 @@ public sealed class FakeVsphereLab
 
         return Vcenter.StartTask(vm, "VirtualMachine.reconfigure", () =>
         {
+            if (spec.Element(FakeVcenter.Ns + "changeTrackingEnabled")?.Value == "false")
+            {
+                Vcenter.Set(vm, "config.changeTrackingEnabled", Val.Bool(false));
+                lock (_lock)
+                {
+                    foreach (var disk in DisksOf(vm))
+                    {
+                        disk.Tracking = false;
+                        disk.Writes.Clear();
+                    }
+
+                    Events.Add($"cbt off {Vcenter.Name(vm)}");
+                }
+            }
+
             if (spec.Element(FakeVcenter.Ns + "changeTrackingEnabled")?.Value == "true")
             {
                 Vcenter.Set(vm, "config.changeTrackingEnabled", Val.Bool(true));
@@ -699,6 +748,22 @@ public sealed class FakeVsphereLab
         var unit = int.Parse(device.Element(FakeVcenter.Ns + "unitNumber")!.Value, CultureInfo.InvariantCulture);
         lock (_lock)
         {
+            if (mode == "persistent")
+            {
+                // A quick rollback: the VM's current disk, written through the proxy.
+                var live = _disks.Values.FirstOrDefault(d => d.FileName == fileName) ?? throw new VimFault("FileNotFound", $"File {fileName} was not found");
+                if (Vcenter.Objects("VirtualMachine").Any(v => Vcenter.Get(v, "runtime.powerState")?.Value == "poweredOn" && v != vm && DisksOf(v).Contains(live)))
+                {
+                    throw new VimFault("FileLocked", $"Unable to access file {fileName} since it is locked (its VM is running)");
+                }
+
+                _devices[vm.Value].Add(Disk(_nextKey++, controller, unit, fileName, live.Capacity, live.Uuid, null));
+                ProxyDevices.Attach($"sd{(char)('b' + _nextDevice++)}", live.File, live.Uuid);
+                Events.Add($"attach {fileName} to {Vcenter.Name(vm)} at {controller}:{unit} persistent");
+                PublishDevicesLocked(vm);
+                return;
+            }
+
             // The base disk of a snapshot: its content as it was when the snapshot was taken.
             var (disk, frozen) = _snapshots.Values.SelectMany(s => s.Disks.Select(d => (Disk: _disks[d.Key], Frozen: d.Value.File)))
                 .LastOrDefault(d => d.Disk.FileName == fileName);
@@ -847,6 +912,9 @@ public sealed class FakeVsphereLab
         [.. _devices[vm.Value].Where(d => d.Attribute(FakeVcenter.Xsi + "type")?.Value == "VirtualDisk")
             .Select(d => d.Element(FakeVcenter.Ns + "backing")!.Element(FakeVcenter.Ns + "uuid")!.Value)
             .Where(_disks.ContainsKey).Select(u => _disks[u])];
+
+    private void PublishDevicesLocked((string Type, string Value) vm) =>
+        Vcenter.Set(vm, "config.hardware.device", Val.Array("ArrayOfVirtualDevice", _devices[vm.Value].Select(d => new XElement(d))));
 
     private void PublishDevices((string Type, string Value) vm)
     {
