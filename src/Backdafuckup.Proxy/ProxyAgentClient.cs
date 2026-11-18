@@ -16,8 +16,11 @@ public sealed record ProxyHostInfo(string HostName, string? SmbiosUuid, string? 
 /// itself and its devices, and carries out the server's commands. All decisions stay on the server.
 /// </summary>
 /// <param name="connect">Opens a WebSocket to a URL with a bearer token (TLS pinning is the caller's business).</param>
+/// <param name="iscsi">The iSCSI initiator for SAN access; null: none.</param>
+/// <param name="sanCheck">The SAN self-check (null: SAN access is offered only with an initiator and passes no check).</param>
 public sealed class ProxyAgentClient(
-    ProxyAgentSettings settings, ProxyHostInfo host, IBlockDevices devices, Func<Uri, string, CancellationToken, Task<WebSocket>> connect, Action<string> log)
+    ProxyAgentSettings settings, ProxyHostInfo host, IBlockDevices devices, Func<Uri, string, CancellationToken, Task<WebSocket>> connect, Action<string> log,
+    IIscsiInitiator? iscsi = null, Func<CancellationToken, Task<string?>>? sanCheck = null)
 {
     private readonly ConcurrentDictionary<string, OpenHandle> _handles = new(StringComparer.Ordinal);
 
@@ -65,6 +68,14 @@ public sealed class ProxyAgentClient(
         using var socket = await connect(new Uri(settings.ServerUrl, ProxyAgentProtocol.ControlPath(settings.ProxyId)), settings.AgentKey, cancellationToken).ConfigureAwait(false);
         using var send = new SemaphoreSlim(1, 1);
         using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var initiator = iscsi is null ? null : await iscsi.InitiatorNameAsync(cancellationToken).ConfigureAwait(false);
+        var sanRefusal = iscsi is null || initiator is null ? "no iSCSI initiator (open-iscsi) is installed"
+            : sanCheck is null ? null : await sanCheck(cancellationToken).ConfigureAwait(false);
+        if (sanRefusal is not null && iscsi is not null)
+        {
+            log($"No SAN access: {sanRefusal}");
+        }
+
         await ProxyAgentProtocol.SendAsync(socket, send, new ProxyAgentMessage
         {
             Type = ProxyMessageTypes.Hello,
@@ -75,8 +86,12 @@ public sealed class ProxyAgentClient(
             SmbiosUuid = host.SmbiosUuid,
             BiosSerial = host.BiosSerial,
             Addresses = host.Addresses,
-            Capabilities = [ProxyAgentProtocol.CapabilityHotAdd, ProxyAgentProtocol.CapabilityNbd],
+            Capabilities = sanRefusal is null
+                ? [ProxyAgentProtocol.CapabilityHotAdd, ProxyAgentProtocol.CapabilityNbd, ProxyAgentProtocol.CapabilitySan]
+                : [ProxyAgentProtocol.CapabilityHotAdd, ProxyAgentProtocol.CapabilityNbd],
             Devices = await devices.ListAsync(cancellationToken).ConfigureAwait(false),
+            InitiatorName = initiator,
+            SanRefusal = sanRefusal,
         }, cancellationToken).ConfigureAwait(false);
         log($"Connected to {settings.ServerUrl} as proxy {settings.ProxyId}.");
 
@@ -115,6 +130,7 @@ public sealed class ProxyAgentClient(
                 ProxyMessageTypes.Open => await OpenAsync(command, cancellationToken).ConfigureAwait(false),
                 ProxyMessageTypes.Tunnel => await TunnelAsync(command, cancellationToken).ConfigureAwait(false),
                 ProxyMessageTypes.Release => await ReleaseAsync(command, cancellationToken).ConfigureAwait(false),
+                ProxyMessageTypes.IscsiLogin => await IscsiLoginAsync(command, cancellationToken).ConfigureAwait(false),
                 _ => Error(command, $"unknown command '{command.Type}'"),
             };
         }
@@ -131,6 +147,20 @@ public sealed class ProxyAgentClient(
         {
             // The server is gone; it repeats what it still needs after reconnecting.
         }
+    }
+
+    /// <summary>Logs in to the array's target (once) and asks its sessions for new LUNs; replies with the devices.</summary>
+    private async Task<ProxyAgentMessage> IscsiLoginAsync(ProxyAgentMessage command, CancellationToken cancellationToken)
+    {
+        if (iscsi is null)
+        {
+            return Error(command, $"{host.HostName} has no iSCSI initiator");
+        }
+
+        await iscsi.LoginAsync(command.Portals ?? [], command.TargetIqn ?? throw new InvalidOperationException("iscsi-login without a target"), cancellationToken).ConfigureAwait(false);
+        await iscsi.RescanAsync(cancellationToken).ConfigureAwait(false);
+        log($"Logged in to {command.TargetIqn} at {string.Join(", ", command.Portals ?? [])}.");
+        return Reply(command) with { Devices = await devices.ListAsync(cancellationToken).ConfigureAwait(false) };
     }
 
     private async Task<ProxyAgentMessage> RescanAsync(ProxyAgentMessage command, CancellationToken cancellationToken)

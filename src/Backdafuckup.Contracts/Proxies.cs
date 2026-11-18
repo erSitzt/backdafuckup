@@ -3,6 +3,8 @@ namespace Backdafuckup.Contracts;
 /// <summary>A backup proxy (Linux agent that reads and writes disks for vSphere HotAdd and SAN backups).</summary>
 /// <param name="Enrolled">The agent exchanged its install token for its key.</param>
 /// <param name="InstallTokenExpiresUtc">Until when the install command works (null once enrolled).</param>
+/// <param name="InitiatorName">The proxy machine's iSCSI initiator name: its array host object must list it.</param>
+/// <param name="SanRefusal">Why the proxy offers no SAN access (its self-check), or null.</param>
 public sealed record ProxyDto(
     Guid Id,
     string Name,
@@ -17,7 +19,9 @@ public sealed record ProxyDto(
     DateTimeOffset? LastSeenUtc,
     string? LastAddress,
     DateTimeOffset CreatedUtc,
-    DateTimeOffset? InstallTokenExpiresUtc);
+    DateTimeOffset? InstallTokenExpiresUtc,
+    string? InitiatorName = null,
+    string? SanRefusal = null);
 
 public sealed record CreateProxyDto(string Name);
 

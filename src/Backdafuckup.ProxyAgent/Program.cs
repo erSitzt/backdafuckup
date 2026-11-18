@@ -125,7 +125,9 @@ internal static class Program
             new ProxyHostInfo(Environment.MachineName, ReadDmi("product_uuid"), ReadDmi("product_serial"), Addresses(), version, null),
             new LinuxBlockDevices(),
             (uri, bearer, ct) => ConnectAsync(uri, bearer, config.ServerPins, ct),
-            message => Console.WriteLine(message));
+            message => Console.WriteLine(message),
+            new IscsiadmInitiator(),
+            ct => SanSelfCheck.CheckAsync(null, ct));
         await client.RunAsync(cancellationToken).ConfigureAwait(false);
         Console.WriteLine("Stopped.");
         return 0;

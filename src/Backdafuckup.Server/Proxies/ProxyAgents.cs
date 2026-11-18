@@ -234,7 +234,20 @@ public sealed class ProxyAgents(
     }
 
     public IReadOnlyList<ProxyInfo> Connected() =>
-        [.. _connections.Values.Select(c => new ProxyInfo(c.ProxyId, c.Name, c.Hello.HostName, c.Hello.SmbiosUuid, c.Hello.BiosSerial, c.Hello.Capabilities ?? []))];
+        [.. _connections.Values.Select(c => new ProxyInfo(c.ProxyId, c.Name, c.Hello.HostName, c.Hello.SmbiosUuid, c.Hello.BiosSerial, c.Hello.Capabilities ?? [], c.Hello.InitiatorName, c.Hello.SanRefusal))];
+
+    public async Task LoginIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, string targetIqn, CancellationToken cancellationToken)
+    {
+        var connection = _connections.GetValueOrDefault(proxyId)
+            ?? throw new InvalidOperationException($"Proxy {proxyId} is not connected.");
+        if (connection.Hello.Capabilities?.Contains(ProxyAgentProtocol.CapabilitySan) != true)
+        {
+            throw new InvalidOperationException($"Proxy {connection.Name} has no SAN access: {connection.Hello.SanRefusal ?? "its agent does not offer it"}.");
+        }
+
+        await connection.CommandAsync(new ProxyAgentMessage { Type = ProxyMessageTypes.IscsiLogin, Portals = portals, TargetIqn = targetIqn }, TimeSpan.FromMinutes(2), cancellationToken)
+            .ConfigureAwait(false);
+    }
 
     public async Task<IProxyDisk> AttachAsync(Guid proxyId, string serial, long sizeBytes, bool writable, CancellationToken cancellationToken)
     {
@@ -324,7 +337,7 @@ public sealed class ProxyAgents(
         return new ProxyDto(
             proxy.Id, proxy.Name, connection is not null, proxy.KeyHash is not null, hello?.HostName ?? proxy.HostName, hello?.AgentVersion ?? proxy.AgentVersion,
             hello?.SmbiosUuid ?? proxy.SmbiosUuid, hello?.Addresses ?? [], hello?.Capabilities ?? [], hello?.Devices?.Count ?? 0,
-            connection is not null ? time.GetUtcNow() : proxy.LastSeenUtc, proxy.LastAddress, proxy.CreatedUtc, proxy.InstallTokenExpiresUtc);
+            connection is not null ? time.GetUtcNow() : proxy.LastSeenUtc, proxy.LastAddress, proxy.CreatedUtc, proxy.InstallTokenExpiresUtc, hello?.InitiatorName, hello?.SanRefusal);
     }
 
     private string Command(ProxyEntity proxy, string url, string token) =>

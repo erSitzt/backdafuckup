@@ -23,6 +23,9 @@ public static class ProxyAgentProtocol
     /// <summary>The agent serves opened devices as NBD over tunnels.</summary>
     public const string CapabilityNbd = "nbd-v1";
 
+    /// <summary>Logs in to arrays over iSCSI and reads their snapshot LUNs (the SAN self-check passed).</summary>
+    public const string CapabilitySan = "san-v1";
+
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 
     public static string ControlPath(Guid proxyId) => $"api/agent/proxies/{proxyId:D}/control";
@@ -58,6 +61,9 @@ public static class ProxyMessageTypes
 
     /// <summary>Server → agent: close the handle and remove the device from the kernel (before the disk is detached).</summary>
     public const string Release = "release";
+
+    /// <summary>Server → agent: log in to an array's iSCSI target at these portals (once), then rescan its sessions.</summary>
+    public const string IscsiLogin = "iscsi-login";
 
     /// <summary>Agent → server: the answer to a command (same id); <see cref="ProxyAgentMessage.Error"/> when it failed.</summary>
     public const string Reply = "reply";
@@ -96,6 +102,17 @@ public sealed record ProxyAgentMessage
     public IReadOnlyList<string>? Capabilities { get; init; }
 
     public IReadOnlyList<ProxyDevice>? Devices { get; init; }
+
+    /// <summary>hello: the machine's iSCSI initiator name (for the array's host object).</summary>
+    public string? InitiatorName { get; init; }
+
+    /// <summary>hello: why the proxy offers no SAN access (the self-check's finding), or null.</summary>
+    public string? SanRefusal { get; init; }
+
+    // iscsi-login
+    public IReadOnlyList<string>? Portals { get; init; }
+
+    public string? TargetIqn { get; init; }
 
     // wait-device
     public string? Serial { get; init; }

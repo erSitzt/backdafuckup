@@ -21,6 +21,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/sys/class/scsi_host /sys/block /sys/devices
+# SAN access (backup from storage snapshots): iscsiadm keeps its node records there.
+ReadWritePaths=-/etc/iscsi -/var/lib/iscsi -/run/lock
 ProtectHome=true
 ProtectControlGroups=true
 
