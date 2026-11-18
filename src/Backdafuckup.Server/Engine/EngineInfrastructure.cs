@@ -92,7 +92,14 @@ public sealed class ConnectionManager(IEnumerable<IHypervisorProvider> providers
         new NetworkCredential(connection.Credential.Username, protector.Unprotect(connection.Credential.ProtectedSecret)),
         connection.TrustMode,
         connection.Hosts.Select(h => new PinnedCertificate(h.Address, h.SpkiSha256, h.Sha256Thumbprint, h.CertificatePem)).ToList(),
-        Options(connection, new Dictionary<string, string> { [XenConnectionOptions.AllowInsecureNbd] = connection.AllowInsecureNbd ? "true" : "false" }));
+        Options(connection, KindOptions(connection.Kind, connection.AllowInsecureNbd)));
+
+    /// <summary>The options a connection of the kind starts from (the connection test gets the same).</summary>
+    public static Dictionary<string, string> KindOptions(HypervisorKind kind, bool allowInsecureNbd) => kind switch
+    {
+        HypervisorKind.XenServer => new Dictionary<string, string> { [XenConnectionOptions.AllowInsecureNbd] = allowInsecureNbd ? "true" : "false" },
+        _ => [],
+    };
 
     /// <summary>The options every session of the connection gets, the platforms set by hand among them (Kubernetes).</summary>
     public static Dictionary<string, string> Options(HypervisorConnection connection, Dictionary<string, string> options)

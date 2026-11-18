@@ -84,7 +84,7 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        var pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer");
+        var pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer,VSphere");
         var result = new List<(ConnectionDto, List<InventoryItemDto>)>();
         foreach (var pool in pools)
         {

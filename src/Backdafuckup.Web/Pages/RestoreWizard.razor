@@ -216,7 +216,7 @@ else
     protected override async Task OnInitializedAsync()
     {
         _point = await Api.GetAsync<RestorePointDto>(FromTape ? $"api/tape/copies/{Id}/restore-point" : $"api/restore-points/{Id}");
-        _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer");
+        _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer,VSphere");
         _vmName = $"{_point.VmName}_restored";
         _targetPool = _point.ConnectionId ?? _pools.FirstOrDefault()?.Id ?? Guid.Empty;
         foreach (var disk in _point.Disks)

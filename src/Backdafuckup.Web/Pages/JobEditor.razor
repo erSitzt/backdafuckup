@@ -627,16 +627,16 @@ else
         "Check the settings, then save the job.",
     ];
 
-    private const string KindVms = "XenServer";
+    private const string KindVms = "Vms";
     private const string KindNamespaces = "Kubernetes";
 
-    /// <summary>What the job backs up: VMs of a pool (<see cref="KindVms"/>) or namespaces of a Kubernetes cluster.</summary>
+    /// <summary>What the job backs up: VMs of a pool or vCenter (<see cref="KindVms"/>) or namespaces of a Kubernetes cluster.</summary>
     private string _kind = KindVms;
 
     private bool IsCluster => _kind == KindNamespaces;
 
     /// <summary>The pools, or the clusters, the job can use.</summary>
-    private IEnumerable<ConnectionDto> Connections => (_pools ?? []).Where(c => c.Kind == _kind);
+    private IEnumerable<ConnectionDto> Connections => (_pools ?? []).Where(c => (c.Kind == KindNamespaces) == IsCluster);
 
     private async Task OnKindChangedAsync(string kind)
     {
@@ -799,7 +799,7 @@ else
             _name = job.Name;
             _description = job.Description;
             _connectionId = job.ConnectionId;
-            _kind = _pools.FirstOrDefault(p => p.Id == job.ConnectionId)?.Kind ?? KindVms;
+            _kind = _pools.FirstOrDefault(p => p.Id == job.ConnectionId)?.Kind == KindNamespaces ? KindNamespaces : KindVms;
             _repositoryId = job.RepositoryId;
             _retention = job.RetentionPoints;
             _parallelVms = job.MaxParallelVms;
@@ -866,7 +866,7 @@ else
         else
         {
             // VMs unless there are only clusters.
-            _kind = _pools.Any(p => p.Kind == KindVms) || !_pools.Any(p => p.Kind == KindNamespaces) ? KindVms : KindNamespaces;
+            _kind = _pools.Any(p => p.Kind != KindNamespaces) || !_pools.Any(p => p.Kind == KindNamespaces) ? KindVms : KindNamespaces;
             _connectionId = Connections.FirstOrDefault()?.Id ?? Guid.Empty;
             _repositoryId = _repositories.FirstOrDefault()?.Id ?? Guid.Empty;
         }

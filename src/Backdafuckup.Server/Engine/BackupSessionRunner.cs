@@ -547,8 +547,11 @@ internal sealed class VmBackupTask(
             // gives a VM none after its creation (Xen: generation_id is read-only), so only a new VM from another template helps.
             if (directory is not null && !VmGenerationIds.IsSet(backup.Vm.GenerationId))
             {
+                var check = job.Connection.Kind == HypervisorKind.XenServer
+                    ? $" (XCP-ng's Windows templates have one; on the pool: xe vm-param-get uuid={vm.NativeId} param-name=generation_id)"
+                    : string.Empty;
                 _log.Warning($"Domain controller {backup.Vm.Name}: its VM has no VM generation id (created from a template without one), so Windows cannot tell that a VM restore of it was restored: " +
-                    $"restoring it risks a USN rollback. Create domain controllers from a template with a VM generation id (XCP-ng's Windows templates have one; on the pool: xe vm-param-get uuid={vm.NativeId} param-name=generation_id). Single objects come back safely under Restore → Active Directory objects.");
+                    $"restoring it risks a USN rollback. Create domain controllers from a template with a VM generation id{check}. Single objects come back safely under Restore → Active Directory objects.");
                 warnings = true;
             }
 
@@ -708,16 +711,16 @@ internal sealed class VmBackupTask(
     }
 
     /// <summary>
-    /// The platform snapshots the disks of a VM one after another (Xen: each disk is paused and captured on its own). Unless
-    /// the guest held its writes for the whole snapshot (application-consistent), a VM with two or more disks is not
-    /// consistent across its disks, not even like a power failure: the reason says so, with the measured gap, and the
-    /// restore point shows the warning. The session's result does not change.
+    /// A platform that snapshots the disks of a VM one after another (Xen: each disk is paused and captured on its own).
+    /// Unless the guest held its writes for the whole snapshot (application-consistent), a VM with two or more disks is
+    /// then not consistent across its disks, not even like a power failure: the reason says so, with the measured gap, and
+    /// the restore point shows the warning. The session's result does not change.
     /// </summary>
-    private static string? AcrossDisks(string consistency, string? reason, IVmBackupSession backup, string disks)
+    internal static string? AcrossDisks(string consistency, string? reason, IVmBackupSession backup, string disks)
     {
-        if (consistency == "application" || backup.Snapshot is not { DiskCount: >= 2 } facts || facts.Method == SnapshotMethods.Checkpoint)
+        if (consistency == "application" || backup.Snapshot is not { DiskCount: >= 2 } facts || facts.Method == SnapshotMethods.Checkpoint || facts.DisksAtOnce)
         {
-            // A snapshot with memory pauses the whole VM: its disks match.
+            // A snapshot with memory pauses the whole VM, and some platforms capture all disks at one moment: they match.
             return reason;
         }
 

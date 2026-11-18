@@ -19,6 +19,12 @@ public sealed record SnapshotFacts(TimeSpan Duration, TimeSpan GateWait, int Dis
     /// disks match each other (<see cref="DiskSkew"/> does not matter).
     /// </summary>
     public string Method { get; init; } = SnapshotMethods.Snapshot;
+
+    /// <summary>
+    /// The platform captured all disks at one moment (vSphere stuns the VM once for all its disks), so a crash-consistent
+    /// snapshot is also consistent across the disks. Xen captures them one after another.
+    /// </summary>
+    public bool DisksAtOnce { get; init; }
 }
 
 /// <summary>How a VM snapshot was taken (metric label values).</summary>

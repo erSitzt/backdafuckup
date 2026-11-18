@@ -62,6 +62,7 @@ public sealed partial class RestoreSessionRunner(
             await using var opened = await open(cancellationToken).ConfigureAwait(false);
             var reader = opened.Reader;
             var manifest = reader.Manifest;
+            await CheckKindAsync(manifest, point, targetConnection, cancellationToken).ConfigureAwait(false);
             var resume = request.ResumeWithMemory;
             if (resume)
             {
@@ -297,12 +298,36 @@ public sealed partial class RestoreSessionRunner(
     }
 
     /// <summary>
+    /// A restore point goes back to the kind of platform it was backed up from: its VM metadata (XAPI export, vSphere
+    /// configuration, Kubernetes objects) only means something there.
+    /// </summary>
+    private async Task CheckKindAsync(RestorePointManifest manifest, RestorePointEntity point, Guid targetConnection, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var target = await db.Connections.AsNoTracking().Where(c => c.Id == targetConnection).Select(c => new { c.Kind, c.DisplayName })
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException($"The target connection {targetConnection} no longer exists.");
+        if (target.Kind != manifest.Source.Provider)
+        {
+            throw new InvalidOperationException(
+                $"The restore point of {point.VmName} from {manifest.CreatedUtc.ToLocalTime():g} was backed up from {ConnectionKinds.Platform(manifest.Source.Provider)}; " +
+                $"it cannot be restored to '{target.DisplayName}', a {ConnectionKinds.Platform(target.Kind)} {ConnectionKinds.Noun(target.Kind)}. Choose a {ConnectionKinds.Platform(manifest.Source.Provider)} target.");
+        }
+    }
+
+    /// <summary>
     /// A resume needs the RAM image, the snapshot with memory's metadata and its disk ids, the pool the VM was backed up in
     /// (its memory needs the same kind of CPUs), and no domain controller: XAPI keeps the snapshot's VM generation id, so
     /// Windows would continue the directory of the backup without noticing a restore (USN rollback).
     /// </summary>
     private async Task CheckResumeAsync(RestorePointManifest manifest, RestorePointEntity point, Guid targetConnection, CancellationToken cancellationToken)
     {
+        // Only a pool can resume a snapshot with memory (VM.checkpoint).
+        if (manifest.Source.Provider != HypervisorKind.XenServer)
+        {
+            throw new InvalidOperationException($"The restore point of {point.VmName} has no snapshot with memory to resume ({ConnectionKinds.Platform(manifest.Source.Provider)}): restore it without memory.");
+        }
+
         var at = $"{point.VmName} from {manifest.CreatedUtc.ToLocalTime():g}";
         if (manifest.Memory is null || manifest.MemoryMetadata is null)
         {

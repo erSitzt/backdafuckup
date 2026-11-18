@@ -68,7 +68,7 @@ else
 
     protected override Task OnInitializedAsync() => LoadAsync();
 
-    private async Task LoadAsync() => _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer");
+    private async Task LoadAsync() => _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer,VSphere");
 
     private async Task OnPoolAddedAsync()
     {

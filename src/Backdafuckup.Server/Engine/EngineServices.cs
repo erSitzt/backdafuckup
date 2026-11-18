@@ -566,6 +566,10 @@ public sealed class StartupRecovery(
 
 public static class EngineServiceCollectionExtensions
 {
+    /// <summary>A provider of this kind is registered as an instance already (tests bring their own with fakes).</summary>
+    private static bool HasProvider(IServiceCollection services, HypervisorKind kind) =>
+        services.Any(d => d.ServiceType == typeof(IHypervisorProvider) && !d.IsKeyedService && d.ImplementationInstance is IHypervisorProvider provider && provider.Kind == kind);
+
     public static IServiceCollection AddBackupEngine(this IServiceCollection services, IConfiguration configuration)
     {
         services.Configure<EngineOptions>(configuration.GetSection("Engine"));
@@ -576,13 +580,13 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Telemetry.StateMetrics>();
         services.AddHostedService<Telemetry.MetricsStateService>();
         // Tests register their own providers before this; each kind is added only when none of it is there.
-        if (services.All(d => d.ServiceType != typeof(IHypervisorProvider)))
+        if (!HasProvider(services, HypervisorKind.XenServer))
         {
             var xen = configuration.GetSection("Xen").Get<XenOptions>() ?? new XenOptions();
             services.AddSingleton<IHypervisorProvider>(new XenProvider(xen));
         }
 
-        if (!services.Any(d => d.ServiceType == typeof(IHypervisorProvider) && d.ImplementationInstance is IHypervisorProvider { Kind: HypervisorKind.Kubernetes }))
+        if (!HasProvider(services, HypervisorKind.Kubernetes))
         {
             services.AddSingleton<IHypervisorProvider>(sp => new Backdafuckup.Kubernetes.KubernetesProvider(
                 channels: sp.GetRequiredService<Backdafuckup.Core.DataMover.IMoverChannels>(), images: sp.GetRequiredService<Movers.MoverRegistry>(),

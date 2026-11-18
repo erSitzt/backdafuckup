@@ -18,27 +18,28 @@ public static class InfrastructureEndpoints
         connections.MapGet("/", async (AppDbContext db, Clusters.ClusterAgents agents, string? kind, CancellationToken ct) =>
         {
             var query = db.Connections.Include(c => c.Credential).Include(c => c.Hosts).AsQueryable();
-            if (!string.IsNullOrEmpty(kind))
+            if (!ConnectionKinds.TryParseList(kind, out var kinds, out var error))
             {
-                if (!Enum.TryParse<HypervisorKind>(kind, ignoreCase: true, out var parsed))
-                {
-                    return Results.Problem($"Unknown connection kind '{kind}' (XenServer or Kubernetes).", statusCode: StatusCodes.Status400BadRequest);
-                }
+                return Results.Problem(error, statusCode: StatusCodes.Status400BadRequest);
+            }
 
-                query = query.Where(c => c.Kind == parsed);
+            if (kinds is not null)
+            {
+                var wanted = kinds.ToList();
+                query = query.Where(c => wanted.Contains(c.Kind));
             }
 
             return Results.Ok((await query.OrderBy(c => c.DisplayName).ToListAsync(ct)).Select(c => WithAgent(c, agents)));
-        }).WithDescription("All connections: pools and Kubernetes clusters. kind=XenServer or kind=Kubernetes returns one kind only.");
+        }).WithDescription("All connections: pools, Kubernetes clusters and vCenters. kind=XenServer, kind=Kubernetes or kind=VSphere returns those kinds only (several separated by commas, e.g. kind=XenServer,VSphere).");
 
         connections.MapGet("/{id:guid}", async (Guid id, AppDbContext db, Clusters.ClusterAgents agents, CancellationToken ct) =>
             await db.Connections.Include(c => c.Credential).Include(c => c.Hosts).FirstOrDefaultAsync(c => c.Id == id, ct) is { } c ? Results.Ok(WithAgent(c, agents)) : Results.NotFound());
 
         connections.MapPost("/probe", async (ProbeRequestDto request, ConnectionManager manager, CancellationToken ct) =>
         {
-            if (!Enum.TryParse<HypervisorKind>(request.Kind, ignoreCase: true, out var kind))
+            if (!ConnectionKinds.TryParse(request.Kind, out var kind))
             {
-                return Results.Problem($"Unknown connection kind '{request.Kind}' (XenServer or Kubernetes).", statusCode: StatusCodes.Status400BadRequest);
+                return Results.Problem($"Unknown connection kind '{request.Kind}' ({ConnectionKinds.Accepted}).", statusCode: StatusCodes.Status400BadRequest);
             }
 
             try
@@ -53,12 +54,12 @@ public static class InfrastructureEndpoints
 
         connections.MapPost("/", async (CreateConnectionDto request, AppDbContext db, ConnectionManager manager, CredentialProtector protector, TimeProvider time, HttpContext http, CancellationToken ct) =>
         {
-            if (!Enum.TryParse<HypervisorKind>(request.Kind, ignoreCase: true, out var kind))
+            if (!ConnectionKinds.TryParse(request.Kind, out var kind))
             {
-                return Results.Problem($"Unknown connection kind '{request.Kind}' (XenServer or Kubernetes).", statusCode: StatusCodes.Status400BadRequest);
+                return Results.Problem($"Unknown connection kind '{request.Kind}' ({ConnectionKinds.Accepted}).", statusCode: StatusCodes.Status400BadRequest);
             }
 
-            var noun = kind == HypervisorKind.Kubernetes ? "cluster" : "pool";
+            var noun = ConnectionKinds.Noun(kind);
             if (await db.Connections.AnyAsync(c => c.DisplayName == request.DisplayName, ct))
             {
                 return Results.Problem($"A connection named '{request.DisplayName}' already exists.", statusCode: StatusCodes.Status409Conflict);
@@ -106,7 +107,7 @@ public static class InfrastructureEndpoints
                 Guid.Empty, kind, request.Address.Trim(), request.Port,
                 new System.Net.NetworkCredential(request.UserName, request.Password), TlsTrustMode.Pinned,
                 pins,
-                new Dictionary<string, string>());
+                ConnectionManager.KindOptions(kind, allowInsecureNbd: request.AllowInsecureNbd));
             var result = await manager.Provider(kind).TestConnectionAsync(settings, ct);
             if (result.UntrustedHosts.Count > 0)
             {

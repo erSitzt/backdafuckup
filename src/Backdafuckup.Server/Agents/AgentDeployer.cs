@@ -50,7 +50,7 @@ public sealed class AgentDeployer(
 
         if (addresses.Count == 0)
         {
-            throw new InvalidOperationException($"VM {vmName} reports no IP address to XCP-ng: are the guest tools installed and the VM running?");
+            throw new InvalidOperationException($"VM {vmName} reports no IP address to its platform: are the guest tools (XCP-ng guest tools or VMware Tools) installed and the VM running?");
         }
 
         var builds = new[] { AgentProtocol.BuildNet10, AgentProtocol.BuildNet48 }.Select(packages.Get).OfType<AgentBuild>().ToList();

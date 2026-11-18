@@ -48,12 +48,12 @@ public sealed record CertificateDto(
     string Sha256Thumbprint,
     bool ValidAgainstSystemCa);
 
-/// <param name="Kind">"XenServer" (default) or "Kubernetes".</param>
+/// <param name="Kind">"XenServer" (default), "Kubernetes" or "VSphere".</param>
 public sealed record ProbeRequestDto(string Address, int Port = 443, string Kind = "XenServer");
 
 public sealed record CreateConnectionDto
 {
-    /// <summary>"XenServer" (default): a pool, with a user name and password. "Kubernetes": a cluster, with a ServiceAccount token as the password.</summary>
+    /// <summary>"XenServer" (default): a pool, with a user name and password. "Kubernetes": a cluster, with a ServiceAccount token as the password. "VSphere": a vCenter, with an SSO user and password.</summary>
     public string Kind { get; init; } = "XenServer";
 
     public required string DisplayName { get; init; }

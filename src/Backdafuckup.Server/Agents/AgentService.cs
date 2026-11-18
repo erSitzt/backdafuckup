@@ -174,8 +174,9 @@ public sealed class AgentService(
     }
 
     /// <summary>
-    /// VM UUIDs the agent may run in: the BIOS serial number (XCP-ng puts the VM UUID there) and the SMBIOS UUID, both as
-    /// shown and with the first three groups byte-swapped (Windows reads them little-endian).
+    /// VM UUIDs the agent may run in: the BIOS serial number (XCP-ng puts the VM UUID there; vSphere puts its BIOS UUID
+    /// there as "VMware-42 1a 2b … 7f-80 91 …") and the SMBIOS UUID, both as shown and with the first three groups
+    /// byte-swapped (Windows reads them little-endian).
     /// </summary>
     public static IReadOnlyList<string> VmIdCandidates(AgentHostInfo host)
     {
@@ -183,7 +184,7 @@ public sealed class AgentService(
         var result = new List<string>();
         foreach (var value in new[] { host.BiosSerial, host.SmbiosUuid })
         {
-            if (Guid.TryParse(value?.Trim(), out var guid))
+            if (Guid.TryParse(value?.Trim(), out var guid) || TryParseVmwareSerial(value, out guid))
             {
                 result.Add(guid.ToString("D", CultureInfo.InvariantCulture));
                 var bytes = guid.ToByteArray();
@@ -193,5 +194,27 @@ public sealed class AgentService(
         }
 
         return result.Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>
+    /// vSphere's BIOS serial number: "VMware-" and the BIOS UUID as 16 hex bytes in the order of its text form, with a
+    /// dash after the eighth ("VMware-42 1a 2b 3c 4d 5e 6f 70-81 92 a3 b4 c5 d6 e7 f8" is 421a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8).
+    /// </summary>
+    internal static bool TryParseVmwareSerial(string? value, out Guid uuid)
+    {
+        uuid = Guid.Empty;
+        var text = value?.Trim();
+        if (text is null || !text.StartsWith("VMware-", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var hex = text["VMware-".Length..].Replace(" ", string.Empty, StringComparison.Ordinal).Replace("-", string.Empty, StringComparison.Ordinal);
+        if (hex.Length != 32 || !hex.All(char.IsAsciiHexDigit))
+        {
+            return false;
+        }
+
+        return Guid.TryParseExact(hex, "N", out uuid);
     }
 }

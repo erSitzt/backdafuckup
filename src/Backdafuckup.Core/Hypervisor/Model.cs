@@ -8,6 +8,9 @@ public enum HypervisorKind
 
     /// <summary>A Kubernetes cluster: its namespaces are backed up (objects and the data of their volumes).</summary>
     Kubernetes,
+
+    /// <summary>A VMware vCenter: its VMs are backed up through the public vim25 API and a HotAdd proxy.</summary>
+    VSphere,
 }
 
 public enum TlsTrustMode

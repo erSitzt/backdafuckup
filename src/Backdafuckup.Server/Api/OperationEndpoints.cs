@@ -27,7 +27,15 @@ public static class OperationEndpoints
 
             if (request.Mode == RestoreModeDto.OriginalLocation && request.TargetConnectionId is { } target && target != point.ConnectionId)
             {
-                return Results.Problem("Restoring to the original location requires the original pool.", statusCode: StatusCodes.Status400BadRequest);
+                return Results.Problem("Restoring to the original location requires the connection it was backed up from (its pool or vCenter).", statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            // A VM goes back to the kind of platform it came from (the runner checks the manifest too, also for deleted connections).
+            if (request.TargetConnectionId is { } chosen && chosen != point.ConnectionId && point.ConnectionId is { } source
+                && await db.Connections.FindAsync([source], ct) is { } from && await db.Connections.FindAsync([chosen], ct) is { } to && from.Kind != to.Kind)
+            {
+                return Results.Problem($"{point.VmName} was backed up from {Engine.ConnectionKinds.Platform(from.Kind)} ('{from.DisplayName}'): it cannot be restored to '{to.DisplayName}', a {Engine.ConnectionKinds.Platform(to.Kind)} {Engine.ConnectionKinds.Noun(to.Kind)}.",
+                    statusCode: StatusCodes.Status400BadRequest);
             }
 
             if (point.ObjectKind == RestorePointObjectKinds.KubernetesCluster && request.KubernetesCluster is null)
