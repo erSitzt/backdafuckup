@@ -33,4 +33,7 @@ public interface IProxyDisk : IAsyncDisposable
 
     /// <summary>Reads the disk over <paramref name="connections"/> NBD streams through the proxy's tunnels.</summary>
     Task<IDiskReader> OpenReaderAsync(int connections, int maxInFlightPerConnection, CancellationToken cancellationToken);
+
+    /// <summary>Writes the disk (attached writable) over <paramref name="connections"/> NBD streams through the proxy's tunnels.</summary>
+    Task<IDiskBlockWriter> OpenWriterAsync(int connections, int maxInFlightPerConnection, CancellationToken cancellationToken);
 }

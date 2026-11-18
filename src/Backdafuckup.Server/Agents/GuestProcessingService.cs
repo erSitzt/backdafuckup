@@ -10,7 +10,8 @@ namespace Backdafuckup.Server.Agents;
 /// <param name="Quiescer">Freezes the guest around the snapshot; null if the backup will be crash-consistent.</param>
 /// <param name="Reason">Why there is no quiescer (agent missing, offline, installation failed).</param>
 /// <param name="Warning">Guest processing works, but not as the job asks (e.g. VSS because the SQL Server account is missing): the session warns.</param>
-public sealed record GuestPreparation(AgentQuiescer? Quiescer, string? Reason, bool Warning = false);
+/// <param name="PlatformQuiesce">No agent: the platform's guest tools quiesce the snapshot instead (vSphere).</param>
+public sealed record GuestPreparation(AgentQuiescer? Quiescer, string? Reason, bool Warning = false, bool PlatformQuiesce = false);
 
 /// <summary>Installs the agent into a VM (push installation); implemented by the agent deployer.</summary>
 public interface IAgentInstaller
@@ -65,7 +66,7 @@ public sealed class GuestProcessingService(
             : $"the agent on {agent.HostName} ({agent.RemoteAddress ?? "address unknown"}) has not contacted the server since {agent.LastContactUtc.ToLocalTime():yyyy-MM-dd HH:mm}";
         if (job.GuestCredentialId is not { } credentialId || installer is null)
         {
-            return new GuestPreparation(null, $"{Capitalize(missing)}. Install it under Guest agents, or give the job Windows credentials for an automatic installation.");
+            return new GuestPreparation(null, $"{Capitalize(missing)}. Install it under Guest agents, or give the job Windows credentials for an automatic installation.", PlatformQuiesce: ToolsQuiesce(job));
         }
 
         log.Info($"Guest processing: {missing}; installing the agent with the job's Windows credentials.");
@@ -75,14 +76,17 @@ public sealed class GuestProcessingService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return new GuestPreparation(null, $"{Capitalize(missing)}, and the automatic installation failed: {ex.Message}");
+            return new GuestPreparation(null, $"{Capitalize(missing)}, and the automatic installation failed: {ex.Message}", PlatformQuiesce: ToolsQuiesce(job));
         }
 
         agent = await agents.WaitForVmAsync(vm.NativeId, options.Value.InstallWaitTimeout, cancellationToken).ConfigureAwait(false);
         return agent is null
-            ? new GuestPreparation(null, $"The agent was installed in VM {vm.CachedName}, but did not report to the server within {options.Value.InstallWaitTimeout.TotalMinutes:0} minutes (check the address under Guest agents → Settings and port 9555 from the guest).")
+            ? new GuestPreparation(null, $"The agent was installed in VM {vm.CachedName}, but did not report to the server within {options.Value.InstallWaitTimeout.TotalMinutes:0} minutes (check the address under Guest agents → Settings and port 9555 from the guest).", PlatformQuiesce: ToolsQuiesce(job))
             : await UseAsync(job, vm, agent, sql, warning, log, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Without our agent, a vSphere VM's snapshot is quiesced by VMware Tools (VSS on Windows, fsfreeze on Linux).</summary>
+    private static bool ToolsQuiesce(BackupJob job) => job.Connection?.Kind == Backdafuckup.Core.Hypervisor.HypervisorKind.VSphere;
 
     /// <summary>
     /// A domain controller gets a VSS full backup, so that AD records it (otherwise event 2089 and an unknown backup age).

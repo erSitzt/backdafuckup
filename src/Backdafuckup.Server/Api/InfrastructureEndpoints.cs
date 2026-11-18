@@ -769,6 +769,7 @@ public static class InfrastructureEndpoints
             entry.Name = item.Name;
             entry.ParentNativeId = item.ParentNativeId;
             entry.Properties = new Dictionary<string, string>(item.Properties);
+            entry.GuestUuid = item.Kind == InventoryKind.Vm && item.Properties.TryGetValue("biosUuid", out var biosUuid) && biosUuid != item.NativeId ? biosUuid : null;
             entry.RefreshedUtc = now;
         }
 

@@ -167,7 +167,8 @@ public sealed class AgentService(
             // Prefer a VM the inventory knows; before the first inventory refresh, the BIOS serial number (on XCP-ng
             // exactly the VM UUID) is taken as it is.
             agent.VmNativeId = await db.Inventory.AsNoTracking()
-                .Where(i => i.Kind == InventoryKind.Vm && candidates.Contains(i.NativeId))
+                .Where(i => i.Kind == InventoryKind.Vm && (candidates.Contains(i.NativeId) || (i.GuestUuid != null && candidates.Contains(i.GuestUuid))))
+                .OrderBy(i => candidates.Contains(i.NativeId) ? 0 : 1)
                 .Select(i => i.NativeId).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false)
                 ?? (Guid.TryParse(host.BiosSerial?.Trim(), out var serial) ? serial.ToString("D", CultureInfo.InvariantCulture) : agent.VmNativeId);
         }

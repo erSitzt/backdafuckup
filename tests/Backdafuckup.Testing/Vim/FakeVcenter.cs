@@ -20,6 +20,7 @@ public sealed class FakeVcenter
     private readonly HashSet<string> _sessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Queue<XElement>> _pages = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Func<XElement, XElement?>> _handlers = new(StringComparer.Ordinal);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Func<Uri, byte[], HttpStatusCode>> _http = new(StringComparer.Ordinal);
     private int _next = 100;
 
     public FakeVcenter()
@@ -139,6 +140,13 @@ public sealed class FakeVcenter
     public string NewId(string prefix) => $"{prefix}-{Interlocked.Increment(ref _next)}";
 
     /// <summary>Handles <paramref name="method"/>: gets the request element, returns the <c>returnval</c> (or null for void).</summary>
+    /// <summary>Answers a plain HTTP request (e.g. a PUT of a guest file transfer to an ESXi host) instead of SOAP.</summary>
+    public void OnHttp(HttpMethod method, string path, Func<Uri, byte[], HttpStatusCode> handler)
+    {
+        ArgumentNullException.ThrowIfNull(method);
+        _http[$"{method.Method} {path}"] = handler;
+    }
+
     public void On(string method, Func<XElement, XElement?> handler)
     {
         lock (_lock)
@@ -444,6 +452,12 @@ public sealed class FakeVcenter
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri!.AbsolutePath;
+            if (vcenter._http.TryGetValue($"{request.Method.Method} {path}", out var plain))
+            {
+                var data = request.Content is null ? [] : await request.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+                return new HttpResponseMessage(plain(request.RequestUri, data));
+            }
+
             if (request.Method == HttpMethod.Get && path == "/sdk/vimServiceVersions.xml")
             {
                 return new HttpResponseMessage(HttpStatusCode.OK)

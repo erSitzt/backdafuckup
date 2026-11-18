@@ -99,6 +99,8 @@ public sealed partial class RestoreSessionRunner(
                 Metadata = new VmMetadataBlob(metadataBlob.Format, metadata),
                 VmName = string.IsNullOrWhiteSpace(request.VmName) ? manifest.Vm.Name : request.VmName,
                 TargetHostId = request.TargetHostId,
+                TargetFolderId = request.TargetFolderId,
+                TargetResourcePoolId = request.TargetResourcePoolId,
                 DiskStorage = storage,
                 Resume = resume,
                 NetworkMap = request.NetworkMap,

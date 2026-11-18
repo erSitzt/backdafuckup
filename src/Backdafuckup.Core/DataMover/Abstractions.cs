@@ -99,6 +99,23 @@ public enum DiskWriterCapabilities
     SkipsZeroRegions = 4,
 }
 
+/// <summary>A disk written at any offset (e.g. a disk attached to a proxy, written over NBD).</summary>
+public interface IDiskBlockWriter : IAsyncDisposable
+{
+    long Capacity { get; }
+
+    /// <summary>The largest write in one request.</summary>
+    int MaxRequestBytes { get; }
+
+    /// <summary>How many writes may be in flight at once.</summary>
+    int MaxConcurrentRequests { get; }
+
+    ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken cancellationToken);
+
+    /// <summary>Makes every acknowledged write durable.</summary>
+    ValueTask FlushAsync(CancellationToken cancellationToken);
+}
+
 /// <summary>Writes a restored disk to the target platform. The writer pulls the data from the image.</summary>
 public interface IDiskWriter : IAsyncDisposable
 {

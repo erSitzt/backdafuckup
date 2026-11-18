@@ -264,6 +264,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
         builder.Entity<InventoryEntry>(e =>
         {
+            e.Property(x => x.GuestUuid).HasMaxLength(64);
+            e.HasIndex(x => x.GuestUuid);
             e.Property(x => x.Kind).HasConversion<string>().HasMaxLength(32);
             e.Property(x => x.Properties).HasColumnType("jsonb").HasConversion(
                 v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),

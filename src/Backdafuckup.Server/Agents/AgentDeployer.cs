@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using Backdafuckup.Agent.Protocol;
 using Backdafuckup.Contracts;
+using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Operations;
 using Backdafuckup.Server.Data;
 using Backdafuckup.Server.Engine;
@@ -15,6 +16,8 @@ namespace Backdafuckup.Server.Agents;
 /// otherwise ADMIN$\backdafuckup Agent), then the service BackdafuckupAgent is created (Local System, automatic) and
 /// started. The .NET 10 build is tried first; if it does not keep running, the .NET Framework 4.8 build replaces it.
 /// The agent itself protects its folder, registers the VSS provider and enrolls with the server.
+/// When the guest reports no address or none accepts SMB, a platform with guest operations (vSphere: VMware Tools) is
+/// used instead: the files are copied through the ESXi host and sc.exe runs in the guest.
 /// </summary>
 public sealed class AgentDeployer(
     IDbContextFactory<AppDbContext> dbFactory,
@@ -42,13 +45,10 @@ public sealed class AgentDeployer(
             password = protector.Unprotect(credential.ProtectedSecret);
         }
 
-        IReadOnlyList<string> addresses;
-        await using (var hypervisor = await connections.OpenAsync(connectionId, cancellationToken).ConfigureAwait(false))
-        {
-            addresses = await hypervisor.GetGuestAddressesAsync(vmNativeId, cancellationToken).ConfigureAwait(false);
-        }
-
-        if (addresses.Count == 0)
+        await using var hypervisor = await connections.OpenAsync(connectionId, cancellationToken).ConfigureAwait(false);
+        var addresses = await hypervisor.GetGuestAddressesAsync(vmNativeId, cancellationToken).ConfigureAwait(false);
+        var guest = hypervisor as IGuestOperations;
+        if (addresses.Count == 0 && guest is null)
         {
             throw new InvalidOperationException($"VM {vmName} reports no IP address to its platform: are the guest tools (XCP-ng guest tools or VMware Tools) installed and the VM running?");
         }
@@ -60,8 +60,160 @@ public sealed class AgentDeployer(
         }
 
         var config = JsonSerializer.SerializeToUtf8Bytes(await settings.CreateAgentConfigAsync(cancellationToken).ConfigureAwait(false), AgentJson.Options);
-        await Task.Run(() => Deploy(addresses, user, password, vmName, builds, config, log, cancellationToken), cancellationToken).ConfigureAwait(false);
+        string why;
+        if (addresses.Count == 0)
+        {
+            why = $"VM {vmName} reports no IP address to vCenter";
+        }
+        else
+        {
+            try
+            {
+                await Task.Run(() => Deploy(addresses, user, password, vmName, builds, config, log, cancellationToken), cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (SmbUnreachableException ex) when (guest is not null)
+            {
+                why = ex.Message.TrimEnd('.');
+            }
+        }
+
+        if (await guest!.CheckGuestOperationsAsync(vmNativeId, cancellationToken).ConfigureAwait(false) is { } unavailable)
+        {
+            throw new InvalidOperationException($"{why}, and the installation through VMware Tools is not possible either: {unavailable}");
+        }
+
+        log.Info($"Agent installation in VM {vmName}: {why}; installing through VMware Tools (guest operations) as {user}.");
+        await DeployThroughGuestAsync(guest, vmNativeId, vmName, new GuestLogin(user, password), builds, config, log, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>The same steps as over SMB, through the platform's guest operations: copy, sc.exe create, start, watch.</summary>
+    private async Task DeployThroughGuestAsync(
+        IGuestOperations guest, string vmId, string vmName, GuestLogin login, List<AgentBuild> builds, byte[] config, IOperationLog log, CancellationToken cancellationToken)
+    {
+        const string folder = @"C:\Program Files\backdafuckup Agent";
+        if (await RunInGuestAsync(guest, vmId, login, GuestSc, $"query {AgentProtocol.ServiceName}", cancellationToken).ConfigureAwait(false) == 0)
+        {
+            log.Info($"Replacing the existing agent service in VM {vmName}.");
+            await RemoveInGuestAsync(guest, vmId, login, cancellationToken).ConfigureAwait(false);
+        }
+
+        await guest.CreateDirectoryAsync(vmId, login, folder, cancellationToken).ConfigureAwait(false);
+        for (var i = 0; i < builds.Count; i++)
+        {
+            var build = builds[i];
+            foreach (var file in build.Files)
+            {
+                var stream = File.OpenRead(Path.Combine(build.Directory, file.Name));
+                await using (stream.ConfigureAwait(false))
+                {
+                    await guest.UploadFileAsync(vmId, login, $@"{folder}\{file.Name}", stream, stream.Length, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            // Last: the enrollment secret only lands next to complete program files.
+            await guest.UploadFileAsync(vmId, login, $@"{folder}\{AgentProtocol.ConfigFile}", new MemoryStream(config), config.Length, cancellationToken).ConfigureAwait(false);
+            log.Info($"Copied the agent ({build.Name}, {build.Version}, {build.Files.Count} file(s)) into VM {vmName} at {folder} through VMware Tools.");
+
+            var created = await RunInGuestAsync(guest, vmId, login, GuestSc,
+                $"create {AgentProtocol.ServiceName} binPath= \"\\\"{folder}\\{AgentProtocol.ExecutableName}\\\" run\" start= auto DisplayName= \"{AgentProtocol.ServiceDisplayName}\"",
+                cancellationToken).ConfigureAwait(false);
+            if (created != 0)
+            {
+                throw new InvalidOperationException(created == 5
+                    ? $"sc.exe in VM {vmName} may not create the agent service as {login.UserName} (error 5, access denied). With User Account Control on, programs that VMware Tools " +
+                      "start for an account other than the built-in Administrator may run without administrator rights: use that account, or install over SMB."
+                    : $"sc.exe create {AgentProtocol.ServiceName} in VM {vmName} ended with exit code {created}.");
+            }
+
+            await RunInGuestAsync(guest, vmId, login, GuestSc, $"start {AgentProtocol.ServiceName}", cancellationToken).ConfigureAwait(false);
+            var (running, status) = await WatchInGuestAsync(guest, vmId, login, cancellationToken).ConfigureAwait(false);
+            if (running)
+            {
+                log.Info($"The agent service runs in VM {vmName} ({build.Name} build) in {folder}; it now registers with the backup server.");
+                return;
+            }
+
+            var next = i + 1 < builds.Count ? $" Trying the {builds[i + 1].Name} build." : string.Empty;
+            log.Warning($"The {build.Name} build does not keep running in VM {vmName} ({status}).{next}");
+            await RemoveInGuestAsync(guest, vmId, login, cancellationToken).ConfigureAwait(false);
+        }
+
+        throw new InvalidOperationException($"The agent does not start in VM {vmName}; see {folder}\\{AgentProtocol.LogFile} and the Windows event log there.");
+    }
+
+    private const string GuestSc = @"C:\Windows\System32\sc.exe";
+
+    private const string GuestCmd = @"C:\Windows\System32\cmd.exe";
+
+    /// <summary>0 running, 2 stopped, 1 anything else (pending, gone): one program run per look.</summary>
+    private static string StateQuery => $"/c sc.exe query {AgentProtocol.ServiceName} | findstr /c:\"RUNNING\" >nul && exit 0 || " +
+        $"(sc.exe query {AgentProtocol.ServiceName} | findstr /c:\"STOPPED\" >nul && exit 2 || exit 1)";
+
+    private async Task<(bool Running, string Status)> WatchInGuestAsync(IGuestOperations guest, string vmId, GuestLogin login, CancellationToken cancellationToken)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var runningSince = TimeSpan.MinValue;
+        while (watch.Elapsed < StableTime + TimeSpan.FromSeconds(20))
+        {
+            var state = await RunInGuestAsync(guest, vmId, login, GuestCmd, StateQuery, cancellationToken).ConfigureAwait(false);
+            if (state == 2)
+            {
+                return (false, "the service stopped");
+            }
+
+            if (state == 0)
+            {
+                if (runningSince == TimeSpan.MinValue)
+                {
+                    runningSince = watch.Elapsed;
+                }
+                else if (watch.Elapsed - runningSince >= StableTime)
+                {
+                    return (true, "running");
+                }
+            }
+
+            await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
+        }
+
+        return (false, "did not reach a stable running state");
+    }
+
+    private async Task RemoveInGuestAsync(IGuestOperations guest, string vmId, GuestLogin login, CancellationToken cancellationToken)
+    {
+        await RunInGuestAsync(guest, vmId, login, GuestSc, $"stop {AgentProtocol.ServiceName}", cancellationToken).ConfigureAwait(false);
+        for (var i = 0; i < 30 && await RunInGuestAsync(guest, vmId, login, GuestCmd, StateQuery, cancellationToken).ConfigureAwait(false) == 0; i++)
+        {
+            await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
+        }
+
+        await RunInGuestAsync(guest, vmId, login, GuestSc, $"delete {AgentProtocol.ServiceName}", cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Runs a program in the guest and waits for its exit code (at most two minutes).</summary>
+    private async Task<int> RunInGuestAsync(IGuestOperations guest, string vmId, GuestLogin login, string program, string arguments, CancellationToken cancellationToken)
+    {
+        var pid = await guest.StartProgramAsync(vmId, login, program, arguments, cancellationToken).ConfigureAwait(false);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            if (await guest.GetExitCodeAsync(vmId, login, pid, cancellationToken).ConfigureAwait(false) is { } exitCode)
+            {
+                return exitCode;
+            }
+
+            if (watch.Elapsed > TimeSpan.FromMinutes(2))
+            {
+                throw new TimeoutException($"{Path.GetFileName(program)} {arguments} (process {pid}) did not end within two minutes in the guest.");
+            }
+
+            await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>No address of the guest accepts SMB: the installation may go through guest operations instead.</summary>
+    private sealed class SmbUnreachableException(string message) : InvalidOperationException(message);
 
     private void Deploy(IReadOnlyList<string> addresses, string user, string password, string vmName, List<AgentBuild> builds, byte[] config, IOperationLog log, CancellationToken cancellationToken)
     {
@@ -130,7 +282,7 @@ public sealed class AgentDeployer(
             }
         }
 
-        throw new InvalidOperationException($"None of the guest's addresses ({string.Join(", ", addresses)}) accepted an SMB connection on port 445: {string.Join(" ", errors)}");
+        throw new SmbUnreachableException($"None of the guest's addresses ({string.Join(", ", addresses)}) accepted an SMB connection on port 445: {string.Join(" ", errors)}");
     }
 
     /// <summary>Starts the service and watches it: true if it keeps running for <see cref="StableTime"/>.</summary>

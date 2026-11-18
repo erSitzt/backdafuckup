@@ -20,6 +20,12 @@ public sealed record RestoreRequestDto
 
     public string? TargetHostId { get; init; }
 
+    /// <summary>vSphere: the VM folder (managed object id, e.g. group-v123). Null: where the backed-up VM was.</summary>
+    public string? TargetFolderId { get; init; }
+
+    /// <summary>vSphere: the resource pool (e.g. resgroup-12). Null: the backed-up VM's, else the target host's cluster.</summary>
+    public string? TargetResourcePoolId { get; init; }
+
     /// <summary>Target storage per disk key. Missing disks go to their original storage.</summary>
     public Dictionary<string, string> DiskStorage { get; init; } = [];
 

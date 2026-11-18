@@ -401,7 +401,8 @@ internal sealed class VmBackupTask(
             try
             {
                 started = await hypervisor.BeginBackupAsync(
-                    new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer, metrics.ForPool(Pool), vm.WithMemory, job.KubernetesPodVolumes), _log, ledger, cancellationToken).ConfigureAwait(false);
+                    new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer, metrics.ForPool(Pool), vm.WithMemory, job.KubernetesPodVolumes,
+                        guest is { Quiescer: null, PlatformQuiesce: true }), _log, ledger, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -696,6 +697,13 @@ internal sealed class VmBackupTask(
         }
 
         var guest = await guestProcessing.PrepareAsync(job, vm, _log, cancellationToken, $"backdafuckup restore point {restorePointId}").ConfigureAwait(false);
+        if (guest is { Quiescer: null, PlatformQuiesce: true })
+        {
+            // The platform's guest tools quiesce the snapshot; whether that worked is reported with the snapshot.
+            _log.Info($"Guest processing: {guest.Reason} VMware Tools quiesce the snapshot instead.");
+            return guest;
+        }
+
         if (guest.Quiescer is null)
         {
             if (job.GuestFailurePolicy == GuestFailurePolicy.FailVm)

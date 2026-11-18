@@ -14,8 +14,9 @@ internal sealed record ProxyVm(
 
 /// <summary>
 /// HotAdd: attaching a snapshot's disk to a proxy VM (<c>ReconfigVM_Task</c>, mode independent_nonpersistent) and
-/// detaching it again. Neither ever carries a <c>fileOperation</c>: an add never creates and a remove never destroys
-/// the disk file, which belongs to the backed-up VM.
+/// detaching it again. Neither carries a <c>fileOperation</c>: an attach never creates and a remove never destroys
+/// the disk file, which belongs to the backed-up VM. Only a restore creates a new disk file on the proxy
+/// (<see cref="CreateSpec"/>, fileOperation create), which then stays when it is detached.
 /// </summary>
 internal static class VSphereHotAdd
 {
@@ -35,6 +36,39 @@ internal static class VSphereHotAdd
                     VimXml.E("controllerKey", slot.ControllerKey),
                     VimXml.E("unitNumber", slot.Unit),
                     VimXml.E("capacityInKB", capacityBytes / 1024))));
+
+    /// <summary>
+    /// A restore's new disk, created on the proxy VM as <paramref name="fileName"/> (its folder must exist) and attached
+    /// independent_persistent, so that writes go straight into the file even if the proxy VM has a snapshot.
+    /// </summary>
+    public static XElement CreateSpec(ScsiSlot slot, string fileName, long capacityBytes, bool thin) =>
+        VimXml.E(
+            "spec",
+            VimXml.E(
+                "deviceChange",
+                VimXml.E("operation", "add"),
+                VimXml.E("fileOperation", "create"),
+                VimXml.Typed(
+                    "device", "VirtualDisk",
+                    VimXml.E("key", -100),
+                    VimXml.Typed("backing", "VirtualDiskFlatVer2BackingInfo", VimXml.E("fileName", fileName), VimXml.E("diskMode", "independent_persistent"),
+                        VimXml.E("thinProvisioned", thin ? "true" : "false")),
+                    VimXml.E("controllerKey", slot.ControllerKey),
+                    VimXml.E("unitNumber", slot.Unit),
+                    VimXml.E("capacityInKB", (capacityBytes + 1023) / 1024))));
+
+    /// <summary>Creates a restore's disk on the proxy VM; returns its device key there and the disk's UUID (its SCSI serial).</summary>
+    public static async Task<(int DeviceKey, string Uuid, string FileName)> CreateAsync(
+        VimSession vim, ProxyVm proxy, ScsiSlot slot, string fileName, long capacityBytes, bool thin, CancellationToken cancellationToken)
+    {
+        var task = await vim.StartTaskAsync("ReconfigVM_Task", proxy.Vm, cancellationToken, CreateSpec(slot, fileName, capacityBytes, thin)).ConfigureAwait(false);
+        await vim.WaitForTaskAsync(task, cancellationToken).ConfigureAwait(false);
+        var devices = (await vim.RetrievePropertiesAsync([proxy.Vm], ["config.hardware.device"], cancellationToken).ConfigureAwait(false)).FirstOrDefault()?["config.hardware.device"];
+        var disk = devices?.Items.FirstOrDefault(d => d.Type == "VirtualDisk" && d.Int("controllerKey") == slot.ControllerKey && d.Int("unitNumber") == slot.Unit)
+            ?? throw new InvalidDataException($"vCenter {vim.Endpoint}: {fileName} was created on proxy VM {proxy.VmName}, but the VM shows no disk on SCSI {slot.Bus}:{slot.Unit}.");
+        return (disk.Int("key") ?? 0, disk.Child("backing")?.Str("uuid") ?? throw new InvalidDataException($"vCenter {vim.Endpoint}: the new disk {fileName} has no UUID."),
+            disk.Child("backing")?.Str("fileName") ?? fileName);
+    }
 
     /// <summary>The device change that detaches a hot-added disk (no fileOperation: the file stays).</summary>
     public static XElement RemoveSpec(int deviceKey, ScsiSlot slot, long capacityBytes) =>

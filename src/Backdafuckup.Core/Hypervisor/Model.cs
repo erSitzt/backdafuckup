@@ -182,9 +182,13 @@ public sealed record VmMetadataBlob(string Format, byte[] Content);
 /// Kubernetes: back up the data of every pod volume that is not a PVC (emptyDir and the like; Velero's opt-out mode), not only
 /// those named in a pod's <c>backup.velero.io/backup-volumes</c> annotation.
 /// </param>
+/// <param name="PlatformQuiesce">
+/// No agent of ours froze the guest: let the platform quiesce the snapshot through its guest tools (vSphere: VMware
+/// Tools, VSS on Windows, fsfreeze on Linux).
+/// </param>
 public sealed record VmBackupRequest(
     string VmId, Guid JobId, Guid SessionId, Guid RestorePointId, string SnapshotName, IGuestQuiescer? Quiescer = null, IBackupTelemetry? Telemetry = null, bool WithMemory = false,
-    bool PodVolumes = false);
+    bool PodVolumes = false, bool PlatformQuiesce = false);
 
 public enum RestoreMode
 {
@@ -248,6 +252,12 @@ public sealed record VmRestorePlan
     public required string VmName { get; init; }
 
     public string? TargetHostId { get; init; }
+
+    /// <summary>vSphere: the VM folder the restored VM goes into (null: where the backed-up VM was).</summary>
+    public string? TargetFolderId { get; init; }
+
+    /// <summary>vSphere: the resource pool of the restored VM (null: the backed-up VM's, else the target host's cluster).</summary>
+    public string? TargetResourcePoolId { get; init; }
 
     /// <summary>Target storage per disk key. Required for every disk.</summary>
     public required IReadOnlyDictionary<string, string> DiskStorage { get; init; }

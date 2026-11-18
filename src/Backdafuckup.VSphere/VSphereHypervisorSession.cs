@@ -7,8 +7,10 @@ using Backdafuckup.VSphere.Vim;
 namespace Backdafuckup.VSphere;
 
 /// <summary>An open connection to one vCenter.</summary>
-internal sealed class VSphereHypervisorSession(VSphereProvider provider, ConnectionSettings settings, VimSession vim, PlatformInfo platform) : IHypervisorSession
+internal sealed class VSphereHypervisorSession(VSphereProvider provider, ConnectionSettings settings, VimSession vim, PlatformInfo platform) : IHypervisorSession, IGuestOperations
 {
+    private VSphereGuestOperations? _guest;
+
     public PlatformInfo Platform { get; } = platform;
 
     internal VSphereProvider Provider { get; } = provider;
@@ -58,10 +60,16 @@ internal sealed class VSphereHypervisorSession(VSphereProvider provider, Connect
         return await VSphereBackupSession.CreateAsync(this, request, log, ledger, cancellationToken).ConfigureAwait(false);
     }
 
-    public Task<IVmRestoreSession> BeginRestoreAsync(VmRestorePlan plan, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken) =>
-        throw new NotSupportedException($"Restores to vSphere are not available yet in this version ({Platform.MasterAddress}).");
+    public Task<IVmRestoreSession> BeginRestoreAsync(VmRestorePlan plan, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return Task.FromResult<IVmRestoreSession>(new VSphereRestoreSession(this, plan, log, ledger));
+    }
 
-    /// <summary>After a crash: removes a backup snapshot that is still there, and detaches a disk still hot-added to a proxy VM.</summary>
+    /// <summary>
+    /// After a crash: removes a backup snapshot that is still there, detaches a disk still hot-added to a proxy VM, and
+    /// removes what an unfinished restore created (its VM, or else its disk files).
+    /// </summary>
     public async Task CleanupArtifactAsync(ProviderArtifact artifact, IOperationLog log, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(artifact);
@@ -87,6 +95,14 @@ internal sealed class VSphereHypervisorSession(VSphereProvider provider, Connect
                 }
 
                 break;
+            case VSphereArtifactKinds.RestoredVm when artifact.NativeId is { Length: > 0 } vm:
+                await VSphereRestoreSession.DestroyAsync(Vim, new ManagedObjectReference("VirtualMachine", vm), cancellationToken).ConfigureAwait(false);
+                log.Info($"Removed VM {artifact.NativeRef} ({vm}) that an unfinished restore created.");
+                break;
+            case VSphereArtifactKinds.RestoredDisk when artifact.NativeId is { Length: > 0 } file && artifact.NativeRef is { Length: > 0 } datacenter:
+                await VSphereRestoreSession.DeleteDiskFileAsync(Vim, file, new ManagedObjectReference("Datacenter", datacenter), cancellationToken).ConfigureAwait(false);
+                log.Info($"Removed the disk file {file} that an unfinished restore created.");
+                break;
         }
     }
 
@@ -100,6 +116,21 @@ internal sealed class VSphereHypervisorSession(VSphereProvider provider, Connect
         await Task.CompletedTask.ConfigureAwait(false);
         yield break;
     }
+
+    private VSphereGuestOperations Guest => _guest ??= new VSphereGuestOperations(this);
+
+    public Task<string?> CheckGuestOperationsAsync(string vmId, CancellationToken cancellationToken) => Guest.CheckGuestOperationsAsync(vmId, cancellationToken);
+
+    public Task CreateDirectoryAsync(string vmId, GuestLogin login, string path, CancellationToken cancellationToken) => Guest.CreateDirectoryAsync(vmId, login, path, cancellationToken);
+
+    public Task UploadFileAsync(string vmId, GuestLogin login, string path, Stream content, long length, CancellationToken cancellationToken) =>
+        Guest.UploadFileAsync(vmId, login, path, content, length, cancellationToken);
+
+    public Task<long> StartProgramAsync(string vmId, GuestLogin login, string programPath, string arguments, CancellationToken cancellationToken) =>
+        Guest.StartProgramAsync(vmId, login, programPath, arguments, cancellationToken);
+
+    public Task<int?> GetExitCodeAsync(string vmId, GuestLogin login, long processId, CancellationToken cancellationToken) =>
+        Guest.GetExitCodeAsync(vmId, login, processId, cancellationToken);
 
     public ValueTask DisposeAsync() => Vim.DisposeAsync();
 }

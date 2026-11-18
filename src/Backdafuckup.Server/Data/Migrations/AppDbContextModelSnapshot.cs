@@ -832,6 +832,11 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("connection_id");
 
+                    b.Property<string>("GuestUuid")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("guest_uuid");
+
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -863,6 +868,9 @@ namespace Backdafuckup.Server.Data.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_inventory");
+
+                    b.HasIndex("GuestUuid")
+                        .HasDatabaseName("ix_inventory_guest_uuid");
 
                     b.HasIndex("ConnectionId", "Kind", "NativeId")
                         .IsUnique()

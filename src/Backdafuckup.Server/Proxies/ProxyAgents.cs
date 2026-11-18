@@ -349,6 +349,17 @@ public sealed class ProxyAgents(
             return new ProxyNbdReader(pool, "hotadd", connections * maxInFlightPerConnection);
         }
 
+        public async Task<IDiskBlockWriter> OpenWriterAsync(int connections, int maxInFlightPerConnection, CancellationToken cancellationToken)
+        {
+            var pool = await NbdConnectionPool.CreateAsync(
+                async ct => await NbdClient.ConnectAsync(
+                    await owner.OpenTunnelAsync(connection, handle, ct).ConfigureAwait(false),
+                    new NbdConnectOptions { Host = Description, ExportName = handle, TlsMode = NbdTlsMode.Disabled, MaxInFlight = maxInFlightPerConnection, ConnectTimeout = TimeSpan.FromSeconds(30) },
+                    ct).ConfigureAwait(false),
+                connections, maxInFlightPerConnection, cancellationToken).ConfigureAwait(false);
+            return new ProxyNbdWriter(pool, connections * maxInFlightPerConnection);
+        }
+
         public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref _released, 1) != 0)

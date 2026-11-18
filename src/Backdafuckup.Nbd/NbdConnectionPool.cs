@@ -1,8 +1,9 @@
 namespace Backdafuckup.Nbd;
 
 /// <summary>
-/// Several NBD connections to the same export. Reads go to the least-loaded healthy connection; broken
-/// connections are re-established and the read is retried (reads are idempotent).
+/// Several NBD connections to the same export. Reads and writes go to the least-loaded healthy connection; broken
+/// connections are re-established and the request is retried (reads are idempotent, and so is writing the same data to
+/// the same place again). Writes over several connections need a server that offers NBD_FLAG_CAN_MULTI_CONN.
 /// </summary>
 public sealed class NbdConnectionPool : IAsyncDisposable
 {
@@ -74,7 +75,26 @@ public sealed class NbdConnectionPool : IAsyncDisposable
         return pool;
     }
 
-    public async ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken)
+    public ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken) =>
+        RunAsync(client => client.ReadAsync(offset, destination, cancellationToken), cancellationToken);
+
+    public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        RunAsync(client => client.WriteAsync(offset, data, cancellationToken), cancellationToken);
+
+    /// <summary>Flushes every open connection (writes acknowledged on any of them reach stable storage).</summary>
+    public async ValueTask FlushAsync(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        foreach (var slot in _slots)
+        {
+            if (slot.Client is { IsFaulted: false } client)
+            {
+                await client.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async ValueTask RunAsync(Func<NbdClient, ValueTask> request, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         var (slot, client) = await AcquireAsync(cancellationToken).ConfigureAwait(false);
@@ -82,7 +102,7 @@ public sealed class NbdConnectionPool : IAsyncDisposable
         {
             try
             {
-                await client.ReadAsync(offset, destination, cancellationToken).ConfigureAwait(false);
+                await request(client).ConfigureAwait(false);
                 return;
             }
             catch (Exception ex) when (ex is (NbdException and not NbdCommandException) or IOException or ObjectDisposedException

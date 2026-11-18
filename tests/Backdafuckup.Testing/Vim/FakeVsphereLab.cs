@@ -29,7 +29,13 @@ public sealed class FakeVsphereLab
         Vcenter = new FakeVcenter();
         var dc = Vcenter.AddDatacenter("DC-Lab");
         Cluster = Vcenter.AddCluster(dc, "Cluster-A");
-        Host = Vcenter.AddHost(Cluster, "esx01.corp.example");
+        using (var key = System.Security.Cryptography.ECDsa.Create())
+        {
+            using var certificate = new System.Security.Cryptography.X509Certificates.CertificateRequest("CN=esx01.corp.example", key, System.Security.Cryptography.HashAlgorithmName.SHA256)
+                .CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+            Host = Vcenter.AddHost(Cluster, "esx01.corp.example", certificate.ExportCertificatePem());
+        }
+
         Datastore = Vcenter.AddDatastore("ds-shared-01", 1L << 40, 600L << 30);
         Vcenter.Set(Host, "datastore", Val.Array("ArrayOfManagedObjectReference", [Val.Mor("ManagedObjectReference", Datastore)]));
         Network = Vcenter.AddNetwork("VM Network");
@@ -57,6 +63,182 @@ public sealed class FakeVsphereLab
         Vcenter.On("CreateSnapshot_Task", CreateSnapshot);
         Vcenter.On("RemoveSnapshot_Task", RemoveSnapshot);
         Vcenter.On("QueryChangedDiskAreas", QueryChangedDiskAreas);
+
+        AddRestoreSupport();
+
+        // VMware Tools guest operations: files arrive with a PUT to the ESXi host, programs are the simulated sc.exe.
+        Vcenter.Add("GuestOperationsManager", "guestOperationsManager",
+            ("fileManager", Val.Mor("GuestFileManager", "guestFileManager")), ("processManager", Val.Mor("GuestProcessManager", "guestProcessManager")));
+        Vcenter.On("MakeDirectoryInGuest", request =>
+        {
+            var vm = GuestVm(request);
+            lock (_lock)
+            {
+                GuestDirectories.Add($"{Vcenter.Name(vm)}:{request.Element(FakeVcenter.Ns + "directoryPath")!.Value}");
+            }
+
+            return null;
+        });
+        Vcenter.On("InitiateFileTransferToGuest", request =>
+        {
+            var vm = GuestVm(request);
+            var id = Interlocked.Increment(ref _nextTransfer).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            lock (_lock)
+            {
+                _transfers[id] = $"{Vcenter.Name(vm)}:{request.Element(FakeVcenter.Ns + "guestFilePath")!.Value}";
+            }
+
+            return Val.Typed("returnval", "xsd:string", $"https://*:443/guestFile?id={id}&token=52a1");
+        });
+        Vcenter.OnHttp(HttpMethod.Put, "/guestFile", (uri, data) =>
+        {
+            var id = System.Web.HttpUtility.ParseQueryString(uri.Query)["id"] ?? string.Empty;
+            lock (_lock)
+            {
+                if (uri.Host != "esx01.corp.example" || !_transfers.Remove(id, out var path))
+                {
+                    return System.Net.HttpStatusCode.NotFound;
+                }
+
+                GuestFiles[path] = data;
+            }
+
+            return System.Net.HttpStatusCode.OK;
+        });
+        Vcenter.On("StartProgramInGuest", request =>
+        {
+            var vm = GuestVm(request);
+            var spec = request.Element(FakeVcenter.Ns + "spec")!;
+            var program = spec.Element(FakeVcenter.Ns + "programPath")!.Value;
+            var arguments = spec.Element(FakeVcenter.Ns + "arguments")?.Value ?? string.Empty;
+            var exitCode = RunInGuest(Vcenter.Name(vm)!, program, arguments);
+            var pid = Interlocked.Increment(ref _nextPid);
+            lock (_lock)
+            {
+                _exitCodes[pid] = exitCode;
+            }
+
+            return Val.Typed("returnval", "xsd:long", pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        });
+        Vcenter.On("ListProcessesInGuest", request =>
+        {
+            GuestVm(request);
+            var pid = long.Parse(request.Element(FakeVcenter.Ns + "pids")!.Value, System.Globalization.CultureInfo.InvariantCulture);
+            int exitCode;
+            lock (_lock)
+            {
+                exitCode = _exitCodes[pid];
+            }
+
+            return new XElement(FakeVcenter.Ns + "returnval",
+                Val.F("name", "program"), Val.F("pid", pid), Val.F("owner", GuestUser), Val.F("cmdLine", "program"),
+                Val.F("startTime", DateTimeOffset.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture)),
+                Val.F("endTime", DateTimeOffset.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture)), Val.F("exitCode", exitCode));
+        });
+    }
+
+    /// <summary>The guest account VMware Tools accept (a local account without <c>.\</c>).</summary>
+    public string GuestUser { get; set; } = @"CORP\backup-admin";
+
+    public string GuestPassword { get; set; } = "secret";
+
+    /// <summary>Files copied into guests, by "vm name:guest path".</summary>
+    public Dictionary<string, byte[]> GuestFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public List<string> GuestDirectories { get; } = [];
+
+    /// <summary>Programs run in guests, as "vm name: program arguments".</summary>
+    public List<string> GuestCommands { get; } = [];
+
+    /// <summary>Windows services in guests by "vm name:service": their state (RUNNING, STOPPED) and command line.</summary>
+    public Dictionary<string, (string State, string BinaryPath)> GuestServices { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Called when sc.exe starts a service in a guest (VM name, service name).</summary>
+    public Action<string, string>? OnServiceStarted { get; set; }
+
+    private readonly Dictionary<string, string> _transfers = new(StringComparer.Ordinal);
+    private readonly Dictionary<long, int> _exitCodes = [];
+    private int _nextTransfer;
+    private long _nextPid = 4000;
+
+    private (string Type, string Value) GuestVm(XElement request)
+    {
+        var vm = request.Element(FakeVcenter.Ns + "vm")!.Value;
+        var auth = request.Element(FakeVcenter.Ns + "auth")!;
+        if (auth.Element(FakeVcenter.Ns + "username")?.Value != GuestUser || auth.Element(FakeVcenter.Ns + "password")?.Value != GuestPassword)
+        {
+            throw new VimFault("InvalidGuestLogin", "Failed to authenticate with the guest operating system using the supplied credentials.");
+        }
+
+        return ("VirtualMachine", vm);
+    }
+
+    /// <summary>sc.exe and the service query through cmd.exe, as the agent installation uses them.</summary>
+    private int RunInGuest(string vm, string program, string arguments)
+    {
+        lock (_lock)
+        {
+            GuestCommands.Add($"{vm}: {Path.GetFileName(program.Replace('\\', '/'))} {arguments}");
+        }
+
+        var words = arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (program.EndsWith("cmd.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            var service = words[3];
+            lock (_lock)
+            {
+                return GuestServices.TryGetValue($"{vm}:{service}", out var state) ? state.State switch { "RUNNING" => 0, "STOPPED" => 2, _ => 1 } : 1;
+            }
+        }
+
+        var key = $"{vm}:{words[1]}";
+        string? started = null;
+        int result;
+        lock (_lock)
+        {
+            var exists = GuestServices.TryGetValue(key, out var current);
+            switch (words[0])
+            {
+                case "query":
+                    result = exists ? 0 : 1060;
+                    break;
+                case "create":
+                    var binPath = arguments[(arguments.IndexOf("binPath= ", StringComparison.Ordinal) + 9)..];
+                    GuestServices[key] = ("STOPPED", binPath[..binPath.IndexOf(" start= ", StringComparison.Ordinal)]);
+                    result = exists ? 1073 : 0;
+                    break;
+                case "start":
+                    result = exists ? 0 : 1060;
+                    if (exists)
+                    {
+                        GuestServices[key] = ("RUNNING", current.BinaryPath);
+                        started = words[1];
+                    }
+
+                    break;
+                case "stop":
+                    result = exists ? 0 : 1060;
+                    if (exists)
+                    {
+                        GuestServices[key] = ("STOPPED", current.BinaryPath);
+                    }
+
+                    break;
+                case "delete":
+                    result = GuestServices.Remove(key) ? 0 : 1060;
+                    break;
+                default:
+                    result = 1;
+                    break;
+            }
+        }
+
+        if (started is not null)
+        {
+            OnServiceStarted?.Invoke(vm, started);
+        }
+
+        return result;
     }
 
     public FakeVcenter Vcenter { get; }
@@ -75,6 +257,287 @@ public sealed class FakeVsphereLab
     public (string Type, string Value) Network { get; }
 
     public (string Type, string Value) ProxyVm { get; }
+
+    /// <summary>The datacenter, its VM folder, a folder "backdafuckup-test" in it, and the cluster's root resource pool.</summary>
+    public (string Type, string Value) Datacenter { get; private set; }
+
+    public (string Type, string Value) VmFolder { get; private set; }
+
+    public (string Type, string Value) TestFolder { get; private set; }
+
+    public (string Type, string Value) ResourcePool { get; private set; }
+
+    /// <summary>CreateVM_Task ends in an error (for a restore that fails after its disks were written).</summary>
+    public bool CreateVmFails { get; set; }
+
+    /// <summary>Folders made on datastores ("[ds] name") and the disk files there by name (to their disk's UUID).</summary>
+    public HashSet<string> DatastoreFolders { get; } = new(StringComparer.Ordinal);
+
+    public IReadOnlyDictionary<string, string> DiskFiles
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _disks.Values.ToDictionary(d => d.FileName, d => d.Uuid, StringComparer.Ordinal);
+            }
+        }
+    }
+
+    /// <summary>The VM's disks by key ("scsi0:1") with their file names and UUIDs, as its devices show them.</summary>
+    public IReadOnlyList<(int Bus, int Unit, string FileName, string Uuid)> VmDisks((string Type, string Value) vm)
+    {
+        lock (_lock)
+        {
+            var controllers = _devices[vm.Value].Where(d => d.Element(FakeVcenter.Ns + "busNumber") is not null)
+                .ToDictionary(d => d.Element(FakeVcenter.Ns + "key")!.Value, d => int.Parse(d.Element(FakeVcenter.Ns + "busNumber")!.Value, CultureInfo.InvariantCulture));
+            return [.. _devices[vm.Value].Where(d => d.Attribute(FakeVcenter.Xsi + "type")!.Value == "VirtualDisk").Select(d => (
+                controllers[d.Element(FakeVcenter.Ns + "controllerKey")!.Value],
+                int.Parse(d.Element(FakeVcenter.Ns + "unitNumber")!.Value, CultureInfo.InvariantCulture),
+                d.Element(FakeVcenter.Ns + "backing")!.Element(FakeVcenter.Ns + "fileName")!.Value,
+                d.Element(FakeVcenter.Ns + "backing")!.Element(FakeVcenter.Ns + "uuid")!.Value))];
+        }
+    }
+
+    /// <summary>The VM's NICs: device type, MAC and network.</summary>
+    public IReadOnlyList<(string Type, string Mac, string Network)> VmNics((string Type, string Value) vm)
+    {
+        lock (_lock)
+        {
+            return [.. _devices[vm.Value].Where(d => d.Element(FakeVcenter.Ns + "macAddress") is not null).Select(d => (
+                d.Attribute(FakeVcenter.Xsi + "type")!.Value, d.Element(FakeVcenter.Ns + "macAddress")!.Value,
+                d.Element(FakeVcenter.Ns + "backing")?.Element(FakeVcenter.Ns + "network")?.Value ?? string.Empty))];
+        }
+    }
+
+    public (string Type, string Value)? FindVm(string name) =>
+        Vcenter.Objects("VirtualMachine").Where(v => Vcenter.Name(v) == name).Select(v => ((string, string)?)v).FirstOrDefault();
+
+    private void AddRestoreSupport()
+    {
+        Datacenter = Vcenter.Objects("Datacenter").Single();
+        VmFolder = FakeVcenter.Ref(Vcenter.Get(Datacenter, "vmFolder")!);
+        Vcenter.Set(Datacenter, "datastore", Val.Array("ArrayOfManagedObjectReference", [Val.Mor("ManagedObjectReference", Datastore)]));
+        TestFolder = Vcenter.Add("Folder", Vcenter.NewId("group-v"), ("name", Val.Str("backdafuckup-test")), ("parent", Val.Mor(VmFolder.Type, VmFolder.Value)));
+        ResourcePool = Vcenter.Add("ResourcePool", Vcenter.NewId("resgroup"), ("name", Val.Str("Resources")), ("parent", Val.Mor(Cluster.Type, Cluster.Value)));
+        Vcenter.Set(Cluster, "resourcePool", Val.Mor(ResourcePool.Type, ResourcePool.Value));
+        Vcenter.Set(Host, "parent", Val.Mor(Cluster.Type, Cluster.Value));
+
+        Vcenter.On("MakeDirectory", request =>
+        {
+            var name = request.Element(FakeVcenter.Ns + "name")!.Value;
+            if (request.Element(FakeVcenter.Ns + "datacenter") is null)
+            {
+                throw new VimFault("InvalidArgument", "A datastore path needs the datacenter.");
+            }
+
+            lock (_lock)
+            {
+                if (_disks.Values.Any(d => d.FileName.StartsWith(name + "/", StringComparison.Ordinal)) || !DatastoreFolders.Add(name))
+                {
+                    throw new VimFault("FileAlreadyExists", $"Cannot complete the operation because the file or folder {name} already exists");
+                }
+            }
+
+            return null;
+        });
+        Vcenter.On("CreateVM_Task", request =>
+        {
+            var folder = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
+            var pool = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "pool")!);
+            var config = request.Element(FakeVcenter.Ns + "config")!;
+            return Vcenter.StartTask(folder, "Folder.createVm", () => CreateVm(folder, pool, config));
+        });
+        Vcenter.On("PowerOnVM_Task", request => PowerTask(request, "poweredOn"));
+        Vcenter.On("PowerOffVM_Task", request => PowerTask(request, "poweredOff"));
+        Vcenter.On("ShutdownGuest", request =>
+        {
+            var vm = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
+            Vcenter.Set(vm, "runtime.powerState", Val.Str("poweredOff"));
+            return null;
+        });
+        Vcenter.On("Rename_Task", request =>
+        {
+            var vm = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
+            var name = request.Element(FakeVcenter.Ns + "newName")!.Value;
+            return Vcenter.StartTask(vm, "VirtualMachine.rename", () =>
+            {
+                Vcenter.Set(vm, "name", Val.Str(name));
+                return null;
+            });
+        });
+        Vcenter.On("Destroy_Task", request =>
+        {
+            var vm = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
+            return Vcenter.StartTask(vm, "VirtualMachine.destroy", () =>
+            {
+                if (Vcenter.Get(vm, "runtime.powerState")?.Value != "poweredOff")
+                {
+                    throw new VimFault("InvalidPowerState", "The attempted operation cannot be performed in the current state (Powered on).");
+                }
+
+                lock (_lock)
+                {
+                    foreach (var disk in DisksOf(vm))
+                    {
+                        _disks.Remove(disk.Uuid);
+                        File.Delete(disk.File);
+                    }
+
+                    _devices.Remove(vm.Value);
+                    Events.Add($"destroy {Vcenter.Name(vm)}");
+                }
+
+                Vcenter.Remove(vm);
+                return null;
+            });
+        });
+        Vcenter.On("DeleteVirtualDisk_Task", request =>
+        {
+            var name = request.Element(FakeVcenter.Ns + "name")!.Value;
+            return Vcenter.StartTask(("VirtualDiskManager", "virtualDiskManager"), "VirtualDiskManager.deleteVirtualDisk", () =>
+            {
+                lock (_lock)
+                {
+                    var disk = _disks.Values.FirstOrDefault(d => d.FileName == name) ?? throw new VimFault("FileNotFound", $"File {name} was not found");
+                    if (_devices.Values.Any(devices => devices.Any(d => d.Element(FakeVcenter.Ns + "backing")?.Element(FakeVcenter.Ns + "fileName")?.Value == name)))
+                    {
+                        throw new VimFault("FileLocked", $"Unable to access file {name} since it is locked");
+                    }
+
+                    _disks.Remove(disk.Uuid);
+                    File.Delete(disk.File);
+                    Events.Add($"delete {name}");
+                }
+
+                return null;
+            });
+        });
+    }
+
+    private XElement PowerTask(XElement request, string state)
+    {
+        var vm = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
+        return Vcenter.StartTask(vm, state == "poweredOn" ? "VirtualMachine.powerOn" : "VirtualMachine.powerOff", () =>
+        {
+            Vcenter.Set(vm, "runtime.powerState", Val.Str(state));
+            lock (_lock)
+            {
+                Events.Add($"{(state == "poweredOn" ? "power on" : "power off")} {Vcenter.Name(vm)}");
+            }
+
+            return null;
+        });
+    }
+
+    /// <summary>A restore's new disk file, created on the proxy VM in an existing datastore folder.</summary>
+    private void CreateDisk((string Type, string Value) vm, XElement device)
+    {
+        var backing = device.Element(FakeVcenter.Ns + "backing")!;
+        var fileName = backing.Element(FakeVcenter.Ns + "fileName")!.Value;
+        var controller = int.Parse(device.Element(FakeVcenter.Ns + "controllerKey")!.Value, CultureInfo.InvariantCulture);
+        var unit = int.Parse(device.Element(FakeVcenter.Ns + "unitNumber")!.Value, CultureInfo.InvariantCulture);
+        var capacity = long.Parse(device.Element(FakeVcenter.Ns + "capacityInKB")!.Value, CultureInfo.InvariantCulture) * 1024;
+        if (backing.Element(FakeVcenter.Ns + "diskMode")?.Value != "independent_persistent")
+        {
+            throw new VimFault("InvalidArgument", "A restore's disk on the proxy must be independent_persistent.");
+        }
+
+        lock (_lock)
+        {
+            if (!DatastoreFolders.Contains(fileName[..fileName.LastIndexOf('/')]))
+            {
+                throw new VimFault("FileNotFound", $"File {fileName[..fileName.LastIndexOf('/')]} was not found");
+            }
+
+            if (_disks.Values.Any(d => d.FileName == fileName))
+            {
+                throw new VimFault("FileAlreadyExists", $"Cannot complete the operation because the file or folder {fileName} already exists");
+            }
+
+            var uuid = $"6000C29f-{Guid.NewGuid().ToString()[9..]}";
+            var file = Path.Combine(_root, $"created-{_nextKey}.img");
+            using (var stream = File.Create(file))
+            {
+                stream.SetLength(capacity);
+            }
+
+            _disks[uuid] = new DiskState(uuid, fileName, file, capacity);
+            _devices[vm.Value].Add(Disk(_nextKey++, controller, unit, fileName, capacity, uuid, null));
+            ProxyDevices.Attach($"sd{(char)('b' + _nextDevice++)}", file, uuid);
+            Events.Add($"create {fileName} on {Vcenter.Name(vm)} at {controller}:{unit}");
+        }
+
+        PublishDevices(vm);
+    }
+
+    private XElement CreateVm((string Type, string Value) folder, (string Type, string Value) pool, XElement config)
+    {
+        if (CreateVmFails)
+        {
+            throw new VimFault("InsufficientResourcesFault", "The available Memory resources in the parent resource pool are insufficient for the operation.");
+        }
+
+        if (!Vcenter.Exists(folder) || !Vcenter.Exists(pool))
+        {
+            throw new VimFault("ManagedObjectNotFound", "The object has already been deleted or has not been completely created");
+        }
+
+        string Text(string name) => config.Element(FakeVcenter.Ns + name)?.Value ?? string.Empty;
+        var devices = new List<XElement>();
+        var keys = new Dictionary<string, int>(StringComparer.Ordinal);
+        var nextNic = 4000;
+        lock (_lock)
+        {
+            foreach (var device in config.Elements(FakeVcenter.Ns + "deviceChange").Select(c => c.Element(FakeVcenter.Ns + "device")!))
+            {
+                var type = device.Attribute(FakeVcenter.Xsi + "type")!.Value;
+                var key = device.Element(FakeVcenter.Ns + "key")!.Value;
+                if (device.Element(FakeVcenter.Ns + "busNumber") is { } bus)
+                {
+                    var busNumber = int.Parse(bus.Value, CultureInfo.InvariantCulture);
+                    keys[key] = 1000 + busNumber;
+                    devices.Add(Controller(1000 + busNumber, busNumber));
+                }
+                else if (type == "VirtualDisk")
+                {
+                    var fileName = device.Element(FakeVcenter.Ns + "backing")!.Element(FakeVcenter.Ns + "fileName")!.Value;
+                    var disk = _disks.Values.FirstOrDefault(d => d.FileName == fileName) ?? throw new VimFault("FileNotFound", $"File {fileName} was not found");
+                    devices.Add(Disk(_nextKey++, keys[device.Element(FakeVcenter.Ns + "controllerKey")!.Value], int.Parse(device.Element(FakeVcenter.Ns + "unitNumber")!.Value, CultureInfo.InvariantCulture),
+                        fileName, disk.Capacity, disk.Uuid, null));
+                }
+                else
+                {
+                    var mac = device.Element(FakeVcenter.Ns + "addressType")?.Value == "manual"
+                        ? device.Element(FakeVcenter.Ns + "macAddress")!.Value
+                        : $"00:50:56:{Random.Shared.Next(0x80):x2}:{Random.Shared.Next(256):x2}:{Random.Shared.Next(256):x2}";
+                    devices.Add(Val.Obj("VirtualDevice", type, Val.F("key", nextNic++), new XElement(device.Element(FakeVcenter.Ns + "backing")!), Val.F("macAddress", mac)));
+                }
+            }
+        }
+
+        var vm = Vcenter.Add(
+            "VirtualMachine", Vcenter.NewId("vm"),
+            ("name", Val.Str(Text("name"))), ("config.instanceUuid", Val.Str(Guid.NewGuid().ToString())),
+            ("config.uuid", Val.Str(Text("uuid") is { Length: > 0 } bios ? bios : Guid.NewGuid().ToString())),
+            ("config.template", Val.Bool(false)), ("runtime.powerState", Val.Str("poweredOff")), ("runtime.host", Val.Mor(Host.Type, Host.Value)),
+            ("config.hardware.numCPU", Val.Int(int.Parse(Text("numCPUs"), CultureInfo.InvariantCulture))),
+            ("config.hardware.memoryMB", Val.Int(int.Parse(Text("memoryMB"), CultureInfo.InvariantCulture))),
+            ("config.changeTrackingEnabled", Val.Bool(false)), ("config.guestId", Val.Str(Text("guestId"))), ("config.firmware", Val.Str(Text("firmware"))),
+            ("config.guestFullName", Val.Str("Ubuntu Linux (64-bit)")), ("parent", Val.Mor(folder.Type, folder.Value)), ("resourcePool", Val.Mor(pool.Type, pool.Value)),
+            ("summary.config.vmPathName", Val.Str(config.Element(FakeVcenter.Ns + "files")!.Element(FakeVcenter.Ns + "vmPathName")!.Value)));
+        lock (_lock)
+        {
+            _devices[vm.Value] = devices;
+            Events.Add($"createvm {Text("name")}");
+        }
+
+        PublishDevices(vm);
+        return Val.Mor("returnval", vm);
+    }
+
+    /// <summary>VMware Tools fail to quiesce (a quiesced snapshot ends in an error).</summary>
+    public bool QuiesceFails { get; set; }
 
     /// <summary>Snapshots taken and removed, and HotAdd attaches and detaches, in order (for assertions).</summary>
     public List<string> Events { get; } = [];
@@ -105,9 +568,21 @@ public sealed class FakeVsphereLab
         }
 
         var (vm, instanceUuid) = Vcenter.AddVm(name, Host, disks);
+        Vcenter.Set(vm, "guest.toolsRunningStatus", Val.Str("guestToolsRunning"));
+        Vcenter.Set(vm, "guest.guestOperationsReady", Val.Bool(true));
+        Vcenter.Set(vm, "parent", Val.Mor(VmFolder.Type, VmFolder.Value));
+        Vcenter.Set(vm, "resourcePool", Val.Mor(ResourcePool.Type, ResourcePool.Value));
+        Vcenter.Set(vm, "config.firmware", Val.Str("efi"));
         lock (_lock)
         {
-            _devices[vm.Value] = [Controller(1000, 0), .. disks.Select(d => Disk(d.Key, 1000, d.Unit, d.FileName, d.CapacityBytes, d.Uuid, null))];
+            _devices[vm.Value] =
+            [
+                Controller(1000, 0), .. disks.Select(d => Disk(d.Key, 1000, d.Unit, d.FileName, d.CapacityBytes, d.Uuid, null)),
+                Val.Obj("VirtualDevice", "VirtualVmxnet3", Val.F("key", 4000), Val.F("deviceInfo", new XElement(FakeVcenter.Ns + "label", "Network adapter 1")),
+                    Val.Obj("backing", "VirtualEthernetCardNetworkBackingInfo", Val.F("deviceName", "VM Network"), Val.Mor("network", Network)),
+                    Val.F("connectable", new XElement(FakeVcenter.Ns + "startConnected", "true")), Val.F("controllerKey", 100), Val.F("unitNumber", 7),
+                    Val.F("addressType", "assigned"), Val.F("macAddress", $"00:50:56:8b:{Random.Shared.Next(256):x2}:{Random.Shared.Next(256):x2}")),
+            ];
         }
 
         PublishDevices(vm);
@@ -166,9 +641,9 @@ public sealed class FakeVsphereLab
     {
         var vm = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
         var spec = request.Element(FakeVcenter.Ns + "spec")!;
-        if (spec.Descendants(FakeVcenter.Ns + "fileOperation").Any())
+        if (spec.Descendants(FakeVcenter.Ns + "fileOperation").Any(f => f.Value != "create" || f.Parent!.Element(FakeVcenter.Ns + "operation")!.Value != "add"))
         {
-            throw new VimFault("InvalidArgument", "The fake vSphere refuses fileOperation: a backup must never create or destroy disk files.");
+            throw new VimFault("InvalidArgument", "The fake vSphere refuses a fileOperation other than create: nothing may ever destroy or replace disk files.");
         }
 
         return Vcenter.StartTask(vm, "VirtualMachine.reconfigure", () =>
@@ -193,6 +668,9 @@ public sealed class FakeVsphereLab
                 var key = int.Parse(device.Element(FakeVcenter.Ns + "key")!.Value, CultureInfo.InvariantCulture);
                 switch (change.Element(FakeVcenter.Ns + "operation")!.Value)
                 {
+                    case "add" when change.Element(FakeVcenter.Ns + "fileOperation")?.Value == "create":
+                        CreateDisk(vm, device);
+                        break;
                     case "add":
                         HotAdd(vm, device);
                         break;
@@ -247,8 +725,14 @@ public sealed class FakeVsphereLab
         var vm = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
         var name = request.Element(FakeVcenter.Ns + "name")!.Value;
         var description = request.Element(FakeVcenter.Ns + "description")?.Value ?? string.Empty;
+        var quiesce = request.Element(FakeVcenter.Ns + "quiesce")?.Value == "true";
         return Vcenter.StartTask(vm, "VirtualMachine.createSnapshot", () =>
         {
+            if (quiesce && QuiesceFails)
+            {
+                throw new VimFault("ApplicationQuiesceFault", "An error occurred while quiescing the virtual machine.");
+            }
+
             var id = Vcenter.NewId("snapshot");
             var state = new SnapshotState(vm);
             var devices = new List<XElement>();
@@ -278,7 +762,7 @@ public sealed class FakeVsphereLab
                 }
 
                 _snapshots[id] = state;
-                Events.Add($"snapshot {name} of {Vcenter.Name(vm)}");
+                Events.Add($"snapshot {name} of {Vcenter.Name(vm)}{(quiesce ? " (quiesced)" : string.Empty)}");
             }
 
             var snapshot = Vcenter.Add("VirtualMachineSnapshot", id, ("config.hardware.device", Val.Array("ArrayOfVirtualDevice", devices)));
@@ -376,11 +860,11 @@ public sealed class FakeVsphereLab
         Val.Obj("VirtualDevice", "ParaVirtualSCSIController", Val.F("key", key), Val.F("deviceInfo", new XElement(FakeVcenter.Ns + "label", $"SCSI controller {bus}")),
             Val.F("controllerKey", 100), Val.F("unitNumber", 3 + bus), Val.F("busNumber", bus), Val.F("scsiCtlrUnitNumber", 7));
 
-    private static XElement Disk(int key, int controller, int unit, string fileName, long capacity, string uuid, string? changeId) =>
+    private XElement Disk(int key, int controller, int unit, string fileName, long capacity, string uuid, string? changeId) =>
         Val.Obj("VirtualDevice", "VirtualDisk",
             Val.F("key", key),
             Val.F("deviceInfo", new XElement(FakeVcenter.Ns + "label", $"Hard disk {unit + 1}")),
-            Val.Obj("backing", "VirtualDiskFlatVer2BackingInfo", Val.F("fileName", fileName), Val.F("diskMode", "persistent"), Val.F("thinProvisioned", "true"), Val.F("uuid", uuid),
+            Val.Obj("backing", "VirtualDiskFlatVer2BackingInfo", Val.F("fileName", fileName), Val.Mor("datastore", Datastore), Val.F("diskMode", "persistent"), Val.F("thinProvisioned", "true"), Val.F("uuid", uuid),
                 changeId is null ? null : Val.F("changeId", changeId)),
             Val.F("controllerKey", controller), Val.F("unitNumber", unit), Val.F("capacityInKB", capacity / 1024), Val.F("capacityInBytes", capacity));
 

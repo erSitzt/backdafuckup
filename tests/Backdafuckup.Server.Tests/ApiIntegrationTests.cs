@@ -70,6 +70,10 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
             builder.UseSetting("Paths:DataDirectory", Path.Combine(_root, "data"));
             builder.UseSetting("Paths:LogDirectory", Path.Combine(_root, "logs"));
             builder.UseSetting("Agent:PollHold", "00:00:01");
+            // Agent builds for a push installation exist only when a test puts them there; the installation watches briefly.
+            builder.UseSetting("Agent:PackageDirectory", Path.Combine(_root, "agent"));
+            builder.UseSetting("Agent:ServiceStableTime", "00:00:00.200");
+            builder.UseSetting("Agent:ServicePollInterval", "00:00:00.050");
             // Lets a test publish for 0 minutes, so that the automatic unpublish runs at once.
             builder.UseSetting("SqlRestore:MinAutoUnpublishMinutes", "0");
             // SQL Server backups run when a test calls the scheduler, not on their own.

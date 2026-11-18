@@ -136,6 +136,28 @@ public sealed class VSphereProvider : IHypervisorProvider
         return await VimSession.ConnectAsync(transport, settings.Credential.UserName, settings.Credential.Password, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The HTTP handler for a request to an ESXi host (guest file transfers): only the certificate with the given SPKI pin,
+    /// which vCenter reported for the host, is trusted.
+    /// </summary>
+    internal HttpMessageHandler CreateHostHandler(ConnectionSettings settings, string spkiSha256)
+    {
+        if (_handlerFactory is not null)
+        {
+            return _handlerFactory(settings);
+        }
+
+        return new SocketsHttpHandler
+        {
+            ConnectTimeout = TimeSpan.FromSeconds(20),
+            SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+            {
+                RemoteCertificateValidationCallback = CertificatePinning.CreateValidator(TlsTrustMode.Pinned, [spkiSha256]),
+                CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+            },
+        };
+    }
+
     private static string? Refusal(VimSession session, ConnectionSettings settings) =>
         session.Content.About.ApiType == "VirtualCenter"
             ? null

@@ -22,6 +22,12 @@ public static class VSphereArtifactKinds
     public const string ChangeTokenKind = "vsphere-cbt";
 
     public const string MetadataFormat = "vsphere-config-v1";
+
+    /// <summary>A disk file a restore created (NativeId: its datastore path; NativeRef: the datacenter).</summary>
+    public const string RestoredDisk = "vsphere.restored-disk";
+
+    /// <summary>A VM a restore created (NativeId: its managed object id).</summary>
+    public const string RestoredVm = "vsphere.restored-vm";
 }
 
 /// <summary>A disk of the snapshot as vCenter describes it.</summary>
@@ -52,7 +58,7 @@ internal sealed class VSphereBackupSession : IVmBackupSession
     private VSphereBackupSession(
         VSphereHypervisorSession owner, VSphereVm vm, IArtifactLedger ledger, IOperationLog log, ManagedObjectReference snapshot, Guid snapshotArtifact,
         IReadOnlyList<VSphereSnapshotDisk> disks, IReadOnlyList<SnapshotDisk> excluded, IReadOnlyCollection<(string Id, string Name)> datastores, string? vmCluster,
-        VmMetadataBlob metadata, SnapshotFacts facts, GuestFreezeResult? freeze)
+        VmMetadataBlob metadata, SnapshotFacts facts, GuestFreezeResult? freeze, IReadOnlyList<VmNic> nics, string? firmware, bool secureBoot)
     {
         _owner = owner;
         VmInfo = vm;
@@ -75,6 +81,9 @@ internal sealed class VSphereBackupSession : IVmBackupSession
             VCpus = vm.VCpus,
             MemoryBytes = vm.MemoryBytes,
             OsName = vm.GuestName,
+            Nics = nics,
+            Firmware = firmware,
+            SecureBoot = secureBoot,
         };
         Disks = [.. disks.Select(d => new SnapshotDisk(
             d.Key, d.RootUuid, d.Uuid, d.Label, d.CapacityBytes, d.Key.EndsWith(":0", StringComparison.Ordinal) && d.Key.StartsWith("scsi0", StringComparison.Ordinal),
@@ -105,7 +114,7 @@ internal sealed class VSphereBackupSession : IVmBackupSession
         var vim = owner.Vim;
         var vm = await VSphereInventory.FindVmAsync(vim, request.VmId, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"VM {request.VmId} no longer exists in vCenter {vim.Endpoint}.");
-        var row = (await vim.RetrievePropertiesAsync([vm.Ref], ["config.hardware.device", "config.guestId", "config.version", "config.firmware", "config.hardware.numCoresPerSocket", "config.extraConfig"], cancellationToken)
+        var row = (await vim.RetrievePropertiesAsync([vm.Ref], ["config.hardware.device", "config.guestId", "config.version", "config.firmware", "config.hardware.numCoresPerSocket", "config.extraConfig", "parent", "resourcePool", "config.bootOptions.efiSecureBootEnabled"], cancellationToken)
             .ConfigureAwait(false)).First();
         var devices = row["config.hardware.device"];
         var (usable, excluded) = Classify(devices);
@@ -133,14 +142,34 @@ internal sealed class VSphereBackupSession : IVmBackupSession
         var description = $"{VSphereInventory.SnapshotDescriptionPrefix}session={request.SessionId:D} job={request.JobId:D} restorepoint={request.RestorePointId:D}";
         var artifact = await ledger.RecordAsync(VSphereArtifactKinds.Snapshot, string.Empty, vm.Ref.Value, description, cancellationToken).ConfigureAwait(false);
         var (freeze, freezeResult) = await GuestFreezeOrchestration.FreezeAsync(request.Quiescer, log, cancellationToken).ConfigureAwait(false);
+        var toolsQuiesce = request.Quiescer is null && request.PlatformQuiesce;
+        GuestFreezeResult? toolsResult = null;
         ManagedObjectReference? snapshot = null;
         var watch = Stopwatch.StartNew();
         try
         {
-            var task = await vim.StartTaskAsync("CreateSnapshot_Task", vm.Ref, cancellationToken,
-                VimXml.E("name", VSphereInventory.SnapshotName), VimXml.E("description", description), VimXml.E("memory", "false"), VimXml.E("quiesce", "false")).ConfigureAwait(false);
-            snapshot = (await vim.WaitForTaskAsync(task, cancellationToken).ConfigureAwait(false))?.AsRef()
-                ?? throw new InvalidDataException($"vCenter {vim.Endpoint}: the snapshot of {vm.Name} was created without a reference.");
+            try
+            {
+                snapshot = await CreateSnapshotAsync(vim, vm, description, toolsQuiesce, cancellationToken).ConfigureAwait(false);
+            }
+            catch (VimTaskException ex) when (toolsQuiesce)
+            {
+                log.Warning($"{vm.Name}: VMware Tools could not quiesce the snapshot ({ex.FaultMessage}); it is taken without quiescing (crash-consistent).");
+                toolsResult = GuestFreezeResult.NotConsistent($"VMware Tools could not quiesce the snapshot: {ex.FaultMessage}.");
+                snapshot = await CreateSnapshotAsync(vim, vm, description, quiesce: false, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (toolsQuiesce && toolsResult is null)
+            {
+                var windows = row.Str("config.guestId")?.StartsWith("windows", StringComparison.OrdinalIgnoreCase) == true
+                    || vm.GuestName?.Contains("Windows", StringComparison.OrdinalIgnoreCase) == true;
+                toolsResult = windows
+                    ? new GuestFreezeResult(true, "quiesced by VMware Tools (VSS in the guest)", TimeSpan.Zero, watch.Elapsed, [])
+                    : new GuestFreezeResult(false, "VMware Tools froze the file systems (fsfreeze): file-system-consistent, but applications were not asked to flush their data.", TimeSpan.Zero, watch.Elapsed, []);
+                log.Info(windows
+                    ? $"{vm.Name}: snapshot quiesced by VMware Tools (VSS in the guest) in {watch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s."
+                    : $"{vm.Name}: snapshot quiesced by VMware Tools: the file systems were frozen (fsfreeze) for {watch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s.");
+            }
         }
         finally
         {
@@ -158,6 +187,8 @@ internal sealed class VSphereBackupSession : IVmBackupSession
             GuestFreezeOrchestration.Report(log, freezeResult, watch.Elapsed);
         }
 
+        freezeResult ??= toolsResult;
+
         try
         {
             var snapshotDevices = (await vim.RetrievePropertiesAsync([snapshot], ["config.hardware.device"], cancellationToken).ConfigureAwait(false)).FirstOrDefault()?["config.hardware.device"];
@@ -167,9 +198,11 @@ internal sealed class VSphereBackupSession : IVmBackupSession
             var metadata = new VmMetadataBlob(VSphereArtifactKinds.MetadataFormat, JsonSerializer.SerializeToUtf8Bytes(new VSphereConfig(
                 vm.Name, vm.InstanceUuid, vm.BiosUuid, row.Str("config.guestId"), vm.GuestName, row.Str("config.version"), row.Str("config.firmware"), vm.VCpus,
                 int.TryParse(row.Str("config.hardware.numCoresPerSocket"), out var cores) ? cores : null, vm.MemoryBytes / (1024 * 1024), vm.Annotation,
-                devices?.ToString() ?? string.Empty)));
+                devices?.ToString() ?? string.Empty, row["parent"]?.AsRef().Value, row["resourcePool"]?.AsRef().Value,
+                row.Str("config.bootOptions.efiSecureBootEnabled") is { } secureBoot ? secureBoot == "true" : null)));
             var facts = new SnapshotFacts(watch.Elapsed, TimeSpan.Zero, disks.Count, [.. datastores.Select(d => d.Name).Distinct(StringComparer.Ordinal)], null) { DisksAtOnce = true };
-            return new VSphereBackupSession(owner, vm, ledger, log, snapshot, artifact, disks, excluded, datastores, vmCluster, metadata, facts, freezeResult);
+            return new VSphereBackupSession(owner, vm, ledger, log, snapshot, artifact, disks, excluded, datastores, vmCluster, metadata, facts, freezeResult,
+                VSphereDevices.Nics(devices), row.Str("config.firmware"), row.Str("config.bootOptions.efiSecureBootEnabled") == "true");
         }
         catch
         {
@@ -177,6 +210,15 @@ internal sealed class VSphereBackupSession : IVmBackupSession
             await ledger.UpdateAsync(artifact, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
+    }
+
+    private static async Task<ManagedObjectReference> CreateSnapshotAsync(VimSession vim, VSphereVm vm, string description, bool quiesce, CancellationToken cancellationToken)
+    {
+        var task = await vim.StartTaskAsync("CreateSnapshot_Task", vm.Ref, cancellationToken,
+            VimXml.E("name", VSphereInventory.SnapshotName), VimXml.E("description", description), VimXml.E("memory", "false"), VimXml.E("quiesce", quiesce ? "true" : "false"))
+            .ConfigureAwait(false);
+        return (await vim.WaitForTaskAsync(task, cancellationToken).ConfigureAwait(false))?.AsRef()
+            ?? throw new InvalidDataException($"vCenter {vim.Endpoint}: the snapshot of {vm.Name} was created without a reference.");
     }
 
     public async Task<ChangedExtents> GetChangedExtentsAsync(SnapshotDisk disk, ChangeToken? since, IOperationLog log, CancellationToken cancellationToken)
@@ -536,6 +578,8 @@ internal sealed class VSphereBackupSession : IVmBackupSession
 
 /// <summary>The VM configuration stored with a vSphere restore point (<see cref="VSphereArtifactKinds.MetadataFormat"/>).</summary>
 /// <param name="DevicesXml">config.hardware.device as vCenter sent it, for the restore.</param>
+/// <param name="FolderId">The VM folder the VM was in (restore puts it back there by default).</param>
+/// <param name="ResourcePoolId">The VM's resource pool.</param>
 internal sealed record VSphereConfig(
     string Name, string InstanceUuid, string? BiosUuid, string? GuestId, string? GuestFullName, string? HardwareVersion, string? Firmware, int NumCpu, int? CoresPerSocket,
-    long MemoryMb, string? Annotation, string DevicesXml);
+    long MemoryMb, string? Annotation, string DevicesXml, string? FolderId = null, string? ResourcePoolId = null, bool? EfiSecureBoot = null);

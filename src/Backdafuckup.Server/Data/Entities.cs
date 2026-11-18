@@ -264,6 +264,12 @@ public sealed class InventoryEntry
 
     public Dictionary<string, string> Properties { get; set; } = [];
 
+    /// <summary>
+    /// The UUID a guest sees as its SMBIOS UUID / BIOS serial, when it is not <see cref="NativeId"/> (vSphere: the VM's
+    /// BIOS UUID <c>config.uuid</c>, while the VM's id is its instance UUID). Matches agents to their VM.
+    /// </summary>
+    public string? GuestUuid { get; set; }
+
     public DateTimeOffset RefreshedUtc { get; set; }
 }
 
