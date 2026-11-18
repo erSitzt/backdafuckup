@@ -246,7 +246,8 @@ public sealed record JobDto(
     Guid? SqlCredentialId = null,
     bool SqlSnapshotCopyOnly = false,
     SqlBackupSettingsDto? SqlBackup = null,
-    bool KubernetesPodVolumes = false);
+    bool KubernetesPodVolumes = false,
+    DateTimeOffset? SqlNextRunUtc = null);
 
 /// <summary>
 /// SQL Server backups the agent runs in the job's VMs (the log chain): transaction log backups every

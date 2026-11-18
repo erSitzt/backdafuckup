@@ -1362,6 +1362,12 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
                 Assert.True(schedule.NextLogUtc > DateTimeOffset.UtcNow && schedule.NextLogUtc!.Value.Minute % 15 == 0, $"next log backup at {schedule.NextLogUtc}");
                 Assert.NotNull(schedule.ForeignCheckedUtc);
 
+                // The schedule shows up outside the day session: per VM, and as the job's next run.
+                var scheduled = Assert.Single((await client.GetFromJsonAsync<List<SqlScheduleDto>>("/api/sql/schedules", Ct))!);
+                Assert.Equal(("sql07", 15, schedule.NextLogUtc, day.Id, "Success"), (scheduled.VmName, scheduled.LogIntervalMinutes, scheduled.NextLogUtc, scheduled.DaySessionId, scheduled.LastResult));
+                var listed = Assert.Single((await client.GetFromJsonAsync<List<JobDto>>("/api/jobs", Ct))!, j => j.Name == "Files");
+                Assert.Equal(new[] { schedule.NextLogUtc, schedule.NextFullUtc, schedule.NextSystemUtc }.Where(t => t is not null).Min(), listed.SqlNextRunUtc);
+
                 // Due again (as 15 minutes later).
                 schedule.NextLogUtc = DateTimeOffset.UtcNow.AddSeconds(-1);
                 await db.SaveChangesAsync(Ct);

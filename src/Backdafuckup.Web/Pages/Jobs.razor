@@ -29,11 +29,17 @@ else
                 </span>
                 <MudLink Href="@($"/jobs/{context.Id}")">@context.Name</MudLink>
                 @if (!context.Enabled) { <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Icon="@Icons.Material.Filled.PauseCircle">disabled</MudChip> }
-                <span class="cell-sub n-560">@Describe(context.Schedule) · next @Fmt.Time(context.NextRunUtc)</span>
+                <span class="cell-sub n-560">@Describe(context.Schedule) · next @Fmt.Time(context.NextRunUtc)@(SqlLine(context) is { } sql ? $" · {sql}" : "")</span>
             </MudTd>
-            <MudTd Class="c-760">@BacksUp(context)<span class="cell-sub">@(IsCluster(context) ? "cluster" : "pool") @context.ConnectionName</span></MudTd>
+            <MudTd Class="c-760">@BacksUp(context)<span class="cell-sub">@(IsCluster(context) ? "cluster" : _vcenters.Contains(context.ConnectionId) ? "vCenter" : "pool") @context.ConnectionName</span></MudTd>
             <MudTd Class="c-950">@context.RepositoryName</MudTd>
-            <MudTd Class="c-560 nowrap">@Describe(context.Schedule)</MudTd>
+            <MudTd Class="c-560 nowrap">
+                @Describe(context.Schedule)
+                @if (context.SqlBackup is { Enabled: true } sqlSettings)
+                {
+                    <span class="cell-sub">SQL log every @Interval(sqlSettings.LogIntervalMinutes)</span>
+                }
+            </MudTd>
             <MudTd>
                 @if (context.IsRunning)
                 {
@@ -45,7 +51,13 @@ else
                 }
             </MudTd>
             <MudTd Class="c-760 nowrap">@Fmt.Time(context.LastRunUtc)</MudTd>
-            <MudTd Class="c-560 nowrap">@Fmt.Time(context.NextRunUtc)</MudTd>
+            <MudTd Class="c-560 nowrap">
+                @Fmt.Time(context.NextRunUtc)
+                @if (context.SqlNextRunUtc is { } sqlNext)
+                {
+                    <span class="cell-sub">SQL @Fmt.Time(sqlNext)</span>
+                }
+            </MudTd>
             <MudTd Style="white-space:nowrap">
                 <div class="d-flex align-center justify-end">
                 @if (context.IsRunning)
@@ -69,6 +81,48 @@ else
         <NoRecordsContent><MudText>No backup job yet.</MudText></NoRecordsContent>
     </MudTable>
     </div>
+
+    @if (_sqlSchedules is { Count: > 0 })
+    {
+        <div class="d-flex align-center mt-6 mb-2">
+            <MudText Typo="Typo.h6">SQL Server backups</MudText>
+            <MudSpacer />
+            <MudButton Size="Size.Small" Variant="Variant.Text" StartIcon="@Icons.Material.Filled.Storage" Href="/sql/databases">SQL Server</MudButton>
+        </div>
+        <MudText Typo="Typo.body2" Class="mb-2">Log backups run on their interval inside the jobs' VMs, independent of the job schedule; native and system full backups on their own schedules.</MudText>
+        <div class="cq">
+        <MudTable Items="_sqlSchedules" Hover="true" Dense="true" Elevation="1" Breakpoint="Breakpoint.None">
+            <HeaderContent>
+                <MudTh>VM</MudTh><MudTh Class="c-760">Job</MudTh><MudTh Class="c-560">Log backups</MudTh><MudTh>Next log</MudTh><MudTh Class="c-760">Next full</MudTh><MudTh Class="c-950">Next system</MudTh><MudTh>Last run</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd>
+                    @context.VmName
+                    <span class="cell-sub n-760">@context.JobName@(context.JobEnabled ? "" : " (disabled)")</span>
+                </MudTd>
+                <MudTd Class="c-760"><MudLink Href="@($"/jobs/{context.JobId}")">@context.JobName</MudLink>@if (!context.JobEnabled) { <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Icon="@Icons.Material.Filled.PauseCircle">disabled</MudChip> }</MudTd>
+                <MudTd Class="c-560 nowrap">every @Interval(context.LogIntervalMinutes)</MudTd>
+                <MudTd Class="nowrap">@Fmt.Time(context.NextLogUtc)</MudTd>
+                <MudTd Class="c-760 nowrap">@Fmt.Time(context.NextFullUtc)</MudTd>
+                <MudTd Class="c-950 nowrap">@Fmt.Time(context.NextSystemUtc)</MudTd>
+                <MudTd Class="nowrap">
+                    @if (context.LastResult is not null)
+                    {
+                        <span title="@context.LastMessage"><StateChip State="@context.LastResult" /></span>
+                    }
+                    @if (context.DaySessionId is { } day)
+                    {
+                        <MudLink Href="@($"/sessions/{day}")" Typo="Typo.body2">@Fmt.Time(context.LastRunUtc)</MudLink>
+                    }
+                    else
+                    {
+                        @Fmt.Time(context.LastRunUtc)
+                    }
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+        </div>
+    }
 
     @if (_tapeJobs is { Count: > 0 })
     {
@@ -143,12 +197,24 @@ else
 
     private List<TapeJobDto>? _tapeJobs;
 
+    private List<SqlScheduleDto>? _sqlSchedules;
+
+    private HashSet<Guid> _vcenters = [];
+
     private async Task LoadAsync()
     {
         _tapeJobs = await Api.GetAsync<List<TapeJobDto>>("api/tape/jobs");
         _jobs = await Api.GetAsync<List<JobDto>>("api/jobs");
-        _clusters = [.. (await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=Kubernetes")).Select(c => c.Id)];
+        _sqlSchedules = await Api.GetAsync<List<SqlScheduleDto>>("api/sql/schedules");
+        var connections = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=Kubernetes,VSphere");
+        _clusters = [.. connections.Where(c => c.Kind == "Kubernetes").Select(c => c.Id)];
+        _vcenters = [.. connections.Where(c => c.Kind == "VSphere").Select(c => c.Id)];
     }
+
+    /// <summary>"SQL log every 15 min" for a job with SQL Server backups, else null.</summary>
+    private static string? SqlLine(JobDto job) => job.SqlBackup is { Enabled: true } sql ? $"SQL log every {Interval(sql.LogIntervalMinutes)}" : null;
+
+    private static string Interval(int minutes) => minutes % 60 == 0 ? $"{minutes / 60} h" : $"{minutes} min";
 
     /// <summary>When a tape job runs: its schedule, after a backup job, or only on demand.</summary>
     private string TapeRuns(TapeJobDto job)

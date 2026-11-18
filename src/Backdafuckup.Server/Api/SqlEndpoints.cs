@@ -57,6 +57,8 @@ public static class SqlEndpoints
         app.MapGet("/api/sql/databases/{id:guid}", DatabaseAsync);
         app.MapGet("/api/sql/databases/{id:guid}/plan", PlanAsync);
         app.MapGet("/api/sql/backup-days/{sessionId:guid}", BackupDayAsync);
+        app.MapGet("/api/sql/schedules", ListSchedulesAsync)
+            .WithDescription("The SQL Server backups that jobs schedule, one row per job and VM: next log, native full and system backup, and the last run.");
         app.MapGet("/api/sql/backup-runs/{id:guid}/lines", async (Guid id, AppDbContext db, CancellationToken ct) =>
             await db.SqlBackupRuns.AsNoTracking().Where(r => r.Id == id).Select(r => r.Lines).FirstOrDefaultAsync(ct) is { } lines
                 ? Results.Ok(lines.Select(l => new SqlBackupRunLineDto(l.Severity.ToString(), l.Message)).ToList())
@@ -333,6 +335,28 @@ public static class SqlEndpoints
     }
 
     /// <summary>A "SQL Server backups" day session: counts and bytes of its backups, each VM's schedule, the VMs' databases.</summary>
+    /// <summary>The SQL Server backups jobs schedule, per job and VM, soonest first.</summary>
+    private static async Task<IResult> ListSchedulesAsync(AppDbContext db, CancellationToken ct)
+    {
+        var jobs = await db.Jobs.AsNoTracking().Include(j => j.Objects).Where(j => j.SqlBackup.Enabled).ToListAsync(ct);
+        var ids = jobs.Select(j => j.Id).ToList();
+        var schedules = await db.SqlBackupSchedules.AsNoTracking().Where(s => ids.Contains(s.JobId)).ToListAsync(ct);
+        var days = (await db.Sessions.AsNoTracking().Where(s => s.Kind == SessionKind.SqlBackup && s.JobId != null && ids.Contains(s.JobId.Value))
+                .GroupBy(s => s.JobId!.Value).Select(g => new { JobId = g.Key, Id = g.OrderByDescending(s => s.CreatedUtc).Select(s => s.Id).First() }).ToListAsync(ct))
+            .ToDictionary(d => d.JobId, d => d.Id);
+        var rows = schedules.Select(s =>
+        {
+            var job = jobs.First(j => j.Id == s.JobId);
+            var name = job.Objects.FirstOrDefault(o => o.NativeId == s.VmNativeId)?.CachedName ?? s.VmNativeId;
+            return new SqlScheduleDto(
+                job.Id, job.Name, job.Enabled, s.VmNativeId, name, job.SqlBackup.LogIntervalMinutes, s.NextLogUtc, s.NextFullUtc, s.NextSystemUtc, s.LastRunUtc,
+                s.LastResult?.ToString(), s.LastMessage, days.TryGetValue(job.Id, out var day) ? day : null);
+        });
+        return Results.Ok(rows
+            .OrderBy(r => new[] { r.NextLogUtc, r.NextFullUtc, r.NextSystemUtc }.Where(t => t is not null).DefaultIfEmpty(DateTimeOffset.MaxValue).Min())
+            .ThenBy(r => r.JobName, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.VmName, StringComparer.OrdinalIgnoreCase).ToList());
+    }
+
     private static async Task<IResult> BackupDayAsync(Guid sessionId, AppDbContext db, CancellationToken ct)
     {
         var session = await db.Sessions.AsNoTracking().FirstOrDefaultAsync(s => s.Id == sessionId && s.Kind == SessionKind.SqlBackup, ct);

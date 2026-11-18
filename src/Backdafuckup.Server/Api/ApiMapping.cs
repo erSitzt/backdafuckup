@@ -61,13 +61,13 @@ internal static class ApiMapping
         TimeZoneId = string.IsNullOrWhiteSpace(s.TimeZoneId) ? "UTC" : s.TimeZoneId,
     };
 
-    public static JobDto ToDto(this BackupJob j, bool running) => new(
+    public static JobDto ToDto(this BackupJob j, bool running, DateTimeOffset? sqlNext = null) => new(
         j.Id, j.Name, j.Description, j.Enabled, j.ConnectionId, j.Connection?.DisplayName ?? string.Empty, j.RepositoryId,
         j.Repository?.Name ?? string.Empty, j.RetentionPoints, j.Schedule.ToDto(),
         j.Objects.OrderBy(o => o.Order).Select(o => new JobObjectDto(o.NativeId, o.CachedName, o.WithMemory)).ToList(),
         j.NextRunUtc, j.LastRunUtc, j.LastResult?.ToString(), running, j.MaxParallelVms, j.NbdConnectionsPerDisk, j.RetryCount, j.TransportMode.ToString(), j.MaxParallelDisks,
         j.GuestProcessing, j.GuestFailurePolicy.ToString(), j.GuestCredentialId, j.GuestProcessingMode.ToString(), j.SqlCredentialId, j.SqlSnapshotCopyOnly,
-        j.SqlBackup.ToDto(), j.KubernetesPodVolumes);
+        j.SqlBackup.ToDto(), j.KubernetesPodVolumes, j.SqlBackup.Enabled ? sqlNext : null);
 
     public static SqlBackupSettingsDto ToDto(this SqlBackupSettings s) => new(
         s.Enabled, s.LogIntervalMinutes, s.FullSchedule.ToDto(), s.SystemSchedule.ToDto(), s.FullForAllDatabases, s.FullOnChainBreak, [.. s.ExcludedDatabases], s.StagingFolder);

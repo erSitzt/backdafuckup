@@ -11,6 +11,16 @@ namespace Backdafuckup.Server.Api;
 
 public static class OperationEndpoints
 {
+    /// <summary>Per job, the next SQL Server backup of any of its VMs (log, native full or system full).</summary>
+    private static async Task<Dictionary<Guid, DateTimeOffset?>> SqlNextRunsAsync(AppDbContext db, Guid? jobId, CancellationToken ct)
+    {
+        var schedules = await db.SqlBackupSchedules.AsNoTracking().Where(s => jobId == null || s.JobId == jobId)
+            .Select(s => new { s.JobId, s.NextLogUtc, s.NextFullUtc, s.NextSystemUtc }).ToListAsync(ct);
+        return schedules.GroupBy(s => s.JobId).ToDictionary(
+            g => g.Key,
+            g => g.SelectMany(s => new[] { s.NextLogUtc, s.NextFullUtc, s.NextSystemUtc }).Where(t => t is not null).Min());
+    }
+
     public static void MapOperationEndpoints(this IEndpointRouteBuilder app)
     {
         MapJobs(app.MapGroup("/api/jobs"));
@@ -144,12 +154,13 @@ public static class OperationEndpoints
         jobs.MapGet("/", async (AppDbContext db, CancellationToken ct) =>
         {
             var running = await RunningJobIdsAsync(db, ct);
-            return (await JobQuery(db).OrderBy(j => j.Name).ToListAsync(ct)).Select(j => j.ToDto(running.Contains(j.Id)));
+            var sqlNext = await SqlNextRunsAsync(db, null, ct);
+            return (await JobQuery(db).OrderBy(j => j.Name).ToListAsync(ct)).Select(j => j.ToDto(running.Contains(j.Id), sqlNext.GetValueOrDefault(j.Id)));
         });
 
         jobs.MapGet("/{id:guid}", async (Guid id, AppDbContext db, CancellationToken ct) =>
             await JobQuery(db).FirstOrDefaultAsync(j => j.Id == id, ct) is { } job
-                ? Results.Ok(job.ToDto((await RunningJobIdsAsync(db, ct)).Contains(id)))
+                ? Results.Ok(job.ToDto((await RunningJobIdsAsync(db, ct)).Contains(id), (await SqlNextRunsAsync(db, id, ct)).GetValueOrDefault(id)))
                 : Results.NotFound());
 
         jobs.MapPost("/", async (SaveJobDto request, AppDbContext db, TimeProvider time, CancellationToken ct) =>

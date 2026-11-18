@@ -327,3 +327,23 @@ public sealed record SqlRestorePlanDto(
     string? StopAtLocal,
     DateTimeOffset ReachedUtc,
     IReadOnlyList<SqlPlanFileDto> Files);
+
+/// <summary>
+/// The SQL Server backups a job schedules for one of its VMs: log backups on the interval, native and system fulls on
+/// their schedules, and how the last run went.
+/// </summary>
+/// <param name="DaySessionId">The job's latest day session of SQL Server backups (where the runs are listed).</param>
+public sealed record SqlScheduleDto(
+    Guid JobId,
+    string JobName,
+    bool JobEnabled,
+    string VmNativeId,
+    string VmName,
+    int LogIntervalMinutes,
+    DateTimeOffset? NextLogUtc,
+    DateTimeOffset? NextFullUtc,
+    DateTimeOffset? NextSystemUtc,
+    DateTimeOffset? LastRunUtc,
+    string? LastResult,
+    string? LastMessage,
+    Guid? DaySessionId);
