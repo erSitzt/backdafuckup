@@ -589,7 +589,7 @@ public static class EngineServiceCollectionExtensions
         if (!HasProvider(services, HypervisorKind.VSphere))
         {
             var vsphere = configuration.GetSection("VSphere").Get<Backdafuckup.VSphere.VSphereOptions>() ?? new Backdafuckup.VSphere.VSphereOptions();
-            services.AddSingleton<IHypervisorProvider>(new Backdafuckup.VSphere.VSphereProvider(vsphere));
+            services.AddSingleton<IHypervisorProvider>(sp => new Backdafuckup.VSphere.VSphereProvider(vsphere, sp.GetRequiredService<Backdafuckup.Core.Proxies.IProxyPool>()));
         }
 
         if (!HasProvider(services, HypervisorKind.Kubernetes))

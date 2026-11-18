@@ -47,13 +47,48 @@ internal sealed class VSphereHypervisorSession(VSphereProvider provider, Connect
             .OrderBy(a => a.Contains(':', StringComparison.Ordinal))];
     }
 
-    public Task<IVmBackupSession> BeginBackupAsync(VmBackupRequest request, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken) =>
-        throw new NotSupportedException($"Backups of vSphere VMs are not available yet in this version ({Platform.MasterAddress}).");
+    public async Task<IVmBackupSession> BeginBackupAsync(VmBackupRequest request, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.WithMemory)
+        {
+            throw new NotSupportedException("A snapshot with memory is not offered for vSphere VMs: back the VM up without memory.");
+        }
+
+        return await VSphereBackupSession.CreateAsync(this, request, log, ledger, cancellationToken).ConfigureAwait(false);
+    }
 
     public Task<IVmRestoreSession> BeginRestoreAsync(VmRestorePlan plan, IOperationLog log, IArtifactLedger ledger, CancellationToken cancellationToken) =>
         throw new NotSupportedException($"Restores to vSphere are not available yet in this version ({Platform.MasterAddress}).");
 
-    public Task CleanupArtifactAsync(ProviderArtifact artifact, IOperationLog log, CancellationToken cancellationToken) => Task.CompletedTask;
+    /// <summary>After a crash: removes a backup snapshot that is still there, and detaches a disk still hot-added to a proxy VM.</summary>
+    public async Task CleanupArtifactAsync(ProviderArtifact artifact, IOperationLog log, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(artifact);
+        ArgumentNullException.ThrowIfNull(log);
+        switch (artifact.Kind)
+        {
+            case VSphereArtifactKinds.Snapshot when artifact.NativeId is { Length: > 0 } snapshot:
+                await VSphereBackupSession.RemoveSnapshotAsync(Vim, new ManagedObjectReference("VirtualMachineSnapshot", snapshot), artifact.NativeRef ?? snapshot, log, cancellationToken)
+                    .ConfigureAwait(false);
+                log.Info($"Removed the backup snapshot {snapshot} of VM {artifact.NativeRef} that a stopped session left.");
+                break;
+            case VSphereArtifactKinds.HotAddDisk when artifact.NativeRef is { } proxyVm && artifact.Data is { } data:
+                var record = System.Text.Json.JsonSerializer.Deserialize<HotAddRecord>(data);
+                var devices = (await Vim.RetrievePropertiesAsync([new ManagedObjectReference("VirtualMachine", proxyVm)], ["config.hardware.device"], cancellationToken).ConfigureAwait(false))
+                    .FirstOrDefault()?["config.hardware.device"];
+                var attached = record is null ? null : devices?.Items.FirstOrDefault(d => d.Type == "VirtualDisk" && d.Int("controllerKey") == record.ControllerKey && d.Int("unitNumber") == record.Unit
+                    && d.Child("backing")?.Str("fileName") == record.FileName);
+                if (record is not null && attached?.Int("key") is { } key)
+                {
+                    await VSphereHotAdd.DetachAsync(Vim, new ManagedObjectReference("VirtualMachine", proxyVm), key, new ScsiSlot(record.ControllerKey, record.Bus, record.Unit), record.CapacityBytes, cancellationToken)
+                        .ConfigureAwait(false);
+                    log.Info($"Detached {record.FileName} from proxy VM {proxyVm} (SCSI {record.Bus}:{record.Unit}) that a stopped session left.");
+                }
+
+                break;
+        }
+    }
 
     public Task CommitArtifactAsync(ProviderArtifact artifact, IOperationLog log, CancellationToken cancellationToken) => Task.CompletedTask;
 

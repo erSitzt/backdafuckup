@@ -26,6 +26,7 @@ internal static class VimSchemaOrder
         ["RemoveSnapshot_Task"] = "RemoveSnapshotRequestType",
         ["RetrievePropertiesEx"] = "RetrievePropertiesExRequestType",
         ["RetrieveServiceContent"] = "RetrieveServiceContentRequestType",
+        ["RevertToSnapshot_Task"] = "RevertToSnapshotRequestType",
     };
 
     public static readonly IReadOnlyDictionary<string, (string? Base, (string Name, string Type)[] Elements)> Types =
@@ -100,6 +101,7 @@ internal static class VimSchemaOrder
             ["RetrieveOptions"] = ("DynamicData", [("maxObjects", "int")]),
             ["RetrievePropertiesExRequestType"] = (null, [("_this", "ManagedObjectReference"), ("specSet", "PropertyFilterSpec"), ("options", "RetrieveOptions")]),
             ["RetrieveServiceContentRequestType"] = (null, [("_this", "ManagedObjectReference")]),
+            ["RevertToSnapshotRequestType"] = (null, [("_this", "ManagedObjectReference"), ("host", "ManagedObjectReference"), ("suppressPowerOn", "boolean")]),
             ["ScheduledHardwareUpgradeInfo"] = ("DynamicData", [("upgradePolicy", "string"), ("versionKey", "string"), ("scheduledHardwareUpgradeStatus", "string"), ("fault", "LocalizedMethodFault")]),
             ["ScheduledTaskDetail"] = ("TypeDescription", [("frequency", "string")]),
             ["SelectionSpec"] = ("DynamicData", [("name", "string")]),

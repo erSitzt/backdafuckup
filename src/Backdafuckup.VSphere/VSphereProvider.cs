@@ -25,21 +25,28 @@ public sealed class VSphereProvider : IHypervisorProvider
 
     private readonly Func<ConnectionSettings, HttpMessageHandler>? _handlerFactory;
 
-    public VSphereProvider(VSphereOptions options)
-        : this(options, null)
+    public VSphereProvider(VSphereOptions options, Backdafuckup.Core.Proxies.IProxyPool? proxies = null)
+        : this(options, null, proxies)
     {
     }
 
     /// <summary>Allows replacing the HTTP handler (tests use the fake vCenter).</summary>
-    public VSphereProvider(VSphereOptions options, Func<ConnectionSettings, HttpMessageHandler>? handlerFactory)
+    public VSphereProvider(VSphereOptions options, Func<ConnectionSettings, HttpMessageHandler>? handlerFactory, Backdafuckup.Core.Proxies.IProxyPool? proxies = null)
     {
         Options = options ?? throw new ArgumentNullException(nameof(options));
         _handlerFactory = handlerFactory;
+        Proxies = proxies;
     }
 
     public HypervisorKind Kind => HypervisorKind.VSphere;
 
     public VSphereOptions Options { get; }
+
+    /// <summary>The backup proxies that read and write disks (HotAdd); null on a server without them (read-only use).</summary>
+    public Backdafuckup.Core.Proxies.IProxyPool? Proxies { get; }
+
+    /// <summary>SCSI places handed out on proxy VMs, shared by all connections of the server.</summary>
+    internal HotAddSlots Slots { get; } = new();
 
     public async Task<CertificateProbe> ProbeCertificateAsync(string address, int port, CancellationToken cancellationToken)
     {

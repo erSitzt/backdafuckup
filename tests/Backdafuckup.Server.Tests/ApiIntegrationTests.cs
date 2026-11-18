@@ -116,6 +116,8 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
                 services.AddSingleton<IHypervisorProvider>(new XenProvider(
                     new XenOptions { XapiRetryAttempts = 1, XapiRetryDelay = TimeSpan.FromMilliseconds(10) },
                     (_, host) => new XapiTransport(new Uri($"https://{host}/"), _pool.CreateHandler())));
+                services.AddSingleton<IHypervisorProvider>(sp => new Backdafuckup.VSphere.VSphereProvider(
+                    new Backdafuckup.VSphere.VSphereOptions(), _ => Vsphere.Vcenter.CreateHandler(), sp.GetRequiredService<Backdafuckup.Core.Proxies.IProxyPool>()));
             });
         });
     }
