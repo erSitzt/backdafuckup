@@ -48,7 +48,28 @@ else
                     <MudRadio T="RestoreModeDto" Value="RestoreModeDto.OriginalLocation">Restore to the original location</MudRadio>
                     <MudRadio T="RestoreModeDto" Value="RestoreModeDto.AlternateLocation">Restore to a new location or with different settings</MudRadio>
                 </MudRadioGroup>
-                @if (_mode == RestoreModeDto.OriginalLocation)
+                @if (_mode == RestoreModeDto.OriginalLocation && SourceIsVsphere)
+                {
+                    <MudCheckBox @bind-Value="_quickRollback" Label="Quick rollback: write back into the existing VM only what changed since the restore point" Class="mt-2"
+                                 Disabled="@_point.DomainController" />
+                    @if (_point.DomainController)
+                    {
+                        <MudText Typo="Typo.caption">
+                            Not for a domain controller: it would keep its VM generation id, and Active Directory would not notice that it went back in time (USN rollback).
+                        </MudText>
+                    }
+                    else if (_quickRollback)
+                    {
+                        <MudAlert Severity="Severity.Info" Dense="true" Class="mt-2">
+                            The VM is shut down and a safety snapshot taken; changed block tracking tells which blocks changed since the restore point, and only those are
+                            written back, which takes minutes instead of hours for large disks. If anything fails, the VM goes back to the safety snapshot. Afterwards change
+                            tracking is reset, so the next backup reads the disks fully. It needs the VM with the same disks and change tracking on since the restore point;
+                            for damage of the disks themselves (storage errors) restore the VM fully.
+                        </MudAlert>
+                        <MudCheckBox @bind-Value="_keepSafetySnapshot" Label="Keep the safety snapshot (the VM as it was before the rollback) instead of removing it" />
+                    }
+                }
+                @if (_mode == RestoreModeDto.OriginalLocation && !QuickRollback)
                 {
                     <MudCheckBox @bind-Value="_replace" Label="Replace the existing VM if it still exists (it is shut down and renamed; its jobs then back up the restored VM)" Class="mt-2" />
                     @if (_replace)
@@ -97,8 +118,28 @@ else
                             <MudSelectItem T="string" Value="host.NativeId">@host.Name</MudSelectItem>
                         }
                     </MudSelect>
+                    @if (TargetIsVsphere)
+                    {
+                        <MudSelect T="string" @bind-Value="_folder" Label="VM folder" Variant="Variant.Outlined" Class="mb-3"
+                                   HelperText="Where the VM appears in the vCenter; the vCenter account needs the right to create VMs there.">
+                            @foreach (var folder in _inventory.Where(i => i.Kind == "Folder").OrderBy(i => Path(i), StringComparer.OrdinalIgnoreCase))
+                            {
+                                <MudSelectItem T="string" Value="folder.NativeId">@Path(folder)</MudSelectItem>
+                            }
+                        </MudSelect>
+                        <MudSelect T="string" @bind-Value="_resourcePool" Label="Resource pool" Variant="Variant.Outlined" Class="mb-3">
+                            @foreach (var pool in _inventory.Where(i => i.Kind == "ResourcePool").OrderBy(i => Path(i), StringComparer.OrdinalIgnoreCase))
+                            {
+                                <MudSelectItem T="string" Value="pool.NativeId">@Path(pool)</MudSelectItem>
+                            }
+                        </MudSelect>
+                    }
                 }
-                <MudText Typo="Typo.subtitle1" Class="mb-2">Storage per disk</MudText>
+                else if (QuickRollback)
+                {
+                    <MudText Class="mb-3">The rollback writes into the VM's own disks, where they are.</MudText>
+                }
+                <MudText Typo="Typo.subtitle1" Class="mb-2">@(TargetIsVsphere ? "Datastore per disk (new disks are thin)" : "Storage per disk")</MudText>
                 @foreach (var disk in _point.Disks)
                 {
                     <MudSelect T="string" Value="@_storage.GetValueOrDefault(disk.Key)" ValueChanged="@(v => _storage[disk.Key] = v)" Label="@($"{disk.Name} ({Fmt.Bytes(disk.CapacityBytes)})")" Variant="Variant.Outlined" Class="mb-3" Disabled="@(_mode == RestoreModeDto.OriginalLocation)">
@@ -127,6 +168,15 @@ else
                         </MudSelect>
                     }
                     <MudCheckBox @bind-Value="_regenerateMacs" Label="Generate new MAC addresses (recommended when the original VM still exists)" />
+                    @if (TargetIsVsphere)
+                    {
+                        <MudSelect T="string" @bind-Value="_connectNics" Label="Network connection at the first start" Variant="Variant.Outlined" Class="mt-3">
+                            <MudSelectItem T="string" Value="@("auto")">Automatic: disconnected while the original VM exists, else connected</MudSelectItem>
+                            <MudSelectItem T="string" Value="@("on")">Connected</MudSelectItem>
+                            <MudSelectItem T="string" Value="@("off")">Disconnected (connect the NICs in vCenter later)</MudSelectItem>
+                        </MudSelect>
+                        <MudText Typo="Typo.caption">A copy comes up with the original's network settings inside the guest (addresses, host name): keep it off the network while the original runs.</MudText>
+                    }
                 }
                 else
                 {
@@ -147,7 +197,19 @@ else
                         <tr><td style="width:220px">VM</td><td>@_point.VmName → @(_mode == RestoreModeDto.OriginalLocation ? _point.VmName : _vmName)</td></tr>
                         <tr><td>Restore point</td><td>@Fmt.Time(_point.CreatedUtc)</td></tr>
                         <tr><td>Location</td><td>@(_mode == RestoreModeDto.OriginalLocation ? "Original location" : _pools.FirstOrDefault(p => p.Id == _targetPool)?.DisplayName)</td></tr>
-                        <tr><td>Disks</td><td>@string.Join(", ", _point.Disks.Select(d => $"{d.Name} → {StorageName(_storage.GetValueOrDefault(d.Key))}"))</td></tr>
+                        @if (QuickRollback)
+                        {
+                            <tr><td>Quick rollback</td><td>only the blocks changed since the restore point, under a safety snapshot@(_keepSafetySnapshot ? " that is kept" : null)</td></tr>
+                        }
+                        else
+                        {
+                            <tr><td>Disks</td><td>@string.Join(", ", _point.Disks.Select(d => $"{d.Name} → {StorageName(_storage.GetValueOrDefault(d.Key))}"))</td></tr>
+                        }
+                        @if (TargetIsVsphere && _mode == RestoreModeDto.AlternateLocation)
+                        {
+                            <tr><td>Folder, resource pool</td><td>@(Path(_inventory.FirstOrDefault(i => i.NativeId == _folder)) ?? "as the original") · @(Path(_inventory.FirstOrDefault(i => i.NativeId == _resourcePool)) ?? "as the original")</td></tr>
+                            <tr><td>Network at the first start</td><td>@(_connectNics switch { "on" => "connected", "off" => "disconnected", _ => "disconnected while the original exists" })</td></tr>
+                        }
                         @if (_point.MemoryImageBytes is > 0)
                         {
                             <tr><td>Memory</td><td>@(_resume ? "resume where it was at the backup" + (_mode == RestoreModeDto.AlternateLocation ? ", without network connections" : string.Empty) : "cold start from the disks")</td></tr>
@@ -155,7 +217,11 @@ else
                         <tr><td>@(_resume ? "Resume" : "Power on")</td><td>@(_powerOn ? "yes" : "no")</td></tr>
                     </tbody>
                 </MudSimpleTable>
-                @if (_mode == RestoreModeDto.OriginalLocation && _replace)
+                @if (QuickRollback)
+                {
+                    <MudAlert Severity="Severity.Warning" Class="mt-3">The VM is shut down for the rollback and started again afterwards if it was running.</MudAlert>
+                }
+                else if (_mode == RestoreModeDto.OriginalLocation && _replace)
                 {
                     <MudAlert Severity="Severity.Warning" Class="mt-3">The existing VM will be shut down@(_deleteReplaced ? " and deleted after the restore" : " and renamed").</MudAlert>
                 }
@@ -206,6 +272,19 @@ else
     private bool _regenerateMacs = true;
     private bool _powerOn;
     private bool _resume;
+    private bool _quickRollback;
+    private bool _keepSafetySnapshot;
+    private string? _folder;
+    private string? _resourcePool;
+    private string _connectNics = "auto";
+
+    private bool SourceIsVsphere => _pools?.FirstOrDefault(p => p.Id == _point?.ConnectionId)?.Kind == "VSphere";
+
+    private bool TargetIsVsphere => _pools?.FirstOrDefault(p => p.Id == (_mode == RestoreModeDto.AlternateLocation ? _targetPool : _point?.ConnectionId))?.Kind == "VSphere";
+
+    private bool QuickRollback => _quickRollback && _mode == RestoreModeDto.OriginalLocation && SourceIsVsphere && _point is { DomainController: false };
+
+    private static string? Path(InventoryItemDto? item) => item is null ? null : item.Properties.GetValueOrDefault("path") ?? item.Name;
 
     /// <summary>The restore point shows a DC, or (with memory, so without guest details) the VM's agent or another restore point does.</summary>
     private bool IsDomainController => _point is { DomainController: true } or { DomainControllerEvidence: not null };
@@ -251,8 +330,17 @@ else
         }
     }
 
-    private async Task LoadInventoryAsync() =>
+    private async Task LoadInventoryAsync()
+    {
         _inventory = _targetPool == Guid.Empty ? [] : await Api.GetAsync<List<InventoryItemDto>>($"api/connections/{_targetPool}/inventory");
+
+        // vSphere: by default where the original VM is (if it is in this vCenter), else the first place offered.
+        var original = _inventory.FirstOrDefault(i => i.Kind == "Vm" && i.NativeId == _point?.VmNativeId);
+        _folder = original?.Properties.GetValueOrDefault("folder") is { } folder && _inventory.Any(i => i.NativeId == folder) ? folder
+            : _inventory.Where(i => i.Kind == "Folder").OrderBy(i => Path(i), StringComparer.OrdinalIgnoreCase).FirstOrDefault()?.NativeId;
+        _resourcePool = original?.Properties.GetValueOrDefault("resourcePool") is { } pool && _inventory.Any(i => i.NativeId == pool) ? pool
+            : _inventory.Where(i => i.Kind == "ResourcePool").OrderBy(i => Path(i), StringComparer.OrdinalIgnoreCase).FirstOrDefault()?.NativeId;
+    }
 
     private string StorageName(string? id) => _inventory.FirstOrDefault(i => i.NativeId == id)?.Name ?? id ?? "original";
 
@@ -274,9 +362,14 @@ else
                 NetworkMap = alternate ? new Dictionary<string, string>(_networks) : [],
                 RegenerateMacs = alternate && _regenerateMacs,
                 PowerOn = _powerOn,
-                ReplaceExisting = !alternate && _replace,
-                DeleteReplaced = !alternate && _replace && _deleteReplaced,
+                ReplaceExisting = !alternate && !QuickRollback && _replace,
+                DeleteReplaced = !alternate && !QuickRollback && _replace && _deleteReplaced,
                 ResumeWithMemory = _resume,
+                QuickRollback = QuickRollback,
+                KeepSafetySnapshot = QuickRollback && _keepSafetySnapshot,
+                TargetFolderId = alternate && TargetIsVsphere ? _folder : null,
+                TargetResourcePoolId = alternate && TargetIsVsphere ? _resourcePool : null,
+                ConnectNics = !alternate || !TargetIsVsphere ? null : _connectNics switch { "on" => true, "off" => false, _ => null },
             });
             Navigation.NavigateTo($"/sessions/{started.SessionId}");
         }

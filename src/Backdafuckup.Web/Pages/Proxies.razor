@@ -1,0 +1,188 @@
+@page "/infrastructure/proxies"
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+
+<PageTitle>Backup proxies – backdafuckup</PageTitle>
+<PageHeader Title="Backup Proxies" Description="Linux machines that read and write the disks of vSphere VMs: a proxy VM gets each disk hot-added (HotAdd) and serves it to the server.">
+    <Actions><MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add proxy</MudButton></Actions>
+</PageHeader>
+
+@if (_adding)
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="2">
+        <MudText Typo="Typo.h6" Class="mb-3">Add proxy</MudText>
+        <MudTextField @bind-Value="_name" Label="Name" Variant="Variant.Outlined" AutoFocus="true" HelperText="Shown in job logs, e.g. the proxy VM's name." />
+        <div class="d-flex gap-2 mt-4">
+            <MudButton Variant="Variant.Text" OnClick="@(() => _adding = false)">Cancel</MudButton>
+            <MudSpacer />
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || string.IsNullOrWhiteSpace(_name))" OnClick="CreateAsync">Create install token</MudButton>
+        </div>
+    </MudPaper>
+}
+
+@if (_install is not null)
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="2">
+        <MudText Typo="Typo.h6" Class="mb-2">Install proxy @_install.Proxy.Name</MudText>
+        <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-3">
+            The command below holds a one-time install token (valid until @Fmt.Time(_install.Proxy.InstallTokenExpiresUtc)). It is shown only now; renew it if it gets lost.
+        </MudAlert>
+        <ol class="steps">
+            <li>
+                A Linux VM in the vCenter (any distribution, x64), with <span class="mono">disk.EnableUUID = TRUE</span> in its advanced settings and a
+                paravirtual SCSI controller with free places for hot-added disks (e.g. a second controller on bus 1). It sees the datastores of the VMs it backs up.
+            </li>
+            <li>
+                The agent: download <MudLink Href="api/proxies/package/backdafuckup-proxy" Target="_blank">backdafuckup-proxy</MudLink> and
+                <MudLink Href="api/proxies/package/backdafuckup-proxy.service" Target="_blank">backdafuckup-proxy.service</MudLink>@(_package?.Version is { } version ? $" (version {version})" : null),
+                copy them to the proxy as <span class="mono">/opt/backdafuckup-proxy/backdafuckup-proxy</span> (executable) and
+                <span class="mono">/etc/systemd/system/backdafuckup-proxy.service</span>.
+                @if (_package is { Files.Count: 0 })
+                {
+                    <MudText Typo="Typo.caption" Color="Color.Warning">This server offers no agent package; build it with scripts/build-proxy.sh.</MudText>
+                }
+            </li>
+            <li>As root on the proxy, enroll it (port 9555 of this server must be reachable from there):
+                <div class="d-flex align-center gap-2 mt-1">
+                    <MudTextField Value="@($"/opt/backdafuckup-proxy/{_install.Command}")" ReadOnly="true" Variant="Variant.Outlined" Class="mono" Lines="3" FullWidth="true" />
+                </div>
+            </li>
+            <li>Start it: <span class="mono">systemctl daemon-reload &amp;&amp; systemctl enable --now backdafuckup-proxy</span>. It shows as online here within seconds.</li>
+        </ol>
+        <div class="d-flex mt-3"><MudSpacer /><MudButton Variant="Variant.Filled" OnClick="@(() => _install = null)">Done</MudButton></div>
+    </MudPaper>
+}
+
+@if (_proxies is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else if (_proxies.Count == 0 && !_adding && _install is null)
+{
+    <MudAlert Severity="Severity.Info">
+        No backup proxy yet. vSphere VMs are backed up and restored through a proxy: add one, then install its agent on a Linux VM in the vCenter.
+    </MudAlert>
+}
+else if (_proxies.Count > 0)
+{
+    <MudTable Items="_proxies" Dense="true" Hover="true" Elevation="1">
+        <HeaderContent>
+            <MudTh>Name</MudTh><MudTh>State</MudTh><MudTh>Host</MudTh><MudTh>Addresses</MudTh><MudTh>Version</MudTh><MudTh>Can</MudTh><MudTh>Disks</MudTh><MudTh>Last contact</MudTh><MudTh></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd>@context.Name</MudTd>
+            <MudTd><StateChip State="@(context.Online ? "Online" : context.Enrolled ? "Offline" : "Not enrolled")" /></MudTd>
+            <MudTd>@context.HostName<br /><span class="caption mono" title="SMBIOS UUID: finds the proxy's VM in the vCenter">@context.SmbiosUuid</span></MudTd>
+            <MudTd>@string.Join(", ", context.Addresses)</MudTd>
+            <MudTd>@context.Version</MudTd>
+            <MudTd>@string.Join(", ", context.Capabilities.Select(Capability))</MudTd>
+            <MudTd>@context.Devices</MudTd>
+            <MudTd>
+                @Fmt.Time(context.LastSeenUtc)
+                @if (context.LastAddress is { } address)
+                {
+                    <span class="caption"> from @address</span>
+                }
+                @if (!context.Enrolled && context.InstallTokenExpiresUtc is { } expires)
+                {
+                    <br /><span class="caption">install token valid until @Fmt.Time(expires)</span>
+                }
+            </MudTd>
+            <MudTd Style="white-space:nowrap">
+                <MudTooltip Text="A new install token; the proxy's current key stops working until it enrolls again.">
+                    <MudIconButton Icon="@Icons.Material.Filled.Key" Size="Size.Small" OnClick="@(() => RenewAsync(context))" Disabled="_busy" />
+                </MudTooltip>
+                <MudTooltip Text="Remove">
+                    <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error" OnClick="@(() => RemoveAsync(context))" Disabled="_busy" />
+                </MudTooltip>
+            </MudTd>
+        </RowTemplate>
+    </MudTable>
+    <MudText Typo="Typo.caption" Class="help-text mt-2">
+        A job uses a connected proxy whose VM is powered on, has a free SCSI place and sees all datastores of the VM: one on the VM's host first, then one in
+        its cluster, then the one with the fewest disks attached. The session log names the proxy, and why others were not used.
+    </MudText>
+}
+
+@code {
+    private List<ProxyDto>? _proxies;
+    private ProxyPackageDto? _package;
+    private ProxyInstallDto? _install;
+    private bool _adding;
+    private bool _busy;
+    private string _name = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        try
+        {
+            _package = await Api.GetAsync<ProxyPackageDto>("api/proxies/package");
+        }
+        catch (ApiException)
+        {
+            _package = null;
+        }
+    }
+
+    private async Task LoadAsync() => _proxies = await Api.GetAsync<List<ProxyDto>>("api/proxies");
+
+    private static string Capability(string capability) => capability switch
+    {
+        "hotadd-v1" => "HotAdd",
+        "nbd-v1" => "NBD",
+        "san-v1" => "SAN",
+        _ => capability,
+    };
+
+    private async Task CreateAsync()
+    {
+        await RunAsync(async () =>
+        {
+            _install = await Api.PostAsync<ProxyInstallDto>("api/proxies", new CreateProxyDto(_name.Trim()));
+            _adding = false;
+            _name = string.Empty;
+        });
+    }
+
+    private async Task RenewAsync(ProxyDto proxy)
+    {
+        if (proxy.Enrolled && await Dialogs.ShowMessageBoxAsync("New install token", $"{proxy.Name} stops working until it enrolls again with the new token. Continue?",
+                yesText: "New token", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        await RunAsync(async () => _install = await Api.PostAsync<ProxyInstallDto>($"api/proxies/{proxy.Id}/renew"));
+    }
+
+    private async Task RemoveAsync(ProxyDto proxy)
+    {
+        if (await Dialogs.ShowMessageBoxAsync("Remove proxy", $"Remove {proxy.Name}? Its agent can no longer connect; uninstall it on the proxy machine.",
+                yesText: "Remove", cancelText: "Cancel") != true)
+        {
+            return;
+        }
+
+        await RunAsync(() => Api.DeleteAsync($"api/proxies/{proxy.Id}"));
+    }
+
+    private async Task RunAsync(Func<Task> action)
+    {
+        _busy = true;
+        try
+        {
+            await action();
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

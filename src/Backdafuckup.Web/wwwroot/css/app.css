@@ -183,3 +183,8 @@ html, body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helveti
 .slot-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: .75rem; color: var(--mud-palette-text-secondary); }
 .slot-legend .slot { display: inline-block; width: 14px; min-height: 14px; height: 14px; padding: 0; margin-right: 4px; vertical-align: -2px; }
 
+
+/* Small secondary text inside tables and lists, and numbered setup steps (Backup Proxies). */
+.caption { font-size: .75rem; color: var(--mud-palette-text-secondary); }
+.steps { padding-left: 20px; margin: 0; }
+.steps li { margin-bottom: 10px; line-height: 1.5; }

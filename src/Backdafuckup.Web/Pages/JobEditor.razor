@@ -64,7 +64,7 @@ else
                         </MudAlert>
                     }
                     <div class="field-toolbar">
-                        <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="@(IsCluster ? "Cluster" : "Pool")" Variant="Variant.Outlined" Margin="Margin.Dense"
+                        <MudSelect T="Guid" Value="_connectionId" ValueChanged="OnPoolChangedAsync" Label="@(IsCluster ? "Cluster" : "Pool or vCenter")" Variant="Variant.Outlined" Margin="Margin.Dense"
                                    ToStringFunc="@(id => _pools.FirstOrDefault(p => p.Id == id)?.DisplayName ?? string.Empty)">
                             @foreach (var pool in Connections)
                             {
@@ -179,7 +179,10 @@ else
                     }
                     <div class="table-box">
                         <MudSimpleTable Dense="true" Hover="true" Elevation="0" FixedHeader="true">
-                            <thead><tr><th style="width:48px"></th><th>VM</th><th>Power</th><th>Disks</th><th title="Snapshot with memory: the VM can be resumed on restore">With memory</th></tr></thead>
+                            <thead><tr><th style="width:48px"></th><th>VM</th><th>Power</th><th>Disks</th>@if (!IsVsphere)
+                                {
+                                    <th title="Snapshot with memory: the VM can be resumed on restore">With memory</th>
+                                }</tr></thead>
                             <tbody>
                                 @foreach (var vm in _vms.Where(v => string.IsNullOrWhiteSpace(_vmFilter) || v.Name.Contains(_vmFilter, StringComparison.OrdinalIgnoreCase)))
                                 {
@@ -188,11 +191,14 @@ else
                                         <td>@vm.Name</td>
                                         <td>@vm.Properties.GetValueOrDefault("powerState")</td>
                                         <td class="nowrap">@vm.Properties.GetValueOrDefault("diskCount") (@Fmt.Bytes(long.TryParse(vm.Properties.GetValueOrDefault("diskBytes"), out var b) ? b : null))</td>
+                                        @if (!IsVsphere)
+                                        {
                                         <td>
                                             <MudSwitch T="bool" Value="@_withMemory.Contains(vm.NativeId)" ValueChanged="@(on => ToggleMemory(vm.NativeId, on))" Size="Size.Small" Color="Color.Primary"
                                                        Disabled="@(!_selected.ContainsKey(vm.NativeId))"
                                                        title="@($"RAM {Fmt.Bytes(long.TryParse(vm.Properties.GetValueOrDefault("memoryBytes"), out var m) ? m : null)}: written at every backup")" />
                                         </td>
+                                        }
                                     </tr>
                                 }
                             </tbody>
@@ -239,6 +245,19 @@ else
                                             Each volume is read by its own mover pod. The snapshots of a namespace are taken one after another, before any volume is read.
                                         </MudText>
                                     }
+                                    else if (IsVsphere)
+                                    {
+                                        <MudText Typo="Typo.caption" Class="help-text">
+                                            Disks are read through a backup proxy (Backup Proxies): each disk of the VM's snapshot is hot-added to a proxy VM that sees its datastore
+                                            and is read from there. With changed block tracking (switched on by the first backup) only the changed blocks are read.
+                                        </MudText>
+                                        <div class="field-grid cols-4">
+                                            <MudNumericField @bind-Value="_parallelVms" Label="VMs in parallel" Min="1" Max="16" Variant="Variant.Outlined" />
+                                            <MudNumericField @bind-Value="_parallelDisks" Label="Disks per VM in parallel" Min="1" Max="8" Variant="Variant.Outlined" />
+                                            <MudNumericField @bind-Value="_nbdConnections" Label="Connections per disk" Min="1" Max="12" Variant="Variant.Outlined" />
+                                            <MudNumericField @bind-Value="_retries" Label="Retries for failed VMs" Min="0" Max="10" Variant="Variant.Outlined" />
+                                        </div>
+                                    }
                                     else
                                     {
                                     <MudSelect T="string" @bind-Value="_transport" Label="Disk transport" Variant="Variant.Outlined" Class="form-narrow">
@@ -278,6 +297,14 @@ else
                                         The agent freezes SQL Server, Active Directory, Exchange and other VSS-aware applications in Windows VMs while
                                         the snapshot is taken (VSS backups are copy-only: other backup products are not disturbed). Without it,
                                         backups are crash-consistent, like after a power failure.
+                                        @if (IsVsphere)
+                                        {
+                                            <text>
+                                                In vSphere VMs without the agent, VMware Tools quiesce the snapshot instead: VSS in Windows, frozen file systems in Linux
+                                                (file-system-consistent only). A missing agent is installed with the Windows credentials below, over SMB, or through VMware
+                                                Tools when the VM has no address the server reaches on port 445.
+                                            </text>
+                                        }
                                     </MudText>
                                     @if (_guest)
                                     {
@@ -660,12 +687,12 @@ else
 
     private string TransportSummary() => IsCluster
         ? $"{_parallelVms} namespace(s) and {_parallelDisks} volume(s) per namespace in parallel · {_retries} retries"
-        : $"{_transport switch { TransportModes.NbdOnly => "NBD only", TransportModes.HttpExportOnly => "HTTP export only", _ => "Automatic transport" }} · " +
+        : $"{(IsVsphere ? "HotAdd through a backup proxy" : _transport switch { TransportModes.NbdOnly => "NBD only", TransportModes.HttpExportOnly => "HTTP export only", _ => "Automatic transport" })} · " +
         $"{_parallelVms} VM(s) and {_parallelDisks} disk(s) per VM in parallel · {_retries} retries";
 
     private string GuestSummary() => !_guest
         ? "Off: backups are crash-consistent, like after a power failure"
-        : $"{(_guestMode == GuestProcessingModes.SqlSnapshot ? "SQL Server snapshot, VSS for the other VMs" : "VSS for every VM")} · " +
+        : $"{(_guestMode == GuestProcessingModes.SqlSnapshot ? "SQL Server snapshot, VSS for the other VMs" : "VSS for every VM")}{(IsVsphere ? ", VMware Tools without the agent" : null)} · " +
           $"if the guest cannot be frozen: {(_guestPolicy == GuestFailurePolicies.FailVm ? "fail the VM" : "crash-consistent with a warning")}";
 
     private string SqlSummary() => !_sqlBackup
@@ -709,6 +736,9 @@ else
 
     /// <summary>The platforms of the chosen cluster, as last detected (or set by hand).</summary>
     private KubernetesPlatformsDto? SelectedPlatforms => _pools?.FirstOrDefault(p => p.Id == _connectionId)?.Platforms;
+
+    /// <summary>The job's VMs are in a vCenter: read through proxies, no snapshots with memory, no transport choice.</summary>
+    private bool IsVsphere => _pools?.FirstOrDefault(p => p.Id == _connectionId)?.Kind == "VSphere";
 
     /// <summary>The namespaces of the inventory a whole-cluster run would back up now.</summary>
     private List<string> WholeClusterNamespaces()

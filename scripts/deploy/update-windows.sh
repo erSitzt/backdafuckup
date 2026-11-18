@@ -43,5 +43,16 @@ else
   echo "warning: artifacts/mover is missing (scripts/build-mover.sh); the server cannot push the mover image." >&2
 fi
 
+# The proxy agent the console offers for download; SKIP_PROXY_BUILD=1 reuses artifacts/proxy.
+if [[ "${SKIP_PROXY_BUILD:-0}" != "1" ]]; then
+  echo "== build proxy agent"
+  "$root/scripts/build-proxy.sh" "$root/artifacts/proxy"
+fi
+if [[ -d "$root/artifacts/proxy" ]]; then
+  cp -r "$root/artifacts/proxy" "$out/publish/proxy"
+else
+  echo "warning: artifacts/proxy is missing (scripts/build-proxy.sh); the console offers no proxy agent download." >&2
+fi
+
 echo "== install on $host"
 "$root/scripts/deploy/.venv/bin/python" -W ignore "$root/scripts/deploy/bdfu_deploy.py" --host "$host" --env "$env_file" install --publish "$out/publish"

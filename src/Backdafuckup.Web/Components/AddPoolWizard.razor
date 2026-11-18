@@ -4,11 +4,19 @@
 @inject ISnackbar Snackbar
 
 <MudPaper Class="pa-4 mb-4" Elevation="2">
-    <MudText Typo="Typo.h6" Class="mb-3">Add XCP-ng / XenServer pool</MudText>
+    <MudText Typo="Typo.h6" Class="mb-3">@(Vcenter ? "Add VMware vCenter" : "Add XCP-ng / XenServer pool")</MudText>
 
     @if (_step == Step.Address)
     {
-        <MudText Typo="Typo.body2" Class="mb-3">Enter the address of any host of the pool. The certificate is shown for confirmation next.</MudText>
+        <MudToggleGroup T="string" Value="_kind" ValueChanged="OnKindChanged" SelectionMode="SelectionMode.SingleSelection" Color="Color.Primary" Class="mb-3">
+            <MudToggleItem T="string" Value="@("XenServer")">XCP-ng / XenServer pool</MudToggleItem>
+            <MudToggleItem T="string" Value="@("VSphere")">VMware vCenter</MudToggleItem>
+        </MudToggleGroup>
+        <MudText Typo="Typo.body2" Class="mb-3">
+            @(Vcenter
+                ? "Enter the address of the vCenter Server (a standalone ESXi host is not enough: backups need vCenter for snapshots, change tracking and HotAdd). The certificate is shown for confirmation next."
+                : "Enter the address of any host of the pool. The certificate is shown for confirmation next.")
+        </MudText>
         <MudStack Row="true" AlignItems="AlignItems.Start">
             <MudTextField @bind-Value="_address" Label="Host name or IP address" Variant="Variant.Outlined" AutoFocus="true" />
             <MudNumericField @bind-Value="_port" Label="Port" Variant="Variant.Outlined" Style="max-width:120px" />
@@ -16,10 +24,21 @@
     }
     else if (_step == Step.Trust)
     {
-        <MudAlert Severity="Severity.Warning" Class="mb-3">
-            Verify the certificate before you trust it (compare the fingerprint on the host console:
-            <span class="mono">openssl x509 -in /etc/xensource/xapi-ssl.pem -noout -pubkey | openssl pkey -pubin -outform der | sha256sum</span>).
-        </MudAlert>
+        @if (Vcenter)
+        {
+            <MudAlert Severity="Severity.Warning" Class="mb-3">
+                Verify the certificate before you trust it, e.g. compare the certificate SHA-256 with the one your browser shows for the vSphere Client, or on the
+                vCenter appliance: <span class="mono">openssl x509 -in /etc/vmware-vpx/ssl/rui.crt -noout -fingerprint -sha256</span>. The ESXi hosts' certificates
+                are then taken from vCenter.
+            </MudAlert>
+        }
+        else
+        {
+            <MudAlert Severity="Severity.Warning" Class="mb-3">
+                Verify the certificate before you trust it (compare the fingerprint on the host console:
+                <span class="mono">openssl x509 -in /etc/xensource/xapi-ssl.pem -noout -pubkey | openssl pkey -pubin -outform der | sha256sum</span>).
+            </MudAlert>
+        }
         @foreach (var cert in _pending)
         {
             <MudSimpleTable Dense="true" Elevation="0" Class="mb-3">
@@ -38,9 +57,19 @@
     {
         <MudStack>
             <MudTextField @bind-Value="_displayName" Label="Display name" Variant="Variant.Outlined" />
-            <MudTextField @bind-Value="_userName" Label="User name (pool admin)" Variant="Variant.Outlined" />
+            <MudTextField @bind-Value="_userName" Label="@(Vcenter ? "User name (vCenter SSO, e.g. backup@vsphere.local)" : "User name (pool admin)")" Variant="Variant.Outlined" />
             <MudTextField @bind-Value="_password" Label="Password" InputType="InputType.Password" Variant="Variant.Outlined" />
-            <MudCheckBox @bind-Value="_allowInsecureNbd" Label="Allow unencrypted NBD (networks with purpose insecure_nbd)" />
+            @if (Vcenter)
+            {
+                <MudText Typo="Typo.caption">
+                    The account needs the privileges listed in the admin guide (VMware vSphere → vCenter account): snapshots, change tracking, adding disks to the
+                    proxy VMs, guest operations and, for restores, creating VMs. A local SSO user needs its domain (user@vsphere.local).
+                </MudText>
+            }
+            else
+            {
+                <MudCheckBox @bind-Value="_allowInsecureNbd" Label="Allow unencrypted NBD (networks with purpose insecure_nbd)" />
+            }
         </MudStack>
     }
 
@@ -78,6 +107,15 @@
     [Parameter] public EventCallback OnCancel { get; set; }
 
     private Step _step = Step.Address;
+    private string _kind = "XenServer";
+
+    private bool Vcenter => _kind == "VSphere";
+
+    private void OnKindChanged(string kind)
+    {
+        _kind = kind;
+        _userName = Vcenter ? string.Empty : "root";
+    }
     private string _address = string.Empty;
     private int _port = 443;
     private string _displayName = string.Empty;
@@ -94,7 +132,7 @@
     {
         await RunAsync(async () =>
         {
-            var cert = await Api.PostAsync<CertificateDto>("api/connections/probe", new ProbeRequestDto(_address.Trim(), _port));
+            var cert = await Api.PostAsync<CertificateDto>("api/connections/probe", new ProbeRequestDto(_address.Trim(), _port, _kind));
             _pending = [cert];
             _displayName = string.IsNullOrEmpty(_displayName) ? _address.Trim() : _displayName;
             _step = Step.Trust;
@@ -118,13 +156,14 @@
         {
             var request = new CreateConnectionDto
             {
+                Kind = _kind,
                 DisplayName = _displayName.Trim(),
                 Address = _address.Trim(),
                 Port = _port,
                 UserName = _userName.Trim(),
                 Password = _password,
                 TrustedCertificates = _trusted,
-                AllowInsecureNbd = _allowInsecureNbd,
+                AllowInsecureNbd = !Vcenter && _allowInsecureNbd,
             };
             using var response = await Api.PostRawAsync("api/connections", request);
             if (response.StatusCode == HttpStatusCode.Conflict && response.Content.Headers.ContentType?.MediaType == "application/json"
@@ -142,7 +181,7 @@
                 throw new ApiException(await ApiClient.ReadProblemAsync(response), response.StatusCode, null);
             }
 
-            Snackbar.Add($"Pool {_displayName} added.", Severity.Success);
+            Snackbar.Add($"{(Vcenter ? "vCenter" : "Pool")} {_displayName} added.", Severity.Success);
             await OnDone.InvokeAsync();
         });
     }

@@ -2,7 +2,7 @@
 @inject ApiClient Api
 
 <PageTitle>Inventory – backdafuckup</PageTitle>
-<PageHeader Title="Inventory" Description="The VMs, hosts and storage of the pools, as XAPI reports them." />
+<PageHeader Title="Inventory" Description="The VMs, hosts, storage and networks of the pools and vCenters, as they report them." />
 
 @if (_pools is null)
 {
@@ -43,6 +43,20 @@ else
                     </MudSimpleTable>
                 </MudTabPanel>
                 <MudTabPanel Text="Networks">
+                    @if (pool.Kind == "VSphere")
+                    {
+                    <MudSimpleTable Dense="true" Elevation="0">
+                        <thead><tr><th>Name</th><th>Type</th><th>Id</th></tr></thead>
+                        <tbody>
+                            @foreach (var net in items.Where(i => i.Kind == "Network"))
+                            {
+                                <tr><td>@net.Name</td><td>@(net.Properties.GetValueOrDefault("type") switch { "DistributedVirtualPortgroup" => "distributed port group", "OpaqueNetwork" => "NSX network", _ => "standard network" })</td><td class="mono">@net.NativeId</td></tr>
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                    }
+                    else
+                    {
                     <MudSimpleTable Dense="true" Elevation="0">
                         <thead><tr><th>Name</th><th>Bridge</th><th>MTU</th><th>NBD</th><th>UUID</th></tr></thead>
                         <tbody>
@@ -57,14 +71,25 @@ else
                             }
                         </tbody>
                     </MudSimpleTable>
+                    }
                 </MudTabPanel>
                 <MudTabPanel Text="Hosts">
                     <MudSimpleTable Dense="true" Elevation="0">
-                        <thead><tr><th>Name</th><th>Address</th></tr></thead>
+                        <thead><tr><th>Name</th><th>Address</th>@if (pool.Kind == "VSphere")
+                            {
+                                <th>Cluster</th><th>Version</th><th>State</th>
+                            }</tr></thead>
                         <tbody>
                             @foreach (var host in items.Where(i => i.Kind == "Host"))
                             {
-                                <tr><td>@host.Name</td><td>@host.Properties.GetValueOrDefault("address")</td></tr>
+                                <tr>
+                                    <td>@host.Name</td><td>@host.Properties.GetValueOrDefault("address")</td>
+                                    @if (pool.Kind == "VSphere")
+                                    {
+                                        <td>@host.Properties.GetValueOrDefault("cluster")</td><td>@host.Properties.GetValueOrDefault("version")</td>
+                                        <td>@(host.Properties.GetValueOrDefault("maintenance") == "true" ? "maintenance" : host.Properties.GetValueOrDefault("connectionState"))</td>
+                                    }
+                                </tr>
                             }
                         </tbody>
                     </MudSimpleTable>
@@ -74,7 +99,7 @@ else
     }
     @if (_pools.Count == 0)
     {
-        <MudAlert Severity="Severity.Info">Add a pool under Backup Infrastructure first.</MudAlert>
+        <MudAlert Severity="Severity.Info">Add a pool or vCenter under Backup Infrastructure → Virtualization first.</MudAlert>
     }
 }
 

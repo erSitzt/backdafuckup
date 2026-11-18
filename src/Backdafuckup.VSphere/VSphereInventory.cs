@@ -76,8 +76,13 @@ internal static class VSphereInventory
             }
         }
 
+        items.AddRange(await PlacesAsync(session, platform, clusters, cancellationToken).ConfigureAwait(false));
+
+        var placement = (await session.RetrieveAllAsync("VirtualMachine", ["parent", "resourcePool"], cancellationToken).ConfigureAwait(false))
+            .ToDictionary(v => v.Obj.Value, v => (Folder: v["parent"]?.AsRef().Value, Pool: v["resourcePool"]?.AsRef().Value), StringComparer.Ordinal);
         foreach (var vm in await VmsAsync(session, cancellationToken).ConfigureAwait(false))
         {
+            var (folder, pool) = placement.GetValueOrDefault(vm.Ref.Value);
             items.Add(new InventoryItem(InventoryKind.Vm, vm.InstanceUuid, vm.Name, vm.HostId, Properties(
                 ("powerState", vm.PowerState),
                 ("vcpus", vm.VCpus.ToString(CultureInfo.InvariantCulture)),
@@ -89,10 +94,80 @@ internal static class VSphereInventory
                 ("guestOs", vm.GuestName),
                 ("biosUuid", vm.BiosUuid),
                 ("moref", vm.Ref.Value),
+                ("folder", folder),
+                ("resourcePool", pool),
                 ("host", vm.HostId is { } host ? hostNames.GetValueOrDefault(host) : null))));
         }
 
         return new Inventory(platform, items);
+    }
+
+    /// <summary>
+    /// Where a restored VM can go: the VM folders (path from the datacenter, whose own VM folder is shown as the
+    /// datacenter) and the resource pools and vApps (path from the cluster, whose root pool is shown as the cluster).
+    /// </summary>
+    private static async Task<List<InventoryItem>> PlacesAsync(VimSession session, PlatformInfo platform, IReadOnlyDictionary<string, string> clusters, CancellationToken cancellationToken)
+    {
+        var items = new List<InventoryItem>();
+        var datacenters = await session.RetrieveAllAsync("Datacenter", ["name", "vmFolder"], cancellationToken).ConfigureAwait(false);
+        var dcNames = datacenters.ToDictionary(d => d.Obj.Value, d => d.Str("name") ?? d.Obj.Value, StringComparer.Ordinal);
+        var folders = (await session.RetrieveAllAsync("Folder", ["name", "parent", "childType"], cancellationToken).ConfigureAwait(false)).ToDictionary(f => f.Obj.Value, StringComparer.Ordinal);
+        var rootFolders = datacenters.Where(d => d["vmFolder"] is not null).ToDictionary(d => d["vmFolder"]!.AsRef().Value, d => d.Str("name") ?? d.Obj.Value, StringComparer.Ordinal);
+
+        string? FolderPath(string id, int depth = 0)
+        {
+            if (rootFolders.TryGetValue(id, out var datacenter))
+            {
+                return datacenter;
+            }
+
+            if (depth > 32 || !folders.TryGetValue(id, out var folder) || folder["parent"]?.AsRef() is not { } parent)
+            {
+                return null;
+            }
+
+            var above = parent.Type == "Folder" ? FolderPath(parent.Value, depth + 1) : dcNames.GetValueOrDefault(parent.Value);
+            return above is null ? null : $"{above}/{folder.Str("name")}";
+        }
+
+        foreach (var (id, folder) in folders)
+        {
+            var types = folder["childType"]?.Items.Select(i => i.Value).ToList();
+            if (types is { Count: > 0 } && !types.Contains("VirtualMachine") || FolderPath(id) is not { } path)
+            {
+                continue;
+            }
+
+            items.Add(new InventoryItem(InventoryKind.Folder, id, folder.Str("name") ?? id, platform.PlatformId, Properties(("path", path))));
+        }
+
+        var pools = (await session.RetrieveAllAsync("ResourcePool", ["name", "parent", "owner"], cancellationToken).ConfigureAwait(false)).ToDictionary(p => p.Obj.Value, StringComparer.Ordinal);
+
+        string? PoolPath(string id, int depth = 0)
+        {
+            if (depth > 32 || !pools.TryGetValue(id, out var pool))
+            {
+                return null;
+            }
+
+            if (pool["parent"]?.AsRef() is { Type: "ResourcePool" or "VirtualApp" } parent)
+            {
+                return PoolPath(parent.Value, depth + 1) is { } above ? $"{above}/{pool.Str("name")}" : null;
+            }
+
+            // The root pool of a cluster or standalone host.
+            return pool["owner"]?.AsRef() is { } owner ? clusters.GetValueOrDefault(owner.Value, owner.Value) : pool.Str("name");
+        }
+
+        foreach (var (id, pool) in pools)
+        {
+            if (PoolPath(id) is { } path)
+            {
+                items.Add(new InventoryItem(InventoryKind.ResourcePool, id, pool.Str("name") ?? id, platform.PlatformId, Properties(("path", path), ("type", pool.Obj.Type))));
+            }
+        }
+
+        return items;
     }
 
     public static async Task<StorageState> GetStorageStateAsync(VimSession session, CancellationToken cancellationToken)

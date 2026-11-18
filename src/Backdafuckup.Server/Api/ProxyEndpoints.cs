@@ -7,6 +7,12 @@ namespace Backdafuckup.Server.Api;
 /// <summary>Backup proxies: the console's management, and the agent's enrollment, control connection and tunnels.</summary>
 public static class ProxyEndpoints
 {
+    private static readonly string[] PackageFiles = ["backdafuckup-proxy", "backdafuckup-proxy.service"];
+
+    /// <summary>The proxy agent package next to the server (<c>proxy/</c>), or Proxy:PackageDirectory.</summary>
+    private static string PackageDirectory(IConfiguration configuration) =>
+        Path.GetFullPath(configuration["Proxy:PackageDirectory"] is { Length: > 0 } configured ? configured : "proxy", AppContext.BaseDirectory);
+
     public static void MapProxyEndpoints(this IEndpointRouteBuilder app)
     {
         var proxies = app.MapGroup("/api/proxies");
@@ -15,6 +21,17 @@ public static class ProxyEndpoints
             .WithDescription("Creates a proxy and its one-time install token (24 hours); the answer's command enrolls the agent on the proxy machine.");
         proxies.MapPost("/{id:guid}/renew", (Guid id, ProxyAgents agents, CancellationToken ct) => Run(async () => Results.Ok(await agents.RenewInstallAsync(id, ct))))
             .WithDescription("A new install token; the proxy's current key stops working until it enrolls again.");
+        proxies.MapGet("/package", (IConfiguration configuration) =>
+        {
+            var directory = PackageDirectory(configuration);
+            var files = PackageFiles.Select(name => new FileInfo(Path.Combine(directory, name))).Where(f => f.Exists).Select(f => new ProxyPackageFileDto(f.Name, f.Length)).ToList();
+            var version = Path.Combine(directory, "version.txt") is var file && File.Exists(file) ? File.ReadAllText(file).Trim() : null;
+            return Results.Ok(new ProxyPackageDto(files.Count == 0 ? null : version, files));
+        }).WithDescription("The proxy agent this server offers: version and files (linux-x64 binary and systemd unit).");
+        proxies.MapGet("/package/{name}", (string name, IConfiguration configuration) =>
+            PackageFiles.Contains(name) && Path.Combine(PackageDirectory(configuration), name) is var path && File.Exists(path)
+                ? Results.File(path, "application/octet-stream", name)
+                : Results.NotFound()).WithDescription("Downloads a file of the proxy agent package.");
         proxies.MapDelete("/{id:guid}", (Guid id, ProxyAgents agents, CancellationToken ct) => Run(async () =>
         {
             await agents.DeleteAsync(id, ct);

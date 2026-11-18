@@ -20,6 +20,17 @@ public sealed partial class ApiIntegrationTests
         var client = await SignedInClientAsync();
         await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://localhost/", Ct);
 
+        // The agent package for download: none yet, then the files a build put next to the server.
+        Assert.Equal((null, 0), ((await client.GetFromJsonAsync<ProxyPackageDto>("/api/proxies/package", Ct))!.Version, (await client.GetFromJsonAsync<ProxyPackageDto>("/api/proxies/package", Ct))!.Files.Count));
+        Directory.CreateDirectory(Path.Combine(_root, "proxy"));
+        await File.WriteAllBytesAsync(Path.Combine(_root, "proxy", "backdafuckup-proxy"), [0x7f, (byte)'E', (byte)'L', (byte)'F'], Ct);
+        await File.WriteAllTextAsync(Path.Combine(_root, "proxy", "version.txt"), "0.3.0\n", Ct);
+        var package = (await client.GetFromJsonAsync<ProxyPackageDto>("/api/proxies/package", Ct))!;
+        Assert.Equal(("0.3.0", "backdafuckup-proxy", 4L), (package.Version, Assert.Single(package.Files).Name, package.Files[0].SizeBytes));
+        Assert.Equal([0x7f, (byte)'E', (byte)'L', (byte)'F'], await client.GetByteArrayAsync("/api/proxies/package/backdafuckup-proxy", Ct));
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/proxies/package/version.txt", Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/proxies/package/..%2Fappsettings.json", Ct)).StatusCode);
+
         var created = await Read<ProxyInstallDto>(client.PostAsJsonAsync("/api/proxies", new CreateProxyDto("proxy01"), Ct));
         Assert.StartsWith($"backdafuckup-proxy enroll --server https://localhost/ --proxy {created.Proxy.Id:D} --token bdfupi_", created.Command, StringComparison.Ordinal);
         Assert.False(created.Proxy.Enrolled);

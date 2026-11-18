@@ -75,10 +75,26 @@ public sealed class VSphereProviderTests
             new FakeVmDisk("[ds-shared-01] app01/app01_1.vmdk", 10L << 30, datastore, "6000C292-1111-2222-3333-444455556666", Key: 2001, Unit: 1)],
             changeTracking: true, biosUuid: "421a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8");
         vcenter.AddVm("tpl-ubuntu", host, [new FakeVmDisk("[ds-shared-01] tpl/tpl.vmdk", 10L << 30, datastore, "6000C293-0000-0000-0000-000000000000")], template: true);
+
+        // Places for restored VMs: VM folders (the datacenter's own shown as the datacenter; not other kinds of folder) and resource pools.
+        var dc = vcenter.Objects("Datacenter").Single();
+        var vmFolder = (vcenter.Get(dc, "vmFolder")!.Attribute("type")!.Value, vcenter.Get(dc, "vmFolder")!.Value);
+        vcenter.Set(vmFolder, "childType", Val.Array("ArrayOfString", [Val.Str("Folder"), Val.Str("VirtualMachine"), Val.Str("VirtualApp")]));
+        var test = vcenter.Add("Folder", "group-v100", ("name", Val.Str("backdafuckup-test")), ("parent", Val.Mor(vmFolder.Item1, vmFolder.Item2)),
+            ("childType", Val.Array("ArrayOfString", [Val.Str("Folder"), Val.Str("VirtualMachine")])));
+        vcenter.Add("Folder", "group-h4", ("name", Val.Str("host")), ("parent", Val.Mor(dc.Type, dc.Value)), ("childType", Val.Array("ArrayOfString", [Val.Str("ComputeResource")])));
+        var cluster = vcenter.Objects("ClusterComputeResource").Single();
+        var root = vcenter.Add("ResourcePool", "resgroup-8", ("name", Val.Str("Resources")), ("parent", Val.Mor(cluster.Type, cluster.Value)), ("owner", Val.Mor(cluster.Type, cluster.Value)));
+        vcenter.Add("ResourcePool", "resgroup-9", ("name", Val.Str("backup-tests")), ("parent", Val.Mor(root.Type, root.Value)), ("owner", Val.Mor(cluster.Type, cluster.Value)));
+        vcenter.Set(app, "parent", Val.Mor(test.Type, test.Value));
+        vcenter.Set(app, "resourcePool", Val.Mor("ResourcePool", "resgroup-9"));
         var (provider, settings) = Provider(vcenter);
         await using var session = await provider.OpenAsync(settings, Ct);
 
         var inventory = await session.GetInventoryAsync(Ct);
+
+        Assert.Equal(["DC-Lab", "DC-Lab/backdafuckup-test"], inventory.Items.Where(i => i.Kind == InventoryKind.Folder).Select(i => i.Properties["path"]).Order(StringComparer.Ordinal));
+        Assert.Equal(["Cluster-A", "Cluster-A/backup-tests"], inventory.Items.Where(i => i.Kind == InventoryKind.ResourcePool).Select(i => i.Properties["path"]).Order(StringComparer.Ordinal));
 
         var esx = Assert.Single(inventory.Items, i => i.Kind == InventoryKind.Host);
         Assert.Equal(("esx01.corp.example", "Cluster-A", "True"), (esx.Name, esx.Properties["cluster"], esx.Properties["enabled"]));
@@ -91,6 +107,7 @@ public sealed class VSphereProviderTests
         Assert.Equal(("poweredOn", "2", (4096L << 20).ToString(), "2", (50L << 30).ToString(), "True", "421a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8", app.Value, "esx01.corp.example"),
             (vm.Properties["powerState"], vm.Properties["vcpus"], vm.Properties["memoryBytes"], vm.Properties["diskCount"], vm.Properties["diskBytes"], vm.Properties["cbtEnabled"],
              vm.Properties["biosUuid"], vm.Properties["moref"], vm.Properties["host"]));
+        Assert.Equal(("group-v100", "resgroup-9"), (vm.Properties["folder"], vm.Properties["resourcePool"]));
     }
 
     [Fact]

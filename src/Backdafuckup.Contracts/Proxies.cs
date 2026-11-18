@@ -21,6 +21,11 @@ public sealed record ProxyDto(
 
 public sealed record CreateProxyDto(string Name);
 
+/// <summary>The proxy agent the server offers for download (built by scripts/build-proxy.sh); empty if it has none.</summary>
+public sealed record ProxyPackageDto(string? Version, IReadOnlyList<ProxyPackageFileDto> Files);
+
+public sealed record ProxyPackageFileDto(string Name, long SizeBytes);
+
 /// <summary>A new proxy, or a renewed install token: the token is shown only here.</summary>
 /// <param name="Command">What to run on the proxy machine (as root) with the agent installed.</param>
 public sealed record ProxyInstallDto(ProxyDto Proxy, string InstallToken, string Command);

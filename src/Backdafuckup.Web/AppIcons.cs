@@ -49,6 +49,9 @@ public static class AppIcons
     /// <summary>A virtualization pool and its hosts.</summary>
     public const string Pool = Icons.Material.Filled.Dns;
 
+    /// <summary>Backup proxies (Linux agents that read and write vSphere disks).</summary>
+    public const string Proxy = Icons.Material.Filled.SwapHoriz;
+
     /// <summary>A VM, or a guest computer (also an Active Directory computer object).</summary>
     public const string Vm = Icons.Material.Filled.Computer;
 

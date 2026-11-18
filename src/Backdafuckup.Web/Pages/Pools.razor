@@ -3,9 +3,9 @@
 @inject ISnackbar Snackbar
 @inject IDialogService Dialogs
 
-<PageTitle>Virtualization pools – backdafuckup</PageTitle>
-<PageHeader Title="Virtualization Pools" Description="The XCP-ng / XenServer pools whose VMs are backed up.">
-    <Actions><MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add pool</MudButton></Actions>
+<PageTitle>Virtualization – backdafuckup</PageTitle>
+<PageHeader Title="Virtualization" Description="The XCP-ng / XenServer pools and VMware vCenters whose VMs are backed up.">
+    <Actions><MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add pool or vCenter</MudButton></Actions>
 </PageHeader>
 
 @if (_adding)
@@ -19,7 +19,7 @@
 }
 else if (_pools.Count == 0 && !_adding)
 {
-    <MudAlert Severity="Severity.Info">No XCP-ng / XenServer pool has been added yet.</MudAlert>
+    <MudAlert Severity="Severity.Info">No XCP-ng / XenServer pool or VMware vCenter has been added yet.</MudAlert>
 }
 else
 {
@@ -32,7 +32,7 @@ else
                         <MudIcon Icon="@AppIcons.Pool" />
                         <MudText Typo="Typo.h6">@pool.DisplayName</MudText>
                         <StateChip State="@pool.Status" />
-                        <MudText Typo="Typo.body2" Color="Color.Secondary">@pool.ProductName @pool.ProductVersion · master @pool.MasterAddress</MudText>
+                        <MudText Typo="Typo.body2" Color="Color.Secondary">@pool.ProductName @pool.ProductVersion · @(IsVcenter(pool) ? "vCenter" : "master") @pool.MasterAddress</MudText>
                     </div>
                 </TitleContent>
                 <ChildContent>
@@ -40,7 +40,7 @@ else
                     {
                         <MudAlert Severity="Severity.Error" Dense="true" Class="mb-2">@pool.LastError</MudAlert>
                     }
-                    <MudText Typo="Typo.subtitle2">Trusted host certificates (public key SHA-256)</MudText>
+                    <MudText Typo="Typo.subtitle2">@(IsVcenter(pool) ? "Trusted certificates: the vCenter and its ESXi hosts as vCenter reports them (public key SHA-256)" : "Trusted host certificates (public key SHA-256)")</MudText>
                     <MudSimpleTable Dense="true" Elevation="0" Class="mb-3">
                         <tbody>
                             @foreach (var host in pool.Hosts)
@@ -49,11 +49,21 @@ else
                             }
                         </tbody>
                     </MudSimpleTable>
-                    <MudText Typo="Typo.body2" Class="mb-3">
-                        Backups read disks over NBD. A pool network needs the NBD purpose, e.g.
-                        <span class="mono">xe network-param-add param-name=purpose param-key=nbd uuid=&lt;network-uuid&gt;</span>
-                        (see Inventory for the NBD state of each network).
-                    </MudText>
+                    @if (IsVcenter(pool))
+                    {
+                        <MudText Typo="Typo.body2" Class="mb-3">
+                            Backups and restores read and write disks through a backup proxy VM in this vCenter (HotAdd; see <MudLink Href="/infrastructure/proxies">Backup Proxies</MudLink>),
+                            with changed block tracking for incremental backups. ESXi host certificates are only used to copy the agent into guests through VMware Tools.
+                        </MudText>
+                    }
+                    else
+                    {
+                        <MudText Typo="Typo.body2" Class="mb-3">
+                            Backups read disks over NBD. A pool network needs the NBD purpose, e.g.
+                            <span class="mono">xe network-param-add param-name=purpose param-key=nbd uuid=&lt;network-uuid&gt;</span>
+                            (see Inventory for the NBD state of each network).
+                        </MudText>
+                    }
                     <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Refresh" OnClick="@(() => RescanAsync(pool))" Class="mr-2">Rescan</MudButton>
                     <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Filled.Delete" OnClick="@(() => RemoveAsync(pool))">Remove</MudButton>
                 </ChildContent>
@@ -67,6 +77,8 @@ else
     private bool _adding;
 
     protected override Task OnInitializedAsync() => LoadAsync();
+
+    private static bool IsVcenter(ConnectionDto connection) => connection.Kind == "VSphere";
 
     private async Task LoadAsync() => _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer,VSphere");
 
@@ -92,7 +104,7 @@ else
 
     private async Task RemoveAsync(ConnectionDto pool)
     {
-        if (await Dialogs.ShowMessageBoxAsync("Remove pool", $"Remove {pool.DisplayName}? Restore points are kept.", yesText: "Remove", cancelText: "Cancel") != true)
+        if (await Dialogs.ShowMessageBoxAsync(IsVcenter(pool) ? "Remove vCenter" : "Remove pool", $"Remove {pool.DisplayName}? Restore points are kept.", yesText: "Remove", cancelText: "Cancel") != true)
         {
             return;
         }

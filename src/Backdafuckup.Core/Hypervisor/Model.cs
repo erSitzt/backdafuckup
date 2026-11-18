@@ -80,6 +80,12 @@ public enum InventoryKind
     /// <c>container</c>); its parent is the namespace.
     /// </summary>
     PodVolume,
+
+    /// <summary>A vSphere VM folder (property <c>path</c>: datacenter/folder/…), a place for restored VMs.</summary>
+    Folder,
+
+    /// <summary>A vSphere resource pool or vApp (property <c>path</c>: cluster/pool/…), a place for restored VMs.</summary>
+    ResourcePool,
 }
 
 /// <summary>Hypervisor-neutral inventory entry. Provider-specific details go into <see cref="Properties"/>.</summary>
