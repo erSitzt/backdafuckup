@@ -67,6 +67,32 @@ public sealed class DataMoverRoundTripTests : IDisposable
     }
 
     [Fact]
+    public async Task A_full_read_of_the_allocated_areas_reads_only_their_chunks_and_records_the_rest_as_zeros()
+    {
+        await using var repo = await LocalDirectoryRepository.CreateAsync(_root, Ct, ChunkSize);
+        // 32 MiB plus a short last chunk: data in chunk 2 (two areas), across the border of chunks 9/10, and in the last chunk.
+        var content = new byte[(32L * ChunkSize) + 4096];
+        var allocated = new List<DiskExtent> { new(2L * ChunkSize, 4096), new((2L * ChunkSize) + 65536, 8192), new((10L * ChunkSize) - 4096, 8192), new(32L * ChunkSize, 4096) };
+        foreach (var area in allocated)
+        {
+            RandomNumberGenerator.Fill(content.AsSpan((int)area.Offset, (int)area.Length));
+        }
+
+        // What the platform reports as unallocated holds no data; a stray byte there is not read and comes back as zero.
+        content[20L * ChunkSize] = 0x55;
+        var (snap, _) = new InMemoryDisk(content).Snapshot();
+        var full = await BackupAsync(repo, snap, ChangedExtents.FullAllocated("first backup", allocated), null);
+
+        Assert.Equal(DiskBackupMode.Full, full.Result.Stats.Mode);
+        Assert.Equal((3L * ChunkSize) + 4096, snap.BytesRead);
+        Assert.Equal(33 - 4, full.Result.Stats.ZeroChunks);
+        Assert.Equal(4, full.Result.Stats.ChangedChunks);
+        var restored = await RestoreAsync(repo, full.RestorePointId);
+        content[20L * ChunkSize] = 0;
+        Assert.Equal(Sha(content), Sha(restored));
+    }
+
+    [Fact]
     public async Task Random_reads_from_the_image_match_the_source()
     {
         await using var repo = await LocalDirectoryRepository.CreateAsync(_root, Ct, ChunkSize);

@@ -156,7 +156,17 @@ public sealed record ChangedExtents(bool IsFull, string? FullReason, IReadOnlyLi
     /// <summary>Why everything is read, as one of the fixed <see cref="FullReadReasons"/> (for metrics).</summary>
     public string? FullReasonCode { get; init; }
 
+    /// <summary>
+    /// For a full read: the areas of the disk that hold data (vSphere: <c>QueryChangedDiskAreas</c> with "*"). Only chunks
+    /// that touch them are read; the rest of the disk is recorded as zeros. Null: the whole disk is read.
+    /// </summary>
+    public IReadOnlyList<Extents.DiskExtent>? Allocated { get; init; }
+
     public static ChangedExtents Full(string reason, string code = FullReadReasons.Other) => new(true, reason, []) { FullReasonCode = code };
+
+    /// <summary>A full read of only the <paramref name="allocated"/> areas; the rest of the disk holds no data.</summary>
+    public static ChangedExtents FullAllocated(string reason, IReadOnlyList<Extents.DiskExtent> allocated, string code = FullReadReasons.Other) =>
+        new(true, reason, []) { FullReasonCode = code, Allocated = allocated };
 }
 
 /// <summary>Raw provider-specific VM metadata needed to re-create the VM (Xen: export_metadata output).</summary>

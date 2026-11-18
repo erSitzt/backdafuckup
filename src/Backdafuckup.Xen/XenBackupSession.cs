@@ -195,7 +195,7 @@ internal sealed class XenBackupSession : IVmBackupSession
             // Guest processing: freeze the guest as late as possible. Everything slow (CBT, record reads, waiting for
             // other snapshots) is done by now, because VSS holds writes for at most 10 s and only the snapshot itself
             // may run in that window.
-            (var freeze, freezeResult) = await FreezeGuestAsync(request.Quiescer, log, cancellationToken).ConfigureAwait(false);
+            (var freeze, freezeResult) = await GuestFreezeOrchestration.FreezeAsync(request.Quiescer, log, cancellationToken).ConfigureAwait(false);
 
             // Snapshot. The task is recorded before waiting so a crash never leaks the snapshot.
             log.Info(checkpoint
@@ -229,7 +229,7 @@ internal sealed class XenBackupSession : IVmBackupSession
             {
                 // Thaw right away, also when the snapshot failed.
                 snapshotTime = snapshotWatch.Elapsed;
-                freezeResult = await ThawGuestAsync(freeze, freezeResult, snapshotTaken: snapshotRef is not null).ConfigureAwait(false);
+                freezeResult = await GuestFreezeOrchestration.ThawAsync(freeze, freezeResult, snapshotTaken: snapshotRef is not null).ConfigureAwait(false);
             }
         }
         finally
@@ -262,7 +262,7 @@ internal sealed class XenBackupSession : IVmBackupSession
 
         if (freezeResult is not null)
         {
-            ReportGuestFreeze(log, freezeResult, snapshotTime);
+            GuestFreezeOrchestration.Report(log, freezeResult, snapshotTime);
         }
 
         var snapshot = await xapi.GetRecordAsync("VM", snapshotRef, cancellationToken).ConfigureAwait(false);
@@ -530,79 +530,6 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
 
         return parts.Count == 0 ? "no storage" : string.Join(", ", parts);
-    }
-
-    private static async Task<(IGuestFreeze? Freeze, GuestFreezeResult? Result)> FreezeGuestAsync(IGuestQuiescer? quiescer, IOperationLog log, CancellationToken cancellationToken)
-    {
-        if (quiescer is null)
-        {
-            return (null, null);
-        }
-
-        try
-        {
-            return (await quiescer.FreezeAsync(log, cancellationToken).ConfigureAwait(false), null);
-        }
-        catch (GuestQuiesceException ex)
-        {
-            return (null, GuestFreezeResult.NotConsistent(ex.Message));
-        }
-    }
-
-    private static async Task<GuestFreezeResult?> ThawGuestAsync(IGuestFreeze? freeze, GuestFreezeResult? result, bool snapshotTaken)
-    {
-        if (freeze is null)
-        {
-            return result;
-        }
-
-        await using (freeze.ConfigureAwait(false))
-        {
-            try
-            {
-                return await freeze.ThawAsync(snapshotTaken, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (GuestQuiesceException ex)
-            {
-                return GuestFreezeResult.NotConsistent(ex.Message);
-            }
-        }
-    }
-
-    private static void ReportGuestFreeze(IOperationLog log, GuestFreezeResult result, TimeSpan snapshotTime)
-    {
-        if (result.Sql is { } sql)
-        {
-            var text = $"Guest processing (SQL Server snapshot): {sql.Summary} VM snapshot took {Seconds(snapshotTime)}.";
-            if (sql.AllDatabasesConsistent)
-            {
-                log.Info(text);
-            }
-            else
-            {
-                log.Warning(text);
-            }
-
-            foreach (var warning in sql.Warnings ?? [])
-            {
-                log.Warning($"Guest processing (SQL Server snapshot): {warning}");
-            }
-
-            return;
-        }
-
-        var writers = result.Writers.Count == 0 ? string.Empty
-            : " Writers: " + string.Join(", ", result.Writers.Select(w => w.Failure is null ? $"{w.Name} ({w.State})" : $"{w.Name} ({w.State}: {w.Failure})")) + ".";
-        if (result.ApplicationConsistent)
-        {
-            log.Info(
-                $"Guest processing: application-consistent snapshot. Writes were held for {Seconds(result.HeldTime)} (VM snapshot {Seconds(snapshotTime)}, " +
-                $"freeze {Seconds(result.FreezeTime)}).{writers}");
-        }
-        else
-        {
-            log.Warning($"Guest processing: the snapshot is only crash-consistent: {result.Reason} VM snapshot took {Seconds(snapshotTime)}.{writers}");
-        }
     }
 
     private static string Seconds(TimeSpan time) => time.TotalSeconds.ToString("0.0 s", CultureInfo.InvariantCulture);

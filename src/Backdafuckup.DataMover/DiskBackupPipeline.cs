@@ -110,10 +110,18 @@ public static class DiskBackupPipeline
         var index = incremental
             ? new ChunkIndex(chunkSize, capacity, (ChunkId[])job.BaseIndex!.Entries.Clone())
             : ChunkIndex.CreateEmpty(chunkSize, capacity);
+        // A full read of a disk whose allocated areas are known reads only the chunks that touch them; the others stay zero.
+        var allocated = incremental ? null : job.Changes.Allocated;
         var work = incremental
             ? ExtentMath.DirtyChunks(job.Changes.Extents, capacity, chunkSize)
-            : ExtentMath.AllChunks(capacity, chunkSize);
+            : allocated is not null ? ExtentMath.DirtyChunks(allocated, capacity, chunkSize) : ExtentMath.AllChunks(capacity, chunkSize);
         var state = new RunState(job, index, incremental ? job.BaseIndex!.Entries : null, capacity);
+        if (allocated is not null)
+        {
+            var readBytes = work.Sum(chunk => (long)ExtentMath.ChunkLength(chunk, capacity, chunkSize));
+            state.ZeroBytes = capacity - readBytes;
+            state.ZeroChunks = ExtentMath.ChunkCount(capacity, chunkSize) - work.Length;
+        }
 
         switch (job.Reader)
         {
