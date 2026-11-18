@@ -5,16 +5,25 @@ namespace Backdafuckup.Server.ScaleOut;
 /// <summary>An extent as the planner sees it: its size and free space (expected), and whether it takes chains.</summary>
 public sealed record PlannerExtent(Guid Id, string Name, long Total, long Free, bool Active);
 
-/// <summary>A chain the planner may move: its part on <see cref="ExtentId"/> (≈ bytes), and whether it must stay now.</summary>
-public sealed record PlannerChain(Guid? JobId, string ObjectNativeId, string Name, Guid ExtentId, long Bytes, bool Pinned);
+/// <summary>
+/// A chain the planner may move, and whether it must stay now. <see cref="Bytes"/> is about what its extent gets back (its
+/// own new data: chunks it shares with other chains stay); <see cref="Footprint"/>, once measured, what it takes on a
+/// target (every chunk it uses), else <see cref="Bytes"/>.
+/// </summary>
+public sealed record PlannerChain(Guid? JobId, string ObjectNativeId, string Name, Guid ExtentId, long Bytes, bool Pinned, long? Footprint = null)
+{
+    /// <summary>What the chain takes on a target.</summary>
+    public long Need => Math.Max(Bytes, Footprint ?? Bytes);
+}
 
-/// <summary>A planned move.</summary>
+/// <summary>A planned move: <see cref="Bytes"/> to copy (what the target needs), about <see cref="PlannerChain.Bytes"/> freed on the source.</summary>
 public sealed record PlannedMove(PlannerChain Chain, Guid ToExtentId, long Bytes);
 
 /// <summary>
-/// Plans a rebalance: from the fullest active extent to the one with the most room, chains one by one (the one after
-/// whose move the two are most even), until the extents are within the imbalance limit and none is below its low-space mark, or
-/// the run's byte budget is spent. Pure, so the console can show the plan before it runs.
+/// Plans a rebalance: from the fullest active extent to the one with the most room, chains one by one (the one after whose
+/// move the fuller of the two is emptiest; of equal ones the one that copies least, since a chain sharing data takes more
+/// to its target than its extent gets back), until the extents are within the imbalance limit and none is below its
+/// low-space mark, or the run's byte budget is spent. Pure, so the console can show the plan before it runs.
 /// </summary>
 public static class RebalancePlanner
 {
@@ -57,14 +66,19 @@ public static class RebalancePlanner
             }
 
             var reserve = state[target].Extent.Total / 100 * settings.NewChainMinFreePercent;
+            var sourceUsed = Used(source);
             var candidate = chains
-                .Where(c => c.ExtentId == source && !c.Pinned && c.Bytes > 0 && !moved.Contains(c) && c.Bytes <= budget && c.Bytes < state[target].Free - reserve)
-                .Select(c => (Chain: c, After: Math.Abs(
-                    (100.0 * (state[source].Extent.Total - state[source].Free - c.Bytes) / state[source].Extent.Total)
-                    - (100.0 * (state[target].Extent.Total - state[target].Free + c.Bytes) / state[target].Extent.Total))))
-                .Where(c => c.After < spread) // never overshoot into a worse spread (no ping-pong)
-                .OrderBy(c => c.After) // the move that leaves the extents most even; of equal ones the larger chain
-                .ThenByDescending(c => c.Chain.Bytes)
+                .Where(c => c.ExtentId == source && !c.Pinned && c.Bytes > 0 && !moved.Contains(c) && c.Need <= budget && c.Need < state[target].Free - reserve)
+                .Select(c =>
+                {
+                    var sourceAfter = 100.0 * (state[source].Extent.Total - state[source].Free - c.Bytes) / state[source].Extent.Total;
+                    var targetAfter = 100.0 * (state[target].Extent.Total - state[target].Free + c.Need) / state[target].Extent.Total;
+                    return (Chain: c, Fuller: Math.Max(sourceAfter, targetAfter), Spread: Math.Abs(sourceAfter - targetAfter));
+                })
+                .Where(c => c.Spread < spread && c.Fuller < sourceUsed) // relief for the fullest, never overshooting (no ping-pong)
+                .OrderBy(c => c.Fuller) // the fuller of the two as empty as possible; of equal ones the one that copies least
+                .ThenBy(c => c.Chain.Need)
+                .ThenBy(c => c.Spread)
                 .ThenBy(c => c.Chain.Name, StringComparer.Ordinal)
                 .Select(c => c.Chain)
                 .FirstOrDefault();
@@ -73,11 +87,11 @@ public static class RebalancePlanner
                 break;
             }
 
-            moves.Add(new PlannedMove(candidate, target, candidate.Bytes));
+            moves.Add(new PlannedMove(candidate, target, candidate.Need));
             moved.Add(candidate);
-            budget -= candidate.Bytes;
+            budget -= candidate.Need;
             state[source] = (state[source].Extent, state[source].Free + candidate.Bytes);
-            state[target] = (state[target].Extent, state[target].Free - candidate.Bytes);
+            state[target] = (state[target].Extent, state[target].Free - candidate.Need);
         }
 
         return moves;
@@ -89,7 +103,7 @@ public static class RebalancePlanner
         var free = extents.ToDictionary(e => e.Id, e => e.Free);
         foreach (var move in moves)
         {
-            free[move.Chain.ExtentId] += move.Bytes;
+            free[move.Chain.ExtentId] += move.Chain.Bytes;
             free[move.ToExtentId] -= move.Bytes;
         }
 

@@ -61,6 +61,27 @@ public sealed class RebalancePlannerTests
     }
 
     [Fact]
+    public void A_chain_sharing_much_data_takes_its_whole_footprint_to_the_target_and_frees_only_its_own_data()
+    {
+        var extents = new List<PlannerExtent> { new(A, "A", 100 * GiB, 10 * GiB, true), new(B, "B", 100 * GiB, 90 * GiB, true) };
+
+        // "clone" frees 20 GiB on A but takes 60 GiB on B (its template's chunks too): B would end fuller than A was.
+        // "own" frees and takes 20 GiB. The planner prefers "own"; the clone alone is not worth it.
+        var clone = Chain("clone", A, 20) with { Footprint = 60 * GiB };
+        var own = Chain("own", A, 20);
+        var moves = RebalancePlanner.Plan(extents, [clone, own], new ScaleOutSettings());
+        Assert.Equal("own", moves[0].Chain.Name);
+        Assert.DoesNotContain(moves, m => m.Chain.Name == "clone");
+
+        // The free space after counts what the target takes and what the source gets back.
+        var after = RebalancePlanner.FreeAfter(extents, [new PlannedMove(clone, B, clone.Need)]);
+        Assert.Equal((30 * GiB, 30 * GiB), (after[A], after[B]));
+
+        // The budget counts what is copied.
+        Assert.Empty(RebalancePlanner.Plan(extents, [clone], new ScaleOutSettings { MaxBytesPerRun = 50 * GiB }));
+    }
+
+        [Fact]
     public void A_window_across_midnight_ends_the_next_morning_on_its_days_only()
     {
         var window = new ScaleOutWindow { Days = [DayOfWeek.Monday], Start = "22:00", End = "06:00", TimeZoneId = "UTC" };

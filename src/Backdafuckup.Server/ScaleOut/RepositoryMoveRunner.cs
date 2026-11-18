@@ -154,9 +154,9 @@ public sealed class RepositoryMoveRunner(
         }
         else
         {
-            var estimate = await db.RestorePoints.Where(r => r.JobId == item.JobId && r.VmNativeId == item.ObjectNativeId && r.RepositoryId == item.FromExtentId && r.State == RestorePointState.Available)
-                .SumAsync(r => r.NewStoredBytes, cancellationToken).ConfigureAwait(false);
-            to = placement.Choose(scope, estimate, out var refusals);
+            // Measured: what the chain uses on its extent, shared chunks included (the most a target can need).
+            var estimate = (await mover.MeasureAsync(item.JobId, item.ObjectNativeId, item.FromExtentId, null, cancellationToken).ConfigureAwait(false)).Footprint;
+            to = placement.Choose(scope, estimate, out var refusals, except: item.FromExtentId);
             if (to is null)
             {
                 return (null, $"{name}: no extent can take it: {string.Join("; ", refusals)}.");

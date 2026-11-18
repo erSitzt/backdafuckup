@@ -25,6 +25,12 @@ public sealed class ScaleOutBalancer(
     /// <summary>Copies of a move that never switched (its session gone) are abandoned after this long.</summary>
     private static readonly TimeSpan StaleCopies = TimeSpan.FromDays(1);
 
+    /// <summary>How long a measured footprint is reused while the chain's part on its extent stays the same.</summary>
+    private static readonly TimeSpan FootprintAge = TimeSpan.FromHours(6);
+
+    /// <summary>Measured footprints by chain part, with what the part looked like then.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(Guid? JobId, string ObjectNativeId, Guid ExtentId), (ChainPart Part, long Footprint, DateTimeOffset At)> _footprints = new();
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (options.Value.BalancerInterval <= TimeSpan.Zero)
@@ -107,7 +113,8 @@ public sealed class ScaleOutBalancer(
 
     /// <summary>
     /// A rebalance plan from the extents' space now (minus what moves still have to free) and the chains' sizes. Chains
-    /// that move, run, were moved recently or are due within the hour stay.
+    /// that move, run, were moved recently or are due within the hour stay. What a planned chain takes on its target is
+    /// measured (its chunks, shared ones included) and the plan made again until every planned chain is measured.
     /// </summary>
     public async Task<RebalancePlan> PlanAsync(Guid scaleOutId, CancellationToken cancellationToken)
     {
@@ -128,6 +135,7 @@ public sealed class ScaleOutBalancer(
         }).ToList();
 
         var now = time.GetUtcNow();
+        var parts = new Dictionary<(Guid?, string, Guid), ChainPart>();
         var moving = await db.Sessions.Where(s => s.Kind == SessionKind.RepositoryMove && (s.State == SessionState.Queued || s.State == SessionState.Running || s.State == SessionState.Stopping))
             .Select(s => s.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
         var due = await db.Jobs.Where(j => j.RepositoryId == scaleOutId && j.NextRunUtc != null && j.NextRunUtc < now.AddHours(1)).Select(j => j.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -137,16 +145,39 @@ public sealed class ScaleOutBalancer(
             {
                 var home = c.Placement?.ExtentId ?? c.Parts.OrderByDescending(p => p.Bytes).Select(p => p.ExtentId).FirstOrDefault();
                 var part = c.Parts.FirstOrDefault(p => p.ExtentId == home);
+                if (part is not null)
+                {
+                    parts[(c.JobId, c.ObjectNativeId, home)] = part;
+                }
+
                 var pinned = (c.Placement?.MoveSessionId is { } session && moving.Contains(session))
                     || locks.Holder(c.JobId!.Value, c.ObjectNativeId) is not null
                     || due.Contains(c.JobId.Value)
                     || (c.Placement is { Reason: "moved" } p && p.PlacedUtc > now.AddDays(-settings.CooldownDays));
-                return new PlannerChain(c.JobId, c.ObjectNativeId, c.ObjectName, home, part?.Bytes ?? 0, pinned);
+                var key = (c.JobId, c.ObjectNativeId, home);
+                long? footprint = part is not null && _footprints.TryGetValue(key, out var known) && known.Part == part && now - known.At < FootprintAge ? known.Footprint : null;
+                return new PlannerChain(c.JobId, c.ObjectNativeId, c.ObjectName, home, part?.Bytes ?? 0, pinned, footprint);
             })
             .Where(c => c.ExtentId != Guid.Empty)
             .ToList();
         var trigger = RebalancePlanner.Trigger(extents, settings);
         var moves = RebalancePlanner.Plan(extents, chains, settings);
+        for (var round = 0; round < 5 && moves.Any(m => m.Chain.Footprint is null); round++)
+        {
+            foreach (var chain in moves.Select(m => m.Chain).Where(c => c.Footprint is null).ToList())
+            {
+                var footprint = (await mover.MeasureAsync(chain.JobId, chain.ObjectNativeId, chain.ExtentId, null, cancellationToken).ConfigureAwait(false)).Footprint;
+                if (parts.TryGetValue((chain.JobId, chain.ObjectNativeId, chain.ExtentId), out var part))
+                {
+                    _footprints[(chain.JobId, chain.ObjectNativeId, chain.ExtentId)] = (part, footprint, now);
+                }
+
+                chains[chains.IndexOf(chain)] = chain with { Footprint = footprint };
+            }
+
+            moves = RebalancePlanner.Plan(extents, chains, settings);
+        }
+
         return new RebalancePlan(extents, moves, trigger, extentRows.ToDictionary(e => e.Id, e => e.Name));
     }
 

@@ -222,11 +222,11 @@ public sealed class RepositoryPlacement(IDbContextFactory<AppDbContext> dbFactor
         : null;
 
     /// <summary>The active extent with the most room after reservations and the reserve; null with the reasons when none qualifies.</summary>
-    internal BackupRepositoryEntity? Choose(RepositoryScope scope, long estimate, out List<string> refusals)
+    internal BackupRepositoryEntity? Choose(RepositoryScope scope, long estimate, out List<string> refusals, Guid? except = null)
     {
         refusals = [];
         var candidates = new List<(BackupRepositoryEntity Extent, long Room)>();
-        foreach (var extent in scope.Extents)
+        foreach (var extent in scope.Extents.Where(e => e.Id != except))
         {
             if (extent.Maintenance)
             {

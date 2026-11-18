@@ -333,11 +333,11 @@ Several directory repositories on different volumes (**extents**) form one **sca
 - **SQL Server log backups** of such a VM go to another extent for that run only.
 
 **Moving chains.** *Repositories → the scale-out → Chains → ⋮ → Move to …* (`POST /api/repositories/{id}/moves`) copies a chain to another extent and then switches it:
-1. **Copying:** its restore points are copied oldest first, while backups and restores go on. Only chunks the target does not have yet are read, and they are stored as they are, checked.
+1. **Measuring and copying:** first it measures what the target lacks: every chunk of the chain, also those it shares with other chains (dedupe), so a chain whose own new data is small can still need many GB. A move that would leave the target below *Keep free for new chains* is refused with both numbers. Then its restore points are copied oldest first, while backups and restores go on. Only chunks the target does not have yet are read, and they are stored as they are, checked.
 2. **SQL Server backups:** they follow one by one.
 3. **The switch:** it waits for a running backup of that chain (*Wait for its backup*, 6 hours), copies what that backup wrote, and switches the restore points to the target in one step. Every next backup of the chain is an incremental on the target.
 4. **Deleting the source copies:** only once nobody reads them any more. A file browser or a published database keeps its copy until it is closed.
-5. **Garbage collection** then frees the space on the source.
+5. **Garbage collection** then frees the space on the source: about the chain's own new data; chunks other chains share stay.
 
 The session shows one task per chain with its progress. A move that is interrupted (service restart) leaves its copies for the next move of the chain; nothing is lost or counted twice. *Move at most MB/s* keeps moves from slowing backups on the same disks.
 
@@ -348,8 +348,8 @@ The session shows one task per chain with its progress. A move that is interrupt
 - **On disk:** the directory itself is kept.
 
 **Rebalancing**
-- *Rebalance…* shows a plan first: which chains move where, their size (≈, from each restore point's new data) and each extent's free space before and after. *Move* runs it.
-- **What it changes:** it moves chains from the fullest active extent to the one with the most room, choosing the chain after whose move the two are most even. It stops when the extents are within the limits.
+- *Rebalance…* shows a plan first: which chains move where, what each takes on its target (measured, shared chunks included) and each extent's free space before and after (the source gets back about the chain's own new data). *Move* runs it.
+- **What it changes:** it moves chains from the fullest active extent to the one with the most room, choosing the chain after whose move the fuller of the two is emptiest, and of equal ones the chain that copies least. It stops when the extents are within the limits.
 - **Chains it leaves alone:** those that are backing up, were moved recently (*Rest after a move*, 7 days), or are due within the hour.
 - **Automatic rebalance** runs in the window (days, from–to, time zone) when an active extent has less than *Low free space* or the extents differ by more than *Imbalance* percentage points of use. *At most GiB per run* caps a run; a run that reaches the end of the window pauses and continues in the next one.
 

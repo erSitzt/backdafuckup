@@ -189,6 +189,60 @@ public sealed partial class ApiIntegrationTests
     }
 
     [Fact]
+    public async Task A_move_measures_what_the_target_lacks_and_is_refused_when_that_does_not_fit()
+    {
+        var client = await SignedInClientAsync();
+        var image = RandomNumberGenerator.GetBytes(4 << 20);
+        var original = await BackUpImageAsync(client, "vm1", image);
+        var local = (await client.GetFromJsonAsync<List<RepositoryDto>>("/api/repositories", Ct))!.Single(r => r.Name == "Local");
+
+        // A clone in another job: next to no new data of its own, but it uses every chunk of vm1.
+        var (cloneVm, cloneDisks) = _pool.AddVm("clone", image.LongLength);
+        _pool.WriteDisk(cloneDisks[0], 0, image);
+        var job = (await client.GetFromJsonAsync<JobDto>($"/api/jobs/{original.JobId}", Ct))!;
+        var clones = await Read<IdOnly>(client.PostAsJsonAsync("/api/jobs", new SaveJobDto
+        {
+            Name = "Clones", ConnectionId = job.ConnectionId, RepositoryId = local.Id, RetentionPoints = 7, Schedule = new ScheduleDto("Daily", "22:00", [], "Europe/Berlin"),
+            Objects = [new JobObjectDto(cloneVm, "clone")], RetryCount = 0,
+        }, Ct));
+        Assert.Equal("Succeeded", (await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync($"/api/jobs/{clones.Id}/run", new RunJobDto(), Ct))).SessionId)).Session.State);
+        var clone = Assert.Single((await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={clones.Id}", Ct))!);
+        Assert.True(clone.NewStoredBytes < 64 << 10, $"{clone.NewStoredBytes} bytes new");
+
+        var extentPath = Path.Combine(_root, "extent2");
+        var added = await client.PostAsJsonAsync($"/api/repositories/{local.Id}/extents", new AddExtentDto { Name = "E2", Path = extentPath, ScaleOutName = "Scale" }, Ct);
+        Assert.True(added.IsSuccessStatusCode, await added.Content.ReadAsStringAsync(Ct));
+        var repositories = (await client.GetFromJsonAsync<List<RepositoryDto>>("/api/repositories", Ct))!;
+        var (scale, e2) = (repositories.Single(r => r.Name == "Scale"), repositories.Single(r => r.Name == "E2"));
+        async Task<(SessionDetailDto Detail, List<string> Log)> MoveAsync(Guid jobId, string vm)
+        {
+            var detail = await WaitForSessionAsync(client, (await Read<StartedDto>(client.PostAsJsonAsync($"/api/repositories/{scale.Id}/moves",
+                new StartMovesDto([new ChainMoveDto(jobId, vm, local.Id, e2.Id)]), Ct))).SessionId);
+            return (detail, (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{detail.Session.Id}/log", Ct))!.Select(l => l.Message).ToList());
+        }
+
+        // E2 has 2 MiB beside its 5 % reserve: the clone's 4 MiB do not fit, whatever its own data.
+        _volumes.Set(extentPath, 200L << 30, (10L << 30) + (2 << 20));
+        var refused = await MoveAsync(clones.Id, cloneVm);
+        Assert.Equal("Failed", refused.Detail.Session.State);
+        Assert.Contains(refused.Log, l => l.Contains($"E2 ({extentPath}) has 10.0 GB free; clone needs 4.0 MB there, and 10.0 GB (5 %) stay free for new chains: not moved.", StringComparison.Ordinal));
+        Assert.Equal(local.Id, (await client.GetFromJsonAsync<List<RestorePointDto>>($"/api/restore-points?jobId={clones.Id}", Ct))!.Single().RepositoryId);
+
+        // With room it copies all of it, as announced, and the progress ends at 100 %.
+        _volumes.Set(extentPath, 200L << 30, 100L << 30);
+        var moved = await MoveAsync(clones.Id, cloneVm);
+        Assert.True(moved.Detail.Session.State == "Succeeded", moved.Detail.Session.Summary + "\n" + string.Join("\n", moved.Log));
+        Assert.Contains(moved.Log, l => l.StartsWith("Moving clone from extent Local to E2: 4.0 MB to copy.", StringComparison.Ordinal));
+        Assert.Contains("4.0 MB copied", moved.Detail.Session.Summary, StringComparison.Ordinal);
+        Assert.Equal(100, Assert.Single(moved.Detail.Tasks).Progress);
+
+        // vm1 next: E2 has its chunks now.
+        var second = await MoveAsync(original.JobId!.Value, original.VmNativeId);
+        Assert.True(second.Detail.Session.State == "Succeeded", second.Detail.Session.Summary);
+        Assert.Contains(second.Log, l => l.StartsWith("Moving vm1 from extent Local to E2: 0.0 KB to copy (4.0 MB in all; E2 has the rest already).", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task The_balancer_rebalances_in_its_window_within_the_limit_per_run_and_continues_with_the_next_run()
     {
         var client = await SignedInClientAsync();

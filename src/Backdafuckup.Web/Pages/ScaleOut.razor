@@ -35,7 +35,7 @@
 {
     <MudPaper Class="pa-4 mb-4" Elevation="2">
         <MudText Typo="Typo.h6" Class="mb-1">Rebalance</MudText>
-        <MudText Typo="Typo.body2" Class="mb-3">@_plan.Note Sizes are estimates (≈, from the new data of each restore point); each chain keeps its restore point ids.</MudText>
+        <MudText Typo="Typo.body2" Class="mb-3">@_plan.Note Each planned chain is measured: it takes all its chunks to the target, also those it shares with other chains (dedupe), while its extent gets back only about its own new data. Each chain keeps its restore point ids.</MudText>
         <MudSimpleTable Dense="true" Elevation="0" Class="mb-3">
             <thead><tr><th>Extent</th><th>Free now</th><th>Free after</th></tr></thead>
             <tbody>

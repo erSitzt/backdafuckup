@@ -11,6 +11,12 @@ namespace Backdafuckup.Server.ScaleOut;
 public sealed record ChainToMove(Guid ScaleOutId, Guid? JobId, string ObjectNativeId, string ObjectName, Guid FromExtentId, Guid ToExtentId);
 
 /// <summary>What a move did: points and SQL Server backups switched, bytes copied; deferred when the chain's backup kept running.</summary>
+/// <summary>
+/// What a chain takes: <see cref="Footprint"/> is the stored size of every chunk its restore points and SQL Server backups
+/// use on the source extent (shared ones included); <see cref="ToCopy"/> the part of it a target extent does not have.
+/// </summary>
+public sealed record ChainSize(long Footprint, long ToCopy);
+
 public sealed record ChainMoveResult(int Points, int SqlBackups, long BytesCopied, bool Deferred, string Summary);
 
 /// <summary>
@@ -33,6 +39,7 @@ public sealed class ChainMover(
     ChainLocks locks,
     SessionQueue queue,
     Sql.SqlBackupService sqlBackups,
+    IVolumeSpace volumes,
     TimeProvider time)
 {
     private static readonly TimeSpan DeleteWait = TimeSpan.FromSeconds(5);
@@ -56,9 +63,23 @@ public sealed class ChainMover(
 
         var (source, sourceName) = await OpenAsync(chain.FromExtentId, cancellationToken).ConfigureAwait(false);
         var (target, targetName) = await OpenAsync(chain.ToExtentId, cancellationToken).ConfigureAwait(false);
-        await CheckTargetAsync(chain, cancellationToken).ConfigureAwait(false);
+        var targetRow = await CheckTargetAsync(chain, cancellationToken).ConfigureAwait(false);
         var throttle = new Throttle(settings.MaxMoveMBps, time);
-        var total = await PlannedBytesAsync(chain, cancellationToken).ConfigureAwait(false);
+
+        // What the target lacks, measured: a chain shares chunks with others (dedupe), so its own new data says little.
+        var size = await MeasureAsync(chain.JobId, chain.ObjectNativeId, chain.FromExtentId, chain.ToExtentId, cancellationToken).ConfigureAwait(false);
+        if (volumes.Probe(targetRow.Path) is { } space)
+        {
+            var reserve = space.Total / 100 * settings.NewChainMinFreePercent;
+            if (size.ToCopy > space.Free - reserve)
+            {
+                throw new InvalidOperationException(
+                    $"{targetName} ({targetRow.Path}) has {VmBackupTask.Format(space.Free)} free; {chain.ObjectName} needs {VmBackupTask.Format(size.ToCopy)} there, " +
+                    $"and {VmBackupTask.Format(reserve)} ({settings.NewChainMinFreePercent} %) stay free for new chains: not moved.");
+            }
+        }
+
+        var total = size.ToCopy;
         long copied = 0;
         void Copied(long bytes)
         {
@@ -69,7 +90,8 @@ public sealed class ChainMover(
         await MarkMovingAsync(chain, sessionId, cancellationToken).ConfigureAwait(false);
         try
         {
-            log.Info($"Moving {Describe(chain)} from extent {sourceName} to {targetName} (about {VmBackupTask.Format(total)}).");
+            log.Info($"Moving {Describe(chain)} from extent {sourceName} to {targetName}: {VmBackupTask.Format(size.ToCopy)} to copy" +
+                (size.Footprint > size.ToCopy ? $" ({VmBackupTask.Format(size.Footprint)} in all; {targetName} has the rest already)." : "."));
 
             // 1. Restore points, oldest first, without the lease; again while each pass still finds more than one new point.
             for (var pass = 0; pass < 5; pass++)
@@ -487,13 +509,47 @@ public sealed class ChainMover(
     private static IQueryable<RestorePointEntity> ChainPoints(AppDbContext db, ChainToMove chain) =>
         db.RestorePoints.Where(r => r.JobId == chain.JobId && r.VmNativeId == chain.ObjectNativeId);
 
-    private async Task<long> PlannedBytesAsync(ChainToMove chain, CancellationToken cancellationToken)
+    /// <summary>
+    /// Measures a chain on <paramref name="fromExtentId"/>: the stored size of every chunk its restore points and SQL Server
+    /// backups use there, and of those <paramref name="toExtentId"/> does not have (all of them without a target). Reads the
+    /// indexes only; an object deleted meanwhile is left out.
+    /// </summary>
+    public async Task<ChainSize> MeasureAsync(Guid? jobId, string objectNativeId, Guid fromExtentId, Guid? toExtentId, CancellationToken cancellationToken)
     {
-        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var points = await ChainPoints(db, chain).Where(r => r.RepositoryId == chain.FromExtentId && r.State == RestorePointState.Available).SumAsync(r => r.NewStoredBytes, cancellationToken).ConfigureAwait(false);
-        var sql = await db.SqlBackups.Where(b => b.JobId == chain.JobId && b.VmNativeId == chain.ObjectNativeId && b.RepositoryId == chain.FromExtentId && b.State == SqlBackupState.Available)
-            .SumAsync(b => b.NewStoredBytes, cancellationToken).ConfigureAwait(false);
-        return points + sql;
+        List<Guid> points, backups;
+        await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
+        {
+            points = await db.RestorePoints.Where(r => r.JobId == jobId && r.VmNativeId == objectNativeId && r.RepositoryId == fromExtentId && r.State == RestorePointState.Available)
+                .Select(r => r.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+            backups = await db.SqlBackups.Where(b => b.JobId == jobId && b.VmNativeId == objectNativeId && b.RepositoryId == fromExtentId && b.State == SqlBackupState.Available)
+                .Select(b => b.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var source = (IRepositoryTransfer)await repositories.GetAsync(fromExtentId, cancellationToken).ConfigureAwait(false);
+        var ids = new HashSet<ChunkId>();
+        foreach (var (id, sql) in points.Select(p => (p, false)).Concat(backups.Select(b => (b, true))))
+        {
+            try
+            {
+                ids.UnionWith(sql
+                    ? await source.ListSqlBackupChunksAsync(id, cancellationToken).ConfigureAwait(false)
+                    : await source.ListRestorePointChunksAsync(id, cancellationToken).ConfigureAwait(false));
+            }
+            catch (Exception ex) when (ex is KeyNotFoundException or FileNotFoundException or DirectoryNotFoundException or InvalidDataException)
+            {
+                // Deleted by retention meanwhile.
+            }
+        }
+
+        var locator = (IChunkLocator)source;
+        var footprint = locator.PlanRead(ids).StoredBytes;
+        if (toExtentId is not { } to)
+        {
+            return new ChainSize(footprint, footprint);
+        }
+
+        var target = (IChunkLocator)await repositories.GetAsync(to, cancellationToken).ConfigureAwait(false);
+        return new ChainSize(footprint, locator.PlanRead(target.PlanRead(ids).Missing).StoredBytes);
     }
 
     private async Task<(IRepositoryTransfer Repository, string Name)> OpenAsync(Guid extentId, CancellationToken cancellationToken)
@@ -508,7 +564,7 @@ public sealed class ChainMover(
         return ((IRepositoryTransfer)await repositories.GetAsync(extentId, cancellationToken).ConfigureAwait(false), name);
     }
 
-    private async Task CheckTargetAsync(ChainToMove chain, CancellationToken cancellationToken)
+    private async Task<BackupRepositoryEntity> CheckTargetAsync(ChainToMove chain, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var extents = await db.Repositories.Where(r => r.Id == chain.FromExtentId || r.Id == chain.ToExtentId).ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -532,6 +588,7 @@ public sealed class ChainMover(
         // A move to another target supersedes copies an interrupted move left elsewhere: those are abandoned (and deleted).
         await db.RepositoryMoveItems.Where(m => m.State == MoveItemState.Copied && m.JobId == chain.JobId && m.ObjectNativeId == chain.ObjectNativeId && m.TargetExtentId != chain.ToExtentId)
             .ExecuteUpdateAsync(u => u.SetProperty(m => m.State, MoveItemState.Abandoned).SetProperty(m => m.UpdatedUtc, time.GetUtcNow()), cancellationToken).ConfigureAwait(false);
+        return to;
     }
 
     private async Task MarkMovingAsync(ChainToMove chain, Guid sessionId, CancellationToken cancellationToken)
