@@ -43,15 +43,19 @@
   - Check whether the array needs a Virtual Copy (snapshot) licence. Veeam lists one as a requirement for this array family
 - **XCP-ng data path from an array snapshot:**
   - A Linux backup proxy gets the snapshot LUN over iSCSI/FC
-  - The proxy imports the LVM volume group (`vgimportclone`) and reads the VHD disks from the logical volumes. LVM and the VHD format are openly documented
+  - The proxy parses the LVM metadata of the snapshot LUN in user space and reads the VHD chains from the logical volumes. It never activates or imports the volume group (`vgimportclone` would write to the PVs). LVM and the VHD format are openly documented; the LVHD layout is read from the open-source `sm` code
   - XAPI CBT supplies the changed blocks
+  - Opt-in, with verification against NBD reads (spec `2026-11-18-1713-storage-snapshot-backup`)
+- **vSphere data path from an array snapshot** (same spec):
+  - Supported: the snapshot LUN is presented to an ESXi host, resignatured and mounted as a temporary datastore (public vim25), and the HotAdd proxy reads the VMDKs from it
+  - Opt-in accelerator: our own VMFS6 reader on the proxy reads the snapshot LUN directly (see the VMFS exception in the Integration Policy)
 - **Proxy requirement:** the backup proxy needs SAN access (iSCSI or FC) to the primary array
 
 ## Other
 
 - **Hypervisor integration:** pluggable hypervisor provider layer behind a common core
   - XCP-ng / XenServer (MVP): XAPI for snapshots, VM export/import and SR handling
-  - VMware vSphere (later): vim25 Web Services API for snapshots and CBT, through our own C# client generated from the WSDL that vCenter serves (no Broadcom DLLs). Disk data goes through a HotAdd proxy VM (`ReconfigVM_Task`); ExportSnapshot / ImportVApp is the fallback. No VDDK
+  - VMware vSphere (in progress, spec `2026-11-18-1713-vsphere-provider`): vim25 Web Services API for snapshots and CBT, through our own hand-written C# SOAP client (the WSDL that vCenter serves is the reference; no Broadcom DLLs). Disk data goes through a Linux HotAdd proxy VM (`ReconfigVM_Task`), which serves the attached disks to the server as NBD inside a WebSocket tunnel. No VDDK
   - Hyper-V (later): WMI v2, Resilient Change Tracking (RCT), virtdisk.dll and VSS, all publicly documented by Microsoft
 - **Data mover abstraction:** hypervisor-neutral interface (changed-extent source plus random-access reader/writer), designed in Phase 1 so each hypervisor plugs in its own data mover
 - **Windows guest helpers:** VSS for application-consistent backups, plus MS SQL Server and Active Directory integration for app-aware backup and item-level restore
@@ -68,6 +72,7 @@ We use only publicly available, documented APIs and documentation. That means:
 - **No vendor partner programs:** no Broadcom TAP or similar
 - **No gated SDKs:** no VDDK
 - **Nothing undocumented:** no internal or undocumented APIs and protocols, such as VMware NFC or `RetrieveInternalContent`
+  - **One exception (user decision 2026-11-18): undocumented on-disk formats may be read through open-source readers, here VMFS6.** Only code under GPL-2.0-or-later (or a more permissive licence) may be ported, file by file after a licence audit. Such a reader is opt-in, verified on every run against data known from CBT and the previous restore point, and falls back to the supported path (ESXi resignature + HotAdd) on any doubt. Protocols and APIs stay public-only
 - **Record every dependency** in `THIRD-PARTY-NOTICES.md`
 
 Background: `reports/VMware vSphere integration access.md`.

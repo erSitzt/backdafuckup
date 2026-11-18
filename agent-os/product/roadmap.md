@@ -11,7 +11,7 @@
   3. The backup proxy reads from the array snapshot over the SAN
   4. Changed blocks come from XAPI CBT
 
-  Arrays connect through a storage plugin interface.
+  Arrays connect through a storage plugin interface. In progress with spec `2026-11-18-1713-storage-snapshot-backup` (2026-11-18), for XCP-ng and vSphere, opt-in with verification.
 - **Backup targets:** a directory on a local volume first (e.g. an iSCSI LUN from the HPE MSA mounted on the backup server); then SMB and NFS shares and S3-compatible object storage
 - **Scheduling & retention:** scheduled backup jobs with retention and rotation policies
 - **Restore:** restore a VM to its original or an alternate host / SR
@@ -70,14 +70,14 @@
 - **Offsite / immutable copy:** backup copies to a secondary site, S3 or immutable storage
 - **SQL Server, follow-ups:** differential backups; automatic restore tests (restore to a point in time into a test instance and `DBCC CHECKDB` on a schedule); mail/webhook alerts for chain breaks and RPO; availability groups and failover cluster instances; streaming fulls without staging space in the VM (VDI); resumable uploads; repository pack files for the many small log backup objects
 - **Publish for file-level restore:** mount a restore point's volumes into a VM over the same loopback iSCSI as the SQL publish
-- **VMware vSphere support:** back up and restore vSphere VMs using only public vSphere APIs, with no VDDK and no Broadcom partner program
-  - Snapshots and CBT through the vim25 Web Services API
-  - Disk data read and written through a HotAdd proxy VM (`ReconfigVM_Task`), with full, incremental and block-level restore
-  - ExportSnapshot / ImportVApp as a full-backup / full-restore fallback
+- **VMware vSphere support (in progress since 2026-11-18, user request):** back up and restore vSphere VMs using only public vSphere APIs, with no VDDK and no Broadcom partner program
+  - Spec `2026-11-18-1713-vsphere-provider`: snapshots and CBT through the vim25 Web Services API; disk data read and written through a Linux HotAdd proxy VM (`ReconfigVM_Task`); guest processing with our agent or VMware Tools quiescing; agent install through guest operations; restore and quick rollback (only the changed blocks written back)
+  - Spec `2026-11-18-1713-vsphere-instant-recovery`: run a VM directly from a restore point over an NFS datastore served by the backup server, then Storage vMotion or discard
+  - ExportSnapshot / ImportVApp: not planned for now (user decision 2026-11-18)
   - Requires a paid vSphere licence on the customer side, since free ESXi blocks backup APIs
 - **Hyper-V support:** back up and restore Hyper-V VMs
 - **Storage snapshots for vSphere and Hyper-V:**
-  - vSphere: the snapshot LUN is mounted on an ESXi host as a resignatured datastore and read through the HotAdd proxy
+  - vSphere (in progress, spec `2026-11-18-1713-storage-snapshot-backup`): the snapshot LUN is mounted on an ESXi host as a resignatured datastore and read through the HotAdd proxy; opt-in, our own VMFS6 reader reads it directly on the proxy
   - Hyper-V: the array's VSS hardware provider plus transportable shadow copies
 - **More storage array plugins:** vendors to be decided; each must have a publicly documented snapshot API
 - **File-level restore, follow-ups:**
