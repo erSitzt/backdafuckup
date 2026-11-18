@@ -728,6 +728,7 @@ public static class OperationEndpoints
         job.MaxParallelDisks = Math.Clamp(request.MaxParallelDisks, 1, 8);
         job.GuestProcessing = request.GuestProcessing;
         job.KubernetesPodVolumes = request.KubernetesPodVolumes;
+        job.FromStorageSnapshots = request.FromStorageSnapshots;
         job.GuestFailurePolicy = Enum.TryParse<GuestFailurePolicy>(request.GuestFailurePolicy, true, out var policy) ? policy : GuestFailurePolicy.CrashConsistentWithWarning;
         job.GuestCredentialId = request.GuestCredentialId;
         job.GuestProcessingMode = Enum.TryParse<GuestProcessingMode>(request.GuestProcessingMode, true, out var mode) && !int.TryParse(request.GuestProcessingMode, out _) ? mode : GuestProcessingMode.Vss;

@@ -247,7 +247,8 @@ public sealed record JobDto(
     bool SqlSnapshotCopyOnly = false,
     SqlBackupSettingsDto? SqlBackup = null,
     bool KubernetesPodVolumes = false,
-    DateTimeOffset? SqlNextRunUtc = null);
+    DateTimeOffset? SqlNextRunUtc = null,
+    bool FromStorageSnapshots = false);
 
 /// <summary>
 /// SQL Server backups the agent runs in the job's VMs (the log chain): transaction log backups every
@@ -321,6 +322,9 @@ public sealed record SaveJobDto
     /// <c>backup.velero.io/backup-volumes</c>; needs the node agent.
     /// </summary>
     public bool KubernetesPodVolumes { get; init; }
+
+    /// <summary>Backup from storage snapshots where the disks lie on turned-on volumes of a storage system (off: the normal path).</summary>
+    public bool FromStorageSnapshots { get; init; }
 
     public int RetryCount { get; init; } = 2;
 

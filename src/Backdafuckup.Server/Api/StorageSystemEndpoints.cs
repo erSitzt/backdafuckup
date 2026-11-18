@@ -42,6 +42,9 @@ public static class StorageSystemEndpoints
             await service.SetVolumeAsync(id, volumeId, request.Enabled, ct);
             return Results.NoContent();
         })).WithDescription("Turns backups from snapshots of a volume on or off.");
+        systems.MapPut("/{id:guid}/options", (Guid id, StorageSystemOptionsDto request, StorageSystems service, CancellationToken ct) => Run(async () =>
+            Results.Ok(await service.SetOptionsAsync(id, request, ct))))
+            .WithDescription("Sets how the server uses the array's snapshots: expiry, batches, experimental readers, verify runs.");
         systems.MapGet("/{id:guid}/leftovers", (Guid id, StorageSystems service, CancellationToken ct) => Run(async () => Results.Ok(await service.LeftoversAsync(id, ct))))
             .WithDescription("This server's snapshots and presentations on the array, and whether the cleanup knows them.");
     }

@@ -1,0 +1,382 @@
+@page "/infrastructure/storage-systems"
+@inject ApiClient Api
+@inject ISnackbar Snackbar
+@inject IDialogService Dialogs
+
+<PageTitle>Storage systems – backdafuckup</PageTitle>
+<PageHeader Title="Storage Systems" Description="Storage arrays whose snapshots backups read from: the VM snapshot exists only for seconds, the disks are read from a snapshot of the array through a proxy with SAN access.">
+    <Actions><MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="StartAdding" Disabled="@(_step is not null)">Add storage system</MudButton></Actions>
+</PageHeader>
+
+@if (_step is not null)
+{
+    <MudPaper Class="pa-4 mb-4" Elevation="2">
+        <MudText Typo="Typo.h6" Class="mb-3">Add HPE Alletra MP</MudText>
+        @if (_step == Step.Address)
+        {
+            <MudText Typo="Typo.body2" Class="mb-3">The array's management address (its WSAPI, port 443). The certificate is shown for confirmation next.</MudText>
+            <MudStack Row="true" AlignItems="AlignItems.Start">
+                <MudTextField @bind-Value="_address" Label="Host name or IP address" Variant="Variant.Outlined" AutoFocus="true" />
+                <MudNumericField @bind-Value="_port" Label="Port" Variant="Variant.Outlined" Style="max-width:120px" />
+            </MudStack>
+        }
+        else if (_step == Step.Trust && _certificate is { } cert)
+        {
+            <MudAlert Severity="Severity.Warning" Class="mb-3">
+                Verify the certificate before you trust it, e.g. compare the certificate SHA-256 with the one your browser shows for the array's management interface.
+            </MudAlert>
+            <MudSimpleTable Dense="true" Elevation="0" Class="mb-3">
+                <tbody>
+                    <tr><td style="width:180px">Host</td><td>@cert.HostAddress</td></tr>
+                    <tr><td>Subject</td><td>@cert.Subject</td></tr>
+                    <tr><td>Issuer</td><td>@cert.Issuer @(cert.ValidAgainstSystemCa ? "(trusted CA)" : "(self-signed or unknown CA)")</td></tr>
+                    <tr><td>Valid</td><td>@Fmt.Time(cert.NotBefore) – @Fmt.Time(cert.NotAfter)</td></tr>
+                    <tr><td>Public key SHA-256</td><td class="mono">@cert.SpkiSha256</td></tr>
+                    <tr><td>Certificate SHA-256</td><td class="mono">@cert.Sha256Thumbprint</td></tr>
+                </tbody>
+            </MudSimpleTable>
+        }
+        else if (_step == Step.Credentials)
+        {
+            <MudStack>
+                <MudTextField @bind-Value="_name" Label="Name" Variant="Variant.Outlined" />
+                <MudTextField @bind-Value="_userName" Label="WSAPI user" Variant="Variant.Outlined" />
+                <MudTextField @bind-Value="_password" Label="Password" InputType="InputType.Password" Variant="Variant.Outlined" />
+                <MudText Typo="Typo.caption">
+                    A user with the role <i>edit</i> in the domain that holds the volumes is enough. The server takes snapshots only of volumes you turn on below,
+                    names them <span class="mono">bdfu-…</span> with its own id in the comment, and never changes or deletes anything else on the array.
+                </MudText>
+            </MudStack>
+        }
+
+        @if (_error is not null)
+        {
+            <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">@_error</MudAlert>
+        }
+
+        <div class="d-flex gap-2 mt-4">
+            <MudButton Variant="Variant.Text" OnClick="@(() => _step = null)">Cancel</MudButton>
+            <MudSpacer />
+            @if (_step == Step.Address)
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || string.IsNullOrWhiteSpace(_address))" OnClick="ProbeAsync">Next</MudButton>
+            }
+            else if (_step == Step.Trust)
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="@(() => _step = Step.Credentials)">Trust certificate</MudButton>
+            }
+            else
+            {
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || string.IsNullOrWhiteSpace(_userName))" OnClick="CreateAsync">Connect and add</MudButton>
+            }
+        </div>
+        @if (_busy)
+        {
+            <MudProgressLinear Indeterminate="true" Class="mt-2" />
+        }
+    </MudPaper>
+}
+
+@if (_systems is null)
+{
+    <MudProgressLinear Indeterminate="true" />
+}
+else if (_systems.Count == 0 && _step is null)
+{
+    <MudAlert Severity="Severity.Info">
+        No storage system yet. Add an HPE Alletra MP to back up VMs on its volumes from array snapshots (so far XCP-ng LVM storage over iSCSI or FC).
+        It also needs a backup proxy with SAN access; see the admin guide, "Backup from storage snapshots".
+    </MudAlert>
+}
+else
+{
+    @foreach (var system in _systems)
+    {
+        <MudPaper Class="pa-4 mb-4" Elevation="1">
+            <div class="d-flex align-center gap-2">
+                <MudIcon Icon="@AppIcons.StorageSystem" />
+                <MudText Typo="Typo.h6">@system.Name</MudText>
+                <StateChip State="@system.Status" />
+                <MudSpacer />
+                <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.NetworkCheck" Disabled="_busy" OnClick="@(() => TestAsync(system))">Test</MudButton>
+                <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Refresh" Disabled="_busy" OnClick="@(() => RefreshAsync(system))">Refresh mapping</MudButton>
+                <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error" Disabled="_busy" OnClick="@(() => RemoveAsync(system))" />
+            </div>
+            <MudText Typo="Typo.body2" Class="mt-1">
+                @system.Address:@system.Port · user @system.UserName
+                @if (system.Facts is { } facts)
+                {
+                    <span> · @facts.Model, serial @facts.Serial, OS @facts.OsVersion, WSAPI @facts.ApiVersion</span>
+                }
+                · checked @Fmt.Time(system.LastCheckedUtc)
+            </MudText>
+            @if (system.LastError is { } error)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mt-2">@error</MudAlert>
+            }
+            @if (system.Facts?.LicenseWarning is { } warning)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">@warning</MudAlert>
+            }
+
+            <MudText Typo="Typo.subtitle2" Class="mt-4">Volumes (@system.VolumesEnabled of @system.Volumes turned on)</MudText>
+            @if (_volumes.GetValueOrDefault(system.Id) is { } volumes)
+            {
+                <MudTable Items="volumes" Dense="true" Hover="true" Elevation="0">
+                    <HeaderContent>
+                        <MudTh>Use</MudTh><MudTh>Volume</MudTh><MudTh>Size</MudTh><MudTh>Datastore / SR</MudTh><MudTh>Layout</MudTh><MudTh>WWN</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>
+                            <MudSwitch T="bool" Value="@context.Enabled" ValueChanged="@(on => SetVolumeAsync(system, context, on))" Color="Color.Primary"
+                                       Disabled="@(_busy || (context.Refusal is not null && !context.Enabled) || context.StorageName is null)" />
+                        </MudTd>
+                        <MudTd>@context.VolumeName</MudTd>
+                        <MudTd>@Fmt.Bytes(context.SizeBytes)</MudTd>
+                        <MudTd>
+                            @if (context.StorageName is { } storage)
+                            {
+                                <span>@storage <span class="caption">(@context.ConnectionName)</span></span>
+                            }
+                            else
+                            {
+                                <span class="caption">no datastore or SR found on it</span>
+                            }
+                            @if (context.Refusal is { } refusal)
+                            {
+                                <br /><span class="caption">@refusal</span>
+                            }
+                        </MudTd>
+                        <MudTd>@Layout(context.Layout)</MudTd>
+                        <MudTd><span class="mono caption">@context.Wwn</span></MudTd>
+                    </RowTemplate>
+                </MudTable>
+            }
+
+            <MudExpansionPanels Elevation="0" Class="mt-3">
+                <MudExpansionPanel Text="Options">
+                    @{ var options = _options[system.Id]; }
+                    <div class="field-grid cols-4">
+                        <MudNumericField @bind-Value="options.ExpiryHours" Label="Snapshot expiry (hours)" Min="1" Max="72" Variant="Variant.Outlined"
+                                         HelperText="The array removes a forgotten snapshot by itself after this time." />
+                        <MudNumericField @bind-Value="options.MaxVmsPerSnapshot" Label="VMs per array snapshot" Min="1" Max="32" Variant="Variant.Outlined" />
+                        <MudNumericField @bind-Value="options.BatchWindowSeconds" Label="Batch window (s)" Min="0" Max="600" Variant="Variant.Outlined"
+                                         HelperText="How long a snapshot waits for more VMs of the job run." />
+                        <MudNumericField @bind-Value="options.ProbationRuns" Label="Verify runs" Min="0" Max="50" Variant="Variant.Outlined" />
+                    </div>
+                    <MudSwitch T="bool" @bind-Value="options.ExperimentalReaders" Color="Color.Primary" Class="mt-2"
+                               Label="Experimental readers: read XCP-ng LVM storage (LVHD) on the snapshot LUN" />
+                    <MudText Typo="Typo.caption" Class="help-text">
+                        The layout on the LUN is read by backdafuckup itself, read-only. Each disk's chain is checked against what XCP-ng reports before the VM
+                        snapshot is removed, and every incremental compares regions that change tracking reports unchanged with the previous restore point.
+                    </MudText>
+                    <div class="d-flex mt-2"><MudSpacer /><MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="@(() => SaveOptionsAsync(system))">Save options</MudButton></div>
+                </MudExpansionPanel>
+                <MudExpansionPanel Text="Objects of this server on the array" ExpandedChanged="@(open => open ? LoadLeftoversAsync(system) : Task.CompletedTask)">
+                    @if (_leftovers.GetValueOrDefault(system.Id) is not { } leftovers)
+                    {
+                        <MudProgressLinear Indeterminate="true" />
+                    }
+                    else if (leftovers.Count == 0)
+                    {
+                        <MudText Typo="Typo.body2">None: no snapshot or presentation of this server is on the array.</MudText>
+                    }
+                    else
+                    {
+                        <MudSimpleTable Dense="true" Elevation="0">
+                            <thead><tr><th>Kind</th><th>Name</th><th>Detail</th><th>Cleanup</th></tr></thead>
+                            <tbody>
+                                @foreach (var item in leftovers)
+                                {
+                                    <tr>
+                                        <td>@item.Kind</td><td class="mono">@item.Name</td><td>@item.Detail</td>
+                                        <td>@(item.Recorded ? "recorded, removed by the cleanup" : "not recorded, removed by the orphan scan after two hours")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                    }
+                </MudExpansionPanel>
+            </MudExpansionPanels>
+        </MudPaper>
+    }
+}
+
+@code {
+    private enum Step { Address, Trust, Credentials }
+
+    private List<StorageSystemDto>? _systems;
+    private readonly Dictionary<Guid, List<StorageVolumeDto>> _volumes = [];
+    private readonly Dictionary<Guid, OptionsModel> _options = [];
+    private readonly Dictionary<Guid, List<StorageLeftoverDto>> _leftovers = [];
+    private Step? _step;
+    private bool _busy;
+    private string? _error;
+    private string _address = string.Empty;
+    private int _port = 443;
+    private CertificateDto? _certificate;
+    private string _name = string.Empty;
+    private string _userName = string.Empty;
+    private string _password = string.Empty;
+
+    /// <summary>Editable copy of a system's options.</summary>
+    private sealed class OptionsModel
+    {
+        public int ExpiryHours { get; set; }
+
+        public int MaxVmsPerSnapshot { get; set; }
+
+        public int BatchWindowSeconds { get; set; }
+
+        public bool ExperimentalReaders { get; set; }
+
+        public int ProbationRuns { get; set; }
+
+        public static OptionsModel From(StorageSystemOptionsDto o) => new()
+        {
+            ExpiryHours = o.ExpiryHours, MaxVmsPerSnapshot = o.MaxVmsPerSnapshot, BatchWindowSeconds = o.BatchWindowSeconds, ExperimentalReaders = o.ExperimentalReaders,
+            ProbationRuns = o.ProbationRuns,
+        };
+
+        public StorageSystemOptionsDto ToDto() => new(ExpiryHours, MaxVmsPerSnapshot, BatchWindowSeconds, ExperimentalReaders, ProbationRuns);
+    }
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _systems = await Api.GetAsync<List<StorageSystemDto>>("api/storage-systems");
+        foreach (var system in _systems)
+        {
+            _options[system.Id] = OptionsModel.From(system.Options);
+            _volumes[system.Id] = await Api.GetAsync<List<StorageVolumeDto>>($"api/storage-systems/{system.Id}/volumes");
+        }
+    }
+
+    private static string Layout(string layout) => layout switch
+    {
+        "Lvhd" => "XCP-ng LVM (LVHD)",
+        "Vmfs5" => "VMFS 5",
+        "Vmfs6" => "VMFS 6",
+        _ => layout,
+    };
+
+    private void StartAdding()
+    {
+        _step = Step.Address;
+        _error = null;
+        _certificate = null;
+        _address = string.Empty;
+        _port = 443;
+        _name = string.Empty;
+        _userName = string.Empty;
+        _password = string.Empty;
+    }
+
+    private Task ProbeAsync() => RunAsync(async () =>
+    {
+        _certificate = await Api.PostAsync<CertificateDto>("api/storage-systems/probe", new ProbeRequestDto(_address.Trim(), _port, "AlletraMp"));
+        _name = string.IsNullOrEmpty(_name) ? _address.Trim() : _name;
+        _step = Step.Trust;
+    });
+
+    private Task CreateAsync() => RunAsync(async () =>
+    {
+        var created = await Api.PostAsync<StorageSystemDto>("api/storage-systems", new CreateStorageSystemDto
+        {
+            Name = _name.Trim(),
+            Address = _address.Trim(),
+            Port = _port,
+            UserName = _userName.Trim(),
+            Password = _password,
+            TrustedCertificates = _certificate is null ? [] : [_certificate],
+        });
+        _step = null;
+        _password = string.Empty;
+        Snackbar.Add($"Storage system {created.Name} added: {created.Volumes} volume(s) with a datastore or SR found. Turn on those backups may use.", Severity.Success);
+        await LoadAsync();
+    });
+
+    private Task TestAsync(StorageSystemDto system) => RunAsync(async () =>
+    {
+        var tested = await Api.PostAsync<StorageSystemDto>($"api/storage-systems/{system.Id}/test");
+        Snackbar.Add(tested.LastError is null ? $"{tested.Name}: connected." : $"{tested.Name}: {tested.LastError}", tested.LastError is null ? Severity.Success : Severity.Error);
+        await LoadAsync();
+    });
+
+    private Task RefreshAsync(StorageSystemDto system) => RunAsync(async () =>
+    {
+        _volumes[system.Id] = await Api.PostAsync<List<StorageVolumeDto>>($"api/storage-systems/{system.Id}/volumes/refresh");
+        Snackbar.Add($"{system.Name}: mapping refreshed.", Severity.Success);
+    });
+
+    private Task SetVolumeAsync(StorageSystemDto system, StorageVolumeDto volume, bool enabled) => RunAsync(async () =>
+    {
+        if (enabled)
+        {
+            var confirmed = await Dialogs.ShowMessageBoxAsync(
+                $"Use volume {volume.VolumeName}?",
+                $"Backups of jobs with 'Backup from storage snapshots' will take snapshots of {volume.VolumeName} ({volume.StorageName}) on {system.Name} and present " +
+                "them to a backup proxy. Turn on only volumes this server may snapshot.",
+                yesText: "Turn on", cancelText: "Cancel");
+            if (confirmed != true)
+            {
+                return;
+            }
+        }
+
+        await Api.PutAsync($"api/storage-systems/{system.Id}/volumes/{volume.Id}", new SetStorageVolumeDto(enabled));
+        await LoadAsync();
+    });
+
+    private Task SaveOptionsAsync(StorageSystemDto system) => RunAsync(async () =>
+    {
+        await Api.PutAsync<StorageSystemDto>($"api/storage-systems/{system.Id}/options", _options[system.Id].ToDto());
+        Snackbar.Add($"{system.Name}: options saved.", Severity.Success);
+        await LoadAsync();
+    });
+
+    private async Task LoadLeftoversAsync(StorageSystemDto system)
+    {
+        _leftovers.Remove(system.Id);
+        await RunAsync(async () => _leftovers[system.Id] = await Api.GetAsync<List<StorageLeftoverDto>>($"api/storage-systems/{system.Id}/leftovers"));
+    }
+
+    private async Task RemoveAsync(StorageSystemDto system)
+    {
+        var confirmed = await Dialogs.ShowMessageBoxAsync(
+            $"Remove {system.Name}?",
+            "The server forgets the array and its volume mapping. It refuses while snapshots or presentations of this server are still on the array. Nothing on the array is changed.",
+            yesText: "Remove", cancelText: "Cancel");
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        await RunAsync(async () =>
+        {
+            await Api.DeleteAsync($"api/storage-systems/{system.Id}");
+            Snackbar.Add($"{system.Name} removed.", Severity.Success);
+            await LoadAsync();
+        });
+    }
+
+    private async Task RunAsync(Func<Task> action)
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            await action();
+        }
+        catch (ApiException ex)
+        {
+            _error = ex.Message;
+            Snackbar.Add(ex.Message, Severity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

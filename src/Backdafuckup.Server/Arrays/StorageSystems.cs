@@ -201,6 +201,37 @@ public sealed class StorageSystems(
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>How the server uses the array's snapshots: expiry, batches, experimental readers, verify runs (each within its range).</summary>
+    public async Task<StorageSystemDto> SetOptionsAsync(Guid id, StorageSystemOptionsDto options, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        Check(options.ExpiryHours, 1, 72, "The expiry");
+        Check(options.MaxVmsPerSnapshot, 1, 32, "VMs per snapshot");
+        Check(options.BatchWindowSeconds, 0, 600, "The batch window");
+        Check(options.ProbationRuns, 0, 50, "Verify runs");
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var system = await FindAsync(db, id, cancellationToken).ConfigureAwait(false);
+        system.Options = new StorageSystemOptions
+        {
+            ExpiryHours = options.ExpiryHours,
+            MaxVmsPerSnapshot = options.MaxVmsPerSnapshot,
+            BatchWindowSeconds = options.BatchWindowSeconds,
+            ExperimentalReaders = options.ExperimentalReaders,
+            ProbationRuns = options.ProbationRuns,
+        };
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        var volumes = await db.StorageVolumes.Where(v => v.StorageSystemId == id).Select(v => v.Enabled).ToListAsync(cancellationToken).ConfigureAwait(false);
+        return ToDto(system, volumes.Count, volumes.Count(e => e));
+
+        static void Check(int value, int min, int max, string what)
+        {
+            if (value < min || value > max)
+            {
+                throw new StorageSystemRequestException($"{what} must be between {min} and {max} (is {value}).");
+            }
+        }
+    }
+
     /// <summary>
     /// Which volume holds which datastore or SR: the LUN WWNs every pool and vCenter reports for its storages, matched with
     /// the array's volumes. A volume keeps whether it is turned on; volumes no storage lies on any more are dropped.

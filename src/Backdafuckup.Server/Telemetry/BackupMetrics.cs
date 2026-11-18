@@ -46,6 +46,10 @@ public sealed class BackupMetrics
     private readonly Counter<long> _restoredBytes;
     private readonly Counter<long> _repackedBytes;
     private readonly Counter<long> _packedLoose;
+    private readonly Histogram<double> _arraySnapshot;
+    private readonly Histogram<double> _arrayBatch;
+    private readonly Counter<long> _arrayFallbacks;
+    private readonly Histogram<double> _vmSnapshotLifetime;
     private readonly ConcurrentDictionary<(string Pool, string Vm), VmLast> _last = new();
 
     public BackupMetrics(IMeterFactory meterFactory, RunningSessions running)
@@ -73,6 +77,11 @@ public sealed class BackupMetrics
         _packedLoose = meter.CreateCounter<long>("bdfu_repository_packed_loose_chunks_total", description: "Loose chunks of format 1 moved into packs after a conversion.");
         _tapeWritten = meter.CreateCounter<long>("bdfu_tape_written_bytes_total", "By", "Bytes written to tape (blocks with their headers), by media pool.");
         _moveBytes = meter.CreateCounter<long>("bdfu_repository_move_bytes_total", "By", "Bytes copied between the extents of a scale-out repository by moves, by scale-out repository.");
+        _arraySnapshot = Seconds(meter, "bdfu_array_snapshot_seconds", "Backup from storage snapshots: taking the array snapshot of a batch, by storage system.", SnapshotBuckets);
+        _arrayBatch = meter.CreateHistogram<double>("bdfu_array_batch_vms", description: "Backup from storage snapshots: VMs served by one array snapshot, by storage system.",
+            advice: new InstrumentAdvice<double> { HistogramBucketBoundaries = [1, 2, 3, 4, 6, 8, 12, 16, 32] });
+        _arrayFallbacks = meter.CreateCounter<long>("bdfu_array_fallback_total", description: "VMs meant to be read from an array snapshot but read from their VM snapshot, by storage system and reason.");
+        _vmSnapshotLifetime = Seconds(meter, "bdfu_vm_snapshot_lifetime_seconds", "How long a VM snapshot existed, by path (array: released before the disks were read).", SessionBuckets);
         _tapeRead = meter.CreateCounter<long>("bdfu_tape_read_bytes_total", "By", "Bytes of chunks brought back from tape, by media pool.");
 
         meter.CreateObservableGauge("bdfu_sessions_running", () =>
@@ -127,6 +136,17 @@ public sealed class BackupMetrics
         _snapshots.Add(1, Tag("pool", pool), Tag("storage", storage), Tag("consistency", consistency), Tag("method", method));
         _last[(pool, vm)] = new VmLast(facts.Duration.TotalSeconds, facts.DiskSkew?.TotalSeconds, held);
     }
+
+    public void RecordArraySnapshot(string system, TimeSpan duration, int vms)
+    {
+        _arraySnapshot.Record(duration.TotalSeconds, Tag("storage_system", system));
+        _arrayBatch.Record(vms, Tag("storage_system", system));
+    }
+
+    public void RecordArrayFallback(string system, string reason) => _arrayFallbacks.Add(1, Tag("storage_system", system), Tag("reason", reason));
+
+    public void RecordVmSnapshotLifetime(string system, string path, TimeSpan lifetime) =>
+        _vmSnapshotLifetime.Record(lifetime.TotalSeconds, Tag("storage_system", system), Tag("path", path));
 
     public void RecordRelease(string pool, SnapshotFacts facts, TimeSpan release) =>
         _release.Record(release.TotalSeconds, Tag("pool", pool), Tag("storage", facts.StorageLabel));

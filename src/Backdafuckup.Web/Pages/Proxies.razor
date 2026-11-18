@@ -76,7 +76,17 @@ else if (_proxies.Count > 0)
             <MudTd>@context.HostName<br /><span class="caption mono" title="SMBIOS UUID: finds the proxy's VM in the vCenter">@context.SmbiosUuid</span></MudTd>
             <MudTd>@string.Join(", ", context.Addresses)</MudTd>
             <MudTd>@context.Version</MudTd>
-            <MudTd>@string.Join(", ", context.Capabilities.Select(Capability))</MudTd>
+            <MudTd>
+                @string.Join(", ", context.Capabilities.Select(Capability))
+                @if (context.InitiatorName is { } iqn)
+                {
+                    <br /><span class="caption mono" title="iSCSI initiator name: a host object on the array must list it">@iqn</span>
+                }
+                @if (context.Online && context.SanRefusal is { } refusal)
+                {
+                    <br /><span class="caption" title="Why the proxy offers no SAN access (backup from storage snapshots)">No SAN: @refusal</span>
+                }
+            </MudTd>
             <MudTd>@context.Devices</MudTd>
             <MudTd>
                 @Fmt.Time(context.LastSeenUtc)

@@ -279,6 +279,12 @@ else
                                         Each disk is read as its own stream. Parallel streams speed up the HTTP export, which is limited per stream,
                                         until the network is full: on a 1 Gbit/s link about two streams already reach the line rate.
                                     </MudText>
+                                    <MudSwitch T="bool" @bind-Value="_fromStorageSnapshots" Color="Color.Primary" Class="mt-3" Label="Backup from storage snapshots (automatic)" />
+                                    <MudText Typo="Typo.caption" Class="help-text">
+                                        VMs whose disks all lie on volumes turned on under Storage systems are read from a snapshot of the array, taken right after their VM
+                                        snapshot; the VM snapshot is removed before the disks are read, so it exists only seconds. Needs a backup proxy with SAN access.
+                                        Every other VM, and every VM where a step fails, is read from its VM snapshot as usual (the log says why).
+                                    </MudText>
                                     }
                                 </div>
                             </ChildContent>
@@ -579,6 +585,10 @@ else
                                 {
                                     <dt>Disk transport</dt><dd>@TransportText(_transport)</dd>
                                     <dt>In parallel</dt><dd>@_parallelVms VM(s), @_parallelDisks disk(s) per VM, @_nbdConnections NBD connection(s) per disk</dd>
+                                    @if (_fromStorageSnapshots && !IsVsphere)
+                                    {
+                                        <dt>Storage snapshots</dt><dd>automatic: VMs on turned-on volumes are read from array snapshots</dd>
+                                    }
                                 }
                                 <dt>Retries</dt><dd>@_retries</dd>
                             </dl>
@@ -785,6 +795,7 @@ else
 
     /// <summary>Kubernetes: every pod volume that is not a PVC, not only the annotated ones.</summary>
     private bool _podVolumes;
+    private bool _fromStorageSnapshots;
     private string _guestPolicy = GuestFailurePolicies.CrashConsistentWithWarning;
     private Guid? _guestCredentialId;
     private List<WindowsCredentialDto> _credentials = [];
@@ -837,6 +848,7 @@ else
             _parallelDisks = job.MaxParallelDisks;
             _guest = job.GuestProcessing;
             _podVolumes = job.KubernetesPodVolumes;
+            _fromStorageSnapshots = job.FromStorageSnapshots;
             _guestPolicy = job.GuestFailurePolicy;
             _guestCredentialId = job.GuestCredentialId;
             _guestMode = job.GuestProcessingMode;
@@ -1007,6 +1019,7 @@ else
             MaxParallelDisks = _parallelDisks,
             GuestProcessing = _guest && !IsCluster,
             KubernetesPodVolumes = IsCluster && _podVolumes,
+            FromStorageSnapshots = !IsCluster && !IsVsphere && _fromStorageSnapshots,
             GuestFailurePolicy = _guestPolicy,
             GuestCredentialId = _guest ? _guestCredentialId : null,
             GuestProcessingMode = _guestMode,

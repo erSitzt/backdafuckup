@@ -768,6 +768,34 @@ Create a role with these privileges and assign it to the backup account on the v
 | Virtual machine → Interaction | Power on · Power off · Guest operating system management (shutdown for restores) |
 | Virtual machine → Snapshot management | Create snapshot · Remove snapshot · Revert to snapshot (quick rollback) |
 
+## Backup from storage snapshots
+
+For VMs on an **HPE Alletra MP** (B10000), the disks can be read from a snapshot of the array instead of from the VM snapshot. The VM snapshot is still taken (with guest processing as usual), then the array snapshot of the volume, then the VM snapshot is removed **before** the disks are read: it exists for seconds instead of the whole backup, so less changed data piles up in it and its removal is quick. So far for **XCP-ng LVM storage over iSCSI or FC (LVHD)**; vSphere datastores follow.
+
+### Requirements
+
+- **The array:** a WSAPI user with the role *edit* in a domain that holds the volumes (no other rights are needed), and the Virtual Copy licence. Add the array under *Backup Infrastructure → Storage systems* (its certificate is pinned when added). The server finds which volume holds which SR by the LUN's WWN; only SRs on exactly one LUN can be used. Turn on each volume that may be used, one at a time.
+- **A backup proxy with SAN access** (Linux, see Backup proxies): `open-iscsi` installed (its initiator name, `/etc/iscsi/initiatorname.iscsi`, is shown on the proxy's page) and a network path to the array's iSCSI ports. On the array, a host object that lists this initiator name; the snapshots are presented to this host object only, never to a host set.
+- **The proxy must leave foreign disks alone,** or its LVM would activate the volume groups on a snapshot LUN: `devices/use_devicesfile = 1` with only the local disks in `/etc/lvm/devices/system.devices` (or a `devices/global_filter` that rejects all other disks), `global/event_activation = 0`, and no `udisks2`. Until then the proxy offers no SAN access and its page says what is missing.
+- **Experimental readers** turned on for the storage system: the LVM and VHD layout on the LUN is read by backdafuckup itself (read-only, without activating anything).
+
+### How a backup runs
+
+Turn on *Backup from storage snapshots* in the job (Transport). For each VM whose disks all lie on turned-on volumes of one storage system:
+
+1. VM snapshot (guest processing as usual), the changed blocks since the previous backup are asked for.
+2. Array snapshot of the volume, read-only, named `bdfu-…-01`, with this server's id in its comment and an expiry (6 hours by default, moved forward while it is read). VMs of the same job run that reach this point within the batch window (60 s) share one array snapshot (up to 8 by default).
+3. The snapshot is presented to the proxy's host object, the proxy logs in and opens the LUN read-only.
+4. Each disk's chain is found on the LUN and compared with what XAPI reported (volume group of the SR, logical volumes and their sizes, the VHD chain and its links). Any difference, or the storage manager working on the chain (coalesce, clone), keeps the VM on the normal path.
+5. The VM snapshot is removed (its change tracking data is kept for the next incremental), and the disks are read from the array snapshot.
+6. When the last VM of the batch is done, the LUN is closed on the proxy, the presentation removed and the snapshot deleted.
+
+Every incremental backup compares 32 regions that change tracking reports as unchanged with the previous restore point; a difference fails the backup of that VM (turn off *Experimental readers* and report it). Every other VM, and every VM where a step fails before its VM snapshot is removed, is read from its VM snapshot; the log says why, and `bdfu_array_fallback_total` counts it.
+
+### Leftovers
+
+Every array object is recorded before it is created. After a crash, the cleanup removes presentations, then snapshots, then VM snapshots. Every ten minutes the server also looks for objects of its own on the array that no record names and removes them when they are older than two hours. Objects are only removed when the array confirms they are ours: the `bdfu-` name, this server's id in the comment, a snapshot of the recorded volume, not presented elsewhere. Nothing else on the array is ever changed. The array's own expiry removes a forgotten snapshot in any case.
+
 ## Kubernetes namespaces
 
 backdafuckup backs up namespaces of Kubernetes clusters, with their objects and the data of their PVCs, or a whole cluster. It restores:

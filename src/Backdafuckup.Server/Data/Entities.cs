@@ -446,6 +446,12 @@ public sealed class BackupJob
     /// </summary>
     public bool KubernetesPodVolumes { get; set; }
 
+    /// <summary>
+    /// Backup from storage snapshots ("Automatic"): VMs whose disks all lie on turned-on volumes of a storage system are read
+    /// from an array snapshot, and their VM snapshot is removed before the disks are read. Off: the normal path.
+    /// </summary>
+    public bool FromStorageSnapshots { get; set; }
+
     public GuestFailurePolicy GuestFailurePolicy { get; set; } = GuestFailurePolicy.CrashConsistentWithWarning;
 
     /// <summary>Windows credentials to install the agent automatically where it is missing (optional).</summary>

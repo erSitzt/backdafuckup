@@ -304,6 +304,21 @@ A vCenter (7.0 or later) with a VM folder and resource pool for the tests, a bac
 | V11 | A VM with an independent disk and a VM with a user snapshot. | The independent disk left out with a warning; the user snapshot untouched, backed up from the current state. |
 | V12 | Two proxies, one on the VM's host. | The one on the VM's host is used; with it stopped, the other one. |
 
+### N. Backup from storage snapshots (XCP-ng on an HPE Alletra MP)
+
+A dedicated test volume on the array, used as an LVM over iSCSI SR in the pool, with a test VM on it; a WSAPI user with the role *edit* in the volume's domain; a backup proxy VM in the pool with interfaces in the storage networks, `open-iscsi`, and a host object on the array that lists its initiator name. Never production volumes.
+
+| # | Do | Expect |
+|---|---|---|
+| N1 | Proxy: `lvmconfig` without a devices file or filter; then set `use_devicesfile=1` (only the system disk), `event_activation=0`, stop udisks2. | First the proxy's page names the missing setting and offers no SAN access; afterwards it offers it and shows its initiator name. |
+| N2 | Add the array (*Storage systems*), refresh the mapping, turn on the test volume and *Experimental readers*. | The volume maps to the SR (by WWN, layout LVHD); production volumes are listed but stay off. |
+| N3 | A job with *Backup from storage snapshots* for the test VM; run it twice, writing in between. | Each run: VM snapshot, array snapshot `bdfu-…-01` presented to the proxy only, chain found on the LUN, VM snapshot released within seconds (log), disks read through the proxy (`array-lvhd`); the second run is incremental and its unchanged regions match. Afterwards no VLUN, no `bdfu-` snapshot, no snapshot VM; only the CBT metadata VDI. |
+| N4 | Restore the second restore point as a new VM and boot it; compare a file with the original. | Same as from a normal backup. |
+| N5 | Start a coalesce on the SR's chain (or keep a snapshot of the VM so the GC works on it) and run the job. | The chain is refused on the LUN (journal volume or sizes differ), the VM is read from its VM snapshot with a warning; the array snapshot is removed. |
+| N6 | Remove the proxy's initiator from the host object and run the job. | The VM is read normally, the log names the proxy and its initiator; `bdfu_array_fallback_total{reason="no_proxy"}` rises. |
+| N7 | Restart the server after the array snapshot was taken (while the disks are read). | At start the cleanup removes the presentation, then the snapshot, then the VM snapshot leftovers; nothing of ours is left on the array. |
+| N8 | Create a `bdfu-` snapshot by hand with another comment, wait for the orphan scan. | It is not touched (not ours). |
+
 ## Results
 
 | Check | Date | Server / agent version | Result | Notes |

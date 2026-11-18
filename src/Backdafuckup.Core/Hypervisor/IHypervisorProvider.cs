@@ -144,7 +144,8 @@ public interface IVmBackupSession : IAsyncDisposable
     /// <summary>
     /// Removes the VM snapshot now, after <see cref="GetChangedExtentsAsync"/> was asked for every disk and the disks are read
     /// from elsewhere (an array snapshot). Afterwards <see cref="OpenReaderAsync"/> throws, and <see cref="CommitAsync"/>
-    /// only completes what is left (ledger rows, change-tracking data).
+    /// only completes what is left (ledger rows, change-tracking data). Throws only while the snapshot is still whole, so
+    /// that the disks can then be read from it as usual.
     /// </summary>
     Task ReleaseSnapshotAsync(IOperationLog log, CancellationToken cancellationToken) =>
         throw new NotSupportedException("This platform keeps its VM snapshot until the backup is committed.");

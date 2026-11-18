@@ -177,3 +177,24 @@ public static class Wwns
         return text.Length == 33 && text[0] == '3' ? text[1..] : text;
     }
 }
+
+/// <summary>A member of a disk's chain on its storage as the platform reported it at the snapshot (leaf first).</summary>
+/// <param name="Id">The platform's id of the member (XCP-ng: the VDI uuid, which names its LVHD volume).</param>
+/// <param name="PhysicalUtilisation">The member's size on the storage (XCP-ng LVHD: its logical volume).</param>
+public sealed record ArrayChainMember(string Id, long VirtualSize, long PhysicalUtilisation);
+
+/// <summary>Where one disk of a VM snapshot lies: its storage, the layout there, and its chain on it.</summary>
+public sealed record ArrayDiskFacts(string StorageId, StorageLayout Layout, IReadOnlyList<ArrayChainMember> Chain);
+
+/// <summary>
+/// Optional on a VM backup session: what is needed to read its disks from an array snapshot of their storage instead of
+/// from the VM snapshot (recorded while the VM snapshot exists, before it is released early).
+/// </summary>
+public interface IArraySnapshotFacts
+{
+    /// <summary>
+    /// Per disk key, asked only on the array path (it costs platform calls); a disk missing here is not readable from an
+    /// array snapshot, and the VM takes the normal path.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, ArrayDiskFacts>> GetArrayDisksAsync(CancellationToken cancellationToken);
+}

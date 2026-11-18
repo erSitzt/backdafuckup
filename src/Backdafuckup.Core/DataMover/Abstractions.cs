@@ -77,14 +77,13 @@ public interface IDiskTransport
 public interface ISnapshotLifecycleHook
 {
     Task<ArrayReadLease?> OnVmSnapshotCreatedAsync(VmSnapshotContext context, IOperationLog log, CancellationToken cancellationToken);
-
-    Task OnBackupFinishedAsync(VmSnapshotContext context, ArrayReadLease? lease, bool success, IOperationLog log, CancellationToken cancellationToken);
 }
 
 /// <summary>What the hook needs of a VM's backup: its job run, connection, session and the previous change tokens.</summary>
 /// <param name="Previous">The change token of each disk's previous restore point (null: none).</param>
+/// <param name="MaxPeers">How many VMs of the job run can be at this point at once (a batch waits for no more).</param>
 public sealed record VmSnapshotContext(
-    Guid SessionId, Guid JobId, Guid ConnectionId, IHypervisorSession Hypervisor, IVmBackupSession Session, IReadOnlyDictionary<string, ChangeToken?> Previous);
+    Guid SessionId, Guid JobId, Guid ConnectionId, IHypervisorSession Hypervisor, IVmBackupSession Session, IReadOnlyDictionary<string, ChangeToken?> Previous, int MaxPeers = 1);
 
 /// <summary>
 /// The disks of one VM read from an array snapshot instead of from the VM snapshot: their changed extents (asked while the
@@ -98,6 +97,9 @@ public abstract class ArrayReadLease : IAsyncDisposable
 
     /// <summary>The transport recorded for the disks: <c>array-esxi-hotadd</c>, <c>array-vmfs</c> or <c>array-lvhd</c>.</summary>
     public abstract string Transport { get; }
+
+    /// <summary>For the restore point's manifest: which array snapshots, how, and how long the VM snapshot lived.</summary>
+    public abstract Repository.ArraySnapshotInfo Info { get; }
 
     public abstract ChangedExtents GetChangedExtents(SnapshotDisk disk);
 

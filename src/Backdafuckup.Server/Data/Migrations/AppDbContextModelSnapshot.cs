@@ -307,6 +307,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("enabled");
 
+                    b.Property<bool>("FromStorageSnapshots")
+                        .HasColumnType("boolean")
+                        .HasColumnName("from_storage_snapshots");
+
                     b.Property<Guid?>("GuestCredentialId")
                         .HasColumnType("uuid")
                         .HasColumnName("guest_credential_id");

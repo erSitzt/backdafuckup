@@ -3,9 +3,28 @@ using Backdafuckup.Xen.Xapi;
 
 namespace Backdafuckup.Xen;
 
-/// <summary>Which LUN holds an SR: for LVM over iSCSI or FC (LVHD) the SCSI id of its PBDs, which every host must agree on.</summary>
-internal sealed partial class XenHypervisorSession : IStorageBackingSource
+/// <summary>
+/// Which LUN holds an SR: for LVM over iSCSI or FC (LVHD) the SCSI id of its PBDs, which every host must agree on. And the
+/// gate of the SRs while an array snapshot of their LUNs is taken: the same per-SR gate our VM snapshots take, so no
+/// VM snapshot of ours is half done in the volume group when the array copies it.
+/// </summary>
+internal sealed partial class XenHypervisorSession : IStorageBackingSource, IStorageSnapshotGate
 {
+    public async Task<IAsyncDisposable> HoldAsync(IReadOnlyCollection<string> storageIds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(storageIds);
+        return new GateHold(await Provider.SnapshotGate.EnterAsync(storageIds, cancellationToken).ConfigureAwait(false));
+    }
+
+    private sealed class GateHold(XenSnapshotGate.Lease lease) : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync()
+        {
+            lease.Dispose();
+            return ValueTask.CompletedTask;
+        }
+    }
+
     public async Task<IReadOnlyList<StorageBacking>> GetStorageBackingAsync(IReadOnlyCollection<string> storageIds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(storageIds);

@@ -52,6 +52,9 @@ public static class AppIcons
     /// <summary>Backup proxies (Linux agents that read and write vSphere disks).</summary>
     public const string Proxy = Icons.Material.Filled.SwapHoriz;
 
+    /// <summary>A storage array (backup from storage snapshots).</summary>
+    public const string StorageSystem = Icons.Material.Filled.Storage;
+
     /// <summary>A VM, or a guest computer (also an Active Directory computer object).</summary>
     public const string Vm = Icons.Material.Filled.Computer;
 

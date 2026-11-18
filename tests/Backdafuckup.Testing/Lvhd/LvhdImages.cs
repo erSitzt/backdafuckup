@@ -110,7 +110,7 @@ public static class PvBuilder
     private const long MdaSize = 1L << 20;
     private const string PvId = "abcdef0123456789abcdef0123456789";
 
-    /// <summary>An LV: its name and content, or a name with a size only (journal and other volumes), or several segments.</summary>
+    /// <summary>An LV: its name and content (in at least <paramref name="Extents"/> extents), or a name with a size only (journal and other volumes), or several segments.</summary>
     public sealed record Volume(string Name, byte[]? Content = null, long Extents = 1, bool Striped = false, int Segments = 1);
 
     public static byte[] Build(string vgName, IReadOnlyList<Volume> volumes, int seqno = 7, bool corruptText = false, string? olderText = null)
@@ -119,7 +119,8 @@ public static class PvBuilder
         var nextExtent = 0L;
         foreach (var volume in volumes)
         {
-            var extents = volume.Content is null ? volume.Extents : Math.Max(1, (volume.Content.Length + ExtentBytes - 1) / ExtentBytes);
+            // With content: at least as large as the content, larger if asked (an inflated volume).
+            var extents = volume.Content is null ? volume.Extents : Math.Max(volume.Extents, (volume.Content.Length + ExtentBytes - 1) / ExtentBytes);
             extents = (extents + volume.Segments - 1) / volume.Segments * volume.Segments;
             placed.Add((volume, extents, nextExtent));
             nextExtent += extents + 1; // a free extent between volumes, so mapping errors show

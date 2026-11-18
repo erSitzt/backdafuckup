@@ -17,7 +17,7 @@ namespace Backdafuckup.Xen;
 /// Backup of one VM: crash-consistent snapshot, CBT queries, NBD readers, and on commit conversion of the
 /// snapshot disks to change-tracking metadata (VDI.data_destroy) for the next incremental backup.
 /// </summary>
-internal sealed class XenBackupSession : IVmBackupSession
+internal sealed class XenBackupSession : IVmBackupSession, Backdafuckup.Core.Arrays.IArraySnapshotFacts
 {
     private readonly XenHypervisorSession _owner;
     private readonly XapiSession _xapi;
@@ -31,6 +31,12 @@ internal sealed class XenBackupSession : IVmBackupSession
     private int _cbtBreakLogged;
     private bool _committed;
     private bool _commitDeferred;
+
+    /// <summary>The snapshot VM is gone and its disks reduced to CBT metadata before the disks were read (from an array snapshot).</summary>
+    private bool _released;
+
+    /// <summary>Disks already reduced to CBT metadata by an early release.</summary>
+    private readonly HashSet<string> _metadataOnly = new(StringComparer.Ordinal);
     private bool _disposed;
 
     private XenBackupSession(
@@ -601,6 +607,11 @@ internal sealed class XenBackupSession : IVmBackupSession
 
     public async Task<IDiskSource> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken)
     {
+        if (_released)
+        {
+            throw new InvalidOperationException($"The snapshot of {Vm.Name} was released early; its disks are read from the array snapshot.");
+        }
+
         var state = _disks[disk.Key];
         _log.Info($"Disk {disk.Name}: selecting the transport ({ModeText(options.Transport)}).");
         if (options.Transport == DiskTransportMode.HttpExportOnly)
@@ -832,8 +843,117 @@ internal sealed class XenBackupSession : IVmBackupSession
     public ChangeToken? GetNewChangeToken(SnapshotDisk disk) =>
         _disks.TryGetValue(disk.Key, out var state) && state.CbtUsable ? new ChangeToken(XenTags.ChangeTokenKind, state.Disk.SnapshotDiskId) : null;
 
+    /// <summary>Every disk keeps CBT metadata (data_destroy) and the snapshot has no memory image.</summary>
+    public bool CanReleaseEarly => Memory is null && _disks.Values.All(d => d.CbtUsable && !d.Discard);
+
+    /// <summary>
+    /// Removes the snapshot VM and reduces its disks to CBT metadata now (the disks are read from an array snapshot). The
+    /// metadata VDIs stay Active in the ledger: removed if the backup fails, kept for the next incremental at commit.
+    /// Throws only while the snapshot is still whole; a disk that cannot be reduced yet is reduced again at commit.
+    /// </summary>
+    public async Task ReleaseSnapshotAsync(IOperationLog log, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(log);
+        if (!CanReleaseEarly)
+        {
+            throw new InvalidOperationException($"The snapshot of {Vm.Name} cannot be released before its disks are read.");
+        }
+
+        var watch = Stopwatch.StartNew();
+        await _xapi.CallAsync("VM.destroy", cancellationToken, _snapshotRef).ConfigureAwait(false);
+        await _ledger.UpdateAsync(_snapshotArtifact, ArtifactState.Done, null, cancellationToken).ConfigureAwait(false);
+        _released = true;
+        foreach (var state in _disks.Values)
+        {
+            try
+            {
+                await XenHypervisorSession.DataDestroyAsync(_xapi, state.SnapshotVdiRef, log, cancellationToken, _owner.Provider.Options.SnapshotReleaseTimeout).ConfigureAwait(false);
+                _metadataOnly.Add(state.Disk.Key);
+            }
+            catch (Exception ex) when (ex is XenSnapshotInUseException or XapiException or HttpRequestException or IOException)
+            {
+                log.Warning($"Disk {state.Disk.Name}: its snapshot disk is not reduced to change tracking data yet ({ex.Message}); tried again when the backup is finished.");
+            }
+        }
+
+        ReleaseDuration = watch.Elapsed;
+        log.Info($"Snapshot of {Vm.Name} released before its disks are read (reduced to change tracking data in {watch.Elapsed.TotalSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)} s).");
+    }
+
+    /// <summary>
+    /// For a backup from an array snapshot: each disk's SR, its layout (LVHD for LVM over iSCSI or FC), and the chain of
+    /// the snapshot VDI down through its base copies (sm_config vhd-parent) with their sizes, as XAPI reports them now.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, Backdafuckup.Core.Arrays.ArrayDiskFacts>> GetArrayDisksAsync(CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<string, Backdafuckup.Core.Arrays.ArrayDiskFacts>(StringComparer.Ordinal);
+        foreach (var state in _disks.Values.Where(d => !d.Discard))
+        {
+            var srRef = await _xapi.TryGetByUuidAsync("SR", state.Disk.StorageId, cancellationToken).ConfigureAwait(false);
+            if (srRef is null)
+            {
+                continue;
+            }
+
+            var sr = await _xapi.GetRecordAsync("SR", srRef, cancellationToken).ConfigureAwait(false);
+            if (sr.Str("type") is not ("lvmoiscsi" or "lvmohba"))
+            {
+                continue;
+            }
+
+            var chain = new List<Backdafuckup.Core.Arrays.ArrayChainMember>();
+            var vdi = await _xapi.GetRecordAsync("VDI", state.SnapshotVdiRef, cancellationToken).ConfigureAwait(false);
+            while (vdi is not null && chain.Count < 64)
+            {
+                chain.Add(new Backdafuckup.Core.Arrays.ArrayChainMember(vdi.Str("uuid"), vdi.Long("virtual_size"), vdi.Long("physical_utilisation")));
+                var parent = vdi.Map("sm_config").GetValueOrDefault("vhd-parent");
+                vdi = parent is { Length: > 0 } && await _xapi.TryGetByUuidAsync("VDI", parent, cancellationToken).ConfigureAwait(false) is { } parentRef
+                    ? await _xapi.GetRecordAsync("VDI", parentRef, cancellationToken).ConfigureAwait(false)
+                    : null;
+            }
+
+            result[state.Disk.Key] = new Backdafuckup.Core.Arrays.ArrayDiskFacts(state.Disk.StorageId, Backdafuckup.Core.Arrays.StorageLayout.Lvhd, chain);
+        }
+
+        return result;
+    }
+
     public async Task CommitAsync(IOperationLog log, CancellationToken cancellationToken)
     {
+        if (_released)
+        {
+            // The snapshot VM is gone already; its CBT metadata now belongs to the restore point. A disk not reduced yet is
+            // reduced now (or by the background retry, which finds its row CommitPending).
+            foreach (var state in _disks.Values.Where(d => !_metadataOnly.Contains(d.Disk.Key)))
+            {
+                await _ledger.UpdateAsync(state.Artifact, ArtifactState.CommitPending, null, cancellationToken).ConfigureAwait(false);
+            }
+
+            foreach (var state in _disks.Values)
+            {
+                if (!_metadataOnly.Contains(state.Disk.Key))
+                {
+                    try
+                    {
+                        await XenHypervisorSession.DataDestroyAsync(_xapi, state.SnapshotVdiRef, log, cancellationToken, _owner.Provider.Options.SnapshotReleaseTimeout).ConfigureAwait(false);
+                    }
+                    catch (XenSnapshotInUseException ex)
+                    {
+                        _commitDeferred = true;
+                        throw new SnapshotCleanupDeferredException(
+                            $"Disk {state.Disk.Name}: {ex.Message}. The restore point is complete. The snapshot disk of '{Vm.Name}' is reduced to change tracking data in the background " +
+                            "(retried every 10 minutes and at service start).",
+                            ex);
+                    }
+                }
+
+                await _ledger.UpdateAsync(state.Artifact, ArtifactState.Done, null, cancellationToken).ConfigureAwait(false);
+            }
+
+            _committed = true;
+            return;
+        }
+
         var watch = Stopwatch.StartNew();
         foreach (var state in _disks.Values)
         {
@@ -893,7 +1013,25 @@ internal sealed class XenBackupSession : IVmBackupSession
         }
 
         _disposed = true;
-        if (!_committed && !_commitDeferred)
+        if (!_committed && _released)
+        {
+            // Released early, then the backup failed: its CBT metadata VDIs belong to no restore point.
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            foreach (var disk in _disks.Values)
+            {
+                try
+                {
+                    await XenHypervisorSession.DestroyVdiByUuidAsync(_xapi, disk.Disk.SnapshotDiskId, _log, timeout.Token).ConfigureAwait(false);
+                    await _ledger.UpdateAsync(disk.Artifact, ArtifactState.Done, null, timeout.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is XapiException or HttpRequestException or IOException or OperationCanceledException)
+                {
+                    _log.Warning($"The change tracking data of {disk.Disk.Name} could not be removed ({ex.Message}); it is removed later.");
+                    await _ledger.UpdateAsync(disk.Artifact, ArtifactState.CleanupPending, null, CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+        }
+        else if (!_committed && !_commitDeferred)
         {
             await RollbackAsync(_xapi, _log, _ledger, SnapshotId, _snapshotArtifact, _disks.Values).ConfigureAwait(false);
         }

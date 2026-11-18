@@ -311,6 +311,38 @@ public sealed class FakeXenPool : IAsyncDisposable
         return certificate.ExportCertificatePem();
     }
 
+    /// <summary>
+    /// What an LVHD SR reports as a VDI's physical utilisation beyond its virtual size (inflated leaves and base copies);
+    /// a snapshot leaf is deflated to this size alone.
+    /// </summary>
+    public const long LvhdOverhead = 8L * 1024 * 1024;
+
+    /// <summary>Moves a disk to another SR (a VM whose disks lie on a LUN SR).</summary>
+    public void MoveVdi(string vdiUuid, string srRef)
+    {
+        lock (_lock)
+        {
+            var vdi = _tables["VDI"].Values.Single(v => v["uuid"]!.GetValue<string>() == vdiUuid);
+            vdi["SR"] = srRef;
+            if (IsLvhd(srRef))
+            {
+                vdi["physical_utilisation"] = vdi["virtual_size"]!.GetValue<long>() + LvhdOverhead;
+            }
+        }
+    }
+
+    /// <summary>The data of a VDI as it is now (a snapshot's or base copy's content), by uuid.</summary>
+    public byte[] VdiData(string vdiUuid)
+    {
+        lock (_lock)
+        {
+            var (vdiRef, _) = _tables["VDI"].Single(v => v.Value["uuid"]!.GetValue<string>() == vdiUuid);
+            return (byte[])_data[vdiRef].Clone();
+        }
+    }
+
+    private bool IsLvhd(string srRef) => _tables["SR"][srRef]["type"]?.GetValue<string>() is "lvmoiscsi" or "lvmohba";
+
     /// <summary>An LVM over iSCSI SR (lvmoiscsi) on the LUN with this SCSI id ("3" + WWN): its PBD names it in device_config.</summary>
     public (string Ref, string Uuid) AddLunSr(string name, string scsiId)
     {
@@ -686,6 +718,30 @@ public sealed class FakeXenPool : IAsyncDisposable
             });
             captured += DiskSnapshotInterval;
             _data[snapVdi] = (byte[])_data[sourceRef].Clone();
+            if (IsLvhd(source["SR"]!.GetValue<string>()))
+            {
+                // Like the LVHD storage manager: the disk's data becomes a hidden base copy, the VM's disk and the snapshot
+                // become differencing leaves on it (the snapshot one deflated).
+                var baseRef = Add("VDI", new JsonObject
+                {
+                    ["name_label"] = "base copy",
+                    ["virtual_size"] = source["virtual_size"]!.DeepClone(),
+                    ["SR"] = source["SR"]!.DeepClone(),
+                    ["type"] = "user",
+                    ["managed"] = false,
+                    ["is_a_snapshot"] = false,
+                    ["snapshot_of"] = "OpaqueRef:NULL",
+                    ["other_config"] = new JsonObject(),
+                    ["physical_utilisation"] = source["virtual_size"]!.GetValue<long>() + LvhdOverhead,
+                    ["sm_config"] = source["sm_config"]?.DeepClone() ?? new JsonObject(),
+                });
+                _data[baseRef] = (byte[])_data[sourceRef].Clone();
+                var baseUuid = _tables["VDI"][baseRef]["uuid"]!.GetValue<string>();
+                source["sm_config"] = new JsonObject { ["vhd-parent"] = baseUuid };
+                var snapshot = _tables["VDI"][snapVdi];
+                snapshot["sm_config"] = new JsonObject { ["vhd-parent"] = baseUuid };
+                snapshot["physical_utilisation"] = LvhdOverhead;
+            }
             AddVbd(snapRef, snapVdi, vbd["userdevice"]!.GetValue<string>(), vbd["bootable"]!.GetValue<bool>());
         }
 

@@ -28,7 +28,8 @@ public sealed class BackupSessionRunner(
     TimeProvider time,
     ILogger<BackupSessionRunner> logger,
     ScaleOut.RepositoryPlacement placement,
-    ScaleOut.ChainLocks chainLocks)
+    ScaleOut.ChainLocks chainLocks,
+    Arrays.ArraySnapshotService arraySnapshots)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -123,7 +124,8 @@ public sealed class BackupSessionRunner(
                 try
                 {
                     var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, metrics, engineOptions.Value.CheckpointWithVss, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1,
-                        new ChainTargets(scope, placement, chainLocks, repositories), hypervisor);
+                        new ChainTargets(scope, placement, chainLocks, repositories), hypervisor, job.FromStorageSnapshots ? arraySnapshots : null,
+                        Math.Max(1, Math.Min(job.MaxParallelVms, pending.Count)));
                     return (item, State: await task.RunAsync(cancellationToken).ConfigureAwait(false));
                 }
                 finally
@@ -300,9 +302,14 @@ internal sealed class VmBackupTask(
     Guid taskId,
     int attempt,
     ChainTargets targets,
-    IHypervisorSession hypervisor)
+    IHypervisorSession hypervisor,
+    ISnapshotLifecycleHook? arrayHook = null,
+    int maxPeers = 1)
 {
     private readonly IOperationLog _log = events.CreateLog(session.Id, taskId, vm.CachedName);
+
+    /// <summary>The disks are read from an array snapshot (backup from storage snapshots); null: from the VM snapshot.</summary>
+    private ArrayReadLease? _arrayLease;
 
     // Set once the chain's extent is chosen (under the chain's lease).
     private IBackupRepository repository = null!;
@@ -423,6 +430,18 @@ internal sealed class VmBackupTask(
                 metrics.RecordSnapshot(Pool, vm.CachedName, facts, backup.GuestFreeze, sqlSuspended, consistency);
             }
 
+            // Backup from storage snapshots: the disks come from an array snapshot, the VM snapshot goes before they are read.
+            if (arrayHook is not null && backup.Memory is null && backup.FileTrees.Count == 0)
+            {
+                var previous = backup.Disks.ToDictionary(
+                    d => d.Key,
+                    d => baseline?.Disks.FirstOrDefault(b => b.SourceDiskId == d.SourceDiskId) is { ChangeTokenValue: not null } b ? new ChangeToken(b.ChangeTokenKind!, b.ChangeTokenValue) : null,
+                    StringComparer.Ordinal);
+                _arrayLease = await arrayHook.OnVmSnapshotCreatedAsync(
+                    new VmSnapshotContext(session.Id, job.Id, job.ConnectionId, hypervisor, backup, previous, maxPeers), _log, cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var arrayLease = _arrayLease;
             var images = backup.Memory is { } ram ? backup.Disks.Append(ram).ToList() : backup.Disks.ToList();
 
             // Volumes read file by file count with what the previous run found in them, else with their size.
@@ -592,6 +611,7 @@ internal sealed class VmBackupTask(
                 MemoryDiskIds = memoryImage is null ? null : backup.MemoryDiskIds,
                 Kubernetes = backup.Kubernetes,
                 FileTrees = fileTrees,
+                ArraySnapshot = _arrayLease?.Info,
             };
             var committed = await writer.CommitAsync(manifest, cancellationToken).ConfigureAwait(false);
 
@@ -1009,7 +1029,7 @@ internal sealed class VmBackupTask(
         var warned = false;
         var baseDisk = baseline?.Disks.FirstOrDefault(d => d.SourceDiskId == disk.SourceDiskId);
         ChangeToken? since = baseDisk is { ChangeTokenValue: not null } ? new ChangeToken(baseDisk.ChangeTokenKind!, baseDisk.ChangeTokenValue) : null;
-        var changes = await backup.GetChangedExtentsAsync(disk, since, _log, cancellationToken).ConfigureAwait(false);
+        var changes = _arrayLease is { } lease ? lease.GetChangedExtents(disk) : await backup.GetChangedExtentsAsync(disk, since, _log, cancellationToken).ConfigureAwait(false);
 
         ChunkIndex? baseIndex = null;
         if (!changes.IsFull && baseDisk is not null && baseReader is not null)
@@ -1048,7 +1068,10 @@ internal sealed class VmBackupTask(
         }
 
         UpdateDisk(disk.Key, d => d with { State = "Running", Mode = changes.IsFull ? nameof(DiskBackupMode.Full) : nameof(DiskBackupMode.Cbt), FullReason = changes.FullReason });
-        await using var reader = await backup.OpenReaderAsync(disk, new DiskReaderOptions(Math.Clamp(job.NbdConnectionsPerDisk, 1, 16), 4, job.TransportMode), cancellationToken).ConfigureAwait(false);
+        var readerOptions = new DiskReaderOptions(Math.Clamp(job.NbdConnectionsPerDisk, 1, 16), 4, job.TransportMode);
+        await using var reader = _arrayLease is { } arrayRead
+            ? await arrayRead.OpenReaderAsync(disk, readerOptions, cancellationToken).ConfigureAwait(false)
+            : await backup.OpenReaderAsync(disk, readerOptions, cancellationToken).ConfigureAwait(false);
         UpdateDisk(disk.Key, d => d with { Transport = reader.TransportName });
         var result = await DiskBackupPipeline.RunAsync(
             new DiskBackupJob
@@ -1071,6 +1094,25 @@ internal sealed class VmBackupTask(
         UpdateDisk(disk.Key, d => d with { State = "Done", Mode = result.Stats.Mode.ToString(), FullReason = result.Stats.FullReason, Transport = result.Stats.Transport, Metrics = diskMetrics });
         _log.Info($"{DiskNoun} {disk.Name}: {result.Stats.Mode} via {result.Stats.Transport}: {MetricsText.Describe(diskMetrics)}.", key);
 
+        // An experimental reader is checked on every run: chunks unchanged since the previous restore point must read as stored then.
+        var stats = result.Stats;
+        if (_arrayLease is not null && baseIndex is not null && reader is IDiskReader random)
+        {
+            var verification = await Arrays.UnchangedRegionCheck.RunAsync(random, changes, baseIndex, 32, cancellationToken).ConfigureAwait(false);
+            if (verification is { Passed: false })
+            {
+                throw new InvalidDataException(
+                    $"{DiskNoun} {disk.Name}: {verification.Mismatches} of {verification.Regions} regions that change tracking reports unchanged read differently from the previous restore point " +
+                    $"through {_arrayLease.Description}. The restore point is not kept; turn off 'Experimental readers' for this storage system and report the case.");
+            }
+
+            if (verification is not null)
+            {
+                _log.Info($"{DiskNoun} {disk.Name}: {verification.Regions} unchanged region(s) read from the array snapshot match the previous restore point.");
+                stats = stats with { Verification = verification };
+            }
+        }
+
         var indexRef = await writer.WriteDiskIndexAsync(disk.Key, result.Index, cancellationToken).ConfigureAwait(false);
         return (new ManifestDisk
         {
@@ -1082,8 +1124,8 @@ internal sealed class VmBackupTask(
             StorageId = disk.StorageId,
             StorageName = disk.StorageName,
             Index = indexRef,
-            ChangeToken = backup.GetNewChangeToken(disk),
-            Stats = result.Stats,
+            ChangeToken = _arrayLease?.GetNewChangeToken(disk) ?? backup.GetNewChangeToken(disk),
+            Stats = stats,
         }, warned);
     }
 
