@@ -345,6 +345,14 @@ public sealed class SqlBackupLane
         {
             Skip("SIMPLE recovery (no log backups)");
         }
+        else if (database.HasLogChain && request.FullWithoutChain && request.DatabasesWithBase is { } withBase
+            && !withBase.Contains($"{database.Instance}\\{database.Name}", StringComparer.OrdinalIgnoreCase))
+        {
+            // E.g. a restored copy: SQL Server continues the log chain of the backups it was restored from, which the
+            // server does not hold for this database. A log backup would not be restorable; a full starts its own chain.
+            outcome.Action = SqlBackupActions.Full;
+            outcome.Reason = "new to the backups (its log continues backups made elsewhere, e.g. it was restored from another database's backups): a full backup starts its chain";
+        }
         else if (database.HasLogChain)
         {
             outcome.Action = SqlBackupActions.Log;

@@ -1092,6 +1092,14 @@ public sealed class SqlJobRequest
     /// <summary>LogBackup: a database in FULL or BULK_LOGGED recovery without a log chain gets a native full backup.</summary>
     public bool FullWithoutChain { get; set; }
 
+    /// <summary>
+    /// LogBackup with <see cref="FullWithoutChain"/>: the user databases the server holds a full backup of
+    /// (<c>instance\name</c>). A database with a log chain that is not listed is new to the backups (e.g. restored from
+    /// another database's backups, whose chain SQL Server continues): it gets a full backup instead of a log backup.
+    /// Null: not checked (servers before this list).
+    /// </summary>
+    public List<string>? DatabasesWithBase { get; set; }
+
     /// <summary>LogBackup: report backup sets of other tools that finished since then (UTC).</summary>
     public DateTime? ForeignSinceUtc { get; set; }
 

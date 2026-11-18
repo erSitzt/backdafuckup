@@ -63,6 +63,43 @@ public sealed class SqlBackupLaneTests(SqlServerFixture sql) : IClassFixture<Sql
     }
 
     [Fact]
+    public async Task A_restored_copy_the_server_holds_no_full_of_gets_a_full_backup_instead_of_a_log_backup()
+    {
+        Assert.SkipUnless(SqlServerFixture.Enabled, "Tests against a SQL Server container need about 2 GB of memory. Set BDFU_SQL_TESTS=1 for the run to enable them.");
+        await sql.ExecuteAsync("CREATE DATABASE lane_r; ALTER DATABASE lane_r SET RECOVERY FULL;");
+        await sql.ExecuteAsync($"BACKUP DATABASE lane_r TO DISK = N'{Data}/lane_r_source.bak' WITH INIT;");
+        await sql.ExecuteAsync(
+            $"RESTORE DATABASE lane_rc FROM DISK = N'{Data}/lane_r_source.bak' WITH MOVE N'lane_r' TO N'{Data}/lane_rc.mdf', MOVE N'lane_r_log' TO N'{Data}/lane_rc_log.ldf', RECOVERY;");
+        try
+        {
+            var (lane, sink, _, _, _) = await LaneAsync();
+
+            // SQL Server continues lane_r's log chain in the copy, but the server holds a full of lane_r only.
+            var request = Request(SqlJobKinds.LogBackup, fullWithoutChain: true, only: "lane_rc");
+            request.DatabasesWithBase = [@"MSSQLSERVER\lane_r"];
+            var result = await RunAsync(lane, request);
+
+            var copy = result.BackupDatabases!.Single(d => d.Database == "lane_rc");
+            Assert.Equal((SqlBackupActions.Full, true), (copy.Action, copy.HasLogChain));
+            Assert.StartsWith("new to the backups", copy.Reason, StringComparison.Ordinal);
+            Assert.Equal([("lane_rc", "full")], sink.Committed.Select(c => (c.Database, c.Kind)));
+
+            // Once the server holds that full, the log is backed up.
+            sink.Committed.Clear();
+            request = Request(SqlJobKinds.LogBackup, fullWithoutChain: true, only: "lane_rc");
+            request.DatabasesWithBase = [@"MSSQLSERVER\lane_r", @"mssqlserver\LANE_RC"];
+            result = await RunAsync(lane, request);
+
+            Assert.Equal(SqlBackupActions.Log, result.BackupDatabases!.Single(d => d.Database == "lane_rc").Action);
+            Assert.Equal([("lane_rc", "log")], sink.Committed.Select(c => (c.Database, c.Kind)));
+        }
+        finally
+        {
+            await sql.ExecuteAsync("DROP DATABASE lane_rc; DROP DATABASE lane_r;");
+        }
+    }
+
+    [Fact]
     public async Task Files_whose_upload_fails_stay_queued_and_go_first_in_the_next_run()
     {
         Assert.SkipUnless(SqlServerFixture.Enabled, "Tests against a SQL Server container need about 2 GB of memory. Set BDFU_SQL_TESTS=1 for the run to enable them.");
@@ -195,7 +232,7 @@ public sealed class SqlBackupLaneTests(SqlServerFixture sql) : IClassFixture<Sql
         Account = Sa,
         Instance = "MSSQLSERVER",
         FullWithoutChain = fullWithoutChain,
-        ExcludedDatabases = only is null ? null : ["lane_a", "lane_simple", "lane_q", "lane_i", "lane_f"],
+        ExcludedDatabases = only is null ? null : ["lane_a", "lane_simple", "lane_q", "lane_i", "lane_f", "lane_r", "lane_rc"],
         ForeignSinceUtc = foreignSince,
         SystemDatabases = systemDatabases,
         BackupJobId = Guid.NewGuid(),

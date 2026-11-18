@@ -1421,6 +1421,61 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
             {
                 Assert.Equal(Backdafuckup.Server.Data.SqlChainState.Simple, (await db.SqlDatabases.SingleAsync(d => d.Name == "shop", Ct)).ChainState);
             }
+
+            // A copy restored from shop's backups appears: SQL Server continues shop's log chain in it, but we hold no full of
+            // it. Its full backup comes first (no log backup that nothing restorable continues), as information, not a warning.
+            sql.AddRestoredCopy("shop_copy", "shop", @"D:\SQL\shop_copy.mdf", @"L:\Log\shop_copy_log.ldf");
+            var lane = 0;
+            var (runState, runLines, sessionLines) = await RunDueAsync();
+            Assert.Equal([("shop_copy", "D")], sql.LaneBackups.Skip(lane).Select(b => (b.Database, b.Type)));
+            Assert.Contains(runLines, l => l.Severity == "Info" && l.Message.Contains(@"SQLEXPRESS\shop_copy: new to the backups (its log continues backups made elsewhere", StringComparison.Ordinal));
+            Assert.Equal("Succeeded", runState);
+            Assert.DoesNotContain(sessionLines, l => l.Severity != "Info");
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                Assert.Equal(Backdafuckup.Server.Data.SqlChainState.Ok, (await db.SqlDatabases.SingleAsync(d => d.Name == "shop_copy", Ct)).ChainState);
+            }
+
+            // Then shop_copy is replaced by a restore of another database's backups under the same name: the agent knows the
+            // name and backs up the log, the server holds no full of this database (another family). Its full follows at
+            // once, again without a warning about a broken chain.
+            sql.AddRestoredCopy("shop_copy", "orders", @"D:\SQL\shop_copy.mdf", @"L:\Log\shop_copy_log.ldf");
+            (runState, runLines, sessionLines) = await RunDueAsync();
+            Assert.Equal([("shop_copy", "L"), ("shop_copy", "D")], sql.LaneBackups.Skip(lane).Select(b => (b.Database, b.Type)));
+            Assert.Contains(runLines, l => l.Severity == "Info" && l.Message.Contains(@"SQLEXPRESS\shop_copy: new to the backups (no full backup of it is held yet)", StringComparison.Ordinal));
+            Assert.Contains(runLines, l => l.Message.Contains("Full backup to start the log chain: [shop_copy]", StringComparison.Ordinal));
+            Assert.Equal("Succeeded", runState);
+            Assert.DoesNotContain(sessionLines, l => l.Severity != "Info");
+            await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+            {
+                var copies = await db.SqlDatabases.Where(d => d.Name == "shop_copy").OrderBy(d => d.FirstSeenUtc).ToListAsync(Ct);
+                Assert.Equal(
+                    [(ScriptedSqlEnvironment.FamilyGuid("shop"), Backdafuckup.Server.Data.SqlChainState.Ok), (ScriptedSqlEnvironment.FamilyGuid("orders"), Backdafuckup.Server.Data.SqlChainState.Ok)],
+                    copies.Select(d => (d.FamilyGuid, d.ChainState)));
+            }
+
+            // Makes the log backups due and runs them: the run's state and lines, and the session's new log lines (lane: the
+            // count of the lane backups before).
+            async Task<(string State, List<SqlBackupRunLineDto> Lines, List<LogEntryDto> Session)> RunDueAsync()
+            {
+                await using (var db = await dbFactory.CreateDbContextAsync(Ct))
+                {
+                    (await db.SqlBackupSchedules.SingleAsync(Ct)).NextLogUtc = DateTimeOffset.UtcNow.AddSeconds(-1);
+                    await db.SaveChangesAsync(Ct);
+                }
+
+                var known = (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{day.Id}/log", Ct))!.Max(l => l.Id);
+                var runs = await RunIdsAsync();
+                lane = sql.LaneBackups.Count;
+                await service.TickAsync(Ct);
+                await service.WaitIdleAsync();
+                var session = (await client.GetFromJsonAsync<List<LogEntryDto>>($"/api/sessions/{day.Id}/log", Ct))!.Where(l => l.Id > known).ToList();
+                var run = Assert.Single((await client.GetFromJsonAsync<SqlBackupDayDto>($"/api/sql/backup-days/{day.Id}", Ct))!.Runs.SelectMany(r => r.Vms), v => !runs.Contains(v.Id));
+                return (run.State, (await client.GetFromJsonAsync<List<SqlBackupRunLineDto>>($"/api/sql/backup-runs/{run.Id}/lines", Ct))!, session);
+            }
+
+            async Task<HashSet<Guid>> RunIdsAsync() =>
+                [.. (await client.GetFromJsonAsync<SqlBackupDayDto>($"/api/sql/backup-days/{day.Id}", Ct))!.Runs.SelectMany(r => r.Vms).Select(v => v.Id)];
         }
         finally
         {

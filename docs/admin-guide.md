@@ -532,7 +532,7 @@ A job backs up the transaction logs of the SQL Server databases in its VMs when 
 **Settings** (job → guest processing → *SQL Server backups*)
 - *Log backups every* 5, 15, 30 or 60 minutes, or longer (60–1440 minutes). The times are counted from midnight in the job's time zone: every 15 minutes means :00, :15, :30, :45.
 - *Full backups:* native full backups (`BACKUP DATABASE … WITH CHECKSUM`, verified with `RESTORE VERIFYONLY`) on a schedule (daily, or weekly with days and a time). By default only for databases that have no other base: SQL Server before 2022, or jobs with VSS instead of the SQL Server snapshot. *Also for databases whose base is the SQL Server snapshot* takes them for all databases.
-- *Start a missing or broken log chain with a full backup at once* (default on): a new database, a database switched from SIMPLE to FULL, or a broken chain gets a full in the same run, plus a warning.
+- *Start a missing or broken log chain with a full backup at once* (default on): a broken chain gets a full in the same run, plus a warning. A database new to the backups gets its full instead of a log backup, as information, not a warning. That covers a new database, a database switched from SIMPLE to FULL, and a restored copy. SQL Server continues the log chain of the backups a copy was restored from, but those belong to another database.
 - *System databases:* full backups of `master`, `msdb` and `model` (default daily).
 - *Leave out databases*, and the *folder in the VM* for the files until they are sent (default: the instance's backup folder, subfolder `backdafuckup`).
 - The account must be `sysadmin` on the instances. It is needed in VSS mode too once SQL Server backups are on.
@@ -549,7 +549,7 @@ A job backs up the transaction logs of the SQL Server databases in its VMs when 
 - *intact:* a base and an unbroken chain of log backups since then.
 - *no full backup:* no base yet. The next run takes a full if *Start … with a full backup at once* is on.
 - *broken:* a gap. The reason names it: another tool's log backup (with its time and file), a new fork (a restore over the database), or a log backup the repository no longer has.
-- *SIMPLE:* no log backups; restorable to the times of its full backups only. Switched back to FULL, the next run takes a full backup (with a warning) and the chain is *intact* again.
+- *SIMPLE:* no log backups; restorable to the times of its full backups only. Switched back to FULL, the next run takes a full backup and the chain is *intact* again.
 - Warnings in the day session: another tool's full or log backup (named with time and device; copy-only backups do not count), a switch from FULL to SIMPLE (point in time only up to the last log backup), log backups further apart than twice the interval (RPO missed, for example while the server was down; the chain stays intact), the last log backup older than twice the interval, an agent offline or too old at a due run, an agent restart during a run (host and IP; its finished files follow with the next run).
 - **Exactly one tool may take log backups.** Turn off the log backups of maintenance plans, Ola Hallengren jobs and other backup products, including log truncation in other image backup products (e.g. "truncate logs" in a Veeam job). Their full backups do no harm, as long as they are copy-only.
 

@@ -90,6 +90,21 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
         }
     }
 
+    /// <summary>
+    /// A database restored from <paramref name="from"/>'s backups (with RECOVERY): it has <paramref name="from"/>'s family and a
+    /// log chain that continues those backups, so its next log backup starts where the restore ended.
+    /// </summary>
+    public void AddRestoredCopy(string name, string from, params string[] files)
+    {
+        AddDatabase(name, files);
+        lock (_lock)
+        {
+            RestoredFrom[name] = from;
+            LogChains.Add(name);
+            _logStart[name] = _lsn += 100;
+        }
+    }
+
     public List<string> DatabaseFiles(string name)
     {
         lock (_lock)
@@ -128,6 +143,11 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
     /// <summary>Stable GUIDs per database (family and database GUID), as msdb would report them.</summary>
     public static Guid FamilyGuid(string database) => new(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes("family:" + database.ToUpperInvariant())));
 
+    /// <summary>Databases restored from another database's backups: their family GUID is that database's.</summary>
+    public Dictionary<string, string> RestoredFrom { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    private Guid Family(string database) => FamilyGuid(RestoredFrom.GetValueOrDefault(database, database));
+
     public static Guid DatabaseGuid(string database) => new(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes("database:" + database.ToUpperInvariant())));
 
     /// <summary>A table with the columns of <see cref="SqlBackupSets.Columns"/> and <paramref name="extra"/> after them.</summary>
@@ -146,7 +166,7 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
     private object[] BackupSetRow(
         string database, string type, int position, bool copyOnly, bool snapshot, string first, string last, string checkpoint, string databaseBackupLsn, string name)
     {
-        var family = FamilyGuid(database).ToString();
+        var family = Family(database).ToString();
         var now = Now().ToString("yyyy-MM-ddTHH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture);
         return
         [
@@ -484,7 +504,7 @@ internal sealed partial class ScriptedSqlEnvironment(Func<string, byte[]> readFi
                     ("model", typeof(string)), ("chain", typeof(bool)), ("family", typeof(string)), ("database", typeof(string)), ("fork", typeof(string)));
                 foreach (var (name, database) in _databases.OrderBy(d => d.Key, StringComparer.OrdinalIgnoreCase))
                 {
-                    var family = FamilyGuid(name).ToString();
+                    var family = Family(name).ToString();
                     table.Rows.Add(name, database.Id, Offline.Contains(name) ? "OFFLINE" : "ONLINE", false, false, false, SimpleRecovery.Contains(name) ? "SIMPLE" : "FULL",
                         LogChains.Contains(name), family, DatabaseGuid(name).ToString(), family);
                 }

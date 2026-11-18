@@ -324,10 +324,23 @@ public sealed class SqlBackupService(
     {
         var settings = context.Job.SqlBackup;
         DateTimeOffset since;
+        List<string>? withBase = null;
         await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))
         {
             since = await db.SqlBackupSchedules.Where(s => s.JobId == context.Job.Id && s.VmNativeId == context.Vm.NativeId)
                 .Select(s => s.ForeignCheckedUtc).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false) ?? time.GetUtcNow().AddDays(-1);
+
+            // The databases we hold a full backup of: one with a log chain that is not among them (a restored copy) gets its
+            // full backup first instead of a log backup that nothing restorable continues.
+            if (settings.FullOnChainBreak)
+            {
+                withBase = await db.SqlDatabases
+                    .Where(d => d.PlatformId == context.Source.PlatformId && d.VmNativeId == context.Vm.NativeId)
+                    .Where(d => db.SqlBackupSets.Any(s => s.SqlDatabaseId == d.Id && (s.Kind == SqlBackupSetKind.SnapshotFull || s.Kind == SqlBackupSetKind.NativeFull)))
+                    .Select(d => d.Instance + "\\" + d.Name)
+                    .Distinct()
+                    .ToListAsync(cancellationToken).ConfigureAwait(false);
+            }
         }
 
         var request = new SqlJobRequest
@@ -338,6 +351,7 @@ public sealed class SqlBackupService(
             SessionId = context.SessionId,
             ExcludedDatabases = [.. settings.ExcludedDatabases],
             FullWithoutChain = settings.FullOnChainBreak,
+            DatabasesWithBase = withBase,
             ForeignSinceUtc = since.UtcDateTime,
             Folder = settings.StagingFolder,
             LockWaitMs = (int)options.Value.LaneLockWait.TotalMilliseconds,
@@ -351,10 +365,15 @@ public sealed class SqlBackupService(
                 context.Run.ForeignChecked = true;
             }
 
-            var broken = await WatchChainAsync(context, result, cancellationToken).ConfigureAwait(false);
+            var (broken, unbased) = await WatchChainAsync(context, result, cancellationToken).ConfigureAwait(false);
             if (broken.Count > 0 && settings.FullOnChainBreak)
             {
                 await FullBackupsAsync(context, broken, system: false, "to restart the log chain", cancellationToken).ConfigureAwait(false);
+            }
+
+            if (unbased.Count > 0 && settings.FullOnChainBreak)
+            {
+                await FullBackupsAsync(context, unbased, system: false, "to start the log chain", cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -506,14 +525,16 @@ public sealed class SqlBackupService(
 
     /// <summary>
     /// Updates the chain state of every database the log job saw; returns the databases whose chain broke (they need a
-    /// full backup to restart it).
+    /// full backup to restart it) and those new to the backups whose log was backed up before any full of theirs (an
+    /// older agent, or a restored copy that appeared meanwhile; their full backup starts the chain).
     /// </summary>
-    private async Task<List<string>> WatchChainAsync(RunContext context, SqlJobResult result, CancellationToken cancellationToken)
+    private async Task<(List<string> Broken, List<string> Unbased)> WatchChainAsync(RunContext context, SqlJobResult result, CancellationToken cancellationToken)
     {
         var broken = new List<string>();
+        var unbased = new List<string>();
         if (!result.Success || result.BackupDatabases is null)
         {
-            return broken;
+            return (broken, unbased);
         }
 
         var now = time.GetUtcNow();
@@ -548,8 +569,9 @@ public sealed class SqlBackupService(
                     context.Run.Warn($"{name}: {row.ChainReason}");
                     break;
                 case SqlBackupActions.Full:
+                    // A new database, a restored copy or one back from SIMPLE recovery: its first full starts the chain.
                     SetChain(row, SqlChainState.Ok, null);
-                    context.Run.Warn($"{name}: {outcome.Reason}.");
+                    context.Run.Info($"{name}: {outcome.Reason}.");
                     break;
                 case SqlBackupActions.Log:
                 {
@@ -574,6 +596,26 @@ public sealed class SqlBackupService(
                         break;
                     }
 
+                    // New to the backups: the first log backup of a database we hold no full of and no log before (a
+                    // restored copy continues the chain of the backups it came from). Not a break: its full starts the chain.
+                    if (foreignLogs.Count == 0 && newest is not null && !sets.Any(s => s.Kind is SqlBackupSetKind.SnapshotFull or SqlBackupSetKind.NativeFull)
+                        && !sets.Any(s => s.Kind == SqlBackupSetKind.Log && s.Id != newest.Id))
+                    {
+                        if (context.Job.SqlBackup.FullOnChainBreak)
+                        {
+                            SetChain(row, SqlChainState.NoBase, "New to the backups: its first full backup starts the chain.");
+                            context.Run.Info($"{name}: new to the backups (no full backup of it is held yet): a full backup starts its chain.");
+                            unbased.Add(outcome.Database);
+                        }
+                        else
+                        {
+                            SetChain(row, SqlChainState.NoBase, "No full backup of it is held: a full backup has to start its chain (turned off in the job).");
+                            context.Run.Warn($"{name}: {row.ChainReason}");
+                        }
+
+                        break;
+                    }
+
                     var reason = foreignLogs.Count > 0
                         ? $"another tool took log backup(s): {string.Join("; ", foreignLogs.Select(f => $"{Local(f.BackupSet.Finish)} to {f.BackupSet.Device ?? "an unknown device"}"))}. Turn those log backups off; only backdafuckup may back up the log"
                         : newest is null ? "no full backup is continued by the log backups" : BreakReason(sets, newest, ScheduleCalculator.FindZone(context.Job.Schedule.TimeZoneId));
@@ -591,7 +633,7 @@ public sealed class SqlBackupService(
         }
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        return broken;
+        return (broken, unbased);
     }
 
     /// <summary>The user databases a scheduled native full covers: all with FullForAllDatabases, else those without a snapshot base.</summary>
