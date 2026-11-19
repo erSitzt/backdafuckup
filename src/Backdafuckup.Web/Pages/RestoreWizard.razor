@@ -44,10 +44,44 @@ else
                         from there, and deletes the cache. A tape that is not in the library is asked for.
                     </MudAlert>
                 }
-                <MudRadioGroup T="RestoreModeDto" @bind-Value="_mode">
-                    <MudRadio T="RestoreModeDto" Value="RestoreModeDto.OriginalLocation">Restore to the original location</MudRadio>
+                <MudRadioGroup T="RestoreModeDto" Value="_mode" ValueChanged="OnModeChangedAsync">
+                    <MudRadio T="RestoreModeDto" Value="RestoreModeDto.OriginalLocation" Disabled="@(SourceKind is null)">Restore to the original location</MudRadio>
                     <MudRadio T="RestoreModeDto" Value="RestoreModeDto.AlternateLocation">Restore to a new location or with different settings</MudRadio>
                 </MudRadioGroup>
+                <MudText Typo="Typo.body2" Class="mt-2 mb-1">
+                    @if (SourceKind is null)
+                    {
+                        <span>The pool or vCenter this VM was backed up from is no longer connected, so it is restored as a new VM: you choose the name and where it goes next.</span>
+                    }
+                    else if (_mode == RestoreModeDto.OriginalLocation)
+                    {
+                        <span>
+                            The VM comes back as <b>@_point.VmName</b> in @SourceName, where it was backed up:
+                            @(SourceIsVsphere ? "in its original folder and resource pool, " : string.Empty)its disks on their original @(SourceIsVsphere ? "datastores" : "storage repositories")
+                            (@string.Join(", ", _point.Disks.Select(d => d.StorageName ?? d.StorageId ?? "unknown").Distinct())).
+                        </span>
+                        @if (QuickRollback)
+                        {
+                            <span> The existing VM keeps its name and identity; only its disks are written back.</span>
+                        }
+                        else if (OriginalExists)
+                        {
+                            <span> <b>The VM still exists there.</b> Tick "Replace the existing VM" (it is shut down and renamed "@_point.VmName (replaced …)", or deleted afterwards if chosen),
+                                @(SourceIsVsphere ? "use quick rollback, " : string.Empty)or restore to a new location.</span>
+                        }
+                        else
+                        {
+                            <span> The VM no longer exists there; it is created again with its name, BIOS UUID and MAC addresses.</span>
+                        }
+                    }
+                    else
+                    {
+                        <span>
+                            A new VM, by default named <b>@($"{_point.VmName}_restored")</b>, on the @(SourceIsVsphere ? "vCenter, host, folder and datastores" : "pool, host and storage") you choose next,
+                            with new MAC addresses unless you keep them. The original VM is not touched.
+                        </span>
+                    }
+                </MudText>
                 @if (_mode == RestoreModeDto.OriginalLocation && SourceIsVsphere)
                 {
                     <MudCheckBox @bind-Value="_quickRollback" Label="Quick rollback: write back into the existing VM only what changed since the restore point" Class="mt-2"
@@ -104,15 +138,22 @@ else
             case 1:
                 @if (_mode == RestoreModeDto.AlternateLocation)
                 {
-                    <MudSelect T="Guid" Value="_targetPool" ValueChanged="OnPoolChangedAsync" Label="Target pool" Variant="Variant.Outlined" Class="mb-3" Disabled="_resume"
-                               HelperText="@(_resume ? "A VM with memory resumes only in the pool it was backed up in." : null)">
+                    @if (_pools.Count == 0)
+                    {
+                        <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-3">
+                            No @(SourceIsVsphere ? "vCenter" : SourceKind is null ? "pool or vCenter" : "XCP-ng pool") is connected to restore this VM to. Add one under Backup Infrastructure → Virtualization.
+                        </MudAlert>
+                    }
+                    <MudSelect T="Guid" Value="_targetPool" ValueChanged="OnPoolChangedAsync" Label="@(SourceIsVsphere ? "Target vCenter" : "Target pool")" Variant="Variant.Outlined" Class="mb-3" Disabled="_resume"
+                               ToStringFunc="@(id => _pools.FirstOrDefault(p => p.Id == id)?.DisplayName ?? string.Empty)"
+                               HelperText="@(_resume ? "A VM with memory resumes only in the pool it was backed up in." : SourceKind is null ? null : $"Only {(SourceIsVsphere ? "vCenters" : "XCP-ng pools")}: a VM goes back to the kind of platform it was backed up from.")">
                         @foreach (var pool in _pools)
                         {
                             <MudSelectItem T="Guid" Value="pool.Id">@pool.DisplayName</MudSelectItem>
                         }
                     </MudSelect>
-                    <MudTextField @bind-Value="_vmName" Label="VM name" Variant="Variant.Outlined" Class="mb-3" />
-                    <MudSelect T="string" @bind-Value="_host" Label="Host (optional)" Variant="Variant.Outlined" Clearable="true" Class="mb-3">
+                    <MudTextField @bind-Value="_vmName" Label="VM name" Variant="Variant.Outlined" Class="mb-3" HelperText="The name of the new VM in the target." />
+                    <MudSelect T="string" @bind-Value="_host" Label="Host (optional)" Variant="Variant.Outlined" Clearable="true" Class="mb-3" ToStringFunc="InventoryName">
                         @foreach (var host in _inventory.Where(i => i.Kind == "Host"))
                         {
                             <MudSelectItem T="string" Value="host.NativeId">@host.Name</MudSelectItem>
@@ -120,14 +161,14 @@ else
                     </MudSelect>
                     @if (TargetIsVsphere)
                     {
-                        <MudSelect T="string" @bind-Value="_folder" Label="VM folder" Variant="Variant.Outlined" Class="mb-3"
+                        <MudSelect T="string" @bind-Value="_folder" Label="VM folder" Variant="Variant.Outlined" Class="mb-3" ToStringFunc="InventoryName"
                                    HelperText="Where the VM appears in the vCenter; the vCenter account needs the right to create VMs there.">
                             @foreach (var folder in _inventory.Where(i => i.Kind == "Folder").OrderBy(i => Path(i), StringComparer.OrdinalIgnoreCase))
                             {
                                 <MudSelectItem T="string" Value="folder.NativeId">@Path(folder)</MudSelectItem>
                             }
                         </MudSelect>
-                        <MudSelect T="string" @bind-Value="_resourcePool" Label="Resource pool" Variant="Variant.Outlined" Class="mb-3">
+                        <MudSelect T="string" @bind-Value="_resourcePool" Label="Resource pool" Variant="Variant.Outlined" Class="mb-3" ToStringFunc="InventoryName">
                             @foreach (var pool in _inventory.Where(i => i.Kind == "ResourcePool").OrderBy(i => Path(i), StringComparer.OrdinalIgnoreCase))
                             {
                                 <MudSelectItem T="string" Value="pool.NativeId">@Path(pool)</MudSelectItem>
@@ -142,7 +183,8 @@ else
                 <MudText Typo="Typo.subtitle1" Class="mb-2">@(TargetIsVsphere ? "Datastore per disk (new disks are thin)" : "Storage per disk")</MudText>
                 @foreach (var disk in _point.Disks)
                 {
-                    <MudSelect T="string" Value="@_storage.GetValueOrDefault(disk.Key)" ValueChanged="@(v => _storage[disk.Key] = v)" Label="@($"{disk.Name} ({Fmt.Bytes(disk.CapacityBytes)})")" Variant="Variant.Outlined" Class="mb-3" Disabled="@(_mode == RestoreModeDto.OriginalLocation)">
+                    <MudSelect T="string" Value="@_storage.GetValueOrDefault(disk.Key)" ValueChanged="@(v => _storage[disk.Key] = v)" Label="@($"{disk.Name} ({Fmt.Bytes(disk.CapacityBytes)})")" Variant="Variant.Outlined" Class="mb-3" Disabled="@(_mode == RestoreModeDto.OriginalLocation)"
+                               ToStringFunc="InventoryName" HelperText="@($"Was on {disk.StorageName ?? disk.StorageId ?? "unknown"}")">
                         @foreach (var sr in _inventory.Where(i => i.Kind == "Storage"))
                         {
                             <MudSelectItem T="string" Value="sr.NativeId">@sr.Name (@sr.Properties.GetValueOrDefault("type"))</MudSelectItem>
@@ -160,7 +202,8 @@ else
                 {
                     @foreach (var nic in _point.Nics)
                     {
-                        <MudSelect T="string" Value="@_networks.GetValueOrDefault(nic.Device)" ValueChanged="@(v => _networks[nic.Device] = v)" Label="@($"NIC {nic.Device} (was {nic.NetworkName}, {nic.Mac})")" Variant="Variant.Outlined" Class="mb-3">
+                        <MudSelect T="string" Value="@_networks.GetValueOrDefault(nic.Device)" ValueChanged="@(v => _networks[nic.Device] = v)" Label="@($"NIC {nic.Device} (was {nic.NetworkName}, {nic.Mac})")" Variant="Variant.Outlined" Class="mb-3"
+                                   ToStringFunc="InventoryName">
                             @foreach (var net in _inventory.Where(i => i.Kind == "Network"))
                             {
                                 <MudSelectItem T="string" Value="net.NativeId">@net.Name</MudSelectItem>
@@ -194,9 +237,9 @@ else
             default:
                 <MudSimpleTable Dense="true" Elevation="0">
                     <tbody>
-                        <tr><td style="width:220px">VM</td><td>@_point.VmName → @(_mode == RestoreModeDto.OriginalLocation ? _point.VmName : _vmName)</td></tr>
+                        <tr><td style="width:220px">VM</td><td>@_point.VmName → @(_mode == RestoreModeDto.OriginalLocation ? _point.VmName : _vmName)@(_mode == RestoreModeDto.OriginalLocation && _replace && !QuickRollback ? $" (the existing VM is {(_deleteReplaced ? "deleted after the restore" : $"renamed '{_point.VmName} (replaced …)'")})" : null)</td></tr>
                         <tr><td>Restore point</td><td>@Fmt.Time(_point.CreatedUtc)</td></tr>
-                        <tr><td>Location</td><td>@(_mode == RestoreModeDto.OriginalLocation ? "Original location" : _pools.FirstOrDefault(p => p.Id == _targetPool)?.DisplayName)</td></tr>
+                        <tr><td>Location</td><td>@(_mode == RestoreModeDto.OriginalLocation ? $"where it was backed up: {SourceName}" : _pools.FirstOrDefault(p => p.Id == _targetPool)?.DisplayName)@(_mode == RestoreModeDto.AlternateLocation && _host is not null ? $", host {InventoryName(_host)}" : null)</td></tr>
                         @if (QuickRollback)
                         {
                             <tr><td>Quick rollback</td><td>only the blocks changed since the restore point, under a safety snapshot@(_keepSafetySnapshot ? " that is kept" : null)</td></tr>
@@ -228,6 +271,10 @@ else
                 break;
         }
 
+        @if (StepProblem is { } problem)
+        {
+            <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-3">@problem</MudAlert>
+        }
         @if (_error is not null)
         {
             <MudAlert Severity="Severity.Error" Dense="true" Class="mt-3">@_error</MudAlert>
@@ -240,11 +287,11 @@ else
             <MudButton Variant="Variant.Outlined" Disabled="@(_step == 0)" StartIcon="@Icons.Material.Filled.ChevronLeft" OnClick="@(() => _step--)">Back</MudButton>
             @if (_step < Steps.Length - 1)
             {
-                <MudButton Variant="Variant.Filled" Color="Color.Primary" EndIcon="@Icons.Material.Filled.ChevronRight" OnClick="@(() => _step++)">Next</MudButton>
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" EndIcon="@Icons.Material.Filled.ChevronRight" Disabled="@(StepProblem is not null)" OnClick="@(() => _step++)">Next</MudButton>
             }
             else
             {
-                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" StartIcon="@AppIcons.Restore" OnClick="StartAsync">Restore</MudButton>
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || Problems.Any())" StartIcon="@AppIcons.Restore" OnClick="StartAsync">Restore</MudButton>
             }
         </div>
     </MudPaper>
@@ -259,6 +306,7 @@ else
     [SupplyParameterFromQuery(Name = "tape")] public bool FromTape { get; set; }
 
     private RestorePointDto? _point;
+    private List<ConnectionDto>? _allPools;
     private List<ConnectionDto>? _pools;
     private List<InventoryItemDto> _inventory = [];
     private readonly Dictionary<string, string> _storage = [];
@@ -278,9 +326,77 @@ else
     private string? _resourcePool;
     private string _connectNics = "auto";
 
-    private bool SourceIsVsphere => _pools?.FirstOrDefault(p => p.Id == _point?.ConnectionId)?.Kind == "VSphere";
+    /// <summary>The kind of the pool or vCenter the VM was backed up from; null when that connection is gone.</summary>
+    private string? SourceKind => _allPools?.FirstOrDefault(p => p.Id == _point?.ConnectionId)?.Kind;
 
-    private bool TargetIsVsphere => _pools?.FirstOrDefault(p => p.Id == (_mode == RestoreModeDto.AlternateLocation ? _targetPool : _point?.ConnectionId))?.Kind == "VSphere";
+    private string SourceName => _allPools?.FirstOrDefault(p => p.Id == _point?.ConnectionId)?.DisplayName ?? "its pool or vCenter";
+
+    private bool SourceIsVsphere => SourceKind == "VSphere";
+
+    private bool TargetIsVsphere => _allPools?.FirstOrDefault(p => p.Id == (_mode == RestoreModeDto.AlternateLocation ? _targetPool : _point?.ConnectionId))?.Kind == "VSphere";
+
+    /// <summary>The backed-up VM still exists where it was (the inventory shown is the source's while restoring to the original location).</summary>
+    private bool OriginalExists => _point is not null && _targetPool == _point.ConnectionId && _inventory.Any(i => i.Kind == "Vm" && i.NativeId == _point.VmNativeId);
+
+    /// <summary>What keeps the current step from going on, said plainly; null when it may.</summary>
+    private string? StepProblem => Problems.Where(p => p.Step <= _step).Select(p => p.Text).FirstOrDefault();
+
+    private IEnumerable<(int Step, string Text)> Problems
+    {
+        get
+        {
+            if (_point is null)
+            {
+                yield break;
+            }
+
+            var alternate = _mode == RestoreModeDto.AlternateLocation;
+            if (!alternate && QuickRollback && !OriginalExists)
+            {
+                yield return (0, $"Quick rollback needs the existing VM, but {_point.VmName} no longer exists in {SourceName}. Restore it fully instead.");
+            }
+            else if (!alternate && !QuickRollback && OriginalExists && !_replace)
+            {
+                yield return (0, $"{_point.VmName} still exists in {SourceName}: tick 'Replace the existing VM'{(SourceIsVsphere ? ", use quick rollback" : string.Empty)}, or restore to a new location.");
+            }
+
+            if (alternate && _targetPool == Guid.Empty)
+            {
+                yield return (1, "Choose where the VM is restored to.");
+            }
+
+            if (alternate && string.IsNullOrWhiteSpace(_vmName))
+            {
+                yield return (1, "Enter a name for the new VM.");
+            }
+
+            var noStorage = _point.Disks.Where(d => !_storage.ContainsKey(d.Key)).Select(d => d.Name).ToList();
+            if (alternate && noStorage.Count > 0)
+            {
+                yield return (1, $"Choose {(TargetIsVsphere ? "a datastore" : "a storage repository")} for {string.Join(", ", noStorage)}.");
+            }
+
+            var noNetwork = _point.Nics.Where(n => !_networks.ContainsKey(n.Device)).Select(n => $"NIC {n.Device} (was {n.NetworkName})").ToList();
+            if (alternate && !_resume && noNetwork.Count > 0)
+            {
+                yield return (2, $"Choose a network for {string.Join(", ", noNetwork)}: the target has none of the same name.");
+            }
+        }
+    }
+
+    /// <summary>A host, folder, pool, storage or network of the target by its name (with its path for folders and resource pools).</summary>
+    private string InventoryName(string? id)
+    {
+        if (string.IsNullOrEmpty(id))
+        {
+            return string.Empty;
+        }
+
+        return _inventory.FirstOrDefault(i => i.NativeId == id) is { } item
+            ? item.Kind is "Folder" or "ResourcePool" ? Path(item) ?? item.Name
+              : item.Kind == "Storage" && item.Properties.GetValueOrDefault("type") is { Length: > 0 } type ? $"{item.Name} ({type})" : item.Name
+            : id;
+    }
 
     private bool QuickRollback => _quickRollback && _mode == RestoreModeDto.OriginalLocation && SourceIsVsphere && _point is { DomainController: false };
 
@@ -295,9 +411,17 @@ else
     protected override async Task OnInitializedAsync()
     {
         _point = await Api.GetAsync<RestorePointDto>(FromTape ? $"api/tape/copies/{Id}/restore-point" : $"api/restore-points/{Id}");
-        _pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer,VSphere");
+        _allPools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer,VSphere");
+
+        // A VM goes back to the kind of platform it came from (a vSphere VM into a vCenter, an XCP-ng VM into a pool).
+        _pools = SourceKind is { } kind ? [.. _allPools.Where(p => p.Kind == kind)] : _allPools;
+        if (SourceKind is null)
+        {
+            _mode = RestoreModeDto.AlternateLocation;
+        }
+
         _vmName = $"{_point.VmName}_restored";
-        _targetPool = _point.ConnectionId ?? _pools.FirstOrDefault()?.Id ?? Guid.Empty;
+        _targetPool = _point.ConnectionId is { } source && _pools.Any(p => p.Id == source) ? source : _pools.FirstOrDefault()?.Id ?? Guid.Empty;
         foreach (var disk in _point.Disks)
         {
             if (disk.StorageId is not null)
@@ -320,6 +444,16 @@ else
         await LoadInventoryAsync();
     }
 
+    /// <summary>The original location is the source's: its inventory is shown again (and tells whether the VM still exists).</summary>
+    private async Task OnModeChangedAsync(RestoreModeDto mode)
+    {
+        _mode = mode;
+        if (mode == RestoreModeDto.OriginalLocation && _point!.ConnectionId is { } source && source != _targetPool)
+        {
+            await OnPoolChangedAsync(source);
+        }
+    }
+
     /// <summary>A VM resumes only in the pool it was backed up in.</summary>
     private async Task OnResumeChangedAsync(bool resume)
     {
@@ -340,6 +474,41 @@ else
             : _inventory.Where(i => i.Kind == "Folder").OrderBy(i => Path(i), StringComparer.OrdinalIgnoreCase).FirstOrDefault()?.NativeId;
         _resourcePool = original?.Properties.GetValueOrDefault("resourcePool") is { } pool && _inventory.Any(i => i.NativeId == pool) ? pool
             : _inventory.Where(i => i.Kind == "ResourcePool").OrderBy(i => Path(i), StringComparer.OrdinalIgnoreCase).FirstOrDefault()?.NativeId;
+        if (_host is not null && !_inventory.Any(i => i.Kind == "Host" && i.NativeId == _host))
+        {
+            _host = null;
+        }
+
+        // Each disk and NIC keeps its storage and network where the target has it (by id, else by name); otherwise it is chosen.
+        foreach (var disk in _point!.Disks)
+        {
+            var match = _inventory.FirstOrDefault(i => i.Kind == "Storage" && i.NativeId == _storage.GetValueOrDefault(disk.Key))
+                ?? _inventory.FirstOrDefault(i => i.Kind == "Storage" && i.NativeId == disk.StorageId)
+                ?? _inventory.FirstOrDefault(i => i.Kind == "Storage" && disk.StorageName is not null && string.Equals(i.Name, disk.StorageName, StringComparison.OrdinalIgnoreCase));
+            if (match is null)
+            {
+                _storage.Remove(disk.Key);
+            }
+            else
+            {
+                _storage[disk.Key] = match.NativeId;
+            }
+        }
+
+        foreach (var nic in _point.Nics)
+        {
+            var match = _inventory.FirstOrDefault(i => i.Kind == "Network" && i.NativeId == _networks.GetValueOrDefault(nic.Device))
+                ?? _inventory.FirstOrDefault(i => i.Kind == "Network" && i.NativeId == nic.NetworkId)
+                ?? _inventory.FirstOrDefault(i => i.Kind == "Network" && string.Equals(i.Name, nic.NetworkName, StringComparison.OrdinalIgnoreCase));
+            if (match is null)
+            {
+                _networks.Remove(nic.Device);
+            }
+            else
+            {
+                _networks[nic.Device] = match.NativeId;
+            }
+        }
     }
 
     private string StorageName(string? id) => _inventory.FirstOrDefault(i => i.NativeId == id)?.Name ?? id ?? "original";

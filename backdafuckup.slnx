@@ -37,6 +37,7 @@
     <Project Path="tests/Backdafuckup.FileLevel.Tests/Backdafuckup.FileLevel.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Kubernetes.Tests/Backdafuckup.Kubernetes.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Ssh.Tests/Backdafuckup.Ssh.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.Web.Tests/Backdafuckup.Web.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Sql.Tests/Backdafuckup.Sql.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Lab.Tests/Backdafuckup.Lab.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Nbd.Tests/Backdafuckup.Nbd.Tests.csproj" />
