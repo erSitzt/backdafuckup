@@ -81,6 +81,24 @@ public sealed class NfsServerHostTests : IDisposable
     }
 
     [Fact]
+    public async Task Stop_and_dispose_in_either_order_and_twice()
+    {
+        var host = Host(Loopback());
+        await host.StartAsync(Ct);
+        Assert.True(host.Status.Listening, host.Status.Error);
+        await host.DisposeAsync();
+        await host.StopAsync(Ct);
+        await host.DisposeAsync();
+        Assert.False(host.Status.Listening);
+
+        var other = Host(Loopback());
+        await other.StartAsync(Ct);
+        await other.StopAsync(Ct);
+        await other.DisposeAsync();
+        await other.StopAsync(Ct);
+    }
+
+    [Fact]
     public async Task A_client_outside_the_allowlist_is_refused_and_named()
     {
         await using var host = Host(Loopback());

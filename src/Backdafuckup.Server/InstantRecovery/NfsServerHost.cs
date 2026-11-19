@@ -437,11 +437,11 @@ public sealed class NfsServerHost : IHostedService, IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
-    {
-        await CloseListenersAsync().ConfigureAwait(false);
-        _gate.Dispose();
-    }
+    /// <summary>
+    /// Closes like <see cref="StopAsync"/>; either may come first or twice (the container disposes singletons, the host stops
+    /// services), so the gate is never disposed.
+    /// </summary>
+    public async ValueTask DisposeAsync() => await CloseAsync(CancellationToken.None).ConfigureAwait(false);
 }
 
 /// <summary>The NFS server cannot listen; the message says why and what to do.</summary>
