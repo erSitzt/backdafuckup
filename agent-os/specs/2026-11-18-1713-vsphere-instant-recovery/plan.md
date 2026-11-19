@@ -188,6 +188,14 @@ Encrypted disks are refused, naming the VM and disk. *Changed in task 6:* a vTPM
 
    Tests against `FakeVcenter`.
 7. **`InstantRecoverySessionRunner`:** start, watch, migrate, stop, finalize. Every message names hosts, IPs, ports, datastores and VMs. Tests with a fake platform and the in-memory NFS.
+   *As built:*
+   - Requests go through `InstantRecoveryControl` (start: session and catalog row together; stop and migrate: a conditional state change in the catalog, so they hold across a restart, plus a wake-up of the runner).
+   - Names come from the random end of the session id (`bdfu-ir-<8 hex>`, `/bdfu/<8 hex>`): a v7 id's start is a timestamp, the same for sessions a minute apart.
+   - The address the host mounts is `InstantRecovery:AdvertiseAddress`, else a single `ListenAddress`, else the local address that routes to the host's VMkernel IPs.
+   - New columns: `remote_host`, `folder_id`, `resource_pool_id`, `connect_nics`, `keep_disk_identity`, `migration_target` (jsonb, so a migration carries on after a restart), and `network_map` per VM.
+   - A stop of the session in the console asks the instant recovery to stop (the engine would otherwise end the session while its VMs still use the export); if that stop is refused, the runner keeps serving until the service stops.
+   - A start interrupted by a service stop is recognised on resume by its overlay directory (the start's first side effect): the export is served once more so the host can still reach the VMs' files, the ledger rows are undone newest first, and the session fails with the reason.
+   - Disks left out of the backup get an empty base (`empty:<bytes>`), read as zeros.
 8. **API and console:**
    - an "Instant recovery" entry in `RestoreWizard.razor`;
    - a new `InstantRecovery.razor`:

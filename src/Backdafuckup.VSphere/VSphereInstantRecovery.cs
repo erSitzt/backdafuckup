@@ -171,8 +171,7 @@ internal sealed class VSphereInstantRecovery(VSphereHypervisorSession owner)
             await ledger.UpdateAsync(artifact, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);
             throw new InvalidOperationException(ex.FaultType is "DuplicateName" or "AlreadyExists"
                 ? $"ESXi host {hostName} cannot mount {datastore.RemoteHost}:{datastore.RemotePath}: a datastore named {datastore.Name} exists already in vCenter {Vim.Endpoint}."
-                : $"ESXi host {hostName} could not mount {datastore.RemoteHost}:{datastore.RemotePath} as NFS 3 datastore {datastore.Name}: {ex.FaultMessage} ({ex.FaultType}). " +
-                  $"The host connects to {datastore.RemoteHost} on port 111 (portmapper), 20048 (MOUNT) and 2049 (NFS).", ex);
+                : $"ESXi host {hostName} could not mount {datastore.RemoteHost}:{datastore.RemotePath} as NFS 3 datastore {datastore.Name}: {ex.FaultMessage} ({ex.FaultType}).", ex);
         }
 
         var id = created?.AsRef().Value ?? throw new InvalidDataException($"vCenter {Vim.Endpoint}: CreateNasDatastore on {hostName} returned no datastore.");

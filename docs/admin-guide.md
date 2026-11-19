@@ -772,11 +772,15 @@ Instant VM recovery (in development) runs a VM straight from a restore point: th
 |---|---|---|
 | `Enabled` | `false` | Opens the ports below. |
 | `ListenAddress` | `0.0.0.0` | An address of the backup server the ESXi hosts reach, or all. Each export accepts only the VMkernel addresses of the host it was made for. |
+| `AdvertiseAddress` | (empty) | The address the ESXi host mounts the datastore from. Empty: `ListenAddress` if it is one address, else the address of this server that routes to the host's VMkernel addresses. Set it when the hosts reach the server through NAT or a name. |
 | `PortmapperMode` | `Automatic` | `Own`: the server answers the portmapper on port 111 itself. `System` (Linux): it registers its ports with the machine's rpcbind. `Automatic`: its own, or rpcbind on Linux when port 111 is taken or may not be bound. |
 | `PortmapperPort`, `NfsPort`, `MountPort` | 111, 2049, 20048 | ESXi expects the portmapper on 111 and NFS on 2049. |
 | `OverlayDirectory` | `<data directory>/instant-recovery` | Everything the recovered VMs write. Put it on a volume with room for it. |
 | `FreeSpaceReserveBytes` | 10 GiB | Left free on that volume; beyond it the VM's writes fail with "no space". |
 | `CacheBytes` | 2 GiB | Disk data of the restore points kept in memory, for all running instant recoveries together. |
+| `MaxConcurrentSessions`, `MaxVmsPerSession` | 4, 8 | Instant recoveries at the same time (one datastore each), and VMs in one. |
+| `AgeWarning` | 24 hours | A running instant recovery warns once it is older (migrate or stop it). |
+| `WatchInterval` | 10 seconds | How often a running instant recovery looks at its VMs in vCenter (migrated or removed by hand). |
 
 - **Linux:** binding port 111 needs `CAP_NET_BIND_SERVICE`, which the supplied systemd unit grants (`AmbientCapabilities`). If rpcbind runs (it does wherever `nfs-common` or `nfs-utils` is installed), `Automatic` registers with it. The kernel's NFS server (`nfs-server`) must not run: it holds port 2049.
 - **Windows:** the Windows role *Server for NFS* holds ports 111 and 2049 and must not be installed. `install-service.ps1 -InstantRecoveryFirewall -NfsClients 192.0.2.11,192.0.2.12` adds firewall rules for the ports, limited to the given ESXi VMkernel addresses (without `-NfsClients`, from any address).

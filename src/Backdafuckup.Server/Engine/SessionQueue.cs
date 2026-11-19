@@ -292,6 +292,13 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
             session.State = SessionState.Stopped;
             session.EndedUtc = time.GetUtcNow();
             session.Summary = "Stopped before it started.";
+            if (session.Kind == SessionKind.InstantRecovery)
+            {
+                // Nothing was made yet; the instant recovery ends with its session (and no longer holds its restore points).
+                await db.InstantRecoveries.Where(r => r.SessionId == sessionId && r.State == InstantRecoveryState.Starting)
+                    .ExecuteUpdateAsync(u => u.SetProperty(r => r.State, InstantRecoveryState.Stopped).SetProperty(r => r.Message, "Stopped before it started."), cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         else if (session.State == SessionState.Running && running.RequestStop(sessionId))
         {
@@ -305,6 +312,17 @@ public sealed class SessionQueue(IDbContextFactory<AppDbContext> dbFactory, Runn
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await notifier.SessionUpdatedAsync(session.ToDto()).ConfigureAwait(false);
         return true;
+    }
+
+    /// <summary>Queues an instant recovery: its session and its catalog row (state Starting) together.</summary>
+    public async Task<Guid> EnqueueInstantRecoveryAsync(SessionEntity session, InstantRecoveryEntity recovery, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(recovery);
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        recovery.SessionId = session.Id;
+        db.InstantRecoveries.Add(recovery);
+        return await AddAsync(db, session, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<Guid> AddAsync(AppDbContext db, SessionEntity session, CancellationToken cancellationToken)

@@ -55,6 +55,23 @@ public sealed class InstantRecoveryEntity
     /// <summary>The addresses that may mount the export: the host's VMkernel addresses.</summary>
     public List<string>? AllowedClients { get; set; }
 
+    /// <summary>This server's address that the host mounts the export from (configured, or the one that routes to the host).</summary>
+    public string? RemoteHost { get; set; }
+
+    /// <summary>The VM folder and resource pool of the VMs (null: the datacenter's VM folder, the host's cluster's pool).</summary>
+    public string? FolderId { get; set; }
+
+    public string? ResourcePoolId { get; set; }
+
+    /// <summary>Whether the VMs' NICs start connected (off by default: the originals may still run with the same addresses).</summary>
+    public bool ConnectNics { get; set; }
+
+    /// <summary>Keep the disks' identity (ddb.uuid) instead of new ones.</summary>
+    public bool KeepDiskIdentity { get; set; }
+
+    /// <summary>Where a migration asked for moves the VMs; kept so that a migration carries on after a restart.</summary>
+    public Core.Hypervisor.InstantRecoveryMigration? MigrationTarget { get; set; }
+
     /// <summary>Where the overlay and the namespace journal live (below the configured overlay directory).</summary>
     public required string OverlayDirectory { get; set; }
 
@@ -102,4 +119,7 @@ public sealed class InstantRecoveryVmEntity
 
     /// <summary>The restore point's disk key → the disk's descriptor in the datastore ("app01/disk0.vmdk").</summary>
     public Dictionary<string, string>? DiskFiles { get; set; }
+
+    /// <summary>Network per NIC device key; NICs not listed keep their network.</summary>
+    public Dictionary<string, string>? NetworkMap { get; set; }
 }

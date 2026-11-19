@@ -836,6 +836,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("jsonb")
                         .HasColumnName("allowed_clients");
 
+                    b.Property<bool>("ConnectNics")
+                        .HasColumnType("boolean")
+                        .HasColumnName("connect_nics");
+
                     b.Property<Guid>("ConnectionId")
                         .HasColumnType("uuid")
                         .HasColumnName("connection_id");
@@ -865,6 +869,11 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(64)")
                         .HasColumnName("export_path");
 
+                    b.Property<string>("FolderId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("folder_id");
+
                     b.Property<string>("HostId")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -875,6 +884,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)")
                         .HasColumnName("host_name");
+
+                    b.Property<bool>("KeepDiskIdentity")
+                        .HasColumnType("boolean")
+                        .HasColumnName("keep_disk_identity");
 
                     b.Property<DateTimeOffset?>("LastIoUtc")
                         .HasColumnType("timestamp with time zone")
@@ -889,6 +902,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(64)")
                         .HasColumnName("migrate_task_id");
 
+                    b.Property<string>("MigrationTarget")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("migration_target");
+
                     b.Property<string>("OverlayDirectory")
                         .IsRequired()
                         .HasColumnType("text")
@@ -897,6 +914,16 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Property<long?>("OverlayLimitBytes")
                         .HasColumnType("bigint")
                         .HasColumnName("overlay_limit_bytes");
+
+                    b.Property<string>("RemoteHost")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("remote_host");
+
+                    b.Property<string>("ResourcePoolId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("resource_pool_id");
 
                     b.Property<string>("State")
                         .IsRequired()
@@ -947,6 +974,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasMaxLength(80)
                         .HasColumnType("character varying(80)")
                         .HasColumnName("name");
+
+                    b.Property<string>("NetworkMap")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("network_map");
 
                     b.Property<Guid>("RestorePointId")
                         .HasColumnType("uuid")

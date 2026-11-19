@@ -31,6 +31,15 @@ public sealed class InstantRecoveryOptions
     /// <summary>The address the NFS server listens on; 0.0.0.0 for all IPv4 addresses of this server.</summary>
     public string ListenAddress { get; set; } = "0.0.0.0";
 
+    /// <summary>
+    /// The address of this server that hosts mount the datastore from. Empty: <see cref="ListenAddress"/> if it is one
+    /// address, else the address that routes to the host's VMkernel NICs.
+    /// </summary>
+    public string? AdvertiseAddress { get; set; }
+
+    /// <summary>How often a running instant recovery looks at its VMs (migrated or removed by hand, age).</summary>
+    public TimeSpan WatchInterval { get; set; } = TimeSpan.FromSeconds(10);
+
     public PortmapperMode PortmapperMode { get; set; } = PortmapperMode.Automatic;
 
     public int PortmapperPort { get; set; } = 111;

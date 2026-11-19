@@ -95,6 +95,15 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
             builder.UseSetting("ScaleOut:AllowSameVolume", "true");
             builder.UseSetting("ScaleOut:BalancerInterval", "00:00:00");
             builder.UseSetting("ScaleOut:MaintenanceWait", "00:00:01");
+            // Instant recovery: the NFS server on loopback, ports from the system, a short watch interval.
+            builder.UseSetting("InstantRecovery:Enabled", "true");
+            builder.UseSetting("InstantRecovery:ListenAddress", "127.0.0.1");
+            builder.UseSetting("InstantRecovery:PortmapperMode", "Own");
+            builder.UseSetting("InstantRecovery:PortmapperPort", "0");
+            builder.UseSetting("InstantRecovery:NfsPort", "0");
+            builder.UseSetting("InstantRecovery:MountPort", "0");
+            builder.UseSetting("InstantRecovery:FreeSpaceReserveBytes", "0");
+            builder.UseSetting("InstantRecovery:WatchInterval", "00:00:00.200");
             builder.ConfigureTestServices(services =>
             {
                 services.RemoveAll<Backdafuckup.Server.ScaleOut.IVolumeSpace>();

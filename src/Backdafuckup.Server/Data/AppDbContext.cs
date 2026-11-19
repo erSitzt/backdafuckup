@@ -477,6 +477,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.DatastoreId).HasMaxLength(64);
             e.Property(x => x.ExportPath).HasMaxLength(64);
             e.Property(x => x.MigrateTaskId).HasMaxLength(64);
+            e.Property(x => x.RemoteHost).HasMaxLength(255);
+            e.Property(x => x.FolderId).HasMaxLength(64);
+            e.Property(x => x.ResourcePoolId).HasMaxLength(64);
+            e.Property(x => x.MigrationTarget).HasColumnType("jsonb").HasConversion(
+                v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+                v => JsonSerializer.Deserialize<Core.Hypervisor.InstantRecoveryMigration>(v, JsonSerializerOptions.Default));
             e.HasIndex(x => x.ExportId).IsUnique();
             e.HasIndex(x => x.State);
             ConfigureJsonList(e.Property(x => x.AllowedClients));
@@ -491,13 +497,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.VmId).HasMaxLength(64);
             e.Property(x => x.InstanceUuid).HasMaxLength(64);
             e.HasIndex(x => x.RestorePointId);
-            e.Property(x => x.DiskFiles).HasColumnType("jsonb").HasConversion(
-                v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
-                v => JsonSerializer.Deserialize<Dictionary<string, string>>(v, JsonSerializerOptions.Default),
-                new ValueComparer<Dictionary<string, string>?>(
-                    (a, b) => JsonSerializer.Serialize(a, JsonSerializerOptions.Default) == JsonSerializer.Serialize(b, JsonSerializerOptions.Default),
-                    v => v == null ? 0 : JsonSerializer.Serialize(v, JsonSerializerOptions.Default).GetHashCode(StringComparison.Ordinal),
-                    v => v == null ? null : new Dictionary<string, string>(v)));
+            ConfigureJsonDictionary(e.Property(x => x.DiskFiles));
+            ConfigureJsonDictionary(e.Property(x => x.NetworkMap));
         });
 
         builder.Entity<SessionEntity>(e =>
@@ -575,6 +576,15 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
     }
 
     /// <summary>A list stored as jsonb; it is replaced, never mutated.</summary>
+    private static void ConfigureJsonDictionary(Microsoft.EntityFrameworkCore.Metadata.Builders.PropertyBuilder<Dictionary<string, string>?> property) =>
+        property.HasColumnType("jsonb").HasConversion(
+            v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+            v => JsonSerializer.Deserialize<Dictionary<string, string>>(v, JsonSerializerOptions.Default),
+            new ValueComparer<Dictionary<string, string>?>(
+                (a, b) => JsonSerializer.Serialize(a, JsonSerializerOptions.Default) == JsonSerializer.Serialize(b, JsonSerializerOptions.Default),
+                v => v == null ? 0 : JsonSerializer.Serialize(v, JsonSerializerOptions.Default).GetHashCode(StringComparison.Ordinal),
+                v => v == null ? null : new Dictionary<string, string>(v)));
+
     private static void ConfigureJsonList<T>(Microsoft.EntityFrameworkCore.Metadata.Builders.PropertyBuilder<List<T>?> property) =>
         property.HasColumnType("jsonb").HasConversion(
             v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),

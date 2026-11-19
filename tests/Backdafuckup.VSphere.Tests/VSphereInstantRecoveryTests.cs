@@ -197,7 +197,7 @@ public sealed class VSphereInstantRecoveryTests : IDisposable
     }
 
     [Fact]
-    public async Task A_mount_the_host_cannot_make_names_host_server_path_and_ports_and_closes_its_ledger_row()
+    public async Task A_mount_the_host_cannot_make_names_host_server_and_path_and_closes_its_ledger_row()
     {
         await using var session = await OpenAsync();
         _lab.NasMountFails = "NFS mount 192.0.2.10:/bdfu/1a2b3c4d failed: Unable to connect to NFS server.";
@@ -206,7 +206,7 @@ public sealed class VSphereInstantRecoveryTests : IDisposable
 
         Assert.Equal(
             "ESXi host esx01.corp.example could not mount 192.0.2.10:/bdfu/1a2b3c4d as NFS 3 datastore bdfu-ir-1a2b3c4d: NFS mount 192.0.2.10:/bdfu/1a2b3c4d failed: " +
-            "Unable to connect to NFS server. (HostConfigFault). The host connects to 192.0.2.10 on port 111 (portmapper), 20048 (MOUNT) and 2049 (NFS).", error.Message);
+            "Unable to connect to NFS server. (HostConfigFault).", error.Message);
         Assert.Equal(ArtifactState.Done, Assert.Single(_ledger.Items).State);
 
         // A datastore of that name exists already.

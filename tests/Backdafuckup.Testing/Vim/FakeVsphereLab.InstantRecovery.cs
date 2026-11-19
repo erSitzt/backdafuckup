@@ -48,6 +48,19 @@ public sealed partial class FakeVsphereLab
         UpdateLayout(vm);
     }
 
+    /// <summary>An administrator removes the VM from the inventory in the vSphere client.</summary>
+    public void RemoveVmByHand((string Type, string Value) vm)
+    {
+        lock (_lock)
+        {
+            _devices.Remove(vm.Value);
+            Events.Add($"removed by hand {Vcenter.Name(vm)}");
+        }
+
+        Vcenter.Remove(vm);
+        RefreshDatastoreVms();
+    }
+
     private void AddInstantRecoverySupport()
     {
         VmkernelAddresses = ["192.0.2.21", "198.51.100.21"];

@@ -729,6 +729,7 @@ public static class EngineServiceCollectionExtensions
             var o = sp.GetRequiredService<IOptions<InstantRecovery.InstantRecoveryOptions>>().Value;
             return new Backdafuckup.InstantRecovery.AsyncChunkCache(o.CacheBytes, Math.Max(1, o.MaxConcurrentChunkLoads));
         });
+        services.AddSingleton<InstantRecovery.InstantRecoveryControl>();
         services.AddSingleton<InstantRecovery.InstantRecoverySessionRunner>();
         services.AddHostedService<PendingArtifactRetryService>();
         services.AddSingleton<JobScheduler>();
