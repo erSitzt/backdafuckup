@@ -31,10 +31,11 @@ backdafuckup uses the following third-party components. Keep this list in sync w
 
 Build tools (not shipped): mingw-w64 GCC (GPL-3.0) and osslsigncode (GPL-3.0) in the Docker image of `native/bdfu-vss`.
 
-Test-only dependencies (not shipped): xUnit (Apache-2.0), Testcontainers and Testcontainers.MsSql (MIT), the SQL Server container image (Developer edition, development and test use only), bUnit (MIT), BenchmarkDotNet (MIT), coverlet (MIT).
+Test-only dependencies (not shipped): xUnit (Apache-2.0), Testcontainers and Testcontainers.MsSql (MIT), the SQL Server container image (Developer edition, development and test use only), bUnit (MIT), BenchmarkDotNet (MIT), coverlet (MIT). Container images built only for interoperability tests: nbdkit (BSD-3-Clause) and the libnfs utilities (LGPL-2.1-or-later), from Debian packages.
 
 Specifications implemented from public documents (no code copied):
 - NBD protocol (`doc/proto.md`, public domain)
+- ONC RPC (RFC 5531), XDR (RFC 4506), the portmapper (RFC 1833), NFS version 3 and MOUNT version 3 (RFC 1813)
 - XAPI / XenServer changed block tracking developer documentation
 - Microsoft Volume Shadow Copy Service documentation (requester, provider, COM+ registration)
 - MS-SCMR (Service Control Manager Remote Protocol) and MS-RPCE (NDR), for the svcctl client of the push installation
