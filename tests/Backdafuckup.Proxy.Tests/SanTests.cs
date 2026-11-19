@@ -58,10 +58,20 @@ public sealed class SanTests
         var etc = Directory.CreateTempSubdirectory("bdfu-san-").FullName;
         try
         {
-            Assert.Null(await new IscsiadmInitiator(null, etc).InitiatorNameAsync(Ct));
+            var initiator = new IscsiadmInitiator(null, etc);
+            Assert.Null(await initiator.InitiatorNameAsync(Ct));
+            Assert.StartsWith("no iSCSI initiator (open-iscsi) is installed:", await initiator.InitiatorProblemAsync(Ct), StringComparison.Ordinal);
+
+            // As Debian and Ubuntu install it: the name is generated at iscsid's first start.
             Directory.CreateDirectory(Path.Combine(etc, "iscsi"));
+            await File.WriteAllTextAsync(Path.Combine(etc, "iscsi", "initiatorname.iscsi"), "## DO NOT EDIT\nGenerateName=yes\n", Ct);
+            Assert.Null(await initiator.InitiatorNameAsync(Ct));
+            Assert.Contains("open-iscsi is installed, but has no initiator name yet", await initiator.InitiatorProblemAsync(Ct), StringComparison.Ordinal);
+            Assert.Contains("systemctl start iscsid", await initiator.InitiatorProblemAsync(Ct), StringComparison.Ordinal);
+
             await File.WriteAllTextAsync(Path.Combine(etc, "iscsi", "initiatorname.iscsi"), "## DO NOT EDIT\nInitiatorName=iqn.2004-10.com.ubuntu:01:proxy01\n", Ct);
-            Assert.Equal("iqn.2004-10.com.ubuntu:01:proxy01", await new IscsiadmInitiator(null, etc).InitiatorNameAsync(Ct));
+            Assert.Equal("iqn.2004-10.com.ubuntu:01:proxy01", await initiator.InitiatorNameAsync(Ct));
+            Assert.Null(await initiator.InitiatorProblemAsync(Ct));
         }
         finally
         {

@@ -69,9 +69,7 @@ public sealed class ProxyAgentClient(
         using var socket = await connect(new Uri(settings.ServerUrl, ProxyAgentProtocol.ControlPath(settings.ProxyId)), settings.AgentKey, cancellationToken).ConfigureAwait(false);
         using var send = new SemaphoreSlim(1, 1);
         using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var initiator = iscsi is null ? null : await iscsi.InitiatorNameAsync(cancellationToken).ConfigureAwait(false);
-        var sanRefusal = iscsi is null || initiator is null ? "no iSCSI initiator (open-iscsi) is installed"
-            : sanCheck is null ? null : await sanCheck(cancellationToken).ConfigureAwait(false);
+        var (initiator, sanRefusal) = await SanStateAsync(cancellationToken).ConfigureAwait(false);
         if (sanRefusal is not null && iscsi is not null)
         {
             log($"No SAN access: {sanRefusal}");
@@ -97,6 +95,7 @@ public sealed class ProxyAgentClient(
         log($"Connected to {settings.ServerUrl} as proxy {settings.ProxyId}.");
 
         var running = new List<Task>();
+        running.Add(Task.Run(() => WatchSanAsync(initiator, sanRefusal, session), CancellationToken.None));
         try
         {
             while (await ProxyAgentProtocol.ReceiveAsync(socket, session.Token).ConfigureAwait(false) is { } command)
@@ -116,6 +115,49 @@ public sealed class ProxyAgentClient(
             {
                 // The connection ended while commands ran.
             }
+        }
+    }
+
+    /// <summary>How often the SAN state (initiator name, self-check) is read again while connected.</summary>
+    internal static TimeSpan SanRecheckInterval { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>The initiator name and why the proxy offers no SAN access (null: it does).</summary>
+    private async Task<(string? Initiator, string? Refusal)> SanStateAsync(CancellationToken cancellationToken)
+    {
+        if (iscsi is null)
+        {
+            return (null, "no iSCSI initiator (open-iscsi) is installed");
+        }
+
+        var initiator = await iscsi.InitiatorNameAsync(cancellationToken).ConfigureAwait(false);
+        var refusal = initiator is null
+            ? await iscsi.InitiatorProblemAsync(cancellationToken).ConfigureAwait(false) ?? "no iSCSI initiator name"
+            : sanCheck is null ? null : await sanCheck(cancellationToken).ConfigureAwait(false);
+        return (initiator, refusal);
+    }
+
+    /// <summary>
+    /// Reads the SAN state again every so often; when it changed (open-iscsi installed, the LVM settings made) and no disk
+    /// is open, the connection is ended so that the next one tells the server (the console shows it within a minute).
+    /// </summary>
+    private async Task WatchSanAsync(string? initiator, string? refusal, CancellationTokenSource session)
+    {
+        try
+        {
+            while (!session.IsCancellationRequested)
+            {
+                await Task.Delay(SanRecheckInterval, session.Token).ConfigureAwait(false);
+                var (now, nowRefusal) = await SanStateAsync(session.Token).ConfigureAwait(false);
+                if ((now, nowRefusal) != (initiator, refusal) && _handles.IsEmpty)
+                {
+                    log($"SAN access changed ({nowRefusal ?? $"available, initiator {now}"}); connecting again to tell the server.");
+                    await session.CancelAsync().ConfigureAwait(false);
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
         }
     }
 

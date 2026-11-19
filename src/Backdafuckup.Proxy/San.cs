@@ -11,6 +11,9 @@ public interface IIscsiInitiator
     /// <summary>This machine's initiator name (the array's host object must list it), or null without an initiator.</summary>
     Task<string?> InitiatorNameAsync(CancellationToken cancellationToken);
 
+    /// <summary>Why there is no initiator name (what to do about it); null when there is one.</summary>
+    Task<string?> InitiatorProblemAsync(CancellationToken cancellationToken);
+
     /// <summary>Discovers the target at the portals and logs in once (never at boot: node.startup stays manual).</summary>
     Task LoginAsync(IReadOnlyList<string> portals, string targetIqn, CancellationToken cancellationToken);
 
@@ -27,24 +30,44 @@ public sealed class IscsiadmInitiator(CommandRunner? run = null, string etcRoot 
 
     private readonly CommandRunner _run = run ?? Commands.RunAsync;
 
+    private string InitiatorFile => Path.Combine(etcRoot, "iscsi", "initiatorname.iscsi");
+
     public async Task<string?> InitiatorNameAsync(CancellationToken cancellationToken)
     {
-        var file = Path.Combine(etcRoot, "iscsi", "initiatorname.iscsi");
-        if (!File.Exists(file))
+        if (!File.Exists(InitiatorFile))
         {
             return null;
         }
 
-        foreach (var line in await File.ReadAllLinesAsync(file, cancellationToken).ConfigureAwait(false))
+        foreach (var line in await File.ReadAllLinesAsync(InitiatorFile, cancellationToken).ConfigureAwait(false))
         {
             var text = line.Trim();
-            if (text.StartsWith("InitiatorName=", StringComparison.Ordinal))
+            if (text.StartsWith("InitiatorName=", StringComparison.Ordinal) && text["InitiatorName=".Length..].Trim() is { Length: > 0 } name)
             {
-                return text["InitiatorName=".Length..].Trim();
+                return name;
             }
         }
 
         return null;
+    }
+
+    public async Task<string?> InitiatorProblemAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(InitiatorFile))
+        {
+            return $"no iSCSI initiator (open-iscsi) is installed: {InitiatorFile} is missing";
+        }
+
+        if (await InitiatorNameAsync(cancellationToken).ConfigureAwait(false) is not null)
+        {
+            return null;
+        }
+
+        var lines = await File.ReadAllLinesAsync(InitiatorFile, cancellationToken).ConfigureAwait(false);
+        return lines.Any(l => l.Trim().Equals("GenerateName=yes", StringComparison.OrdinalIgnoreCase))
+            // Debian and Ubuntu write this at install; iscsid's first start replaces it with a generated name.
+            ? $"open-iscsi is installed, but has no initiator name yet ({InitiatorFile} says GenerateName=yes): start iscsid once (systemctl start iscsid)"
+            : $"{InitiatorFile} names no initiator (a line InitiatorName=iqn.…)";
     }
 
     public async Task LoginAsync(IReadOnlyList<string> portals, string targetIqn, CancellationToken cancellationToken)
