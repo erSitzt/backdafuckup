@@ -17,6 +17,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="..\Backdafuckup.Nfs.Tests\libnfs\**" LinkBase="libnfs" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="kernelnfs/**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
