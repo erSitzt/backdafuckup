@@ -23,6 +23,8 @@ ProtectSystem=strict
 ReadWritePaths=/sys/class/scsi_host /sys/block /sys/devices
 # SAN access (backup from storage snapshots): iscsiadm keeps its node records there.
 ReadWritePaths=-/etc/iscsi -/var/lib/iscsi -/run/lock
+# Self-update: the agent replaces its program file with the server's build and exits; Restart=always starts the new one.
+ReadWritePaths=/opt/backdafuckup-proxy
 ProtectHome=true
 ProtectControlGroups=true
 

@@ -18,9 +18,10 @@ public sealed record ProxyHostInfo(string HostName, string? SmbiosUuid, string? 
 /// <param name="connect">Opens a WebSocket to a URL with a bearer token (TLS pinning is the caller's business).</param>
 /// <param name="iscsi">The iSCSI initiator for SAN access; null: none.</param>
 /// <param name="sanCheck">The SAN self-check (null: SAN access is offered only with an initiator and passes no check).</param>
+/// <param name="update">Installs the server's program file (a self-update) and restarts the agent; null: the agent does not update itself.</param>
 public sealed class ProxyAgentClient(
     ProxyAgentSettings settings, ProxyHostInfo host, IBlockDevices devices, Func<Uri, string, CancellationToken, Task<WebSocket>> connect, Action<string> log,
-    IIscsiInitiator? iscsi = null, Func<CancellationToken, Task<string?>>? sanCheck = null)
+    IIscsiInitiator? iscsi = null, Func<CancellationToken, Task<string?>>? sanCheck = null, Func<ProxyAgentMessage, Task>? update = null)
 {
     private readonly ConcurrentDictionary<string, OpenHandle> _handles = new(StringComparer.Ordinal);
 
@@ -131,6 +132,7 @@ public sealed class ProxyAgentClient(
                 ProxyMessageTypes.Tunnel => await TunnelAsync(command, cancellationToken).ConfigureAwait(false),
                 ProxyMessageTypes.Release => await ReleaseAsync(command, cancellationToken).ConfigureAwait(false),
                 ProxyMessageTypes.IscsiLogin => await IscsiLoginAsync(command, cancellationToken).ConfigureAwait(false),
+                ProxyMessageTypes.Update => Update(command),
                 _ => Error(command, $"unknown command '{command.Type}'"),
             };
         }
@@ -147,6 +149,29 @@ public sealed class ProxyAgentClient(
         {
             // The server is gone; it repeats what it still needs after reconnecting.
         }
+    }
+
+    /// <summary>Starts the self-update the server offered (when no disk is open) and replies at once; the update ends with a restart.</summary>
+    private ProxyAgentMessage Update(ProxyAgentMessage command)
+    {
+        if (update is null)
+        {
+            return Error(command, $"{host.HostName}: this agent does not update itself (not installed as {ProxySelfUpdate.ProgramName})");
+        }
+
+        if (!_handles.IsEmpty)
+        {
+            return Error(command, $"{host.HostName}: {_handles.Count} disk(s) open; the update waits for the next connection");
+        }
+
+        if (command.Sha256 is not { Length: 64 } || command.Path is not { Length: > 0 } || command.SizeBytes is not > 0)
+        {
+            return Error(command, $"{host.HostName}: the update offer names no file, size and SHA-256");
+        }
+
+        log($"Updating the agent to version {command.AgentVersion} ({command.SizeBytes} bytes from {command.Path}).");
+        _ = Task.Run(() => update(command));
+        return Reply(command);
     }
 
     /// <summary>Logs in to the array's target (once) and asks its sessions for new LUNs; replies with the devices.</summary>

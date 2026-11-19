@@ -99,4 +99,62 @@ public sealed partial class ApiIntegrationTests
         Assert.False(renewed.Proxy.Enrolled);
         await Assert.ThrowsAnyAsync<Exception>(() => ConnectAgentSocketAsync(new Uri(_factory.Server.BaseAddress, ProxyAgentProtocol.ControlPath(created.Proxy.Id)), enrolled.AgentKey, Ct));
     }
+
+    [Fact]
+    public async Task A_proxy_whose_program_differs_from_the_package_is_offered_the_update_and_downloads_it_with_its_key()
+    {
+        var client = await SignedInClientAsync();
+        await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://localhost/", Ct);
+        var build = RandomNumberGenerator.GetBytes(300_000);
+        Directory.CreateDirectory(Path.Combine(_root, "proxy"));
+        await File.WriteAllBytesAsync(Path.Combine(_root, "proxy", ProxySelfUpdate.ProgramName), build, Ct);
+        await File.WriteAllTextAsync(Path.Combine(_root, "proxy", "version.txt"), "0.3.1\n", Ct);
+        var hash = Convert.ToHexStringLower(SHA256.HashData(build));
+
+        var created = await Read<ProxyInstallDto>(client.PostAsJsonAsync("/api/proxies", new CreateProxyDto("proxy01"), Ct));
+        var enrolled = await Read<EnrollProxyResponseDto>(client.PostAsJsonAsync("/api/agent/proxies/enroll", new EnrollProxyRequestDto(created.Proxy.Id, created.InstallToken, "proxy01"), Ct));
+
+        async Task<ProxyAgentMessage?> ConnectAsync(string filesHash)
+        {
+            var offered = new TaskCompletionSource<ProxyAgentMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var agent = new ProxyAgentClient(
+                new ProxyAgentSettings(_factory.Server.BaseAddress, created.Proxy.Id, enrolled.AgentKey),
+                new ProxyHostInfo("proxy01.corp.example", null, null, ["10.26.16.91"], "0.3.0+old", filesHash),
+                new FileBlockDevices(), ConnectAgentSocketAsync, _ => { }, update: offer =>
+                {
+                    offered.TrySetResult(offer);
+                    return Task.CompletedTask;
+                });
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+            var running = agent.RunAsync(stop.Token);
+            try
+            {
+                await WaitAsync(async () => (await client.GetFromJsonAsync<List<ProxyDto>>("/api/proxies", Ct))!.SingleOrDefault(p => p.Online));
+                return await Task.WhenAny(offered.Task, Task.Delay(TimeSpan.FromSeconds(3), Ct)) == offered.Task ? offered.Task.Result : null;
+            }
+            finally
+            {
+                await stop.CancelAsync();
+                await running;
+            }
+        }
+
+        // An agent of another build gets the offer: the package's version, size and SHA-256, and where to download it.
+        var offer = await ConnectAsync(new string('0', 64));
+        Assert.NotNull(offer);
+        Assert.Equal(("0.3.1", (long?)build.Length, hash, $"api/agent/proxies/{created.Proxy.Id:D}/package/backdafuckup-proxy"), (offer.AgentVersion, offer.SizeBytes, offer.Sha256, offer.Path));
+
+        // The download needs the agent's key.
+        var server = _factory.CreateClient();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await server.GetAsync(offer.Path, Ct)).StatusCode);
+        using (var request = new HttpRequestMessage(HttpMethod.Get, offer.Path))
+        {
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", enrolled.AgentKey);
+            using var response = await server.SendAsync(request, Ct);
+            Assert.Equal(build, await response.Content.ReadAsByteArrayAsync(Ct));
+        }
+
+        // An agent that runs the package's build is left alone.
+        Assert.Null(await ConnectAsync(hash));
+    }
 }

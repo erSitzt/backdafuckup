@@ -660,6 +660,7 @@ public static class EngineServiceCollectionExtensions
         services.Configure<ScaleOut.ScaleOutOptions>(configuration.GetSection("ScaleOut"));
         services.TryAddSingleton<Backdafuckup.Tape.Devices.ITapeHost, Backdafuckup.Tape.Devices.LocalTapeHost>();
         services.AddSingleton<Tape.TapeAgents>();
+        services.AddSingleton<Proxies.ProxyPackage>();
         services.AddSingleton<Proxies.ProxyAgents>();
         services.AddSingleton<Core.Arrays.IStorageArrayProvider>(new Backdafuckup.Arrays.Alletra.AlletraProvider());
         services.AddSingleton<Arrays.StorageSystems>();

@@ -120,17 +120,48 @@ internal static class Program
             ?? throw new ArgumentException($"{configPath} is empty.");
         var server = ServerUri(config.ServerUrl);
         Console.WriteLine($"backdafuckup proxy {version}, server {server}, proxy {config.ProxyId}");
+        var program = Environment.ProcessPath;
+        var hash = ProxySelfUpdate.RunningHash();
+        if (hash is not null && program is not null)
+        {
+            ProxySelfUpdate.RemoveReplaced(program);
+        }
+
         var client = new ProxyAgentClient(
             new ProxyAgentSettings(server, config.ProxyId, config.AgentKey),
-            new ProxyHostInfo(Environment.MachineName, ReadDmi("product_uuid"), ReadDmi("product_serial"), Addresses(), version, null),
+            new ProxyHostInfo(Environment.MachineName, ReadDmi("product_uuid"), ReadDmi("product_serial"), Addresses(), version, hash),
             new LinuxBlockDevices(),
             (uri, bearer, ct) => ConnectAsync(uri, bearer, config.ServerPins, ct),
             message => Console.WriteLine(message),
             new IscsiadmInitiator(),
-            ct => SanSelfCheck.CheckAsync(null, ct));
+            ct => SanSelfCheck.CheckAsync(null, ct),
+            hash is null || program is null ? null : offer => UpdateAsync(server, config, program, offer));
         await client.RunAsync(cancellationToken).ConfigureAwait(false);
         Console.WriteLine("Stopped.");
         return 0;
+    }
+
+    /// <summary>Downloads the server's program file (with the agent key, the server's certificate pinned), swaps it in and exits: systemd starts the new one.</summary>
+    private static async Task UpdateAsync(Uri server, AgentConfig config, string program, ProxyAgentMessage offer)
+    {
+        try
+        {
+            var handler = new SocketsHttpHandler();
+            if (config.ServerPins.Count > 0)
+            {
+                handler.SslOptions.RemoteCertificateValidationCallback = CertificatePinning.CreateValidator(TlsTrustMode.Pinned, config.ServerPins);
+            }
+
+            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMinutes(10) };
+            http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", config.AgentKey);
+            await ProxySelfUpdate.InstallAsync(http, new Uri(server, offer.Path!), program, offer.SizeBytes!.Value, offer.Sha256!, CancellationToken.None).ConfigureAwait(false);
+            Console.WriteLine($"Agent updated to version {offer.AgentVersion} ({program}); restarting.");
+            Environment.Exit(0);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HttpRequestException or InvalidDataException or TaskCanceledException)
+        {
+            Console.WriteLine($"Agent update to version {offer.AgentVersion} from {server} failed: {ex.Message}. The agent keeps running; the update is offered again at the next connection.");
+        }
     }
 
     private static async Task<WebSocket> ConnectAsync(Uri uri, string bearer, IReadOnlyList<string> pins, CancellationToken cancellationToken)

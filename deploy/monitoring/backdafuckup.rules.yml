@@ -224,3 +224,30 @@ groups:
         annotations:
           summary: "Volume snapshots in cluster {{ $labels.cluster }} lived over 2 hours"
           description: "A VolumeSnapshot existed for hours while its volume was read (vSphere: the copy of the snapshot is slow). A volume with a snapshot cannot be expanded or deleted, and vSphere allows 3 per volume."
+
+      - alert: BackdafuckupArrayLeftovers
+        expr: bdfu_array_leftovers > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Storage system {{ $labels.storage_system }} holds {{ $value }} snapshot(s) or presentation(s) of backdafuckup no session uses"
+          description: "Backup from storage snapshots left objects on the array that the cleanup has not removed for an hour (it retries every 10 minutes; the array's own expiry removes a snapshot at the latest after the configured hours). Storage Systems → Objects of this server on the array lists them; the server log names why the removal failed."
+
+      - alert: BackdafuckupArrayReaderMismatch
+        expr: increase(bdfu_array_verify_total{result="mismatch"}[1d]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A disk read from an array snapshot of {{ $labels.storage_system }} differed from the previous restore point"
+          description: "Regions that change tracking reported unchanged read differently through the experimental reader ({{ $labels.method }}); that backup failed and no restore point was kept. Turn off 'Experimental readers' for the storage system (the VMs are then read from their VM snapshots) and report the case with the session log."
+
+      - alert: BackdafuckupArrayFallbacks
+        expr: increase(bdfu_array_fallback_total[1d]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "VMs meant for storage snapshots on {{ $labels.storage_system }} were read from their VM snapshots ({{ $labels.reason }})"
+          description: "The backups succeeded the normal way, with longer-lived VM snapshots. The session logs say why the array path was not taken (no proxy with SAN access, the chain differed on the LUN, an array error)."

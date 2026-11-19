@@ -1099,6 +1099,11 @@ internal sealed class VmBackupTask(
         if (_arrayLease is not null && baseIndex is not null && reader is IDiskReader random)
         {
             var verification = await Arrays.UnchangedRegionCheck.RunAsync(random, changes, baseIndex, 32, cancellationToken).ConfigureAwait(false);
+            if (verification is not null)
+            {
+                metrics.RecordArrayVerify(_arrayLease.Info.System, verification.Method, verification.Passed);
+            }
+
             if (verification is { Passed: false })
             {
                 throw new InvalidDataException(

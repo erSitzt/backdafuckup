@@ -8,7 +8,7 @@ This folder contains:
 |---|---|
 | `backdafuckup.rules.yml` | Alert rules as a plain Prometheus rule group (`rule_files:`) |
 | `prometheusrule.yaml` | The same rules as a `PrometheusRule` for the Prometheus Operator (kube-prometheus-stack), generated from the rule group |
-| `grafana-dashboard.json` | A Grafana dashboard: backups, VM snapshots, disks and transports, pool storage, server, scale-out repositories |
+| `grafana-dashboard.json` | A Grafana dashboard: backups, VM snapshots, disks and transports, pool storage, server, scale-out repositories, backup proxies, backup from storage snapshots |
 
 The metric names and their meaning are listed in the admin guide (`docs/admin-guide.md`, *Monitoring with Prometheus*).
 
@@ -98,7 +98,7 @@ A scrape interval of 60 s matches how often the server refreshes its catalog gau
 - **Prometheus Operator:** `kubectl apply -f prometheusrule.yaml`. Its label `release` must match the Prometheus' `ruleSelector`.
 - **Plain Prometheus:** add `backdafuckup.rules.yml` under `rule_files:`.
 
-Both contain the same 24 alerts:
+Both contain the same 27 alerts:
 
 | Alert | When |
 |---|---|
@@ -126,6 +126,9 @@ Both contain the same 24 alerts:
 | BackdafuckupScaleOutNoRoom | no extent of a scale-out repository that takes new chains has 10 % free (30 minutes) |
 | BackdafuckupExtentOffline | an extent of a scale-out repository cannot be reached (15 minutes) |
 | BackdafuckupEvacuationStuck | an extent being evacuated still holds restore points and nothing moved for 6 hours |
+| BackdafuckupArrayLeftovers | snapshots or presentations of backdafuckup on a storage system no session has used for an hour |
+| BackdafuckupArrayReaderMismatch | a disk read from an array snapshot differed from the previous restore point (in the last day) |
+| BackdafuckupArrayFallbacks | VMs meant for storage snapshots were read from their VM snapshots (info, in the last day) |
 
 After changing `backdafuckup.rules.yml`, check it and regenerate the `PrometheusRule`:
 

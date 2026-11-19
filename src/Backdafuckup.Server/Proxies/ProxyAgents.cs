@@ -24,7 +24,8 @@ public sealed class ProxyRequestException(string message, int statusCode = Statu
 /// tunnels the server asks them to open, and the disks the providers attach through them (<see cref="IProxyPool"/>).
 /// </summary>
 public sealed class ProxyAgents(
-    IDbContextFactory<AppDbContext> dbFactory, Agents.AgentSettingsStore settings, TimeProvider time, ILogger<ProxyAgents> logger, System.Diagnostics.Metrics.IMeterFactory meters) : IProxyPool
+    IDbContextFactory<AppDbContext> dbFactory, Agents.AgentSettingsStore settings, TimeProvider time, ILogger<ProxyAgents> logger, System.Diagnostics.Metrics.IMeterFactory meters,
+    ProxyPackage package) : IProxyPool
 {
     private readonly System.Diagnostics.Metrics.Meter _meter = meters.Create(Telemetry.BackupMetrics.MeterName);
     private readonly ConcurrentDictionary<Guid, string> _seen = new();
@@ -188,6 +189,7 @@ public sealed class ProxyAgents(
         logger.LogInformation(
             "Proxy {Proxy} connected from {Remote} (host {Host}, version {Version}) with {Devices} device(s).",
             proxy.Name, remote, hello.HostName, hello.AgentVersion, hello.Devices?.Count ?? 0);
+        var offer = OfferUpdateAsync(connection, stop.Token);
         try
         {
             await connection.RunAsync(stop.Token).ConfigureAwait(false);
@@ -195,8 +197,46 @@ public sealed class ProxyAgents(
         finally
         {
             _connections.TryRemove(new KeyValuePair<Guid, ProxyConnection>(proxy.Id, connection));
+            await stop.CancelAsync().ConfigureAwait(false);
+            await offer.ConfigureAwait(false);
             await RecordAsync(proxy.Id, null, null).ConfigureAwait(false);
             logger.LogInformation("Proxy {Proxy} ({Remote}) disconnected.", proxy.Name, remote);
+        }
+    }
+
+    /// <summary>
+    /// When the agent's program differs from the server's package, it is offered the update right after its hello (no disk
+    /// is open then). The agent downloads it, swaps it in and restarts; an agent that refuses keeps running as it is.
+    /// </summary>
+    private async Task OfferUpdateAsync(ProxyConnection connection, CancellationToken cancellationToken)
+    {
+        await Task.Yield(); // the package's hash is computed off the connection's start
+        if (connection.Hello.FilesHash is not { Length: > 0 } current || package.Program() is not { } program
+            || string.Equals(current, program.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        logger.LogInformation(
+            "Proxy {Proxy}: its agent ({Version}, {Current}) differs from this server's package ({Offered}, {Sha256}); offering the update.",
+            connection.Name, connection.Hello.AgentVersion, current[..12], program.Version, program.Sha256[..12]);
+        try
+        {
+            await connection.CommandAsync(
+                new ProxyAgentMessage
+                {
+                    Type = ProxyMessageTypes.Update, AgentVersion = program.Version, Sha256 = program.Sha256, SizeBytes = program.SizeBytes,
+                    Path = ProxyAgentProtocol.ProgramPath(connection.ProxyId),
+                },
+                TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
+        {
+            logger.LogWarning("Proxy {Proxy} did not take the agent update: {Error}", connection.Name, ex.Message);
+        }
+        catch (OperationCanceledException)
+        {
+            // Disconnected meanwhile (e.g. it restarted with the update).
         }
     }
 

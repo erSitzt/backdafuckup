@@ -34,6 +34,9 @@ public static class ProxyAgentProtocol
 
     public const string EnrollPath = "api/agent/proxies/enroll";
 
+    /// <summary>The agent's program file of the server's package, for its self-update (authenticated with the agent key).</summary>
+    public static string ProgramPath(Guid proxyId) => $"api/agent/proxies/{proxyId:D}/package/{ProxySelfUpdate.ProgramName}";
+
     public static Task SendAsync(WebSocket socket, SemaphoreSlim sendLock, ProxyAgentMessage message, CancellationToken cancellationToken) =>
         AgentSocketFraming.SendAsync(socket, sendLock, message, ReadOnlyMemory<byte>.Empty, Json, cancellationToken);
 
@@ -61,6 +64,13 @@ public static class ProxyMessageTypes
 
     /// <summary>Server → agent: close the handle and remove the device from the kernel (before the disk is detached).</summary>
     public const string Release = "release";
+
+    /// <summary>
+    /// Server → agent, after the hello when the agent's program differs from the server's package: download it from
+    /// <see cref="ProxyAgentMessage.Path"/>, check it, swap it in and exit (the service manager restarts the agent). Refused
+    /// while disks are open.
+    /// </summary>
+    public const string Update = "update";
 
     /// <summary>Server → agent: log in to an array's iSCSI target at these portals (once), then rescan its sessions.</summary>
     public const string IscsiLogin = "iscsi-login";
@@ -90,6 +100,9 @@ public sealed record ProxyAgentMessage
     public string? AgentVersion { get; init; }
 
     public string? FilesHash { get; init; }
+
+    /// <summary>update: the SHA-256 of the program file to download (with its size in <see cref="SizeBytes"/>, its version in <see cref="AgentVersion"/>).</summary>
+    public string? Sha256 { get; init; }
 
     public string? HostName { get; init; }
 

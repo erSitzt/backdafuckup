@@ -732,6 +732,8 @@ The proxy VM:
 
 Install it under *Backup Infrastructure → Backup Proxies → Add proxy*: download the agent (`backdafuckup-proxy`, one file) and its systemd unit, copy them to `/opt/backdafuckup-proxy/` and `/etc/systemd/system/`, run the shown `enroll` command as root (it holds a one-time install token, valid 24 hours) and start the service. The proxy shows as online within seconds.
 
+**Updates:** after a server update, a proxy whose agent differs from the server's package is offered the new build as soon as it connects with no disk open. It downloads the file with its key (the server's certificate pinned as at the enrollment), checks size and SHA-256, swaps it into `/opt/backdafuckup-proxy/` and restarts through systemd. A changed systemd unit is not installed this way: copy it when the release notes say so, then `systemctl daemon-reload && systemctl restart backdafuckup-proxy`. Agents without the self-update, and units without `ReadWritePaths=/opt/backdafuckup-proxy`, are updated once by hand.
+
 A job uses a connected proxy whose VM is powered on, has a free SCSI place and sees all datastores of the VM: one on the VM's host first, then one in its cluster, then the one with the fewest disks attached. The session log names the proxy and why others were not used.
 
 ### Backups
@@ -1454,6 +1456,12 @@ What is measured (prefix `bdfu_`; `pool` is the connection name of a pool or vCe
 | `bdfu_nbd_reconnects_total` {pool, host} | counter | NBD connections that broke while a disk was read and were opened again |
 | `bdfu_hotadd_attach_seconds` {pool, storage, proxy} | histogram | vSphere: attaching a snapshot's disk to a backup proxy VM (the reconfiguration of the proxy VM) |
 | `bdfu_proxy_connected`, `bdfu_proxy_open_disks` {proxy} | gauge | Backup proxies: 1 while connected, 0 once gone (proxies that connected since the server started); disks the server has open through each |
+| `bdfu_array_snapshot_seconds` {storage_system} | histogram | Backup from storage snapshots: taking the array snapshot of a batch |
+| `bdfu_array_batch_vms` {storage_system} | histogram | VMs served by one array snapshot |
+| `bdfu_vm_snapshot_lifetime_seconds` {storage_system, path} | histogram | How long a VM snapshot existed when it was released before its disks were read (path `array`) |
+| `bdfu_array_fallback_total` {storage_system, reason} | counter | VMs meant for an array snapshot that were read from their VM snapshot (`no_proxy`, `lvhd_refused`, `lun_error`, `array_error`, `not_found`, `release_failed`) |
+| `bdfu_array_verify_total` {storage_system, method, result} | counter | Checks of disks read from array snapshots against the previous restore point (`passed`, `mismatch`) |
+| `bdfu_array_leftovers` {storage_system} | gauge | Snapshots and presentations of this server on a storage system that no running session uses |
 | `bdfu_sessions_total`, `bdfu_session_duration_seconds` {kind, result} | counter, histogram | Finished sessions |
 | `bdfu_sessions_running`, `bdfu_sessions_queued` {kind} | gauge | Sessions now |
 | `bdfu_vm_backups_total` {backup_job, result} | counter | Backups of single VMs, each attempt |

@@ -100,3 +100,67 @@ public sealed class SanTests
         Assert.Null(await SanSelfCheck.CheckAsync(commands.RunAsync, Ct));
     }
 }
+
+/// <summary>The proxy agent's self-update: the server's program file checked and swapped in.</summary>
+public sealed class SelfUpdateTests
+{
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    private sealed class Serve(byte[] content) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(content) });
+    }
+
+    [Fact]
+    public async Task The_checked_download_replaces_the_program_and_the_old_file_goes_at_the_next_start()
+    {
+        var folder = Directory.CreateTempSubdirectory("bdfu-update-").FullName;
+        try
+        {
+            var program = Path.Combine(folder, ProxySelfUpdate.ProgramName);
+            await File.WriteAllTextAsync(program, "old build", Ct);
+            var build = "new build"u8.ToArray();
+            var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(build));
+            using var http = new HttpClient(new Serve(build));
+
+            await ProxySelfUpdate.InstallAsync(http, new Uri("https://backup01.corp.example:9555/x"), program, build.Length, hash, Ct);
+
+            Assert.Equal("new build", await File.ReadAllTextAsync(program, Ct));
+            Assert.Equal("old build", await File.ReadAllTextAsync(program + ".old", Ct));
+            Assert.Equal(hash, ProxySelfUpdate.HashOf(program));
+            if (!OperatingSystem.IsWindows())
+            {
+                Assert.True(File.GetUnixFileMode(program).HasFlag(UnixFileMode.UserExecute));
+            }
+
+            ProxySelfUpdate.RemoveReplaced(program);
+            Assert.False(File.Exists(program + ".old"));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_download_that_does_not_match_leaves_the_program_untouched()
+    {
+        var folder = Directory.CreateTempSubdirectory("bdfu-update-").FullName;
+        try
+        {
+            var program = Path.Combine(folder, ProxySelfUpdate.ProgramName);
+            await File.WriteAllTextAsync(program, "old build", Ct);
+            using var http = new HttpClient(new Serve("tampered"u8.ToArray()));
+            var ex = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ProxySelfUpdate.InstallAsync(http, new Uri("https://backup01.corp.example:9555/x"), program, 9, new string('a', 64), Ct));
+            Assert.Contains("the server named 9 bytes and aaaa", ex.Message, StringComparison.Ordinal);
+            Assert.Equal("old build", await File.ReadAllTextAsync(program, Ct));
+            Assert.Equal([ProxySelfUpdate.ProgramName], Directory.GetFiles(folder).Select(Path.GetFileName));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+}

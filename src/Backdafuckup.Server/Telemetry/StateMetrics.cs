@@ -60,6 +60,9 @@ public sealed class StateMetrics
             description: "Sessions waiting to run, by kind.");
         meter.CreateObservableGauge("bdfu_artifacts_pending", () => _catalog.PendingArtifacts,
             description: "Snapshots and disks of backups still to be removed or reduced (retried every 10 minutes).");
+        meter.CreateObservableGauge("bdfu_array_leftovers", () =>
+            (_catalog.ArrayLeftovers ?? []).Select(r => new Measurement<int>(r.Objects, Tag("storage_system", r.System))),
+            description: "Snapshots and presentations of this server on a storage system that no running session uses (the cleanup removes them).");
 
         meter.CreateObservableGauge("bdfu_repository_size_bytes", () => Repositories(r => r.SizeBytes), "By", "Size of the repository's volume.");
         meter.CreateObservableGauge("bdfu_repository_free_bytes", () => Repositories(r => r.FreeBytes), "By", "Free space on the repository's volume.");
@@ -237,12 +240,16 @@ public sealed class StateMetrics
         IReadOnlyList<TapePoolRow>? TapePools = null,
         int TapeRequestsPending = 0,
         IReadOnlyList<ExtentRow>? Extents = null,
-        IReadOnlyList<ScaleOutRow>? ScaleOuts = null)
+        IReadOnlyList<ScaleOutRow>? ScaleOuts = null,
+        IReadOnlyList<ArrayLeftoverRow>? ArrayLeftovers = null)
     {
         public static CatalogSnapshot Empty { get; } = new([], [], new Dictionary<string, int>(), 0, [], [], 0, 0, []);
     }
 
     internal sealed record ExtentRow(string Name, string ScaleOut, string State, int Chains);
+
+    /// <summary>A storage system and how many of our objects on it no running session uses (snapshots, presentations).</summary>
+    internal sealed record ArrayLeftoverRow(string System, int Objects);
 
     internal sealed record ScaleOutRow(string Name, long SizeBytes, long FreeBytes, double MaxFreeRatio, int PendingDeletes);
 
@@ -429,6 +436,15 @@ public sealed class MetricsStateService(
                 || (m.State == TapeMediumState.Expired && m.PoolId == p.Id)
                 || (m.State == TapeMediumState.Appendable && m.SetId is { } set && openSets.Contains(set) && m.PoolId == p.Id))))).ToList();
 
+        // Our objects on the arrays that no running session reads any more: removed by the cleanup, or left over.
+        var runningSessions = db.Sessions.Where(s => s.State == SessionState.Running).Select(s => s.Id);
+        var arrayObjects = await db.Artifacts.AsNoTracking()
+            .Where(a => a.StorageSystemId != null && a.State != ArtifactState.Done && (a.SessionId == null || !runningSessions.Contains(a.SessionId.Value)))
+            .GroupBy(a => a.StorageSystemId!.Value).Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(g => g.Key, g => g.Count, cancellationToken).ConfigureAwait(false);
+        var arrayRows = (await db.StorageSystems.AsNoTracking().Select(s => new { s.Id, s.Name }).ToListAsync(cancellationToken).ConfigureAwait(false))
+            .Select(s => new StateMetrics.ArrayLeftoverRow(s.Name, arrayObjects.GetValueOrDefault(s.Id))).ToList();
+
         return new StateMetrics.CatalogSnapshot(
             vms,
             results,
@@ -444,7 +460,8 @@ public sealed class MetricsStateService(
             tapePoolRows,
             await db.TapeOperatorRequests.CountAsync(r => r.ResolvedUtc == null, cancellationToken).ConfigureAwait(false),
             extentRows,
-            scaleOutRows);
+            scaleOutRows,
+            arrayRows);
     }
 
     internal async Task ReadPoolsAsync(CancellationToken cancellationToken)

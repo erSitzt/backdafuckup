@@ -2250,20 +2250,17 @@
               "__name__": true,
               "otel_scope_name": true,
               "instance": true,
-              "job": true,
-              "Value #A": true
+              "job": true
             },
             "renameByName": {
-              "scale_out": "Scale-out",
-              "repository": "Extent",
-              "state": "State",
-              "Value #B": "Chains"
+              "proxy": "Proxy",
+              "Value #A": "Connected",
+              "Value #B": "Open disks"
             },
             "indexByName": {
-              "scale_out": 0,
-              "repository": 1,
-              "state": 2,
-              "Value #B": 3
+              "proxy": 0,
+              "Value #A": 1,
+              "Value #B": 2
             }
           }
         }
@@ -2275,7 +2272,7 @@
       "options": {
         "sortBy": [
           {
-            "displayName": "Scale-out",
+            "displayName": "Proxy",
             "desc": false
           }
         ]
@@ -2310,6 +2307,228 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "interval": "1h"
+    },
+    {
+      "type": "row",
+      "title": "Backup from storage snapshots",
+      "id": 48,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 106
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Array objects no session uses",
+      "id": 49,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Snapshots and presentations of backdafuckup on the storage systems that no running session reads (bdfu_array_leftovers); the cleanup removes them, the alert fires after an hour.",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 107
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(bdfu_array_leftovers) or vector(0)",
+          "legendFormat": "objects",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "VM snapshot lifetime with array snapshots (p90)",
+      "id": 50,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "How long VM snapshots existed when their disks were read from an array snapshot (released before reading), p90 per day.",
+      "gridPos": {
+        "h": 6,
+        "w": 9,
+        "x": 6,
+        "y": 107
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le, storage_system) (increase(bdfu_vm_snapshot_lifetime_seconds_bucket{path=\"array\"}[1d])))",
+          "legendFormat": "{{storage_system}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "interval": "1h"
+    },
+    {
+      "type": "timeseries",
+      "title": "Array snapshot duration (p90)",
+      "id": 51,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Taking the array snapshot of a batch (bdfu_array_snapshot_seconds), p90 per day.",
+      "gridPos": {
+        "h": 6,
+        "w": 9,
+        "x": 15,
+        "y": 107
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le, storage_system) (increase(bdfu_array_snapshot_seconds_bucket[1d])))",
+          "legendFormat": "{{storage_system}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "interval": "1h"
+    },
+    {
+      "type": "timeseries",
+      "title": "Fallbacks and reader checks (per day)",
+      "id": 52,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "VMs read from their VM snapshot instead (by reason), and checks of the experimental reader against the previous restore point (passed, mismatch).",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 113
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (storage_system, reason) (increase(bdfu_array_fallback_total[1d]))",
+          "legendFormat": "fallback {{storage_system}} {{reason}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (storage_system, result) (increase(bdfu_array_verify_total[1d]))",
+          "legendFormat": "check {{storage_system}} {{result}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {},
+      "interval": "1h"
+    },
+    {
+      "type": "timeseries",
+      "title": "VMs per array snapshot (average per day)",
+      "id": 53,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "How many VMs one array snapshot served (bdfu_array_batch_vms): more VMs per batch, fewer snapshots on the array.",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 113
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (storage_system) (increase(bdfu_array_batch_vms_sum[1d])) / sum by (storage_system) (increase(bdfu_array_batch_vms_count[1d]))",
+          "legendFormat": "{{storage_system}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1
         },
         "overrides": []
       },

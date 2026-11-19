@@ -50,6 +50,7 @@ public sealed class BackupMetrics
     private readonly Histogram<double> _arrayBatch;
     private readonly Counter<long> _arrayFallbacks;
     private readonly Histogram<double> _vmSnapshotLifetime;
+    private readonly Counter<long> _arrayVerify;
     private readonly ConcurrentDictionary<(string Pool, string Vm), VmLast> _last = new();
 
     public BackupMetrics(IMeterFactory meterFactory, RunningSessions running)
@@ -81,6 +82,8 @@ public sealed class BackupMetrics
         _arrayBatch = meter.CreateHistogram<double>("bdfu_array_batch_vms", description: "Backup from storage snapshots: VMs served by one array snapshot, by storage system.",
             advice: new InstrumentAdvice<double> { HistogramBucketBoundaries = [1, 2, 3, 4, 6, 8, 12, 16, 32] });
         _arrayFallbacks = meter.CreateCounter<long>("bdfu_array_fallback_total", description: "VMs meant to be read from an array snapshot but read from their VM snapshot, by storage system and reason.");
+        _arrayVerify = meter.CreateCounter<long>("bdfu_array_verify_total",
+            description: "Checks of disks read from array snapshots against the previous restore point, by storage system, method and result (passed, mismatch).");
         _vmSnapshotLifetime = Seconds(meter, "bdfu_vm_snapshot_lifetime_seconds", "How long a VM snapshot existed, by path (array: released before the disks were read).", SessionBuckets);
         _tapeRead = meter.CreateCounter<long>("bdfu_tape_read_bytes_total", "By", "Bytes of chunks brought back from tape, by media pool.");
 
@@ -142,6 +145,9 @@ public sealed class BackupMetrics
         _arraySnapshot.Record(duration.TotalSeconds, Tag("storage_system", system));
         _arrayBatch.Record(vms, Tag("storage_system", system));
     }
+
+    public void RecordArrayVerify(string system, string method, bool passed) =>
+        _arrayVerify.Add(1, Tag("storage_system", system), Tag("method", method), Tag("result", passed ? "passed" : "mismatch"));
 
     public void RecordArrayFallback(string system, string reason) => _arrayFallbacks.Add(1, Tag("storage_system", system), Tag("reason", reason));
 
