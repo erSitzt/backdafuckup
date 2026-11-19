@@ -32,7 +32,10 @@ public sealed record ProxyPackageFileDto(string Name, long SizeBytes);
 
 /// <summary>A new proxy, or a renewed install token: the token is shown only here.</summary>
 /// <param name="Command">What to run on the proxy machine (as root) with the agent installed.</param>
-public sealed record ProxyInstallDto(ProxyDto Proxy, string InstallToken, string Command);
+/// <param name="Command">The enroll command, for installing by hand.</param>
+/// <param name="InstallCommand">One line to paste on a Linux proxy as root (<c>curl … | sudo bash</c>); null without an agent package.</param>
+/// <param name="InstallScript">The same installer as a script file; null without an agent package.</param>
+public sealed record ProxyInstallDto(ProxyDto Proxy, string InstallToken, string Command, string? InstallCommand = null, string? InstallScript = null);
 
 /// <summary>The agent's enrollment: its one-time install token for its own key.</summary>
 public sealed record EnrollProxyRequestDto(Guid ProxyId, string Token, string? HostName);

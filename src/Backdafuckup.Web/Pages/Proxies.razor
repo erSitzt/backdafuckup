@@ -2,6 +2,7 @@
 @inject ApiClient Api
 @inject ISnackbar Snackbar
 @inject IDialogService Dialogs
+@inject IJSRuntime JS
 
 <PageTitle>Backup proxies – backdafuckup</PageTitle>
 <PageHeader Title="Backup Proxies" Description="Linux machines that read and write the disks of vSphere VMs: a proxy VM gets each disk hot-added (HotAdd) and serves it to the server.">
@@ -26,33 +27,64 @@
     <MudPaper Class="pa-4 mb-4" Elevation="2">
         <MudText Typo="Typo.h6" Class="mb-2">Install proxy @_install.Proxy.Name</MudText>
         <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-3">
-            The command below holds a one-time install token (valid until @Fmt.Time(_install.Proxy.InstallTokenExpiresUtc)). It is shown only now; renew it if it gets lost.
+            The commands below hold a one-time install token (valid until @Fmt.Time(_install.Proxy.InstallTokenExpiresUtc)). It is shown only now; renew it if it gets lost.
         </MudAlert>
-        <ol class="steps">
-            <li>
-                A Linux VM in the vCenter (any distribution, x64), with <span class="mono">disk.EnableUUID = TRUE</span> in its advanced settings and a
-                paravirtual SCSI controller with free places for hot-added disks (e.g. a second controller on bus 1). It sees the datastores of the VMs it backs up.
-            </li>
-            <li>
-                The agent: download <MudLink Href="api/proxies/package/backdafuckup-proxy" Target="_blank">backdafuckup-proxy</MudLink> and
-                <MudLink Href="api/proxies/package/backdafuckup-proxy.service" Target="_blank">backdafuckup-proxy.service</MudLink>@(_package?.Version is { } version ? $" (version {version})" : null),
-                copy them to the proxy as <span class="mono">/opt/backdafuckup-proxy/backdafuckup-proxy</span> (executable) and
-                <span class="mono">/etc/systemd/system/backdafuckup-proxy.service</span>.
-                @if (_package is { Files.Count: 0 })
-                {
-                    <MudText Typo="Typo.caption" Color="Color.Warning">This server offers no agent package; build it with scripts/build-proxy.sh.</MudText>
-                }
-            </li>
-            <li>As root on the proxy, enroll it (port 9555 of this server must be reachable from there):
-                <div class="d-flex align-center gap-2 mt-1">
-                    <MudTextField Value="@($"/opt/backdafuckup-proxy/{_install.Command}")" ReadOnly="true" Variant="Variant.Outlined" Class="mono" Lines="3" FullWidth="true" />
+        <MudToggleGroup T="string" @bind-Value="_os" Size="Size.Small" Outlined="true" Color="Color.Primary" Class="mb-3">
+            <MudToggleItem Value="@("linux")" Text="Linux" />
+            <MudToggleItem Value="@("windows")" Text="Windows" />
+        </MudToggleGroup>
+        @if (_os == "windows")
+        {
+            <MudAlert Severity="Severity.Info" Dense="true">
+                A Windows proxy (physical Windows hosts reading array snapshots over FC or iSCSI) is planned, not available yet. Use a Linux machine for now.
+            </MudAlert>
+        }
+        else
+        {
+            <MudText Typo="Typo.body2" Class="mb-2">
+                A Linux machine (x64, systemd, any distribution) that reaches this server@(ServerHostPort is { } where ? $" ({where})" : null). As a vSphere proxy VM: in the vCenter,
+                with <span class="mono">disk.EnableUUID = TRUE</span> in its advanced settings and a paravirtual SCSI controller with free places for hot-added disks
+                (e.g. a second one on bus 1); it sees the datastores of the VMs it backs up.
+            </MudText>
+            @if (_install.InstallCommand is { } oneLiner)
+            {
+                <MudText Typo="Typo.subtitle2">Run this as root on the proxy machine (or with sudo, as shown):</MudText>
+                <div class="d-flex align-start gap-2 mt-1 mb-2">
+                    <MudTextField Value="@oneLiner" ReadOnly="true" Variant="Variant.Outlined" Class="mono" Lines="3" FullWidth="true" />
+                    <MudTooltip Text="Copy"><MudIconButton Icon="@Icons.Material.Filled.ContentCopy" OnClick="@(() => CopyAsync(oneLiner))" /></MudTooltip>
                 </div>
-            </li>
-            <li>Start it: <span class="mono">systemctl daemon-reload &amp;&amp; systemctl enable --now backdafuckup-proxy</span>. It shows as online here within seconds.</li>
-            <li>For backup from storage snapshots (SAN access), as root: <span class="mono">/opt/backdafuckup-proxy/backdafuckup-proxy prepare-san</span>. It sets the iSCSI initiator name,
-                keeps LVM from activating volume groups on array snapshots, and stops multipathd and udisks2; <span class="mono">--dry-run</span> only shows what it would do.
-                The proxy's initiator name then shows here; list it in the proxy's host object on the array.</li>
-        </ol>
+                <MudText Typo="Typo.body2" Class="mb-2">
+                    It downloads the agent (its SHA-256 checked, this server's key pinned), installs it with its systemd unit, enrolls it and starts it; the proxy shows as
+                    online here within seconds. Run again, it replaces the installation.
+                    Or <MudLink OnClick="DownloadScriptAsync">download the same script</MudLink> and run it there: <span class="mono">sudo bash install-backdafuckup-proxy.sh</span>.
+                </MudText>
+            }
+            else
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-2">This server offers no complete agent package (program and systemd unit); build it with scripts/build-proxy.sh, then renew the token.</MudAlert>
+            }
+            <MudText Typo="Typo.body2" Class="mb-2">
+                SAN access (backup from storage snapshots) needs nothing more: the agent sets the iSCSI initiator name, keeps LVM from activating volume groups on array
+                snapshots and stops multipathd and udisks2 itself, and says so in its log. The proxy's initiator name then shows here; list it in the proxy's host object
+                on each array.
+            </MudText>
+            <MudExpansionPanels Elevation="0" Class="mt-2">
+                <MudExpansionPanel Text="Install by hand instead">
+                    <ol class="steps">
+                        <li>
+                            Download <MudLink Href="api/proxies/package/backdafuckup-proxy" Target="_blank">backdafuckup-proxy</MudLink> and
+                            <MudLink Href="api/proxies/package/backdafuckup-proxy.service" Target="_blank">backdafuckup-proxy.service</MudLink>@(_package?.Version is { } version ? $" (version {version})" : null),
+                            copy them to the proxy as <span class="mono">/opt/backdafuckup-proxy/backdafuckup-proxy</span> (executable) and
+                            <span class="mono">/etc/systemd/system/backdafuckup-proxy.service</span>.
+                        </li>
+                        <li>As root on the proxy, enroll it:
+                            <MudTextField Value="@($"/opt/backdafuckup-proxy/{_install.Command}")" ReadOnly="true" Variant="Variant.Outlined" Class="mono mt-1" Lines="3" FullWidth="true" />
+                        </li>
+                        <li>Start it: <span class="mono">systemctl daemon-reload &amp;&amp; systemctl enable --now backdafuckup-proxy</span>.</li>
+                    </ol>
+                </MudExpansionPanel>
+            </MudExpansionPanels>
+        }
         <div class="d-flex mt-3"><MudSpacer /><MudButton Variant="Variant.Filled" OnClick="@(() => _install = null)">Done</MudButton></div>
     </MudPaper>
 }
@@ -69,49 +101,46 @@ else if (_proxies.Count == 0 && !_adding && _install is null)
 }
 else if (_proxies.Count > 0)
 {
+    <div class="cq">
     <MudTable Items="_proxies" Dense="true" Hover="true" Elevation="1">
         <HeaderContent>
-            <MudTh>Name</MudTh><MudTh>State</MudTh><MudTh>Host</MudTh><MudTh>Addresses</MudTh><MudTh>Version</MudTh><MudTh>Can</MudTh><MudTh>Disks</MudTh><MudTh>Last contact</MudTh><MudTh></MudTh>
+            <MudTh>Name</MudTh><MudTh>State</MudTh><MudTh Class="c-760">Addresses</MudTh><MudTh Class="c-950">Version</MudTh><MudTh>Can</MudTh>
+            <MudTh Class="c-560 num">Disks</MudTh><MudTh Class="c-760">Last contact</MudTh><MudTh></MudTh>
         </HeaderContent>
         <RowTemplate>
-            <MudTd>@context.Name</MudTd>
-            <MudTd><StateChip State="@(context.Online ? "Online" : context.Enrolled ? "Offline" : "Not enrolled")" /></MudTd>
-            <MudTd>@context.HostName<br /><span class="caption mono" title="SMBIOS UUID: finds the proxy's VM in the vCenter">@context.SmbiosUuid</span></MudTd>
-            <MudTd>@string.Join(", ", context.Addresses)</MudTd>
-            <MudTd>@context.Version</MudTd>
             <MudTd>
-                @string.Join(", ", context.Capabilities.Select(Capability))
-                @if (context.InitiatorName is { } iqn)
+                @context.Name
+                @if (context.HostName is { } hostName)
                 {
-                    <br /><span class="caption mono" title="iSCSI initiator name: a host object on the array must list it">@iqn</span>
+                    <span class="cell-sub" title="@(context.SmbiosUuid is { } uuid ? $"SMBIOS UUID {uuid}: finds the proxy's VM in the vCenter" : null)">@hostName</span>
+                }
+            </MudTd>
+            <MudTd><StateChip State="@(context.Online ? "Online" : context.Enrolled ? "Offline" : "Not enrolled")" /></MudTd>
+            <MudTd Class="c-760">@string.Join(", ", context.Addresses)</MudTd>
+            <MudTd Class="c-950 nowrap"><span title="@context.Version">@ShortVersion(context.Version)</span></MudTd>
+            <MudTd Class="nowrap">
+                @foreach (var capability in context.Capabilities)
+                {
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@(capability == "san-v1" ? Color.Success : Color.Default)">@Capability(capability)</MudChip>
                 }
                 @if (context.Online && context.SanRefusal is { } refusal)
                 {
-                    <div class="caption" title="Why the proxy offers no SAN access (backup from storage snapshots)">
-                        No SAN access:
-                        <ul class="ma-0 pl-4">
-                            @foreach (var problem in refusal.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                            {
-                                <li>@problem</li>
-                            }
-                        </ul>
-                        <span class="mono">backdafuckup-proxy prepare-san</span> (as root on the proxy) makes these settings.
-                    </div>
+                    <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="Color.Warning" title="Backup from storage snapshots: see below">SAN: @Missing(refusal)</MudChip>
                 }
             </MudTd>
-            <MudTd>@context.Devices</MudTd>
-            <MudTd>
+            <MudTd Class="c-560 num">@context.Devices</MudTd>
+            <MudTd Class="c-760">
                 @Fmt.Time(context.LastSeenUtc)
                 @if (context.LastAddress is { } address)
                 {
-                    <span class="caption"> from @address</span>
+                    <span class="cell-sub">from @address</span>
                 }
                 @if (!context.Enrolled && context.InstallTokenExpiresUtc is { } expires)
                 {
-                    <br /><span class="caption">install token valid until @Fmt.Time(expires)</span>
+                    <span class="cell-sub">install token valid until @Fmt.Time(expires)</span>
                 }
             </MudTd>
-            <MudTd Style="white-space:nowrap">
+            <MudTd Style="text-align:right; white-space:nowrap">
                 <MudTooltip Text="A new install token; the proxy's current key stops working until it enrolls again.">
                     <MudIconButton Icon="@Icons.Material.Filled.Key" Size="Size.Small" OnClick="@(() => RenewAsync(context))" Disabled="_busy" />
                 </MudTooltip>
@@ -120,7 +149,40 @@ else if (_proxies.Count > 0)
                 </MudTooltip>
             </MudTd>
         </RowTemplate>
+        <ChildRowContent>
+            @if (context.Online && (context.SanRefusal is not null || context.InitiatorName is not null))
+            {
+                <MudTr>
+                    <MudTd colspan="8" Style="border-bottom-width:1px">
+                        <div class="pl-4 pb-1">
+                            @if (context.InitiatorName is { } iqn)
+                            {
+                                <div class="d-flex align-center gap-1">
+                                    <span class="caption">iSCSI initiator name (list it in the proxy's host object on each array):</span>
+                                    <span class="mono">@iqn</span>
+                                    <MudTooltip Text="Copy"><MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" OnClick="@(() => CopyAsync(iqn))" /></MudTooltip>
+                                </div>
+                            }
+                            @if (context.SanRefusal is { } missing)
+                            {
+                                <div class="caption">
+                                    No SAN access yet (backup from storage snapshots). The agent prepares the machine itself; this is what it could not do
+                                    (its log: <span class="mono">journalctl -u backdafuckup-proxy</span>):
+                                </div>
+                                <ul class="caption ma-0 pl-5">
+                                    @foreach (var problem in missing.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                                    {
+                                        <li>@problem</li>
+                                    }
+                                </ul>
+                            }
+                        </div>
+                    </MudTd>
+                </MudTr>
+            }
+        </ChildRowContent>
     </MudTable>
+    </div>
     <MudText Typo="Typo.caption" Class="help-text mt-2">
         A job uses a connected proxy whose VM is powered on, has a free SCSI place and sees all datastores of the VM: one on the VM's host first, then one in
         its cluster, then the one with the fewest disks attached. The session log names the proxy, and why others were not used.
@@ -131,6 +193,7 @@ else if (_proxies.Count > 0)
     private List<ProxyDto>? _proxies;
     private ProxyPackageDto? _package;
     private ProxyInstallDto? _install;
+    private string _os = "linux";
     private bool _adding;
     private bool _busy;
     private string _name = string.Empty;
@@ -149,6 +212,32 @@ else if (_proxies.Count > 0)
     }
 
     private async Task LoadAsync() => _proxies = await Api.GetAsync<List<ProxyDto>>("api/proxies");
+
+    /// <summary>"host:port" of this server as the install command names it, for the hint that the proxy must reach it.</summary>
+    private string? ServerHostPort => _install?.Command.Split(' ').SkipWhile(p => p != "--server").Skip(1).FirstOrDefault() is { } url && Uri.TryCreate(url, UriKind.Absolute, out var uri)
+        ? $"{uri.Host}:{uri.Port}"
+        : null;
+
+    private async Task CopyAsync(string text)
+    {
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", text);
+        Snackbar.Add("Copied.", Severity.Success);
+    }
+
+    private async Task DownloadScriptAsync()
+    {
+        if (_install?.InstallScript is { } script)
+        {
+            await JS.InvokeVoidAsync("bdfuSaveText", "install-backdafuckup-proxy.sh", script, "text/x-shellscript");
+        }
+    }
+
+    /// <summary>"0.3.0 (65d7e62)" from "0.3.0+65d7e6243262…"; the full one is the tooltip.</summary>
+    private static string? ShortVersion(string? version) =>
+        version?.Split('+', 2) is [var number, var commit] ? $"{number} ({commit[..Math.Min(7, commit.Length)]})" : version;
+
+    private static string Missing(string refusal) =>
+        refusal.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length is var count && count == 1 ? "1 setting missing" : $"{count} settings missing";
 
     private static string Capability(string capability) => capability switch
     {

@@ -73,7 +73,7 @@ public sealed class ProxyAgents(
         db.Proxies.Add(proxy);
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         logger.LogInformation("Proxy {Proxy} ({Id}) created; its install token is valid until {Expiry:u}.", name, proxy.Id, proxy.InstallTokenExpiresUtc);
-        return new ProxyInstallDto(ToDto(proxy), token, Command(proxy, url, token));
+        return Install(proxy, url, token);
     }
 
     /// <summary>A new install token: the proxy enrolls again (e.g. after its machine was rebuilt); its old key stops working.</summary>
@@ -90,7 +90,7 @@ public sealed class ProxyAgents(
         proxy.EnrolledUtc = null;
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         Disconnect(proxyId);
-        return new ProxyInstallDto(ToDto(proxy), token, Command(proxy, url, token));
+        return Install(proxy, url, token);
     }
 
     public async Task DeleteAsync(Guid proxyId, CancellationToken cancellationToken)
@@ -378,6 +378,57 @@ public sealed class ProxyAgents(
             proxy.Id, proxy.Name, connection is not null, proxy.KeyHash is not null, hello?.HostName ?? proxy.HostName, hello?.AgentVersion ?? proxy.AgentVersion,
             hello?.SmbiosUuid ?? proxy.SmbiosUuid, hello?.Addresses ?? [], hello?.Capabilities ?? [], hello?.Devices?.Count ?? 0,
             connection is not null ? time.GetUtcNow() : proxy.LastSeenUtc, proxy.LastAddress, proxy.CreatedUtc, proxy.InstallTokenExpiresUtc, hello?.InitiatorName, hello?.SanRefusal);
+    }
+
+    /// <summary>The install answer: the enroll command, and the one-liner and script when the server has an agent package.</summary>
+    private ProxyInstallDto Install(ProxyEntity proxy, string url, string token)
+    {
+        var script = Script(proxy, url, token);
+        return new ProxyInstallDto(ToDto(proxy), token, Command(proxy, url, token),
+            script is null ? null : ProxyInstallScript.OneLiner(url, proxy.Id, token, settings.ServerPins()), script);
+    }
+
+    /// <summary>The installer script for the proxy, or null when the server has no complete agent package.</summary>
+    private string? Script(ProxyEntity proxy, string url, string token)
+    {
+        var unit = Path.Combine(package.Directory, "backdafuckup-proxy.service");
+        return package.Program() is { } program && File.Exists(unit)
+            ? ProxyInstallScript.Build(proxy.Name, proxy.Id, url, token, settings.ServerPins(), program.Version, program.Sha256, File.ReadAllText(unit),
+                proxy.InstallTokenExpiresUtc ?? time.GetUtcNow(), time.GetUtcNow())
+            : null;
+    }
+
+    /// <summary>
+    /// The installer script, for the install token the request carries (<c>curl … | sudo bash</c>). The token is not spent:
+    /// the enrollment at the end of the script spends it.
+    /// </summary>
+    public async Task<string> InstallScriptAsync(Guid proxyId, string? authorization, CancellationToken cancellationToken)
+    {
+        var (proxy, token) = await InstallTokenAsync(proxyId, authorization, cancellationToken).ConfigureAwait(false);
+        return Script(proxy, await ServerUrlAsync(cancellationToken).ConfigureAwait(false), token)
+            ?? throw new ProxyRequestException("This server has no complete proxy agent package (program and systemd unit); build it with scripts/build-proxy.sh.", StatusCodes.Status404NotFound);
+    }
+
+    /// <summary>Checks the install token the request carries for a download of the installer; throws 401 otherwise.</summary>
+    public async Task CheckInstallTokenAsync(Guid proxyId, string? authorization, CancellationToken cancellationToken) =>
+        await InstallTokenAsync(proxyId, authorization, cancellationToken).ConfigureAwait(false);
+
+    private async Task<(ProxyEntity Proxy, string Token)> InstallTokenAsync(Guid proxyId, string? authorization, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var proxy = await db.Proxies.AsNoTracking().FirstOrDefaultAsync(p => p.Id == proxyId, cancellationToken).ConfigureAwait(false);
+        var token = Bearer(authorization);
+        if (proxy?.InstallTokenHash is not { } expected || token is null || !CryptographicOperations.FixedTimeEquals(expected, Hash(token)))
+        {
+            throw new ProxyRequestException("Unknown proxy or wrong install token (create a new one under Backup Infrastructure → Backup Proxies).", StatusCodes.Status401Unauthorized);
+        }
+
+        if (proxy.InstallTokenExpiresUtc is { } expiry && expiry < time.GetUtcNow())
+        {
+            throw new ProxyRequestException($"The install token of proxy {proxy.Name} expired at {expiry:u}; renew it under Backup Infrastructure → Backup Proxies.", StatusCodes.Status401Unauthorized);
+        }
+
+        return (proxy, token);
     }
 
     private string Command(ProxyEntity proxy, string url, string token) =>

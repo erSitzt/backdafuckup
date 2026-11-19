@@ -31,14 +31,62 @@ public sealed partial class ApiIntegrationTests
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/proxies/package/version.txt", Ct)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/proxies/package/..%2Fappsettings.json", Ct)).StatusCode);
 
+        // Without the systemd unit the package is incomplete: no installer.
+        var incomplete = await Read<ProxyInstallDto>(client.PostAsJsonAsync("/api/proxies", new CreateProxyDto("proxy00"), Ct));
+        Assert.Equal((null, null), (incomplete.InstallCommand, incomplete.InstallScript));
+        await client.DeleteAsync($"/api/proxies/{incomplete.Proxy.Id}", Ct);
+        await File.WriteAllTextAsync(Path.Combine(_root, "proxy", "backdafuckup-proxy.service"), "[Unit]\nDescription=backdafuckup backup proxy\n\n[Service]\nExecStart=/opt/backdafuckup-proxy/backdafuckup-proxy run\n", Ct);
+
         var created = await Read<ProxyInstallDto>(client.PostAsJsonAsync("/api/proxies", new CreateProxyDto("proxy01"), Ct));
         Assert.StartsWith($"backdafuckup-proxy enroll --server https://localhost/ --proxy {created.Proxy.Id:D} --token bdfupi_", created.Command, StringComparison.Ordinal);
         Assert.False(created.Proxy.Enrolled);
+
+        // The one-liner and the same installer as a file: the token in a header, the agent's SHA-256 and the unit in the script.
+        Assert.StartsWith("curl -fsSL ", created.InstallCommand, StringComparison.Ordinal);
+        Assert.Contains($"-H 'Authorization: Bearer {created.InstallToken}' https://localhost/api/agent/proxies/{created.Proxy.Id:D}/install.sh | sudo bash", created.InstallCommand, StringComparison.Ordinal);
+        var script = created.InstallScript!;
+        Assert.Contains($"local proxy_id='{created.Proxy.Id:D}'", script, StringComparison.Ordinal);
+        Assert.Contains($"local token='{created.InstallToken}'", script, StringComparison.Ordinal);
+        Assert.Contains($"local program_sha256='{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData([0x7f, (byte)'E', (byte)'L', (byte)'F']))}'", script, StringComparison.Ordinal);
+        Assert.Contains("\n[Unit]\nDescription=backdafuckup backup proxy\n", script, StringComparison.Ordinal);
+        Assert.Contains("\nBACKDAFUCKUP_UNIT\n", script, StringComparison.Ordinal);
+        if (OperatingSystem.IsLinux())
+        {
+            var file = Path.Combine(_root, "install.sh");
+            await File.WriteAllTextAsync(file, script, Ct);
+            using var bash = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("bash", ["-n", file]) { RedirectStandardError = true })!;
+            var syntax = await bash.StandardError.ReadToEndAsync(Ct);
+            await bash.WaitForExitAsync(Ct);
+            Assert.True(bash.ExitCode == 0, $"bash -n: {syntax}");
+        }
+
+        // The script and the program for the install token only (in the header); the token is not spent by that.
+        var anonymous = _factory.CreateClient();
+        HttpRequestMessage Install(string path, string? token)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, $"/api/agent/proxies/{created.Proxy.Id:D}/{path}");
+            if (token is not null)
+            {
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
+
+            return request;
+        }
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.SendAsync(Install("install.sh", null), Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.SendAsync(Install("install.sh", "bdfupi_wrong"), Ct)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.SendAsync(Install("install/backdafuckup-proxy", null), Ct)).StatusCode);
+        var served = await anonymous.SendAsync(Install("install.sh", created.InstallToken), Ct);
+        Assert.Equal(HttpStatusCode.OK, served.StatusCode);
+        Assert.Contains($"local proxy_id='{created.Proxy.Id:D}'", await served.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+        Assert.Equal([0x7f, (byte)'E', (byte)'L', (byte)'F'], await (await anonymous.SendAsync(Install("install/backdafuckup-proxy", created.InstallToken), Ct)).Content.ReadAsByteArrayAsync(Ct));
 
         // The install token works once; a wrong one is refused.
         var wrong = await client.PostAsJsonAsync("/api/agent/proxies/enroll", new EnrollProxyRequestDto(created.Proxy.Id, "bdfupi_wrong", "proxy01"), Ct);
         Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
         var enrolled = await Read<EnrollProxyResponseDto>(client.PostAsJsonAsync("/api/agent/proxies/enroll", new EnrollProxyRequestDto(created.Proxy.Id, created.InstallToken, "proxy01"), Ct));
+        // Spent by the enrollment: the installer is refused from now on.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.SendAsync(Install("install.sh", created.InstallToken), Ct)).StatusCode);
         Assert.StartsWith("bdfupk_", enrolled.AgentKey, StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsJsonAsync("/api/agent/proxies/enroll", new EnrollProxyRequestDto(created.Proxy.Id, created.InstallToken, "proxy01"), Ct)).StatusCode);
 
@@ -49,15 +97,22 @@ public sealed partial class ApiIntegrationTests
         await File.WriteAllBytesAsync(diskFile, content, Ct);
         var devices = new FileBlockDevices();
         var log = new System.Collections.Concurrent.ConcurrentQueue<string>();
-        // open-iscsi as Debian installs it (no name before iscsid's first start), and two more settings missing: all three are reported at once.
+        // open-iscsi as Debian installs it (no name before iscsid's first start), and two more settings missing. The agent's own
+        // preparation runs once before it reports and makes the two (not the name here); what is left is reported.
         var etc = Path.Combine(_root, "etc");
+        var prepared = 0;
         Directory.CreateDirectory(Path.Combine(etc, "iscsi"));
         await File.WriteAllTextAsync(Path.Combine(etc, "iscsi", "initiatorname.iscsi"), "## DO NOT EDIT OR REMOVE THIS FILE!\nGenerateName=yes\n", Ct);
         var agent = new ProxyAgentClient(
             new ProxyAgentSettings(_factory.Server.BaseAddress, created.Proxy.Id, enrolled.AgentKey),
             new ProxyHostInfo("proxy01.corp.example", "421a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8", "VMware-42 1a 2b 3c 4d 5e 6f 70-81 92 a3 b4 c5 d6 e7 f8", ["10.26.16.91"], "test", null),
             devices, ConnectAgentSocketAsync, log.Enqueue, new IscsiadmInitiator(etcRoot: etc),
-            _ => Task.FromResult<IReadOnlyList<string>>(["LVM would activate the volume groups it finds on an array snapshot", "udisks2 runs"]));
+            _ => Task.FromResult<IReadOnlyList<string>>(prepared == 0 ? ["LVM would activate the volume groups it finds on an array snapshot", "udisks2 runs"] : []),
+            prepareSan: _ =>
+            {
+                Interlocked.Increment(ref prepared);
+                return Task.CompletedTask;
+            });
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var running = agent.RunAsync(stop.Token);
         try
@@ -68,9 +123,10 @@ public sealed partial class ApiIntegrationTests
             Assert.Equal(("proxy01", true, "proxy01.corp.example", "421a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"), (online.Name, online.Enrolled, online.HostName, online.SmbiosUuid));
             Assert.Equal([ProxyAgentProtocol.CapabilityHotAdd, ProxyAgentProtocol.CapabilityNbd], online.Capabilities);
             Assert.Null(online.InitiatorName);
+            Assert.Equal(1, prepared);
+            Assert.Contains(log, l => l.StartsWith("No SAN access yet (open-iscsi is installed, but has no initiator name yet", StringComparison.Ordinal) && l.EndsWith("preparing this machine (prepare-san).", StringComparison.Ordinal));
             Assert.Equal(
-                [$"open-iscsi is installed, but has no initiator name yet ({Path.Combine(etc, "iscsi", "initiatorname.iscsi")} says GenerateName=yes): start iscsid once (systemctl start iscsid)",
-                 "LVM would activate the volume groups it finds on an array snapshot", "udisks2 runs"],
+                [$"open-iscsi is installed, but has no initiator name yet ({Path.Combine(etc, "iscsi", "initiatorname.iscsi")} says GenerateName=yes): start iscsid once (systemctl start iscsid)"],
                 online.SanRefusal!.Split('\n'));
 
             var pool = _factory.Services.GetRequiredService<IProxyPool>();

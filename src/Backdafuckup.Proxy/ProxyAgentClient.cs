@@ -19,11 +19,19 @@ public sealed record ProxyHostInfo(string HostName, string? SmbiosUuid, string? 
 /// <param name="iscsi">The iSCSI initiator for SAN access; null: none.</param>
 /// <param name="sanCheck">The SAN self-check (null: SAN access is offered only with an initiator and passes no check).</param>
 /// <param name="update">Installs the server's program file (a self-update) and restarts the agent; null: the agent does not update itself.</param>
+/// <param name="prepareSan">
+/// Makes the settings SAN access needs (<see cref="SanPreparation"/>), so that a proxy works without anyone on it; run
+/// once for each new set of missing settings, never while a disk is open. Null: the agent changes nothing.
+/// </param>
 public sealed class ProxyAgentClient(
     ProxyAgentSettings settings, ProxyHostInfo host, IBlockDevices devices, Func<Uri, string, CancellationToken, Task<WebSocket>> connect, Action<string> log,
-    IIscsiInitiator? iscsi = null, Func<CancellationToken, Task<IReadOnlyList<string>>>? sanCheck = null, Func<ProxyAgentMessage, Task>? update = null)
+    IIscsiInitiator? iscsi = null, Func<CancellationToken, Task<IReadOnlyList<string>>>? sanCheck = null, Func<ProxyAgentMessage, Task>? update = null,
+    Func<CancellationToken, Task>? prepareSan = null)
 {
     private readonly ConcurrentDictionary<string, OpenHandle> _handles = new(StringComparer.Ordinal);
+
+    /// <summary>The missing settings the last preparation ran for (or left behind): not tried again until they change.</summary>
+    private string? _preparedFor;
 
     /// <summary>Runs until cancelled; a lost connection is opened again after a growing pause (1 s to 30 s).</summary>
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -69,10 +77,11 @@ public sealed class ProxyAgentClient(
         using var socket = await connect(new Uri(settings.ServerUrl, ProxyAgentProtocol.ControlPath(settings.ProxyId)), settings.AgentKey, cancellationToken).ConfigureAwait(false);
         using var send = new SemaphoreSlim(1, 1);
         using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var (initiator, sanRefusal) = await SanStateAsync(cancellationToken).ConfigureAwait(false);
+        var (initiator, sanRefusal) = await EnsureSanAsync(cancellationToken).ConfigureAwait(false);
         if (sanRefusal is not null && iscsi is not null)
         {
-            log($"No SAN access: {sanRefusal.Replace("\n", "; ", StringComparison.Ordinal)} (backdafuckup-proxy prepare-san makes these settings).");
+            log($"No SAN access: {sanRefusal.Replace("\n", "; ", StringComparison.Ordinal)}" +
+                (prepareSan is null ? " (backdafuckup-proxy prepare-san makes these settings)." : " (left after the agent's own preparation; see above)."));
         }
 
         await ProxyAgentProtocol.SendAsync(socket, send, new ProxyAgentMessage
@@ -121,6 +130,34 @@ public sealed class ProxyAgentClient(
     /// <summary>How often the SAN state (initiator name, self-check) is read again while connected.</summary>
     internal static TimeSpan SanRecheckInterval { get; set; } = TimeSpan.FromMinutes(1);
 
+    /// <summary>
+    /// The SAN state, after the machine was prepared for SAN access if something is missing that no preparation has
+    /// run for yet (an admin installed open-iscsi, say). Never while a disk is open.
+    /// </summary>
+    private async Task<(string? Initiator, string? Refusal)> EnsureSanAsync(CancellationToken cancellationToken)
+    {
+        var state = await SanStateAsync(cancellationToken).ConfigureAwait(false);
+        if (state.Refusal is null || prepareSan is null || iscsi is null || state.Refusal == _preparedFor || !_handles.IsEmpty)
+        {
+            return state;
+        }
+
+        _preparedFor = state.Refusal;
+        log($"No SAN access yet ({state.Refusal.Replace("\n", "; ", StringComparison.Ordinal)}): preparing this machine (prepare-san).");
+        try
+        {
+            await prepareSan(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log($"prepare-san failed: {ex.Message}");
+        }
+
+        state = await SanStateAsync(cancellationToken).ConfigureAwait(false);
+        _preparedFor = state.Refusal;
+        return state;
+    }
+
     /// <summary>The initiator name and every reason why the proxy offers no SAN access, one per line (null: it does).</summary>
     private async Task<(string? Initiator, string? Refusal)> SanStateAsync(CancellationToken cancellationToken)
     {
@@ -155,7 +192,7 @@ public sealed class ProxyAgentClient(
             while (!session.IsCancellationRequested)
             {
                 await Task.Delay(SanRecheckInterval, session.Token).ConfigureAwait(false);
-                var (now, nowRefusal) = await SanStateAsync(session.Token).ConfigureAwait(false);
+                var (now, nowRefusal) = await EnsureSanAsync(session.Token).ConfigureAwait(false);
                 if ((now, nowRefusal) != (initiator, refusal) && _handles.IsEmpty)
                 {
                     log($"SAN access changed ({nowRefusal?.Replace("\n", "; ", StringComparison.Ordinal) ?? $"available, initiator {now}"}); connecting again to tell the server.");

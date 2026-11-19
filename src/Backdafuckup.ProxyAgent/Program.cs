@@ -139,7 +139,8 @@ internal static class Program
             message => Console.WriteLine(message),
             new IscsiadmInitiator(),
             ct => SanSelfCheck.CheckAsync(null, ct),
-            hash is null || program is null ? null : offer => UpdateAsync(server, config, program, offer));
+            hash is null || program is null ? null : offer => UpdateAsync(server, config, program, offer),
+            config.PrepareSan is false || Environment.GetEnvironmentVariable("BDFU_PROXY_PREPARE_SAN") == "0" || program is null ? null : ct => PrepareSanAsync(program, ct));
         await client.RunAsync(cancellationToken).ConfigureAwait(false);
         Console.WriteLine("Stopped.");
         return 0;
@@ -226,5 +227,27 @@ internal static class Program
     }
 
     /// <summary>/etc/backdafuckup-proxy/agent.json.</summary>
-    private sealed record AgentConfig(string ServerUrl, Guid ProxyId, string AgentKey, IReadOnlyList<string> ServerPins);
+    /// <param name="PrepareSan">False: the agent leaves the machine's settings alone (an admin runs prepare-san, or sets them).</param>
+    private sealed record AgentConfig(string ServerUrl, Guid ProxyId, string AgentKey, IReadOnlyList<string> ServerPins, bool? PrepareSan = null);
+
+    /// <summary>
+    /// Runs prepare-san as a transient systemd unit: the service's own sandbox (ProtectSystem=strict) keeps /etc/lvm
+    /// read-only, a transient unit started by systemd does not. Its output goes into the agent's log. Without
+    /// systemd-run, prepare-san runs in the agent and leaves what it cannot write to the admin.
+    /// </summary>
+    private static async Task PrepareSanAsync(string program, CancellationToken cancellationToken)
+    {
+        var (code, output) = await Commands.RunAsync(
+            "systemd-run", ["--wait", "--pipe", "--collect", "--quiet", "--unit", "backdafuckup-proxy-prepare-san", program, "prepare-san"], cancellationToken).ConfigureAwait(false);
+        if (code == Commands.NotFound)
+        {
+            await new SanPreparation(line => Console.WriteLine($"prepare-san: {line.Trim()}")).RunAsync(dryRun: false, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            Console.WriteLine($"prepare-san: {line}");
+        }
+    }
 }

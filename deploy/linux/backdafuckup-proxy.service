@@ -4,7 +4,8 @@
 #   install -D -m 755 backdafuckup-proxy /opt/backdafuckup-proxy/backdafuckup-proxy
 #   /opt/backdafuckup-proxy/backdafuckup-proxy enroll --server … --proxy … --token … --pins …   (the console's command)
 #   install -m 644 backdafuckup-proxy.service /etc/systemd/system/ && systemctl enable --now backdafuckup-proxy
-# For SAN access (backup from storage snapshots), run once as root: /opt/backdafuckup-proxy/backdafuckup-proxy prepare-san
+# SAN access (backup from storage snapshots): the agent makes the settings itself (prepare-san, as a transient unit through
+# systemd-run, since /etc/lvm is read-only here). Environment=BDFU_PROXY_PREPARE_SAN=0 leaves the machine's settings alone.
 [Unit]
 Description=backdafuckup backup proxy
 Wants=network-online.target
