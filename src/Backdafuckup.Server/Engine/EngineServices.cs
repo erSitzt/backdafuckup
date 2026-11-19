@@ -677,6 +677,15 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Tape.TapeMailSlotWatcher>();
         services.AddHostedService(sp => sp.GetRequiredService<Tape.TapeMailSlotWatcher>());
         services.AddSingleton<StartupRecovery>();
+        // Instant recovery's NFS server binds before the session runner and the scheduler start (off unless configured).
+        services.Configure<InstantRecovery.InstantRecoveryOptions>(configuration.GetSection("InstantRecovery"));
+        services.AddSingleton<InstantRecovery.NfsServerHost>();
+        services.AddHostedService(sp => sp.GetRequiredService<InstantRecovery.NfsServerHost>());
+        services.AddSingleton(sp =>
+        {
+            var o = sp.GetRequiredService<IOptions<InstantRecovery.InstantRecoveryOptions>>().Value;
+            return new Backdafuckup.InstantRecovery.AsyncChunkCache(o.CacheBytes, Math.Max(1, o.MaxConcurrentChunkLoads));
+        });
         services.AddHostedService<PendingArtifactRetryService>();
         services.AddSingleton<JobScheduler>();
         services.AddHostedService<SessionRunnerService>();

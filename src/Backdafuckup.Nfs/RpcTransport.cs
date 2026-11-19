@@ -144,7 +144,8 @@ public static class RpcTransport
     }
 
     /// <summary>Serves datagrams on a bound UDP socket (one call per datagram, the reply to its sender).</summary>
-    public static async Task ServeDatagramsAsync(Socket socket, RpcDispatcher dispatcher, CancellationToken cancellationToken)
+    /// <param name="datagram">Called with the sender of every datagram (diagnostics).</param>
+    public static async Task ServeDatagramsAsync(Socket socket, RpcDispatcher dispatcher, CancellationToken cancellationToken, Action<IPEndPoint>? datagram = null)
     {
         ArgumentNullException.ThrowIfNull(socket);
         ArgumentNullException.ThrowIfNull(dispatcher);
@@ -168,6 +169,7 @@ public static class RpcTransport
             }
 
             var remote = (IPEndPoint)received.RemoteEndPoint;
+            datagram?.Invoke(remote);
             var reply = await dispatcher.DispatchAsync(buffer.AsMemory(0, received.ReceivedBytes).ToArray(), new RpcContext(remote, "udp"), cancellationToken).ConfigureAwait(false);
             if (reply is not null)
             {
@@ -184,6 +186,17 @@ public static class RpcTransport
     }
 }
 
+/// <summary>A listener could not bind its address and port (in use, no permission for a port below 1024, not a local address).</summary>
+public sealed class RpcBindException(IPEndPoint endpoint, ProtocolType protocol, SocketException inner)
+    : IOException($"Cannot listen on {endpoint} ({(protocol == ProtocolType.Udp ? "UDP" : "TCP")}): {inner.Message} (error {inner.SocketErrorCode}).", inner)
+{
+    public IPEndPoint Endpoint { get; } = endpoint;
+
+    public ProtocolType Protocol { get; } = protocol;
+
+    public SocketError Error { get; } = inner.SocketErrorCode;
+}
+
 /// <summary>
 /// One TCP listener (and optionally a UDP socket) on an address and port, serving a dispatcher. Reports every connection
 /// with its remote address, so that a failed mount can say which hosts reached the server and which did not.
@@ -193,6 +206,7 @@ public sealed class RpcListener : IAsyncDisposable
     private readonly RpcDispatcher _dispatcher;
     private readonly RpcServerOptions _options;
     private readonly Action<IPEndPoint>? _connected;
+    private readonly Action<IPEndPoint>? _datagram;
     private readonly TcpListener _tcp;
     private readonly Socket? _udp;
     private readonly CancellationTokenSource _stop = new();
@@ -200,28 +214,56 @@ public sealed class RpcListener : IAsyncDisposable
     private int _connections;
 
     /// <summary>Binds now (so a port conflict fails here, naming the address and port); serving starts with <see cref="Start"/>.</summary>
-    public RpcListener(IPEndPoint endpoint, RpcDispatcher dispatcher, RpcServerOptions options, bool udp, Action<IPEndPoint>? connected = null)
+    /// <param name="connected">Called with the remote end of every TCP connection (diagnostics).</param>
+    /// <param name="datagram">Called with the sender of every UDP datagram (diagnostics).</param>
+    public RpcListener(IPEndPoint endpoint, RpcDispatcher dispatcher, RpcServerOptions options, bool udp, Action<IPEndPoint>? connected = null, Action<IPEndPoint>? datagram = null)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _connected = connected;
+        _datagram = datagram;
         _tcp = new TcpListener(endpoint);
         try
         {
-            _tcp.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            _tcp.Start(backlog: 64);
-            if (udp)
+            if (OperatingSystem.IsWindows())
             {
-                _udp = new Socket(endpoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-                _udp.Bind(new IPEndPoint(endpoint.Address, ((IPEndPoint)_tcp.LocalEndpoint).Port));
+                // On Windows SO_REUSEADDR would let us bind a port another program listens on; ask for the opposite.
+                _tcp.ExclusiveAddressUse = true;
             }
+            else
+            {
+                // Rebind at once after a restart while old connections linger in TIME_WAIT.
+                _tcp.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            }
+
+            _tcp.Start(backlog: 64);
         }
         catch (SocketException ex)
         {
             _tcp.Stop();
-            _udp?.Dispose();
-            throw new IOException($"Cannot listen on {endpoint} ({(udp ? "TCP and UDP" : "TCP")}): {ex.Message} (error {ex.SocketErrorCode}).", ex);
+            throw new RpcBindException(endpoint, ProtocolType.Tcp, ex);
+        }
+
+        if (udp)
+        {
+            var port = ((IPEndPoint)_tcp.LocalEndpoint).Port;
+            _udp = new Socket(endpoint.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            try
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    _udp.ExclusiveAddressUse = true;
+                }
+
+                _udp.Bind(new IPEndPoint(endpoint.Address, port));
+            }
+            catch (SocketException ex)
+            {
+                _tcp.Stop();
+                _udp.Dispose();
+                throw new RpcBindException(new IPEndPoint(endpoint.Address, port), ProtocolType.Udp, ex);
+            }
         }
 
         Endpoint = (IPEndPoint)_tcp.LocalEndpoint;
@@ -232,12 +274,14 @@ public sealed class RpcListener : IAsyncDisposable
 
     public int Connections => Volatile.Read(ref _connections);
 
+    public bool Udp => _udp is not null;
+
     public void Start()
     {
         _loops.Add(Task.Run(() => AcceptAsync(_stop.Token)));
         if (_udp is not null)
         {
-            _loops.Add(Task.Run(() => RpcTransport.ServeDatagramsAsync(_udp, _dispatcher, _stop.Token)));
+            _loops.Add(Task.Run(() => RpcTransport.ServeDatagramsAsync(_udp, _dispatcher, _stop.Token, _datagram)));
         }
     }
 

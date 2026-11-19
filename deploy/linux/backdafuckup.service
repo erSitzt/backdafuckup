@@ -21,6 +21,9 @@ TimeoutStopSec=300
 StateDirectory=backdafuckup
 LogsDirectory=backdafuckup
 ConfigurationDirectory=backdafuckup
+# Instant recovery's NFS server answers the portmapper on port 111 (only when InstantRecovery:Enabled is on);
+# without the capability, set InstantRecovery:PortmapperMode to System to register with rpcbind instead.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

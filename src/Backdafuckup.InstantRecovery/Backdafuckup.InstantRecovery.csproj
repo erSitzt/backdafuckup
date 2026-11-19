@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
     <ProjectReference Include="..\Backdafuckup.Nfs\Backdafuckup.Nfs.csproj" />
   </ItemGroup>
 

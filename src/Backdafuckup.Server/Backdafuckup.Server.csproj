@@ -25,6 +25,7 @@
     <ProjectReference Include="..\Backdafuckup.Smb\Backdafuckup.Smb.csproj" />
     <ProjectReference Include="..\Backdafuckup.Ssh\Backdafuckup.Ssh.csproj" />
     <ProjectReference Include="..\Backdafuckup.FileLevel\Backdafuckup.FileLevel.csproj" />
+    <ProjectReference Include="..\Backdafuckup.InstantRecovery\Backdafuckup.InstantRecovery.csproj" />
     <ProjectReference Include="..\Backdafuckup.Web\Backdafuckup.Web.csproj" />
   </ItemGroup>
   <ItemGroup>

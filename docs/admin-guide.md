@@ -714,6 +714,7 @@ backdafuckup backs up VMs of a vCenter Server and restores them, with only publi
 | Backup server → vCenter | TCP 443 (HTTPS) | vSphere API |
 | Backup server → ESXi hosts | TCP 443 (HTTPS) | Only for installing the agent through VMware Tools (file copy into the guest) |
 | Backup proxy → backup server | TCP 9555 (HTTPS, WebSockets) | The proxy's control connection and the disk data (NBD inside WebSockets). Outbound from the proxy only. |
+| ESXi hosts (VMkernel addresses) → backup server | TCP and UDP 111, TCP 2049, TCP and UDP 20048 | Instant VM recovery: the NFS datastore a recovered VM runs from. Only when the NFS server is turned on, see [The NFS server for instant recovery](#the-nfs-server-for-instant-recovery). |
 
 ### Add a vCenter
 
@@ -754,6 +755,32 @@ A job uses a connected proxy whose VM is powered on, has a free SCSI place and s
 - **Quick rollback** (original location, VM still there): only the blocks changed since the restore point are written back into the existing VM. The VM is shut down, a safety snapshot taken, CBT lists the changed blocks of each disk, and exactly these are written from the restore point; then the safety snapshot is removed (or kept, if chosen) and CBT is reset, so the next backup reads the disks fully. If anything fails, the VM goes back to the safety snapshot. It needs the same disks (same size) and CBT on since the restore point; it is meant for changes inside the guest (a failed update, ransomware), not for damaged storage. **Not for domain controllers:** a rolled-back DC would keep its VM generation id and Active Directory would not notice that it went back in time (USN rollback); restore it fully instead, the restored VM gets a new generation id.
 
 Not restored: vSphere tags and custom attributes, storage policies, the NVRAM (UEFI boot entries; Windows and Linux boot through their fallback boot loader), a virtual TPM's contents, CD-ROM, USB and serial devices. Disks get new UUIDs: an `/etc/fstab` that names a disk by `/dev/disk/by-id/scsi-36000c29…` must be adjusted (by file system UUID, the usual way, works).
+
+### The NFS server for instant recovery
+
+Instant VM recovery (in development) runs a VM straight from a restore point: the backup server serves the restore point's disks as an NFS v3 datastore, which the ESXi host mounts. The NFS server is part of the backup server and is **off** until it is turned on in `appsettings.json` (Linux `/etc/backdafuckup/`, Windows `%ProgramData%\backdafuckup\`), followed by a restart of the service:
+
+```json
+"InstantRecovery": {
+  "Enabled": true,
+  "ListenAddress": "0.0.0.0",
+  "PortmapperMode": "Automatic"
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `Enabled` | `false` | Opens the ports below. |
+| `ListenAddress` | `0.0.0.0` | An address of the backup server the ESXi hosts reach, or all. Each export accepts only the VMkernel addresses of the host it was made for. |
+| `PortmapperMode` | `Automatic` | `Own`: the server answers the portmapper on port 111 itself. `System` (Linux): it registers its ports with the machine's rpcbind. `Automatic`: its own, or rpcbind on Linux when port 111 is taken or may not be bound. |
+| `PortmapperPort`, `NfsPort`, `MountPort` | 111, 2049, 20048 | ESXi expects the portmapper on 111 and NFS on 2049. |
+| `OverlayDirectory` | `<data directory>/instant-recovery` | Everything the recovered VMs write. Put it on a volume with room for it. |
+| `FreeSpaceReserveBytes` | 10 GiB | Left free on that volume; beyond it the VM's writes fail with "no space". |
+| `CacheBytes` | 2 GiB | Disk data of the restore points kept in memory, for all running instant recoveries together. |
+
+- **Linux:** binding port 111 needs `CAP_NET_BIND_SERVICE`, which the supplied systemd unit grants (`AmbientCapabilities`). If rpcbind runs (it does wherever `nfs-common` or `nfs-utils` is installed), `Automatic` registers with it. The kernel's NFS server (`nfs-server`) must not run: it holds port 2049.
+- **Windows:** the Windows role *Server for NFS* holds ports 111 and 2049 and must not be installed. `install-service.ps1 -InstantRecoveryFirewall -NfsClients 192.0.2.11,192.0.2.12` adds firewall rules for the ports, limited to the given ESXi VMkernel addresses (without `-NfsClients`, from any address).
+- **When a port cannot be bound**, the backup server still starts. The log says which port, and which program holds it ("port 111/tcp is in use by rpcbind (pid 812)"), or that the capability is missing; an instant recovery tries again when it starts. The server logs the first contact of each client on each port, so a mount that fails tells a blocked port (the host never reached 2049) from a refused address.
 
 ### vCenter account
 
