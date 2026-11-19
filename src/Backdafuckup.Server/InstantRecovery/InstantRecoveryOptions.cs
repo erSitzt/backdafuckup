@@ -19,6 +19,15 @@ public sealed class InstantRecoveryOptions
     /// <summary>Off by default: the server opens the NFS ports only when this is on.</summary>
     public bool Enabled { get; set; }
 
+    /// <summary>Instant recoveries running at the same time (each is one datastore).</summary>
+    public int MaxConcurrentSessions { get; set; } = 4;
+
+    /// <summary>VMs in one instant recovery.</summary>
+    public int MaxVmsPerSession { get; set; } = 8;
+
+    /// <summary>A running instant recovery warns once it is older than this (it is meant to be migrated or stopped soon).</summary>
+    public TimeSpan AgeWarning { get; set; } = TimeSpan.FromHours(24);
+
     /// <summary>The address the NFS server listens on; 0.0.0.0 for all IPv4 addresses of this server.</summary>
     public string ListenAddress { get; set; } = "0.0.0.0";
 

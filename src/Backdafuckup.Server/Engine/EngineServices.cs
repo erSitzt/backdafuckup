@@ -27,17 +27,21 @@ public sealed class SessionRunnerService(
     Tape.TapeRestoreRunner tapeRestores,
     Tape.TapeCatalogRebuild tapeRebuild,
     ScaleOut.RepositoryMoveRunner moves,
+    InstantRecovery.InstantRecoverySessionRunner instantRecoveries,
     StartupRecovery recovery,
     Telemetry.BackupMetrics metrics,
     IOptions<EngineOptions> options,
     IOptions<Sql.SqlRestoreOptions> sqlOptions,
+    IOptions<InstantRecovery.InstantRecoveryOptions> instantRecoveryOptions,
     TimeProvider time,
     ILogger<SessionRunnerService> logger) : BackgroundService
 {
     private readonly List<Task> _active = [];
+    private CancellationToken _serviceStopping;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _serviceStopping = stoppingToken;
         try
         {
             await recovery.RunAsync(stoppingToken).ConfigureAwait(false);
@@ -64,12 +68,13 @@ public sealed class SessionRunnerService(
             {
                 await queue.Signal.ReadAsync(wait.Token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException)
             {
-                // Periodic poll.
+                // Periodic poll, or the service stops (the loop ends).
             }
         }
 
+        // The running sessions see the stop and finish (cleanup, their last log lines) before the host goes on stopping.
         await Task.WhenAll(_active.ToArray()).ConfigureAwait(false);
     }
 
@@ -87,7 +92,12 @@ public sealed class SessionRunnerService(
             }
 
             session.State = SessionState.Running;
-            session.StartedUtc = time.GetUtcNow();
+            if (session.Kind != SessionKind.InstantRecovery || session.StartedUtc is null)
+            {
+                // A resumed instant recovery keeps when it started.
+                session.StartedUtc = time.GetUtcNow();
+            }
+
             session.ServerInstanceId = options.Value.ServerInstanceId;
             await db.SaveChangesAsync(stoppingToken).ConfigureAwait(false);
             var cts = running.Register(session.Id, session.Kind, stoppingToken);
@@ -110,6 +120,10 @@ public sealed class SessionRunnerService(
 
         // Moves between extents run next to backups (each chain's switch waits for its backup), one at a time.
         SessionKind.RepositoryMove => running.Count(SessionKind.RepositoryMove) == 0,
+
+        // A resumed instant recovery (started before a restart) always runs again; a new one waits for a free place.
+        SessionKind.InstantRecovery => session.StartedUtc is not null
+            || running.Count(SessionKind.InstantRecovery) < Math.Max(1, instantRecoveryOptions.Value.MaxConcurrentSessions),
         _ => false,
     };
 
@@ -137,6 +151,7 @@ public sealed class SessionRunnerService(
                 SessionKind.TapeBackup => await tapeBackups.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.TapeRestore => await tapeRestores.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 SessionKind.RepositoryMove => await moves.RunAsync(session, cancellationToken).ConfigureAwait(false),
+                SessionKind.InstantRecovery => await instantRecoveries.RunAsync(session, cancellationToken).ConfigureAwait(false),
                 _ => (SessionState.Failed, "Unknown session kind."),
             };
 
@@ -169,6 +184,14 @@ public sealed class SessionRunnerService(
         finally
         {
             running.Unregister(session.Id);
+        }
+
+        if (session.Kind == SessionKind.InstantRecovery && _serviceStopping.IsCancellationRequested && state != SessionState.Failed)
+        {
+            // The VMs keep running on the host and wait for their datastore; the next start of the service resumes it.
+            log.Warning("The backup service stops; the instant recovery's datastore is unavailable until the service runs again, then it resumes.");
+            await events.FlushAsync().ConfigureAwait(false);
+            return;
         }
 
         log.Info($"Session finished: {state}. {summary}");
@@ -356,6 +379,19 @@ public sealed class StartupRecovery(
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         foreach (var session in stale)
         {
+            if (session.Kind == SessionKind.InstantRecovery)
+            {
+                // Resumes: queued again (keeping when it started), its runner reopens the export with the same handles and
+                // the host's datastore comes back. The VMs' disk I/O waited meanwhile; nothing of it is cleaned up.
+                session.State = SessionState.Queued;
+                db.SessionLog.Add(new SessionLogEntry
+                {
+                    SessionId = session.Id, TimestampUtc = time.GetUtcNow(), Severity = LogSeverity.Warning,
+                    Message = "The backup service was restarted; the instant recovery resumes. The VMs' disk reads and writes waited meanwhile.",
+                });
+                continue;
+            }
+
             if (session.Kind is SessionKind.SqlPublish or SessionKind.SqlExport)
             {
                 // The agent gets 404 for the publish now and unpublishes on its own (database first, then the volumes).
@@ -477,7 +513,10 @@ public sealed class StartupRecovery(
         }
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        await CleanupArtifactsAsync(db, _ => true, cancellationToken).ConfigureAwait(false);
+
+        // What instant recoveries made (datastore, VMs) stays: they resume.
+        var resuming = await InstantRecovery.InstantRecoveryCatalog.ActiveSessionIds(db).ToListAsync(cancellationToken).ConfigureAwait(false);
+        await CleanupArtifactsAsync(db, a => a.SessionId is not { } owner || !resuming.Contains(owner), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -488,7 +527,10 @@ public sealed class StartupRecovery(
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var settled = time.GetUtcNow() - TimeSpan.FromMinutes(5);
-        await CleanupArtifactsAsync(db, a => a.UpdatedUtc < settled && (a.SessionId is not { } session || !running.IsRunning(session)), cancellationToken).ConfigureAwait(false);
+        var instantRecoveries = await InstantRecovery.InstantRecoveryCatalog.ActiveSessionIds(db).ToListAsync(cancellationToken).ConfigureAwait(false);
+        await CleanupArtifactsAsync(
+            db, a => a.UpdatedUtc < settled && (a.SessionId is not { } session || (!running.IsRunning(session) && !instantRecoveries.Contains(session))), cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private async Task CleanupArtifactsAsync(AppDbContext db, Func<ProviderArtifactEntity, bool> filter, CancellationToken cancellationToken)
@@ -687,6 +729,7 @@ public static class EngineServiceCollectionExtensions
             var o = sp.GetRequiredService<IOptions<InstantRecovery.InstantRecoveryOptions>>().Value;
             return new Backdafuckup.InstantRecovery.AsyncChunkCache(o.CacheBytes, Math.Max(1, o.MaxConcurrentChunkLoads));
         });
+        services.AddSingleton<InstantRecovery.InstantRecoverySessionRunner>();
         services.AddHostedService<PendingArtifactRetryService>();
         services.AddSingleton<JobScheduler>();
         services.AddHostedService<SessionRunnerService>();

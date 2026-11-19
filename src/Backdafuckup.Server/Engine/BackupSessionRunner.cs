@@ -240,10 +240,17 @@ public sealed class BackupSessionRunner(
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         var touched = new HashSet<Guid>();
+        var instantRecoveries = await InstantRecovery.InstantRecoveryCatalog.RestorePointsInUseAsync(db, cancellationToken).ConfigureAwait(false);
         foreach (var group in points.GroupBy(p => p.VmNativeId))
         {
             foreach (var old in group.OrderByDescending(p => p.CreatedUtc).Skip(Math.Max(1, job.RetentionPoints)))
             {
+                if (instantRecoveries.Contains(old.Id))
+                {
+                    log.Info($"Retention: restore point of {old.VmName} from {old.CreatedUtc.ToLocalTime():g} runs an instant recovery and is removed after it ends.");
+                    continue;
+                }
+
                 // Marked first (compare-and-set): a scale-out move cannot switch it meanwhile, and its repository is fixed.
                 if (await CatalogDeletes.MarkRestorePointAsync(db, old.Id, cancellationToken).ConfigureAwait(false) is not { } repositoryId)
                 {

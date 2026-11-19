@@ -1050,6 +1050,15 @@ public sealed partial class EngineIntegrationTests : IAsyncLifetime
             ["Agent:ServicePollInterval"] = "00:00:00.050",
             ["Agent:InstallWaitTimeout"] = "00:00:15",
             ["SqlBackup:TickInterval"] = "01:00:00",
+
+            // Instant recovery's NFS server on loopback, any free ports.
+            ["InstantRecovery:Enabled"] = "true",
+            ["InstantRecovery:ListenAddress"] = "127.0.0.1",
+            ["InstantRecovery:PortmapperMode"] = "Own",
+            ["InstantRecovery:PortmapperPort"] = "0",
+            ["InstantRecovery:NfsPort"] = "0",
+            ["InstantRecovery:MountPort"] = "0",
+            ["InstantRecovery:FreeSpaceReserveBytes"] = "0",
         });
         foreach (var build in new[] { "net10", "net48" })
         {

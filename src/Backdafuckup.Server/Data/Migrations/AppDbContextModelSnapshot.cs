@@ -826,6 +826,153 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.ToTable("connections", (string)null);
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.InstantRecoveryEntity", b =>
+                {
+                    b.Property<Guid>("SessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("session_id");
+
+                    b.Property<string>("AllowedClients")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("allowed_clients");
+
+                    b.Property<Guid>("ConnectionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("connection_id");
+
+                    b.Property<DateTimeOffset>("CreatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_utc");
+
+                    b.Property<string>("DatastoreId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("datastore_id");
+
+                    b.Property<string>("DatastoreName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("datastore_name");
+
+                    b.Property<long>("ExportId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("export_id");
+
+                    b.Property<string>("ExportPath")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("export_path");
+
+                    b.Property<string>("HostId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("host_id");
+
+                    b.Property<string>("HostName")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("host_name");
+
+                    b.Property<DateTimeOffset?>("LastIoUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_io_utc");
+
+                    b.Property<string>("Message")
+                        .HasColumnType("text")
+                        .HasColumnName("message");
+
+                    b.Property<string>("MigrateTaskId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("migrate_task_id");
+
+                    b.Property<string>("OverlayDirectory")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("overlay_directory");
+
+                    b.Property<long?>("OverlayLimitBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("overlay_limit_bytes");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("state");
+
+                    b.Property<DateTimeOffset>("UpdatedUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_utc");
+
+                    b.HasKey("SessionId")
+                        .HasName("pk_instant_recoveries");
+
+                    b.HasIndex("ExportId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_instant_recoveries_export_id");
+
+                    b.HasIndex("State")
+                        .HasDatabaseName("ix_instant_recoveries_state");
+
+                    b.ToTable("instant_recoveries", (string)null);
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.InstantRecoveryVmEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Directory")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasColumnName("directory");
+
+                    b.Property<string>("DiskFiles")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("disk_files");
+
+                    b.Property<string>("InstanceUuid")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("instance_uuid");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasColumnName("name");
+
+                    b.Property<Guid>("RestorePointId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("restore_point_id");
+
+                    b.Property<Guid>("SessionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("session_id");
+
+                    b.Property<string>("VmId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("vm_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_instant_recovery_vms");
+
+                    b.HasIndex("RestorePointId")
+                        .HasDatabaseName("ix_instant_recovery_vms_restore_point_id");
+
+                    b.HasIndex("SessionId")
+                        .HasDatabaseName("ix_instant_recovery_vms_session_id");
+
+                    b.ToTable("instant_recovery_vms", (string)null);
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.InventoryEntry", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3454,6 +3601,26 @@ namespace Backdafuckup.Server.Data.Migrations
                     b.Navigation("Credential");
                 });
 
+            modelBuilder.Entity("Backdafuckup.Server.Data.InstantRecoveryEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.SessionEntity", null)
+                        .WithOne()
+                        .HasForeignKey("Backdafuckup.Server.Data.InstantRecoveryEntity", "SessionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_instant_recoveries_sessions_session_id");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.InstantRecoveryVmEntity", b =>
+                {
+                    b.HasOne("Backdafuckup.Server.Data.InstantRecoveryEntity", null)
+                        .WithMany("Vms")
+                        .HasForeignKey("SessionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_instant_recovery_vms_instant_recoveries_session_id");
+                });
+
             modelBuilder.Entity("Backdafuckup.Server.Data.MediaPoolEntity", b =>
                 {
                     b.HasOne("Backdafuckup.Server.Data.TapeKeyEntity", null)
@@ -3725,6 +3892,11 @@ namespace Backdafuckup.Server.Data.Migrations
             modelBuilder.Entity("Backdafuckup.Server.Data.HypervisorConnection", b =>
                 {
                     b.Navigation("Hosts");
+                });
+
+            modelBuilder.Entity("Backdafuckup.Server.Data.InstantRecoveryEntity", b =>
+                {
+                    b.Navigation("Vms");
                 });
 
             modelBuilder.Entity("Backdafuckup.Server.Data.RestorePointEntity", b =>

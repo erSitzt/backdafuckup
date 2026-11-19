@@ -527,6 +527,12 @@ public static class OperationEndpoints
                 return Results.NotFound();
             }
 
+            if (await InstantRecovery.InstantRecoveryCatalog.FindUseAsync(db, id, ct) is { } use)
+            {
+                return Results.Problem(
+                    $"The restore point runs the instant recovery of {use.VmName} (session {use.SessionId}); migrate or stop it first.", statusCode: StatusCodes.Status409Conflict);
+            }
+
             // An available point is marked first (compare-and-set), so a scale-out move cannot switch it meanwhile.
             var repositoryId = point.RepositoryId;
             if (point.State == RestorePointState.Available)

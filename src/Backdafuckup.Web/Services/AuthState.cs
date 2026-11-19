@@ -188,6 +188,7 @@ public static class Fmt
         "Restore" => "VM restore",
         "RepositoryMaintenance" => "Maintenance",
         "RepositoryMove" => "Move between extents",
+        "InstantRecovery" => "Instant recovery",
         "AgentDeployment" => "Agent installation",
         "FileBrowse" => "File browser",
         "FileRestore" => "File restore",

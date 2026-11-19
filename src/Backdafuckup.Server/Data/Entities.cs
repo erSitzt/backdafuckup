@@ -708,6 +708,12 @@ public enum SessionKind
 
     /// <summary>Moves chains between the extents of a scale-out repository (by hand, rebalance, evacuation).</summary>
     RepositoryMove,
+
+    /// <summary>
+    /// VMs running straight from restore points on an NFS datastore this server serves, until migrated or stopped. Long-lived;
+    /// after a restart of the server it resumes instead of failing.
+    /// </summary>
+    InstantRecovery,
 }
 
 public enum GuestProcessingMode

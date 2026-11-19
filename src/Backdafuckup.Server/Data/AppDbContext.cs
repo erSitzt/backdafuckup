@@ -47,6 +47,10 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
 
     public DbSet<StorageVolumeMapping> StorageVolumes => Set<StorageVolumeMapping>();
 
+    public DbSet<InstantRecoveryEntity> InstantRecoveries => Set<InstantRecoveryEntity>();
+
+    public DbSet<InstantRecoveryVmEntity> InstantRecoveryVms => Set<InstantRecoveryVmEntity>();
+
     public DbSet<AppSetting> Settings => Set<AppSetting>();
 
     public DbSet<AgentEntity> Agents => Set<AgentEntity>();
@@ -459,6 +463,41 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasOne<SqlDatabaseEntity>().WithMany().HasForeignKey(x => x.SqlDatabaseId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne<SqlBackupEntity>().WithMany().HasForeignKey(x => x.SqlBackupId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne<RestorePointEntity>().WithMany().HasForeignKey(x => x.RestorePointId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<InstantRecoveryEntity>(e =>
+        {
+            e.ToTable("instant_recoveries");
+            e.HasKey(x => x.SessionId);
+            e.HasOne<SessionEntity>().WithOne().HasForeignKey<InstantRecoveryEntity>(x => x.SessionId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.State).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.HostId).HasMaxLength(64);
+            e.Property(x => x.HostName).HasMaxLength(255);
+            e.Property(x => x.DatastoreName).HasMaxLength(64);
+            e.Property(x => x.DatastoreId).HasMaxLength(64);
+            e.Property(x => x.ExportPath).HasMaxLength(64);
+            e.Property(x => x.MigrateTaskId).HasMaxLength(64);
+            e.HasIndex(x => x.ExportId).IsUnique();
+            e.HasIndex(x => x.State);
+            ConfigureJsonList(e.Property(x => x.AllowedClients));
+            e.HasMany(x => x.Vms).WithOne().HasForeignKey(x => x.SessionId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<InstantRecoveryVmEntity>(e =>
+        {
+            e.ToTable("instant_recovery_vms");
+            e.Property(x => x.Name).HasMaxLength(80);
+            e.Property(x => x.Directory).HasMaxLength(80);
+            e.Property(x => x.VmId).HasMaxLength(64);
+            e.Property(x => x.InstanceUuid).HasMaxLength(64);
+            e.HasIndex(x => x.RestorePointId);
+            e.Property(x => x.DiskFiles).HasColumnType("jsonb").HasConversion(
+                v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
+                v => JsonSerializer.Deserialize<Dictionary<string, string>>(v, JsonSerializerOptions.Default),
+                new ValueComparer<Dictionary<string, string>?>(
+                    (a, b) => JsonSerializer.Serialize(a, JsonSerializerOptions.Default) == JsonSerializer.Serialize(b, JsonSerializerOptions.Default),
+                    v => v == null ? 0 : JsonSerializer.Serialize(v, JsonSerializerOptions.Default).GetHashCode(StringComparison.Ordinal),
+                    v => v == null ? null : new Dictionary<string, string>(v)));
         });
 
         builder.Entity<SessionEntity>(e =>
