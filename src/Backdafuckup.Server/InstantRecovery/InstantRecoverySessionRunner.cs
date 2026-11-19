@@ -331,8 +331,8 @@ public sealed class InstantRecoverySessionRunner(
                 r.State = InstantRecoveryState.Running;
                 r.Message = null;
             }, cancellationToken).ConfigureAwait(false);
-            log.Info($"Instant recovery running: {string.Join(", ", recovery.Vms.Select(v => v.Name))} run from datastore {recovery.DatastoreName} ({remoteHost}:{recovery.ExportPath}) " +
-                     $"on ESXi host {host.Name}. Migrate them to production storage, or stop the instant recovery, in the backup console.");
+            log.Info($"Instant recovery running: {string.Join(", ", recovery.Vms.Select(v => v.Name))} {(recovery.Vms.Count == 1 ? "runs" : "run")} from datastore {recovery.DatastoreName} ({remoteHost}:{recovery.ExportPath}) " +
+                     $"on ESXi host {host.Name}. Migrate {(recovery.Vms.Count == 1 ? "it" : "them")} to production storage, or stop the instant recovery, in the backup console.");
             return ((SessionState.Running, string.Empty), served);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && lifetime.ApplicationStopping.IsCancellationRequested)
@@ -500,8 +500,8 @@ public sealed class InstantRecoverySessionRunner(
         if (!watch.StopLogged)
         {
             watch.StopLogged = true;
-            log.Info($"Stopping the instant recovery: {string.Join(", ", recovery.Vms.Select(v => v.Name))} are powered off and removed from vCenter (no file is deleted), " +
-                     $"then datastore {recovery.DatastoreName} is unmounted.");
+            log.Info($"Stopping the instant recovery: {string.Join(", ", recovery.Vms.Select(v => v.Name))} {(recovery.Vms.Count == 1 ? "is" : "are")} powered off and removed from vCenter " +
+                     $"(no file is deleted), then datastore {recovery.DatastoreName} is unmounted.");
         }
 
         try
@@ -667,7 +667,7 @@ public sealed class InstantRecoverySessionRunner(
             r.Message = null;
         }, CancellationToken.None).ConfigureAwait(false);
         var summary = migrated
-            ? $"Migrated: {string.Join(", ", recovery.Vms.Select(v => v.Name))} run from production storage; datastore {recovery.DatastoreName} is gone, the overlay ({Bytes(overlay)}) deleted."
+            ? $"Migrated: {string.Join(", ", recovery.Vms.Select(v => v.Name))} {(recovery.Vms.Count == 1 ? "runs" : "run")} from production storage; datastore {recovery.DatastoreName} is gone, the overlay ({Bytes(overlay)}) deleted."
             : $"Stopped: {string.Join(", ", recovery.Vms.Select(v => v.Name))} removed, datastore {recovery.DatastoreName} unmounted, the overlay ({Bytes(overlay)}) deleted.";
         log.Info(summary);
         return (SessionState.Succeeded, summary);

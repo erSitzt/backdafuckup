@@ -85,7 +85,7 @@ public sealed partial class ApiIntegrationTests
             Assert.True(detail.Session.State == "Succeeded", $"{detail.Session.State}: {string.Join(" | ", log)}");
             Assert.Contains(log, l => l.Contains("Moving VM app03 (instant) to datastore ds-shared-01 (thin disks) by Storage vMotion", StringComparison.Ordinal));
             Assert.Contains(log, l => l.Contains("VM app03 (instant) now runs from datastore ds-shared-01.", StringComparison.Ordinal));
-            Assert.Contains(log, l => l.Contains($"Migrated: app03 (instant) run from production storage; datastore {recovery.DatastoreName} is gone", StringComparison.Ordinal));
+            Assert.Contains(log, l => l.Contains($"Migrated: app03 (instant) runs from production storage; datastore {recovery.DatastoreName} is gone", StringComparison.Ordinal));
             Assert.Equal(["relocate app03 (instant) to ds-shared-01", $"unmount {recovery.DatastoreName}"],
                 lab.Events.SkipWhile(e => !e.StartsWith("relocate", StringComparison.Ordinal)));
             Assert.True(lab.Vcenter.Exists(vm));
