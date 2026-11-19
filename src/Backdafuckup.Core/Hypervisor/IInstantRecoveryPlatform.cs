@@ -57,8 +57,10 @@ public sealed record InstantRecoveryDatastore(string Name, string RemoteHost, st
 /// <param name="NfsMounts">NFS datastores it mounts now.</param>
 /// <param name="NfsMountLimit">How many it may mount (vSphere: NFS.MaxVolumes); null if unknown.</param>
 /// <param name="Problems">Why it cannot take an instant recovery now (disconnected, maintenance mode, mount limit reached).</param>
+/// <param name="SwapDatastore">The host's own datastore for swap files; null if it has none (then a VM's swap file, as big as its memory, goes into the instant recovery's datastore).</param>
 public sealed record InstantRecoveryHost(
-    string Id, string Name, string? ClusterId, string? ResourcePoolId, IReadOnlyList<string> Addresses, int NfsMounts, int? NfsMountLimit, IReadOnlyList<string> Problems);
+    string Id, string Name, string? ClusterId, string? ResourcePoolId, IReadOnlyList<string> Addresses, int NfsMounts, int? NfsMountLimit, IReadOnlyList<string> Problems,
+    string? SwapDatastore = null);
 
 /// <summary>A disk of an instant recovery VM in its directory of the datastore.</summary>
 /// <param name="DiskKey">The restore point's disk key.</param>
@@ -69,7 +71,8 @@ public sealed record InstantRecoveryHost(
 public sealed record InstantRecoveryDiskLayout(
     string DiskKey, string SourceDiskId, string Name, long CapacityBytes, string Descriptor, string FlatFile, byte[] DescriptorContent, bool Empty = false);
 
-public sealed record InstantRecoveryVmLayout(IReadOnlyList<InstantRecoveryDiskLayout> Disks, IReadOnlyList<string> Problems, IReadOnlyList<string> Warnings);
+/// <param name="MemoryBytes">The VM's memory: the size of its swap file.</param>
+public sealed record InstantRecoveryVmLayout(IReadOnlyList<InstantRecoveryDiskLayout> Disks, IReadOnlyList<string> Problems, IReadOnlyList<string> Warnings, long MemoryBytes = 0);
 
 /// <summary>The VM to register around the files of an instant recovery.</summary>
 public sealed record InstantRecoveryVmSpec

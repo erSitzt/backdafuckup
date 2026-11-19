@@ -27,7 +27,8 @@ internal sealed class VSphereInstantRecovery(VSphereHypervisorSession owner)
     public async Task<InstantRecoveryHost> GetHostAsync(string hostId, CancellationToken cancellationToken)
     {
         var host = new ManagedObjectReference("HostSystem", hostId);
-        var row = await PropertiesAsync(host, ["name", "parent", "runtime.connectionState", "runtime.inMaintenanceMode", "config.network.vnic", "configManager.advancedOption", "datastore"], cancellationToken)
+        var row = await PropertiesAsync(host, ["name", "parent", "runtime.connectionState", "runtime.inMaintenanceMode", "config.network.vnic", "configManager.advancedOption", "datastore",
+                "config.localSwapDatastore"], cancellationToken)
             .ConfigureAwait(false) ?? throw new InvalidOperationException($"ESXi host {hostId} does not exist in vCenter {Vim.Endpoint}.");
         var name = row.Str("name") ?? hostId;
         var addresses = (row["config.network.vnic"]?.Items ?? [])
@@ -80,7 +81,13 @@ internal sealed class VSphereInstantRecovery(VSphereHypervisorSession owner)
             problems.Add($"ESXi host {name} mounts {mounts} NFS datastores, as many as NFS.MaxVolumes ({max2}) allows; unmount one or raise the limit.");
         }
 
-        return new InstantRecoveryHost(hostId, name, parent?.Type == "ClusterComputeResource" ? parent.Value : null, pool, addresses, mounts, limit, problems);
+        string? swap = null;
+        if (row["config.localSwapDatastore"]?.AsRef() is { } swapDatastore)
+        {
+            swap = (await PropertiesAsync(swapDatastore, ["summary.name"], cancellationToken).ConfigureAwait(false))?.Str("summary.name") ?? swapDatastore.Value;
+        }
+
+        return new InstantRecoveryHost(hostId, name, parent?.Type == "ClusterComputeResource" ? parent.Value : null, pool, addresses, mounts, limit, problems, swap);
     }
 
     public InstantRecoveryVmLayout PlanVm(RestorePointManifest manifest, VmMetadataBlob metadata, bool keepDiskIdentity)
@@ -143,7 +150,7 @@ internal sealed class VSphereInstantRecovery(VSphereHypervisorSession owner)
             problems.Add($"The restore point of {config.Name} has no disk to run the VM from.");
         }
 
-        return new InstantRecoveryVmLayout(disks, problems, warnings);
+        return new InstantRecoveryVmLayout(disks, problems, warnings, config.MemoryMb * 1024 * 1024);
     }
 
     public async Task<string> MountDatastoreAsync(string hostId, InstantRecoveryDatastore datastore, IArtifactLedger ledger, IOperationLog log, CancellationToken cancellationToken)

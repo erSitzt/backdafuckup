@@ -56,6 +56,9 @@ else if (_server is { Listening: false })
                     @check.Name mounts the datastore from @(check.MountFrom ?? "–") with its VMkernel address(es) @string.Join(", ", check.Addresses)
                     (@check.NfsMounts of @(check.NfsMountLimit?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "?") NFS datastores mounted now).
                     This server's firewall must let them in on TCP/UDP @check.PortmapperPort (portmapper), TCP @check.NfsPort (NFS) and TCP/UDP @check.MountPort (MOUNT).
+                    @(check.SwapDatastore is { } swap
+                        ? $"Swap files go to its own datastore {swap}."
+                        : $"It has no swap datastore of its own, so the VM's swap file ({Fmt.Bytes(_point.MemoryBytes)}, its memory) goes into the instant recovery's datastore.")
                 </MudAlert>
             }
             <MudTextField @bind-Value="_name" Label="VM name" Variant="Variant.Outlined" Class="mb-3" Immediate="true"
@@ -278,6 +281,20 @@ else
             foreach (var problem in _hostCheck?.Problems ?? [])
             {
                 yield return problem;
+            }
+
+            // Without a swap datastore of the host, ESXi powers the VM on only if its swap file fits into the datastore.
+            if (_hostCheck is { SwapDatastore: null } && _point is { MemoryBytes: > 0 } point)
+            {
+                var needed = point.MemoryBytes + (1L << 30);
+                if (_overlayLimitGiB is > 0 and var gib && gib * (1L << 30) < needed)
+                {
+                    yield return $"Raise the write limit to at least {Math.Ceiling(needed / (double)(1L << 30))} GiB: the VM's swap file ({Fmt.Bytes(point.MemoryBytes)}) goes into the instant recovery's datastore, and ESXi powers the VM on only if it fits.";
+                }
+                else if (_hostCheck.OverlayFreeBytes is { } free && free < needed)
+                {
+                    yield return $"This server's overlay volume has only {Fmt.Bytes(free)} free: too little for the VM's swap file ({Fmt.Bytes(point.MemoryBytes)}), which goes into the instant recovery's datastore.";
+                }
             }
 
             foreach (var nic in _point?.Nics ?? [])

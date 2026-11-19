@@ -255,6 +255,7 @@ public sealed class InstantRecoverySessionRunner(
                 layouts[vm.Id] = (layout, manifest, metadata);
             }
 
+            CheckSwapSpace(recovery, host, layouts.Values.Select(l => l.Layout.MemoryBytes).Sum());
             var remoteHost = RemoteHostFor(settings, host.Name, host.Addresses);
             recovery = await UpdateAsync(sessionId, r =>
             {
@@ -326,7 +327,18 @@ public sealed class InstantRecoverySessionRunner(
 
             foreach (var vm in recovery.Vms)
             {
-                await platform.PowerOnAsync(vm.VmId!, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await platform.PowerOnAsync(vm.VmId!, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex.Message.Contains("MonitorLoop", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"ESXi host {host.Name} could not power on VM {vm.Name}: {ex.Message} ESXi could not prepare the VM's memory, usually because its swap file " +
+                        $"({Bytes(layouts[vm.Id].Layout.MemoryBytes)}) does not fit: datastore {recovery.DatastoreName} offers only what the write limit or the overlay volume leaves free. " +
+                        "Raise the write limit, free space on the overlay volume, or give the host a swap datastore.", ex);
+                }
+
                 log.Info($"Powered on VM {vm.Name} on ESXi host {host.Name}.");
             }
 
@@ -370,6 +382,44 @@ public sealed class InstantRecoverySessionRunner(
             }
 
             return (await FailAsync(sessionId, log, reason).ConfigureAwait(false), null);
+        }
+    }
+
+    /// <summary>
+    /// Without a swap datastore of the host, ESXi puts each VM's swap file (as big as its memory) into the instant
+    /// recovery's datastore and powers the VM on only if that much is free there: the write limit and the overlay volume
+    /// must leave room for it, plus some for what the VMs write. Checked before anything is made.
+    /// </summary>
+    private void CheckSwapSpace(InstantRecoveryEntity recovery, InstantRecoveryHost host, long memoryBytes)
+    {
+        if (host.SwapDatastore is not null || memoryBytes <= 0)
+        {
+            return;
+        }
+
+        var needed = memoryBytes + (1L << 30);
+        if (recovery.OverlayLimitBytes is { } limit && limit < needed)
+        {
+            throw new InvalidOperationException(
+                $"The write limit of {Bytes(limit)} leaves no room for the VMs' swap files ({Bytes(memoryBytes)} of memory): ESXi host {host.Name} has no swap datastore of its own, " +
+                $"so ESXi creates them in the instant recovery's datastore and powers the VMs on only if that much is free there. Raise the limit to at least {Bytes(needed)}, or leave it empty.");
+        }
+
+        long free;
+        try
+        {
+            free = InstantRecoveryFileSystem.VolumeAvailableBytes(nfs.OverlayDirectory) - options.Value.FreeSpaceReserveBytes;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return;
+        }
+
+        if (free < needed)
+        {
+            throw new InvalidOperationException(
+                $"The overlay volume of this backup server ({nfs.OverlayDirectory}) has {Bytes(Math.Max(0, free))} free above the reserve, too little for the VMs' swap files " +
+                $"({Bytes(memoryBytes)} of memory): ESXi host {host.Name} has no swap datastore of its own, so ESXi creates them in the instant recovery's datastore. Free space there.");
         }
     }
 

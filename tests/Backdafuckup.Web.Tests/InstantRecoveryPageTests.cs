@@ -116,6 +116,21 @@ public sealed class InstantRecoveryPageTests : BunitContext
     }
 
     [Fact]
+    public void A_write_limit_below_the_vms_memory_is_refused_when_the_host_has_no_swap_datastore()
+    {
+        _api.Inventory[0] = Item("Vm", "5003ab12-original", "app-template", new() { ["folder"] = "group-v1001", ["host"] = "esx02.corp.example" });
+        Services.GetRequiredService<NavigationManager>().NavigateTo($"/instant-recovery?point={PointId}");
+        var cut = RenderPage();
+        cut.WaitForAssertion(() => Assert.Contains("It has no swap datastore of its own, so the VM's swap file", cut.Markup, StringComparison.Ordinal));
+        Assert.False(StartButton(cut).HasAttribute("disabled"));
+
+        var limit = cut.FindComponents<MudNumericField<int?>>().Single();
+        cut.InvokeAsync(() => limit.Instance.ValueChanged.InvokeAsync(4));
+        cut.WaitForAssertion(() => Assert.Contains("Raise the write limit to at least 9 GiB", cut.Markup, StringComparison.Ordinal));
+        Assert.True(StartButton(cut).HasAttribute("disabled"));
+    }
+
+    [Fact]
     public void The_host_the_original_runs_on_is_chosen_by_its_name()
     {
         _api.Inventory[0] = Item("Vm", "5003ab12-original", "app-template", new() { ["folder"] = "group-v1001", ["host"] = "esx02.corp.example" });

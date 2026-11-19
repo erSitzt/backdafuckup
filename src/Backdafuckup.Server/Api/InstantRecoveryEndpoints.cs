@@ -82,8 +82,18 @@ public static class InstantRecoveryEndpoints
                 }
 
                 var status = nfs.Status;
+                long? free = null;
+                try
+                {
+                    free = Math.Max(0, Backdafuckup.InstantRecovery.InstantRecoveryFileSystem.VolumeAvailableBytes(nfs.OverlayDirectory) - options.Value.FreeSpaceReserveBytes);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+                {
+                }
+
                 return Results.Ok(new InstantRecoveryHostDto(
-                    host.Id, host.Name, host.Addresses, host.NfsMounts, host.NfsMountLimit, mountFrom, status.NfsPort, status.MountPort, status.PortmapperPort, problems));
+                    host.Id, host.Name, host.Addresses, host.NfsMounts, host.NfsMountLimit, mountFrom, status.NfsPort, status.MountPort, status.PortmapperPort, problems,
+                    host.SwapDatastore, free));
             }
         }).WithDescription("Checks an ESXi host for an instant recovery: its VMkernel addresses (the NFS clients this server's firewall must let in), its NFS mount " +
                            "limit, the address of this server it would mount from, and what keeps it from taking one now.");

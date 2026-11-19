@@ -137,6 +137,14 @@ public sealed partial class ApiIntegrationTests
             var control = _factory!.Services.GetRequiredService<InstantRecoveryControl>();
             var request = new InstantRecoveryRequest(vcenter.Id, lab.Host.Value, [new InstantRecoveryVmRequest(point.Id, "app04 (instant)")]) { FolderId = lab.TestFolder.Value };
 
+            // A write limit below the VM's memory: the host has no swap datastore, so ESXi would not power the VM on. Refused before anything is made.
+            var limited = await control.StartAsync(request with { OverlayLimitBytes = 1L << 30 }, "test", Ct);
+            var refused = await WaitForSessionAsync(client, limited);
+            Assert.Equal("Failed", refused.Session.State);
+            Assert.Contains("The write limit of 1 GiB leaves no room for the VMs' swap files (4 GiB of memory)", refused.Session.Summary, StringComparison.Ordinal);
+            Assert.Contains("Raise the limit to at least 5 GiB", refused.Session.Summary, StringComparison.Ordinal);
+            Assert.DoesNotContain(lab.Events, e => e.StartsWith("mount ", StringComparison.Ordinal));
+
             // The host cannot mount: the session fails naming host, server, path and ports, and what the NFS server saw of the host.
             lab.NasMountFails = "NFS mount 127.0.0.1:/bdfu failed: Unable to connect to NFS server.";
             var failed = await control.StartAsync(request, "test", Ct);

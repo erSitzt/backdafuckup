@@ -73,6 +73,8 @@ public sealed record InstantRecoveryServerDto(
 /// <param name="Addresses">Its VMkernel IPv4 addresses: the NFS clients the export (and this server's firewall) must let in.</param>
 /// <param name="MountFrom">The address of this server the host would mount from; null with the reason in <paramref name="Problems"/>.</param>
 /// <param name="Problems">What keeps it from taking an instant recovery now.</param>
+/// <param name="SwapDatastore">The host's own datastore for swap files; null if it has none (a VM's swap file, as big as its memory, then goes into the instant recovery's datastore).</param>
+/// <param name="OverlayFreeBytes">Free space on this server's overlay volume above the reserve.</param>
 public sealed record InstantRecoveryHostDto(
     string Id, string Name, IReadOnlyList<string> Addresses, int NfsMounts, int? NfsMountLimit, string? MountFrom, int NfsPort, int MountPort, int PortmapperPort,
-    IReadOnlyList<string> Problems);
+    IReadOnlyList<string> Problems, string? SwapDatastore = null, long? OverlayFreeBytes = null);

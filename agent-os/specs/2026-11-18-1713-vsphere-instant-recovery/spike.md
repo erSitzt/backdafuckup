@@ -32,7 +32,9 @@ A clean `Restart-Service` of the backup server while the Ubuntu VM ran from it: 
 session logged the stop, resumed by itself and served the same export with the same file handles. The guest did not
 notice: uptime went on (244 s before, 304 s after), Tools running, heartbeat green.
 
-Still open: a killed process (no clean stop), and outages of 90 and 180 s (guest disk timeouts).
+Under write load (2026-11-19, 21:43 and 21:46): a clean restart served the export again 5 s after the stop; a killed process (`Stop-Process -Force`, restarted by the service's recovery after 10 s) 14 s after the kill. Health took 35 s and 135 s respectively, the rest of the server's start: the NFS server and the resume come first. A guest writing 6 GiB across both: SHA-256 equal, no reboot.
+
+Still open: outages of 90 and 180 s (guest disk timeouts).
 
 ## S4: Windows server — partly
 
