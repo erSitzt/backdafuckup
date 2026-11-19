@@ -67,12 +67,13 @@ public sealed class FileSystemTests : IDisposable
             handle = fs.CreateBaseFile("vm01/disk0-flat.vmdk", "rp1/scsi0:0", DiskSize).ToArray();
             Assert.Equal(_base.Data, await ReadAllAsync(fs, handle, DiskSize));
 
-            // Concurrent writes to disjoint regions (partial blocks, block-crossing, whole blocks), each also in the model.
+            // Concurrent writes to disjoint regions (partial blocks, block-crossing, whole blocks), each also in the model: each
+            // stays inside its own 128 KiB slot (concurrent overlapping writes have no defined order, in NFS neither).
             var random = new Random(5);
             var writes = Enumerable.Range(0, 64).Select(i =>
             {
                 var start = (i * 128L * 1024) + random.Next(0, 60_000);
-                var length = random.Next(1, 120 * 1024);
+                var length = random.Next(1, (128 * 1024) - 60_000);
                 var data = new byte[length];
                 random.NextBytes(data);
                 return (start, data);
