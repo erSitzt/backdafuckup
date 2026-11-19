@@ -41,6 +41,53 @@ public static class InstantRecoveryEndpoints
                 status.PortmapperPort, status.NfsPort, status.MountPort, status.Portmapper ?? "none", status.Error, running, Math.Max(1, o.MaxConcurrentSessions), Math.Max(1, o.MaxVmsPerSession)));
         }).WithDescription("The NFS server that instant recoveries are served from: whether it is on and listening, its ports, and how many instant recoveries run.");
 
+        group.MapGet("/host", async (Guid connectionId, string hostId, Engine.ConnectionManager connections, NfsServerHost nfs, IOptions<InstantRecoveryOptions> options, CancellationToken ct) =>
+        {
+            IHypervisorSession session;
+            try
+            {
+                session = await connections.OpenAsync(connectionId, ct);
+            }
+            catch (Exception ex) when (ex is KeyNotFoundException or InvalidOperationException or NotSupportedException or HttpRequestException or IOException)
+            {
+                return Results.Problem($"Connection {connectionId} cannot be opened: {ex.Message}", statusCode: StatusCodes.Status409Conflict);
+            }
+
+            await using (session)
+            {
+                if (session is not IInstantRecoveryPlatform platform)
+                {
+                    return Results.Problem($"{session.Platform.ProductName} '{session.Platform.PlatformName}' cannot run instant recoveries; only vCenter can.", statusCode: StatusCodes.Status400BadRequest);
+                }
+
+                InstantRecoveryHost host;
+                try
+                {
+                    host = await platform.GetHostAsync(hostId, ct);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return Results.Problem(ex.Message, statusCode: StatusCodes.Status404NotFound);
+                }
+
+                var problems = host.Problems.ToList();
+                string? mountFrom = null;
+                try
+                {
+                    mountFrom = InstantRecoverySessionRunner.RemoteHostFor(options.Value, host.Name, host.Addresses);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    problems.Add(ex.Message);
+                }
+
+                var status = nfs.Status;
+                return Results.Ok(new InstantRecoveryHostDto(
+                    host.Id, host.Name, host.Addresses, host.NfsMounts, host.NfsMountLimit, mountFrom, status.NfsPort, status.MountPort, status.PortmapperPort, problems));
+            }
+        }).WithDescription("Checks an ESXi host for an instant recovery: its VMkernel addresses (the NFS clients this server's firewall must let in), its NFS mount " +
+                           "limit, the address of this server it would mount from, and what keeps it from taking one now.");
+
         group.MapPost("/", async (StartInstantRecoveryDto request, AppDbContext db, InstantRecoveryControl control, IOptions<InstantRecoveryOptions> options, HttpContext http, CancellationToken ct) =>
         {
             var o = options.Value;

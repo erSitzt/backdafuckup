@@ -43,13 +43,21 @@ else if (_server is { Listening: false })
                     <MudSelectItem T="Guid" Value="@connection.Id">@connection.DisplayName</MudSelectItem>
                 }
             </MudSelect>
-            <MudSelect T="string" @bind-Value="_host" Label="ESXi host" Variant="Variant.Outlined" Class="mb-3" ToStringFunc="InventoryName"
+            <MudSelect T="string" Value="_host" ValueChanged="OnHostChangedAsync" Label="ESXi host" Variant="Variant.Outlined" Class="mb-3" ToStringFunc="InventoryName"
                        HelperText="Mounts the instant recovery's datastore and runs the VM; Migrate can move it to another host later.">
                 @foreach (var host in _inventory.Where(i => i.Kind == "Host").OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase))
                 {
                     <MudSelectItem T="string" Value="@host.NativeId">@host.Name</MudSelectItem>
                 }
             </MudSelect>
+            @if (_hostCheck is { } check)
+            {
+                <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">
+                    @check.Name mounts the datastore from @(check.MountFrom ?? "–") with its VMkernel address(es) @string.Join(", ", check.Addresses)
+                    (@check.NfsMounts of @(check.NfsMountLimit?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "?") NFS datastores mounted now).
+                    This server's firewall must let them in on TCP/UDP @check.PortmapperPort (portmapper), TCP @check.NfsPort (NFS) and TCP/UDP @check.MountPort (MOUNT).
+                </MudAlert>
+            }
             <MudTextField @bind-Value="_name" Label="VM name" Variant="Variant.Outlined" Class="mb-3" Immediate="true"
                           HelperText="A new VM next to the original, which is not touched." />
             <div class="d-flex gap-3">
@@ -225,6 +233,7 @@ else
     private readonly Dictionary<string, string?> _networks = new(StringComparer.Ordinal);
     private Guid _connection;
     private string? _host;
+    private InstantRecoveryHostDto? _hostCheck;
     private string? _folder;
     private string? _pool;
     private string? _name;
@@ -264,6 +273,11 @@ else
             if (_host is null)
             {
                 yield return "Choose the ESXi host that runs the VM.";
+            }
+
+            foreach (var problem in _hostCheck?.Problems ?? [])
+            {
+                yield return problem;
             }
 
             foreach (var nic in _point?.Nics ?? [])
@@ -346,12 +360,42 @@ else
         var original = _inventory.FirstOrDefault(i => i.Kind == "Vm" && i.NativeId == _point?.VmNativeId);
         _folder = original?.Properties.GetValueOrDefault("folder") is { } folder && _inventory.Any(i => i.NativeId == folder) ? folder : null;
         _pool = null;
-        var host = original?.Properties.GetValueOrDefault("host");
-        _host = host is not null && _inventory.Any(i => i.Kind == "Host" && i.NativeId == host) ? host : _inventory.Count(i => i.Kind == "Host") == 1 ? _inventory.First(i => i.Kind == "Host").NativeId : null;
+        // The original's host (the inventory names it by id or by name), else the only host there is.
+        var originalHost = original?.Properties.GetValueOrDefault("host") is { } host
+            ? _inventory.FirstOrDefault(i => i.Kind == "Host" && (i.NativeId == host || string.Equals(i.Name, host, StringComparison.OrdinalIgnoreCase)))?.NativeId
+            : null;
+        _host = originalHost ?? (_inventory.Count(i => i.Kind == "Host") == 1 ? _inventory.First(i => i.Kind == "Host").NativeId : null);
         _networks.Clear();
         foreach (var nic in _point?.Nics ?? [])
         {
             _networks[nic.Device] = _inventory.Any(i => i.Kind == "Network" && i.NativeId == nic.NetworkId) ? nic.NetworkId : null;
+        }
+
+        await CheckHostAsync();
+    }
+
+    private async Task OnHostChangedAsync(string? host)
+    {
+        _host = host;
+        await CheckHostAsync();
+    }
+
+    /// <summary>The chosen host's VMkernel addresses, mount limit and problems (before anything is started).</summary>
+    private async Task CheckHostAsync()
+    {
+        _hostCheck = null;
+        if (_host is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _hostCheck = await Api.GetAsync<InstantRecoveryHostDto>($"api/instant-recoveries/host?connectionId={_connection}&hostId={Uri.EscapeDataString(_host)}");
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Warning);
         }
     }
 

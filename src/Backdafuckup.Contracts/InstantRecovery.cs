@@ -68,3 +68,11 @@ public sealed record InstantRecoveryVmDto(Guid RestorePointId, string Name, stri
 public sealed record InstantRecoveryServerDto(
     bool Enabled, bool Listening, string ListenAddress, string? AdvertiseAddress, int PortmapperPort, int NfsPort, int MountPort, string Portmapper, string? Error,
     int Running, int MaxConcurrent, int MaxVmsPerSession);
+
+/// <summary>An ESXi host checked for an instant recovery, before it starts.</summary>
+/// <param name="Addresses">Its VMkernel IPv4 addresses: the NFS clients the export (and this server's firewall) must let in.</param>
+/// <param name="MountFrom">The address of this server the host would mount from; null with the reason in <paramref name="Problems"/>.</param>
+/// <param name="Problems">What keeps it from taking an instant recovery now.</param>
+public sealed record InstantRecoveryHostDto(
+    string Id, string Name, IReadOnlyList<string> Addresses, int NfsMounts, int? NfsMountLimit, string? MountFrom, int NfsPort, int MountPort, int PortmapperPort,
+    IReadOnlyList<string> Problems);

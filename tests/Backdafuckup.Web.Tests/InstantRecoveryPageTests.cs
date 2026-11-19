@@ -64,6 +64,9 @@ public sealed class InstantRecoveryPageTests : BunitContext
         cut.InvokeAsync(() => host.Instance.ValueChanged.InvokeAsync("host-32"));
         cut.WaitForAssertion(() => Assert.False(StartButton(cut).HasAttribute("disabled")));
         Assert.Contains("<b>app-template (instant)</b> starts on esx02.corp.example", cut.Markup, StringComparison.Ordinal);
+        Assert.Contains("esx02.corp.example mounts the datastore from 192.0.2.10 with its VMkernel address(es) 192.0.2.22, 198.51.100.22", cut.Markup, StringComparison.Ordinal);
+        Assert.Contains("on TCP/UDP 111 (portmapper), TCP 2049 (NFS) and TCP/UDP 20048 (MOUNT)", cut.Markup, StringComparison.Ordinal);
+        Assert.Contains($"GET api/instant-recoveries/host", _api.Calls);
         StartButton(cut).Click();
 
         cut.WaitForAssertion(() => Assert.NotNull(_api.Started));
@@ -110,6 +113,16 @@ public sealed class InstantRecoveryPageTests : BunitContext
         cut.WaitForAssertion(() => Assert.NotNull(_api.Migrated));
         Assert.Equal("datastore-12", _api.Migrated!.RootElement.GetProperty("datastoreId").GetString());
         Assert.True(_api.Migrated.RootElement.GetProperty("thin").GetBoolean());
+    }
+
+    [Fact]
+    public void The_host_the_original_runs_on_is_chosen_by_its_name()
+    {
+        _api.Inventory[0] = Item("Vm", "5003ab12-original", "app-template", new() { ["folder"] = "group-v1001", ["host"] = "esx02.corp.example" });
+        Services.GetRequiredService<NavigationManager>().NavigateTo($"/instant-recovery?point={PointId}");
+        var cut = RenderPage();
+        cut.WaitForAssertion(() => Assert.Contains("<b>app-template (instant)</b> starts on esx02.corp.example", cut.Markup, StringComparison.Ordinal));
+        Assert.DoesNotContain("Choose the ESXi host", cut.Markup, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -195,6 +208,8 @@ public sealed class InstantRecoveryPageTests : BunitContext
                 "api/instant-recoveries" => Recoveries,
                 "api/connections" => Connections,
                 _ when path == $"api/restore-points/{PointId}" => Point,
+                "api/instant-recoveries/host" => new InstantRecoveryHostDto(
+                    "host-32", "esx02.corp.example", ["192.0.2.22", "198.51.100.22"], 1, 8, "192.0.2.10", 2049, 20048, 111, []),
                 _ when path.StartsWith("api/connections/", StringComparison.Ordinal) && path.EndsWith("/inventory", StringComparison.Ordinal) => Inventory,
                 _ => null,
             };

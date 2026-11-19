@@ -40,6 +40,10 @@ public sealed partial class ApiIntegrationTests
             var point = await BackUpVsphereAsync(client, vcenter, repository, "app03");
             var server = await client.GetFromJsonAsync<InstantRecoveryServerDto>("/api/instant-recoveries/server", Ct);
             Assert.True(server is { Enabled: true, Listening: true, Running: 0 }, $"{server}");
+            var check = await client.GetFromJsonAsync<InstantRecoveryHostDto>($"/api/instant-recoveries/host?connectionId={vcenter.Id}&hostId={lab.Host.Value}", Ct);
+            Assert.Equal(("esx01.corp.example", "127.0.0.1", 0, 8), (check!.Name, check.MountFrom, check.NfsMounts, check.NfsMountLimit));
+            Assert.Equal(["192.0.2.21", "198.51.100.21"], check.Addresses);
+            Assert.Empty(check.Problems);
             var sessionId = (await Read<StartedDto>(client.PostAsJsonAsync("/api/instant-recoveries", new StartInstantRecoveryDto
             {
                 ConnectionId = vcenter.Id, HostId = lab.Host.Value, Vms = [new InstantRecoveryVmRequestDto(point.Id)], FolderId = lab.TestFolder.Value,
