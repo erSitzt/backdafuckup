@@ -81,6 +81,23 @@ A hand-written `HttpClient` client. DTOs come from `research/HPE-Alletra/ws-open
 | Hosts | Map ESXi IQNs (`HostInternetScsiHba.iScsiName`) and proxy IQNs to host objects through `/hostpaths`. A proxy's host object (`POST /hosts {name: bdfu-proxy-x, iscsiPaths: [IQN], persona}`) is created only when the admin clicks. |
 | Licence | Show `licenses.consolidatedFeatures` (name, expiry) from `/systems`. Warn if no snapshot feature is listed or it has expired; never block. |
 | Least privilege | Document a WSAPI user with the "edit" role, scoped to a Virtual Domain. WSAPI v3 has no custom roles. |
+| Busy array (2026-11-19) | HTTP 503/429, or a message saying busy or too many sessions: tried again after 2, 4, 8, 15, 30, 30 s (or the array's Retry-After, at most 60 s); a read also after a network error. The error then says how long. Nothing else is tried again. |
+| Rights (2026-11-19) | HTTP 403, or a message about permission or privilege: the error names the operation, the role it needs (edit in the volume's domain) and the account's roles from `arrayPrivileges` (`role in domain …`). |
+| Domains (2026-11-19) | Before a VLUN: snapshot and host object in different domains, and no domain set (`/domainsets`) named like the host's domain holds the snapshot's, is refused before anything is made. Only one of them in a domain: tried, the array's error gets both domains. |
+
+### Open: Peer Persistence (2026-11-19)
+
+A B10000 can replicate synchronously with a second array (Remote Copy with a quorum witness): Peer Persistence. Replicated volumes have to be supported, not refused. What follows from the public API (WSAPI 2.5 spec) and still has to be seen on the arrays:
+
+- **The same WWN on both arrays.** Peer Persistence shows the replicated volume with one WWN through both arrays (that is how hosts fail over). With both arrays added, the mapping by WWN finds the volume twice; with one added, it finds it whether that array is the source or the target right now.
+- **Which side to snapshot.** `CREATE_SNAPSHOT_VOLUME` has no Remote Copy flag (only snapshot schedules have `rcopy`), so the snapshot stays on the array that takes it. On the source it holds what the hosts wrote. On the target it does too, but only while the group is in sync: a stopped or failed-over group leaves the target behind, and its snapshot would be an older disk than the change tracking says, a silently wrong incremental. So: snapshot on the array where the volume is the source now; the target only if the group is shown in sync, or never.
+- **What the API shows.** `GET /volumes` has `rcopyStatus` (a string; the spec lists no values). There are no Remote Copy endpoints in v3 2.5; the older `/api/v1/remotecopygroups` (public WSAPI 1.x, used by other products against this model) may still answer. To see with a browse account: `rcopyStatus` of a replicated volume on both arrays, of a plain volume, and whether `/api/v1/remotecopygroups` answers and shows role and sync state.
+- **The proxy.** Its host object exists on each array that may take the snapshot, and it reaches that array's iSCSI ports (Remote Copy runs on its own ports).
+- **Proposed, until it is seen:** the array path takes a replicated volume only on the array where `rcopyStatus` says it is the source, else the VM uses the normal path with the reason in the log; the values are filled in once seen.
+
+### Later: a Windows proxy for physical hosts (decided 2026-11-19)
+
+Existing physical Windows servers (FC HBAs or iSCSI) are to read array snapshots directly. A separate spec after this one: the agent on Windows (service, self-update), disks by SCSI serial (`IOCTL_STORAGE_QUERY_PROPERTY`), SAN policy OfflineAll and no automount checked before any LUN is presented, every snapshot disk kept offline and read-only, the Microsoft iSCSI initiator, FC through host objects with the HBAs' WWNs (made by the admin, like iSCSI ones), MPIO. No HotAdd.
 
 ### Server and console
 - **Entities and migration:**
@@ -249,7 +266,7 @@ The user wrote **OpenVmfs** in a side project: a read-only VMFS6 and VMDK reader
   - find the device by `/sys/block/*/device/wwid == naa.<snap wwn>` or `/dev/disk/by-id/wwn-0x…` (dm-multipath if configured);
   - `blockdev --setro` on all paths, open `O_RDONLY|O_DIRECT`, check the size.
 - **Release:** close the device, `multipath -f`, `echo 1 > /sys/block/sdX/device/delete`. Then the server deletes the VLUN, and a rescan confirms the device is gone.
-- **Self-check at startup:** SAN mode stays off unless LVM leaves foreign PVs alone (devices file with local disks only, or a `global_filter`, and `event_activation=0`) and nothing auto-mounts.
+- **Self-check at startup** (and every minute): SAN mode stays off unless LVM does not activate foreign volume groups (a devices file with local disks only, an accept-list `global_filter`, or `activation/auto_activation_volume_list` with the local VGs), multipathd does not run, and nothing auto-mounts; every missing setting is listed at once. *As built (2026-11-19):* `event_activation=0` was dropped, since LVM 2.03.15 activates nothing at boot then; `backdafuckup-proxy prepare-san` makes the settings (see the admin guide).
 - **Placement:**
   - a proxy VM uses an in-guest initiator; on XCP-ng it has VIFs on the storage networks and never uses the pool's own iSCSI sessions;
   - a physical Linux proxy runs the same agent but cannot do HotAdd, so it serves (b) and XCP-ng only.

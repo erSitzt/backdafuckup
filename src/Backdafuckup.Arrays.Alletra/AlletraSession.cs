@@ -82,6 +82,11 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
                 // Whatever the array made of it: a snapshot with our name is recorded for the cleanup, else the row is closed.
                 var left = (await VolumesAsync(CancellationToken.None).ConfigureAwait(false)).FirstOrDefault(v => v.Name == name && v.IsSnapshot && Tagged(v.Comment));
                 await ledger.UpdateAsync(artifact, left is null ? ArtifactState.Done : ArtifactState.CleanupPending, left?.Uid, CancellationToken.None).ConfigureAwait(false);
+                if (ex is AlletraException { PermissionDenied: true } denied)
+                {
+                    throw Refused(denied, $"taking snapshot {name} of {source.Name}", source.Domain);
+                }
+
                 throw;
             }
 
@@ -101,9 +106,16 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
     public async Task ExtendExpiryAsync(ArraySnapshot snapshot, TimeSpan expiry, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        await ProveOursAsync(snapshot, cancellationToken).ConfigureAwait(false);
-        await client.ChangeAsync(HttpMethod.Patch, $"api/v3/volumes/{Uri.EscapeDataString(snapshot.Uid)}",
-            new { expireSecs = Math.Max(3600, (long)expiry.TotalSeconds) }, cancellationToken).ConfigureAwait(false);
+        var volume = await ProveOursAsync(snapshot, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await client.ChangeAsync(HttpMethod.Patch, $"api/v3/volumes/{Uri.EscapeDataString(snapshot.Uid)}",
+                new { expireSecs = Math.Max(3600, (long)expiry.TotalSeconds) }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AlletraException ex) when (ex.PermissionDenied)
+        {
+            throw Refused(ex, $"extending the expiry of snapshot {snapshot.Name}", volume?.Domain);
+        }
     }
 
     public async Task<ArrayPresentation> PresentAsync(ArraySnapshot snapshot, string hostName, IArtifactLedger ledger, CancellationToken cancellationToken)
@@ -115,10 +127,30 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
             throw new ArgumentException($"A snapshot is presented to exactly one host object, not '{hostName}'.", nameof(hostName));
         }
 
-        await ProveOursAsync(snapshot, cancellationToken).ConfigureAwait(false);
+        var volume = await ProveOursAsync(snapshot, cancellationToken).ConfigureAwait(false)
+            ?? throw new AlletraException($"Array {client.Endpoint}: snapshot {snapshot.Name} is gone; it cannot be presented to {hostName}.");
+        var host = (await client.ListAsync("api/v3/hosts", cancellationToken).ConfigureAwait(false)).FirstOrDefault(h => h["name"]?.GetValue<string>() == hostName)
+            ?? throw new AlletraException($"Array {client.Endpoint}: there is no host object {hostName} (create it with the proxy's initiator name, or map the proxy to an existing one).");
+        var domains = await DomainsAsync(volume, hostName, host["domain"]?.GetValue<string>(), cancellationToken).ConfigureAwait(false);
         var artifact = await ledger.RecordAsync(ArrayArtifactKinds.Presentation, string.Empty, snapshot.Name,
             JsonSerializer.Serialize(new { volumeName = snapshot.Name, hostName, snapshotUid = snapshot.Uid }), cancellationToken).ConfigureAwait(false);
-        var uid = await client.ChangeAsync(HttpMethod.Post, "api/v3/vluns", new { volumeName = snapshot.Name, hostName, autoLun = true }, cancellationToken).ConfigureAwait(false);
+        string? uid;
+        try
+        {
+            uid = await client.ChangeAsync(HttpMethod.Post, "api/v3/vluns", new { volumeName = snapshot.Name, hostName, autoLun = true }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AlletraException ex)
+        {
+            // The ledger row stays open: the array may have made the VLUN all the same, and the cleanup looks for it.
+            if (ex.PermissionDenied)
+            {
+                throw Refused(ex, $"presenting snapshot {snapshot.Name} to host object {hostName}", volume.Domain);
+            }
+
+            // Where the domains differ in a way the check could not settle, say so with the array's answer.
+            throw domains is null ? ex : new AlletraException($"{ex.Message} ({domains})", ex.Status, ex) { ArrayMessage = ex.ArrayMessage };
+        }
+
         var vlun = (uid is null ? null : await client.GetAsync($"api/v3/vluns/{Uri.EscapeDataString(uid)}", cancellationToken).ConfigureAwait(false) as JsonObject)
             ?? (await client.ListAsync("api/v3/vluns", cancellationToken).ConfigureAwait(false))
                 .FirstOrDefault(v => v["volumeName"]?.GetValue<string>() == snapshot.Name && v["hostName"]?.GetValue<string>() == hostName)
@@ -144,6 +176,10 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
         catch (AlletraException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
         {
         }
+        catch (AlletraException ex) when (ex.PermissionDenied)
+        {
+            throw Refused(ex, $"removing the presentation of {presentation.VolumeName} to {presentation.HostName}", domain: null);
+        }
     }
 
     public async Task DeleteSnapshotAsync(ArraySnapshot snapshot, CancellationToken cancellationToken)
@@ -162,7 +198,14 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
             throw new InvalidOperationException($"Snapshot {volume.Name} on {client.Endpoint} is still presented to {string.Join(", ", presented)}; it is deleted once that is removed.");
         }
 
-        await client.ChangeAsync(HttpMethod.Delete, $"api/v3/volumes/{Uri.EscapeDataString(volume.Uid)}", null, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await client.ChangeAsync(HttpMethod.Delete, $"api/v3/volumes/{Uri.EscapeDataString(volume.Uid)}", null, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AlletraException ex) when (ex.PermissionDenied)
+        {
+            throw Refused(ex, $"deleting snapshot {volume.Name}", volume.Domain);
+        }
     }
 
     public async Task<IReadOnlyList<ProviderArtifact>> FindTaggedAsync(CancellationToken cancellationToken)
@@ -216,6 +259,63 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
     }
 
     public ValueTask DisposeAsync() => client.DisposeAsync();
+
+    /// <summary>
+    /// A refusal for lack of rights, said with what was being done, the right it needs and the rights the account has.
+    /// Creating, extending, presenting and deleting our snapshots needs the role edit in the volume's domain.
+    /// </summary>
+    private AlletraException Refused(AlletraException denied, string what, string? domain) => new(
+        $"Array {client.Endpoint}: {what} was refused for lack of rights: the account {client.User} needs the role edit " +
+        $"{(Domain(domain) is { } d ? $"in domain {d} (or in all domains)" : "in the snapshot's domain")}, and it has {client.PrivilegeSummary}. The array said {denied.ArrayMessage}.",
+        denied.Status, denied)
+    {
+        PermissionDenied = true,
+        ArrayMessage = denied.ArrayMessage,
+    };
+
+    /// <summary>
+    /// Whether the snapshot can be presented to the host object as far as their domains go. A volume in a domain is
+    /// presented only to a host in the same domain, or in a domain set that holds it: such a difference is refused here,
+    /// before anything is made, naming both. Where only one of them is in a domain the rule is less clear, so the
+    /// presentation is tried and this text (returned) is added to an error. Null when the domains match.
+    /// </summary>
+    private async Task<string?> DomainsAsync(ArrayVolume snapshot, string hostName, string? hostDomain, CancellationToken cancellationToken)
+    {
+        var (volumeDomain, ofHost) = (Domain(snapshot.Domain), Domain(hostDomain));
+        if (volumeDomain == ofHost)
+        {
+            return null;
+        }
+
+        var said = $"snapshot {snapshot.Name} is {(volumeDomain is null ? "in no domain" : $"in domain {volumeDomain}")}, host object {hostName} " +
+                   $"{(ofHost is null ? "in no domain" : $"in domain {ofHost}")}";
+        if (volumeDomain is null || ofHost is null)
+        {
+            return said;
+        }
+
+        IReadOnlyList<JsonObject> sets;
+        try
+        {
+            sets = await client.ListAsync("api/v3/domainsets", cancellationToken).ConfigureAwait(false);
+        }
+        catch (AlletraException)
+        {
+            return said;
+        }
+
+        if (sets.Any(s => s["name"]?.GetValue<string>() == ofHost && s["members"] is JsonArray members && members.Any(m => m?.GetValue<string>() == volumeDomain)))
+        {
+            return null;
+        }
+
+        throw new AlletraException(
+            $"Array {client.Endpoint}: {said}, and the array presents a volume only to a host in the same domain: put host object {hostName} into domain {volumeDomain} " +
+            $"(or a domain set with it), or map the proxy to a host object in {volumeDomain}. Nothing was presented.");
+    }
+
+    /// <summary>A domain name, or null for none ("-" and empty mean none).</summary>
+    private static string? Domain(string? domain) => domain is { Length: > 0 } and not "-" ? domain : null;
 
     /// <summary>
     /// The snapshot as the array shows it, if every proof holds: our name prefix, our server id in its comment, a

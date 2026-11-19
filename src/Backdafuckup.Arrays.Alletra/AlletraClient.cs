@@ -2,8 +2,10 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace Backdafuckup.Arrays.Alletra;
 
@@ -11,6 +13,12 @@ namespace Backdafuckup.Arrays.Alletra;
 public sealed class AlletraException(string message, HttpStatusCode? status = null, Exception? inner = null) : Exception(message, inner)
 {
     public HttpStatusCode? Status { get; } = status;
+
+    /// <summary>The array refused for lack of rights (HTTP 403, or a message saying so).</summary>
+    public bool PermissionDenied { get; init; }
+
+    /// <summary>The array's own words (HTTP status and message), without our context.</summary>
+    public string? ArrayMessage { get; init; }
 }
 
 /// <summary>
@@ -19,22 +27,29 @@ public sealed class AlletraException(string message, HttpStatusCode? status = nu
 /// 201 with the new resource's location or 202 with a task to poll, and lists in any of the shapes seen (an array, or
 /// <c>members</c> as an array or keyed by uid).
 /// </summary>
-internal sealed class AlletraClient : IAsyncDisposable
+internal sealed partial class AlletraClient : IAsyncDisposable
 {
+    /// <summary>Pauses between tries while the array says it is busy: about 90 s in all.</summary>
+    public static readonly IReadOnlyList<TimeSpan> DefaultRetryDelays =
+        [TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(8), TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30)];
+
     private static readonly TimeSpan TaskPoll = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromSeconds(60);
     private readonly HttpClient _http;
-    private readonly string _user;
     private readonly string _password;
     private readonly SemaphoreSlim _login = new(1, 1);
+    private readonly IReadOnlyList<TimeSpan> _retryDelays;
+    private readonly ConditionalWeakTable<HttpResponseMessage, string> _retried = [];
     private string? _key;
 
-    public AlletraClient(HttpMessageHandler handler, string address, int port, string user, string password, TimeSpan? taskTimeout = null)
+    public AlletraClient(HttpMessageHandler handler, string address, int port, string user, string password, TimeSpan? taskTimeout = null, IReadOnlyList<TimeSpan>? retryDelays = null)
     {
         Endpoint = port == 443 ? address : $"{address}:{port.ToString(CultureInfo.InvariantCulture)}";
         _http = new HttpClient(handler, disposeHandler: true) { BaseAddress = new Uri($"https://{Endpoint}/"), Timeout = TimeSpan.FromMinutes(2) };
-        _user = user;
+        User = user;
         _password = password;
         TaskTimeout = taskTimeout ?? TimeSpan.FromMinutes(10);
+        _retryDelays = retryDelays ?? DefaultRetryDelays;
     }
 
     /// <summary>"array01.corp.example" (with ":port" when it is not 443), for messages.</summary>
@@ -42,28 +57,42 @@ internal sealed class AlletraClient : IAsyncDisposable
 
     public TimeSpan TaskTimeout { get; }
 
-    /// <summary>The account's privileges from the sign-in (<c>arrayPrivileges</c>).</summary>
+    /// <summary>The account the session signs in as.</summary>
+    public string User { get; }
+
+    /// <summary>The account's privileges from the sign-in (<c>arrayPrivileges</c>), e.g. "edit in domain bdfu-test".</summary>
     public IReadOnlyList<string> Privileges { get; private set; } = [];
+
+    /// <summary>The privileges for a message: "edit in domain bdfu-test, browse in all domains", or that the array named none.</summary>
+    public string PrivilegeSummary => Privileges.Count == 0 ? "no privileges the array named at sign-in" : string.Join(", ", Privileges);
+
+    /// <summary>One entry of <c>arrayPrivileges</c>: a plain role, or an object with role and domain.</summary>
+    internal static string? Privilege(JsonNode? node) => node switch
+    {
+        JsonValue v when v.TryGetValue<string>(out var s) => s,
+        JsonObject o when (o["role"]?.GetValue<string>() ?? Text(o["localizedRole"])) is { Length: > 0 } role =>
+            $"{role} in {(o["domain"]?.GetValue<string>() is { Length: > 0 } domain && domain is not ("-" or "all") ? $"domain {domain}" : "all domains")}",
+        JsonObject o => o.ToJsonString(),
+        _ => null,
+    };
 
     public async Task LoginAsync(CancellationToken cancellationToken)
     {
         await _login.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, "api/v3/credentials") { Content = JsonContent.Create(new { user = _user, password = _password }) };
-            using var response = await SendRawAsync(request, cancellationToken).ConfigureAwait(false);
+            using var response = await SendWithRetryAsync(
+                () => new HttpRequestMessage(HttpMethod.Post, "api/v3/credentials") { Content = JsonContent.Create(new { user = User, password = _password }) }, cancellationToken).ConfigureAwait(false);
             if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
             {
-                throw new AlletraException($"Array {Endpoint}: sign-in as {_user} refused (wrong user name or password, or the account may not use the WSAPI).", response.StatusCode);
+                throw new AlletraException($"Array {Endpoint}: sign-in as {User} refused (wrong user name or password, or the account may not use the WSAPI).", response.StatusCode);
             }
 
             await EnsureSuccessAsync(response, "POST", "api/v3/credentials", cancellationToken).ConfigureAwait(false);
             var body = await ReadJsonAsync(response, cancellationToken).ConfigureAwait(false);
             _key = body?["key"]?.GetValue<string>() ?? LastSegment(response.Headers.Location)
                 ?? throw new AlletraException($"Array {Endpoint}: the sign-in returned no session key.");
-            Privileges = body?["arrayPrivileges"] is JsonArray privileges
-                ? [.. privileges.Select(p => p is JsonValue v && v.TryGetValue<string>(out var s) ? s : p?.ToJsonString()).OfType<string>()]
-                : [];
+            Privileges = body?["arrayPrivileges"] is JsonArray privileges ? [.. privileges.Select(Privilege).OfType<string>()] : [];
         }
         finally
         {
@@ -196,7 +225,7 @@ internal sealed class AlletraClient : IAsyncDisposable
             await LoginAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        var response = await SendRawAsync(Request(method, path, body), cancellationToken).ConfigureAwait(false);
+        var response = await SendWithRetryAsync(() => Request(method, path, body), cancellationToken).ConfigureAwait(false);
         if (response.StatusCode != HttpStatusCode.Unauthorized)
         {
             return response;
@@ -205,7 +234,94 @@ internal sealed class AlletraClient : IAsyncDisposable
         // The session expired (idle timeout): one new sign-in, then the call again.
         response.Dispose();
         await LoginAsync(cancellationToken).ConfigureAwait(false);
-        return await SendRawAsync(Request(method, path, body), cancellationToken).ConfigureAwait(false);
+        return await SendWithRetryAsync(() => Request(method, path, body), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends, and again after a pause while the array says it is busy: HTTP 503 or 429, or an answer whose message says
+    /// "busy", "too many sessions" and the like (the array did nothing then). A read is also tried again after a network
+    /// error (a controller taking over the management address). The pause is the array's Retry-After where it gives one.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendWithRetryAsync(Func<HttpRequestMessage> request, CancellationToken cancellationToken)
+    {
+        var waited = TimeSpan.Zero;
+        for (var attempt = 0; ; attempt++)
+        {
+            HttpResponseMessage response;
+            var message = request();
+            var isRead = message.Method == HttpMethod.Get;
+            try
+            {
+                response = await SendRawAsync(message, cancellationToken).ConfigureAwait(false);
+            }
+            catch (AlletraException ex) when (isRead && attempt < _retryDelays.Count && ex.InnerException is HttpRequestException)
+            {
+                waited += await PauseAsync(_retryDelays[attempt], cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            if (response.IsSuccessStatusCode || !await IsBusyAsync(response, cancellationToken).ConfigureAwait(false))
+            {
+                return response;
+            }
+
+            if (attempt >= _retryDelays.Count)
+            {
+                _retried.AddOrUpdate(response, $" (still busy after {attempt} {(attempt == 1 ? "retry" : "retries")} over {waited.TotalSeconds:0} s)");
+                return response;
+            }
+
+            var pause = response.Headers.RetryAfter?.Delta is { } delta && delta > TimeSpan.Zero ? (delta < MaxRetryAfter ? delta : MaxRetryAfter) : _retryDelays[attempt];
+            response.Dispose();
+            waited += await PauseAsync(pause, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<TimeSpan> PauseAsync(TimeSpan pause, CancellationToken cancellationToken)
+    {
+        if (pause > TimeSpan.Zero)
+        {
+            await Task.Delay(pause, cancellationToken).ConfigureAwait(false);
+        }
+
+        return pause;
+    }
+
+    /// <summary>Whether the answer says "busy, try later" (the body is kept for reading again).</summary>
+    private static async Task<bool> IsBusyAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        if (response.StatusCode is HttpStatusCode.ServiceUnavailable or HttpStatusCode.TooManyRequests)
+        {
+            return true;
+        }
+
+        if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        await response.Content.LoadIntoBufferAsync(cancellationToken).ConfigureAwait(false);
+        return Busy().IsMatch(MessageOf(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false)) ?? string.Empty);
+    }
+
+    [GeneratedRegex(@"\bbusy\b|too many (sessions|requests|connections)|maximum (number of )?(sessions|connections)|session limit|try (it )?(again )?later|temporarily unavailable", RegexOptions.IgnoreCase)]
+    private static partial Regex Busy();
+
+    [GeneratedRegex(@"permission|privilege|not authori[sz]ed|insufficient (rights|privileges)|access (is )?denied|perm_denied", RegexOptions.IgnoreCase)]
+    private static partial Regex Denied();
+
+    /// <summary>The message of an error body ("message", "desc", …), or null.</summary>
+    private static string? MessageOf(string text)
+    {
+        try
+        {
+            var node = JsonNode.Parse(text);
+            return Text(node?["message"]) ?? Text(node?["desc"]) ?? Text(node?["description"]) ?? Text(node?["detail"]);
+        }
+        catch (JsonException)
+        {
+            return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+        }
     }
 
     private HttpRequestMessage Request(HttpMethod method, string path, object? body)
@@ -239,19 +355,19 @@ internal sealed class AlletraClient : IAsyncDisposable
         }
 
         var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        string? message = null;
-        try
+        var message = MessageOf(text) ?? response.ReasonPhrase ?? "no message";
+        var said = $"HTTP {(int)response.StatusCode}: {message}";
+        var retried = _retried.TryGetValue(response, out var note) ? note : string.Empty;
+        if (response.StatusCode == HttpStatusCode.Forbidden || Denied().IsMatch(message))
         {
-            var node = JsonNode.Parse(text);
-            message = Text(node?["message"]) ?? Text(node?["desc"]) ?? Text(node?["description"]) ?? Text(node?["detail"]);
-        }
-        catch (JsonException)
-        {
+            throw new AlletraException($"Array {Endpoint}: {method} {path} was refused for lack of rights ({said}); the account {User} has {PrivilegeSummary}.", response.StatusCode)
+            {
+                PermissionDenied = true,
+                ArrayMessage = said,
+            };
         }
 
-        throw new AlletraException(
-            $"Array {Endpoint}: {method} {path} answered HTTP {(int)response.StatusCode}: {message ?? (string.IsNullOrWhiteSpace(text) ? response.ReasonPhrase : text.Trim())}",
-            response.StatusCode);
+        throw new AlletraException($"Array {Endpoint}: {method} {path} answered {said}{retried}", response.StatusCode) { ArrayMessage = said };
     }
 
     private static async Task<JsonNode?> ReadJsonAsync(HttpResponseMessage response, CancellationToken cancellationToken)

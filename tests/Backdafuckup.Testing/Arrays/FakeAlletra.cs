@@ -37,6 +37,17 @@ public sealed class FakeAlletra
     /// <summary>The next task ends in STATE_FAILED with this message.</summary>
     public string? FailNextTask { get; set; }
 
+    /// <summary>
+    /// Asked with "METHOD path" before each request (the sign-in too): a status and message to answer instead (busy,
+    /// too many sessions, no rights), or null to carry it out.
+    /// </summary>
+    public Func<string, (HttpStatusCode Status, string Message)?>? Refuse { get; set; }
+
+    /// <summary>The sign-in's <c>arrayPrivileges</c>.</summary>
+    public JsonArray Privileges { get; set; } = new("edit");
+
+    public List<JsonObject> DomainSets { get; } = [];
+
     public Dictionary<string, JsonObject> Volumes { get; } = new(StringComparer.Ordinal);
 
     public Dictionary<string, JsonObject> Vluns { get; } = new(StringComparer.Ordinal);
@@ -106,6 +117,12 @@ public sealed class FakeAlletra
     {
         lock (_lock)
         {
+            if (Refuse?.Invoke($"{method.Method} {path}") is var (refusedStatus, refusedMessage))
+            {
+                Requests.Add($"{method.Method} {path} (refused: {(int)refusedStatus})");
+                return (refusedStatus, new JsonObject { ["message"] = refusedMessage }, null);
+            }
+
             if (method == HttpMethod.Post && path == "/api/v3/credentials")
             {
                 if (body?["user"]?.GetValue<string>() != User || body?["password"]?.GetValue<string>() != Password)
@@ -116,7 +133,7 @@ public sealed class FakeAlletra
                 var key = Guid.NewGuid().ToString("N");
                 _keys.Add(key);
                 Logins++;
-                return (HttpStatusCode.Created, new JsonObject { ["key"] = key, ["sessionId"] = $"s{Logins}", ["username"] = User, ["arrayPrivileges"] = new JsonArray("edit") },
+                return (HttpStatusCode.Created, new JsonObject { ["key"] = key, ["sessionId"] = $"s{Logins}", ["username"] = User, ["arrayPrivileges"] = Privileges.DeepClone() },
                     $"/api/v3/credentials/{key}");
             }
 
@@ -187,6 +204,20 @@ public sealed class FakeAlletra
                         return (HttpStatusCode.NotFound, new JsonObject { ["message"] = $"Volume {volumeName} does not exist" }, null);
                     }
 
+                    var hostName = body["hostName"]!.GetValue<string>();
+                    var host = Hosts.FirstOrDefault(h => h["name"]!.GetValue<string>() == hostName);
+                    if (host is null)
+                    {
+                        return (HttpStatusCode.NotFound, new JsonObject { ["message"] = $"Host {hostName} does not exist" }, null);
+                    }
+
+                    // A volume in a domain goes only to a host in that domain, or in a domain set that holds it.
+                    var (volumeDomain, hostDomain) = (target["domain"]?.GetValue<string>(), host["domain"]?.GetValue<string>());
+                    if (volumeDomain != hostDomain && !DomainSets.Any(s => s["name"]!.GetValue<string>() == hostDomain && s["members"]!.AsArray().Any(m => m!.GetValue<string>() == volumeDomain)))
+                    {
+                        return (HttpStatusCode.Conflict, new JsonObject { ["message"] = $"Host {hostName} and volume {volumeName} are in different domains" }, null);
+                    }
+
                     var uid = $"vl{_next++:x8}";
                     Vluns[uid] = new JsonObject
                     {
@@ -198,6 +229,8 @@ public sealed class FakeAlletra
                     return Vluns.Remove(parts[3]) ? (HttpStatusCode.OK, null, null) : (HttpStatusCode.NotFound, null, null);
                 case ("GET", "hosts", 3):
                     return (HttpStatusCode.OK, List(Hosts), null);
+                case ("GET", "domainsets", 3):
+                    return (HttpStatusCode.OK, List(DomainSets), null);
                 case ("GET", "hostpaths", 3):
                     return (HttpStatusCode.OK, List(HostPaths), null);
                 case ("GET", "ports", 3):

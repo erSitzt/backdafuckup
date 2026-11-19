@@ -8,7 +8,9 @@ using Backdafuckup.Core.Tls;
 namespace Backdafuckup.Arrays.Alletra;
 
 /// <summary>HPE Alletra Storage MP (and other arrays with WSAPI v3) through its public REST API.</summary>
-public sealed class AlletraProvider(Func<ArrayConnectionSettings, HttpMessageHandler>? handlerFactory = null, TimeSpan? taskTimeout = null) : IStorageArrayProvider
+/// <param name="retryDelays">Pauses between tries while the array is busy (null: about 90 s in all; tests pass zeros).</param>
+public sealed class AlletraProvider(
+    Func<ArrayConnectionSettings, HttpMessageHandler>? handlerFactory = null, TimeSpan? taskTimeout = null, IReadOnlyList<TimeSpan>? retryDelays = null) : IStorageArrayProvider
 {
     public const string ProviderKind = "AlletraMp";
 
@@ -23,7 +25,7 @@ public sealed class AlletraProvider(Func<ArrayConnectionSettings, HttpMessageHan
     public async Task<IStorageArraySession> OpenAsync(ArrayConnectionSettings settings, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        var client = new AlletraClient(Handler(settings), settings.Address, settings.Port, settings.UserName, settings.Password, taskTimeout);
+        var client = new AlletraClient(Handler(settings), settings.Address, settings.Port, settings.UserName, settings.Password, taskTimeout, retryDelays);
         try
         {
             await client.LoginAsync(cancellationToken).ConfigureAwait(false);

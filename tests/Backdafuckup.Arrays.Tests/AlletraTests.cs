@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json.Nodes;
 using Backdafuckup.Arrays.Alletra;
 using Backdafuckup.Core.Arrays;
@@ -15,7 +16,7 @@ public sealed class AlletraTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     private static (AlletraProvider Provider, ArrayConnectionSettings Settings) Connect(FakeAlletra array) =>
-        (new AlletraProvider(_ => array.CreateHandler(), TimeSpan.FromSeconds(30)),
+        (new AlletraProvider(_ => array.CreateHandler(), TimeSpan.FromSeconds(30), [.. Enumerable.Repeat(TimeSpan.Zero, 6)]),
          new ArrayConnectionSettings("array01.corp.example", 443, array.User, array.Password, TlsTrustMode.Pinned, [], ServerId));
 
     [Theory]
@@ -187,6 +188,106 @@ public sealed class AlletraTests
         Assert.True(array.Volumes.ContainsKey(foreign["uid"]!.GetValue<string>()));
         Assert.Contains(log.Messages, m => m.StartsWith("Removed the presentation of bdfu-dead0001-01 to esx01", StringComparison.Ordinal));
         Assert.Contains(log.Messages, m => m.StartsWith("Deleted the array snapshot bdfu-dead0001-01", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_busy_array_is_asked_again_and_a_lasting_refusal_says_how_long_it_was_tried()
+    {
+        var array = new FakeAlletra();
+        var ds = Volume(array.AddVolume("vdi-ds1", "60002AC0000000000000002200019C45", 1024));
+        var refusals = new Dictionary<string, int>(StringComparer.Ordinal);
+        (HttpStatusCode, string)? Times(string request, int times, HttpStatusCode status, string message)
+        {
+            refusals[request] = refusals.GetValueOrDefault(request) + 1;
+            return refusals[request] <= times ? (status, message) : null;
+        }
+
+        // Too many sessions at the sign-in, then busy twice on the snapshot: both go through.
+        array.Refuse = r => r == "POST /api/v3/credentials" ? Times(r, 1, HttpStatusCode.Conflict, "Maximum number of sessions reached, try again later")
+            : r.StartsWith("POST /api/v3/volumes/", StringComparison.Ordinal) ? Times(r, 2, HttpStatusCode.ServiceUnavailable, "System busy") : null;
+        var (provider, settings) = Connect(array);
+        await using var session = await provider.OpenAsync(settings, Ct);
+        var snapshot = Assert.Single(await session.CreateSnapshotsAsync(
+            new ArraySnapshotRequest([ds], "bdfu-b0000001", string.Empty, true, TimeSpan.FromHours(1)), new InMemoryArtifactLedger(), NullOperationLog.Instance, Ct));
+        Assert.Equal("bdfu-b0000001-01", snapshot.Name);
+        Assert.Equal(3, array.Requests.Count(r => r.StartsWith($"POST /api/v3/volumes/{ds.Uid}", StringComparison.Ordinal)));
+
+        // Busy for good: the error says it was tried again. An error that is not "busy" is not tried again.
+        array.Refuse = r => r == "GET /api/v3/volumes" ? (HttpStatusCode.ServiceUnavailable, "System busy") : null;
+        var busy = await Assert.ThrowsAsync<AlletraException>(() => session.FindVolumesByWwnAsync(["60002ac0000000000000002200019c45"], Ct));
+        Assert.Equal("Array array01.corp.example: GET api/v3/volumes answered HTTP 503: System busy (still busy after 6 retries over 0 s)", busy.Message);
+        array.Refuse = null;
+        var before = array.Requests.Count;
+        await Assert.ThrowsAsync<AlletraException>(() => session.CreateSnapshotsAsync(
+            new ArraySnapshotRequest([ds], "bdfu-b0000001", string.Empty, true, TimeSpan.FromHours(1)), new InMemoryArtifactLedger(), NullOperationLog.Instance, Ct));
+        Assert.Single(array.Requests.Skip(before), r => r.StartsWith("POST /api/v3/volumes/", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_refusal_for_lack_of_rights_names_the_operation_the_role_it_needs_and_the_roles_the_account_has()
+    {
+        var array = new FakeAlletra { Privileges = [new JsonObject { ["domain"] = "bdfu-test", ["role"] = "browse", ["roleId"] = 1 }] };
+        var ds = Volume(array.AddVolume("vdi-ds1", "60002AC0000000000000002200019C45", 1024));
+        var (provider, settings) = Connect(array);
+        Assert.Equal(["browse in domain bdfu-test"], (await provider.TestConnectionAsync(settings, Ct)).Privileges);
+
+        array.Refuse = r => r.StartsWith("POST /api/v3/volumes/", StringComparison.Ordinal) ? (HttpStatusCode.Conflict, "User does not have the required privilege for this operation") : null;
+        await using var session = await provider.OpenAsync(settings, Ct);
+        var ledger = new InMemoryArtifactLedger();
+        var denied = await Assert.ThrowsAsync<AlletraException>(() => session.CreateSnapshotsAsync(
+            new ArraySnapshotRequest([ds], "bdfu-0000000a", string.Empty, true, TimeSpan.FromHours(1)), ledger, NullOperationLog.Instance, Ct));
+
+        Assert.True(denied.PermissionDenied);
+        Assert.Equal("Array array01.corp.example: taking snapshot bdfu-0000000a-01 of vdi-ds1 was refused for lack of rights: the account bdfu-wsapi needs the role edit " +
+                     "in domain bdfu-test (or in all domains), and it has browse in domain bdfu-test. The array said HTTP 409: User does not have the required privilege for this operation.",
+            denied.Message);
+        Assert.Single(array.Requests, r => r.StartsWith("POST /api/v3/volumes/", StringComparison.Ordinal)); // not tried again
+        Assert.Equal(ArtifactState.Done, Assert.Single(ledger.Items).State);
+
+        // HTTP 403 is a refusal for lack of rights whatever the message; an account with roles in all domains says so.
+        array.Privileges = [new JsonObject { ["domain"] = "-", ["role"] = "browse" }, "basic_edit"];
+        array.Refuse = r => r.StartsWith("POST /api/v3/volumes/", StringComparison.Ordinal) ? (HttpStatusCode.Forbidden, "Forbidden") : null;
+        array.ExpireSessions();
+        var forbidden = await Assert.ThrowsAsync<AlletraException>(() => session.CreateSnapshotsAsync(
+            new ArraySnapshotRequest([ds], "bdfu-0000000b", string.Empty, true, TimeSpan.FromHours(1)), ledger, NullOperationLog.Instance, Ct));
+        Assert.Contains("and it has browse in all domains, basic_edit. The array said HTTP 403: Forbidden.", forbidden.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_snapshot_is_presented_only_to_a_host_object_in_its_domain_or_in_a_domain_set_with_it()
+    {
+        var array = new FakeAlletra();
+        var ds = Volume(array.AddVolume("vdi-ds1", "60002AC0000000000000002200019C45", 1024));
+        array.AddHost("bdfu-proxy-01", "iqn.2004-10.com.ubuntu:01:proxy01");
+        var host = array.Hosts.Single();
+        var (provider, settings) = Connect(array);
+        await using var session = await provider.OpenAsync(settings, Ct);
+        var ledger = new InMemoryArtifactLedger();
+        var snapshot = Assert.Single(await session.CreateSnapshotsAsync(new ArraySnapshotRequest([ds], "bdfu-d0000001", string.Empty, true, TimeSpan.FromHours(1)), ledger, NullOperationLog.Instance, Ct));
+
+        // Another domain: refused before anything is made, both named.
+        host["domain"] = "vdi-hosts";
+        var other = await Assert.ThrowsAsync<AlletraException>(() => session.PresentAsync(snapshot, "bdfu-proxy-01", ledger, Ct));
+        Assert.Equal("Array array01.corp.example: snapshot bdfu-d0000001-01 is in domain bdfu-test, host object bdfu-proxy-01 in domain vdi-hosts, and the array presents a volume " +
+                     "only to a host in the same domain: put host object bdfu-proxy-01 into domain bdfu-test (or a domain set with it), or map the proxy to a host object in bdfu-test. " +
+                     "Nothing was presented.", other.Message);
+        Assert.DoesNotContain(array.Requests, r => r.StartsWith("POST /api/v3/vluns", StringComparison.Ordinal));
+        Assert.DoesNotContain(ledger.Items, a => a.Kind == ArrayArtifactKinds.Presentation);
+
+        // A domain set that holds the snapshot's domain: presented.
+        array.DomainSets.Add(new JsonObject { ["uid"] = "ds1", ["name"] = "vdi-hosts", ["members"] = new JsonArray("bdfu-test", "vdi") });
+        var presented = await session.PresentAsync(snapshot, "bdfu-proxy-01", ledger, Ct);
+        await session.UnpresentAsync(presented, Ct);
+
+        // The host in no domain: tried, and the array's refusal comes with both domains.
+        host.Remove("domain");
+        var none = await Assert.ThrowsAsync<AlletraException>(() => session.PresentAsync(snapshot, "bdfu-proxy-01", ledger, Ct));
+        Assert.EndsWith("answered HTTP 409: Host bdfu-proxy-01 and volume bdfu-d0000001-01 are in different domains " +
+                        "(snapshot bdfu-d0000001-01 is in domain bdfu-test, host object bdfu-proxy-01 in no domain)", none.Message, StringComparison.Ordinal);
+
+        // No such host object.
+        var missing = await Assert.ThrowsAsync<AlletraException>(() => session.PresentAsync(snapshot, "bdfu-proxy-99", ledger, Ct));
+        Assert.Equal("Array array01.corp.example: there is no host object bdfu-proxy-99 (create it with the proxy's initiator name, or map the proxy to an existing one).", missing.Message);
     }
 
     private static ArrayVolume Volume(JsonObject volume) => AlletraSession.Volume(volume);
