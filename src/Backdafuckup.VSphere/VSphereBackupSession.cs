@@ -32,6 +32,15 @@ public static class VSphereArtifactKinds
 
     /// <summary>A VM a restore created (NativeId: its managed object id).</summary>
     public const string RestoredVm = "vsphere.restored-vm";
+
+    /// <summary>
+    /// An instant recovery's NFS datastore (NativeId: the datastore's managed object id once mounted; NativeRef: the host
+    /// that mounts it; Data: name, server and export path).
+    /// </summary>
+    public const string NasDatastore = "vsphere.nas-datastore";
+
+    /// <summary>An instant recovery's VM (NativeId: its managed object id once created; NativeRef: the datastore; Data: its name and the datastore's).</summary>
+    public const string InstantRecoveryVm = "vsphere.ir-vm";
 }
 
 /// <summary>A disk of the snapshot as vCenter describes it.</summary>

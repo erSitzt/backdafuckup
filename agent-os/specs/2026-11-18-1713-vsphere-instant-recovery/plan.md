@@ -119,7 +119,7 @@ The library `src/Backdafuckup.Nfs` stays independent of the server, so a proxy c
    - disk backings set to `[ds] vm/disk0.vmdk` with no `fileOperation`.
 7. `PowerOnVM_Task`.
 
-Encrypted, vTPM and RDM VMs are refused, naming the VM.
+Encrypted disks are refused, naming the VM and disk. *Changed in task 6:* a vTPM is a warning, not a refusal (the instant recovery VM has none, because a vTPM needs VM encryption; Windows boots, BitLocker with a TPM protector asks for its recovery key). RDMs need no refusal: physical RDMs are not in the restore point (the VM runs without them, with a warning), and virtual RDMs that were backed up become flat disks, as in a normal restore.
 
 **While it runs** (every 10 s, in the style of `SqlPublishSessionRunner.WatchAsync`)
 - Track overlay bytes and limit, read and write rates, cache hits.
@@ -138,7 +138,7 @@ Encrypted, vTPM and RDM VMs are refused, naming the VM.
 5. Close the export, delete the overlay, release the pins, mark the ledger rows Done.
 
 **Stop**
-1. `PowerOffVM_Task`, then `Destroy_Task`. **Only if every file of the VM is on our datastore**; otherwise refuse and alert.
+1. `PowerOffVM_Task`, then `UnregisterVM`. **Only if every file of the VM is on our datastore** (swap files aside); otherwise refuse and alert. *Changed in task 6:* `UnregisterVM` instead of `Destroy_Task`: it deletes no file anywhere, and the VM's files are in our overlay, which the server deletes itself. It also works while the datastore is unreachable (cleanup after a crash).
 2. `RemoveDatastore`, close the export, delete the overlay, release the pins.
 
 **Server restart**
@@ -183,7 +183,7 @@ Encrypted, vTPM and RDM VMs are refused, naming the VM.
    - VMkernel IPs and the NFS mount limit;
    - `CreateNasDatastore`; `CreateVM_Task` with existing disks and the network map; `PowerOnVM_Task`; `RelocateVM_Task`;
    - a PropertyCollector watch;
-   - `PowerOffVM_Task` and `Destroy_Task` with the guard; `RemoveDatastore`;
+   - `PowerOffVM_Task` and `UnregisterVM` with the guard; `RemoveDatastore` only for our export (type NFS, server and path match) with no VM left on it;
    - cleanup for the new artifact kinds.
 
    Tests against `FakeVcenter`.

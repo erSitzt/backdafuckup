@@ -11,7 +11,7 @@ namespace Backdafuckup.Testing.Vim;
 /// files. Snapshots freeze the disks' content; CBT records the writes after each snapshot; QueryChangedDiskAreas answers
 /// from them ("*": the non-zero 64 KiB blocks). Any <c>fileOperation</c> in a reconfiguration fails the test.
 /// </summary>
-public sealed class FakeVsphereLab
+public sealed partial class FakeVsphereLab
 {
     private const int Block = 64 * 1024;
     private readonly string _root;
@@ -85,6 +85,7 @@ public sealed class FakeVsphereLab
         Vcenter.On("QueryChangedDiskAreas", QueryChangedDiskAreas);
 
         AddRestoreSupport();
+        AddInstantRecoverySupport();
 
         // VMware Tools guest operations: files arrive with a PUT to the ESXi host, programs are the simulated sc.exe.
         Vcenter.Add("GuestOperationsManager", "guestOperationsManager",
@@ -531,9 +532,10 @@ public sealed class FakeVsphereLab
                 else if (type == "VirtualDisk")
                 {
                     var fileName = device.Element(FakeVcenter.Ns + "backing")!.Element(FakeVcenter.Ns + "fileName")!.Value;
-                    var disk = _disks.Values.FirstOrDefault(d => d.FileName == fileName) ?? throw new VimFault("FileNotFound", $"File {fileName} was not found");
+                    var (capacity, uuid) = _disks.Values.FirstOrDefault(d => d.FileName == fileName) is { } disk ? (disk.Capacity, disk.Uuid)
+                        : NasDisk(fileName, device) ?? throw new VimFault("FileNotFound", $"File {fileName} was not found");
                     devices.Add(Disk(_nextKey++, keys[device.Element(FakeVcenter.Ns + "controllerKey")!.Value], int.Parse(device.Element(FakeVcenter.Ns + "unitNumber")!.Value, CultureInfo.InvariantCulture),
-                        fileName, disk.Capacity, disk.Uuid, null));
+                        fileName, capacity, uuid, null));
                 }
                 else
                 {
@@ -565,6 +567,7 @@ public sealed class FakeVsphereLab
         }
 
         PublishDevices(vm);
+        OnVmCreated(vm, config);
         return Val.Mor("returnval", vm);
     }
 

@@ -7,9 +7,10 @@ using Backdafuckup.VSphere.Vim;
 namespace Backdafuckup.VSphere;
 
 /// <summary>An open connection to one vCenter.</summary>
-internal sealed partial class VSphereHypervisorSession(VSphereProvider provider, ConnectionSettings settings, VimSession vim, PlatformInfo platform) : IHypervisorSession, IGuestOperations
+internal sealed partial class VSphereHypervisorSession(VSphereProvider provider, ConnectionSettings settings, VimSession vim, PlatformInfo platform) : IHypervisorSession, IGuestOperations, IInstantRecoveryPlatform
 {
     private VSphereGuestOperations? _guest;
+    private VSphereInstantRecovery? _instant;
 
     public PlatformInfo Platform { get; } = platform;
 
@@ -104,6 +105,9 @@ internal sealed partial class VSphereHypervisorSession(VSphereProvider provider,
                 await VSphereRestoreSession.DestroyAsync(Vim, new ManagedObjectReference("VirtualMachine", vm), cancellationToken).ConfigureAwait(false);
                 log.Info($"Removed VM {artifact.NativeRef} ({vm}) that an unfinished restore created.");
                 break;
+            case VSphereArtifactKinds.InstantRecoveryVm or VSphereArtifactKinds.NasDatastore:
+                await Instant.CleanupAsync(artifact, log, cancellationToken).ConfigureAwait(false);
+                break;
             case VSphereArtifactKinds.RestoredDisk when artifact.NativeId is { Length: > 0 } file && artifact.NativeRef is { Length: > 0 } datacenter:
                 await VSphereRestoreSession.DeleteDiskFileAsync(Vim, file, new ManagedObjectReference("Datacenter", datacenter), cancellationToken).ConfigureAwait(false);
                 log.Info($"Removed the disk file {file} that an unfinished restore created.");
@@ -136,6 +140,35 @@ internal sealed partial class VSphereHypervisorSession(VSphereProvider provider,
 
     public Task<int?> GetExitCodeAsync(string vmId, GuestLogin login, long processId, CancellationToken cancellationToken) =>
         Guest.GetExitCodeAsync(vmId, login, processId, cancellationToken);
+
+    private VSphereInstantRecovery Instant => _instant ??= new VSphereInstantRecovery(this);
+
+    public Task<InstantRecoveryHost> GetHostAsync(string hostId, CancellationToken cancellationToken) => Instant.GetHostAsync(hostId, cancellationToken);
+
+    public InstantRecoveryVmLayout PlanVm(Core.Repository.RestorePointManifest manifest, VmMetadataBlob metadata, bool keepDiskIdentity) =>
+        Instant.PlanVm(manifest, metadata, keepDiskIdentity);
+
+    public Task<string> MountDatastoreAsync(string hostId, InstantRecoveryDatastore datastore, IArtifactLedger ledger, IOperationLog log, CancellationToken cancellationToken) =>
+        Instant.MountDatastoreAsync(hostId, datastore, ledger, log, cancellationToken);
+
+    public Task<InstantRecoveryVm> CreateVmAsync(InstantRecoveryVmSpec spec, IArtifactLedger ledger, IOperationLog log, CancellationToken cancellationToken) =>
+        Instant.CreateVmAsync(spec, ledger, log, cancellationToken);
+
+    public Task PowerOnAsync(string vmId, CancellationToken cancellationToken) => Instant.PowerOnAsync(vmId, cancellationToken);
+
+    public Task<InstantRecoveryVmState> GetVmStateAsync(string vmId, string datastoreName, CancellationToken cancellationToken) =>
+        Instant.GetVmStateAsync(vmId, datastoreName, cancellationToken);
+
+    public Task<string> StartMigrationAsync(string vmId, InstantRecoveryMigration target, IOperationLog log, CancellationToken cancellationToken) =>
+        Instant.StartMigrationAsync(vmId, target, log, cancellationToken);
+
+    public Task<InstantRecoveryTask> GetTaskAsync(string taskId, CancellationToken cancellationToken) => Instant.GetTaskAsync(taskId, cancellationToken);
+
+    public Task RemoveVmAsync(string vmId, string datastoreName, IOperationLog log, CancellationToken cancellationToken) =>
+        Instant.RemoveVmAsync(vmId, datastoreName, log, cancellationToken);
+
+    public Task UnmountDatastoreAsync(string datastoreId, InstantRecoveryDatastore datastore, IOperationLog log, CancellationToken cancellationToken) =>
+        Instant.UnmountDatastoreAsync(datastoreId, datastore, log, cancellationToken);
 
     public ValueTask DisposeAsync() => Vim.DisposeAsync();
 }

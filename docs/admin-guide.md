@@ -789,10 +789,11 @@ Create a role with these privileges and assign it to the backup account on the v
 | Area | Privileges |
 |---|---|
 | Datastore | Browse datastore · Low level file operations · Allocate space |
+| Host → Configuration | Storage partition configuration (instant recovery: mount and unmount its NFS datastore) |
 | Network | Assign network (restore) |
-| Resource | Assign virtual machine to resource pool (restore) |
+| Resource | Assign virtual machine to resource pool (restore) · Migrate powered on virtual machine · Migrate powered off virtual machine (instant recovery: migrate to production storage) |
 | Virtual machine → Change Configuration | Add existing disk · Add new disk · Remove disk · Toggle disk change tracking · Modify device settings · Advanced configuration · Rename (restore to the original location) |
-| Virtual machine → Edit Inventory | Create new · Remove (restore, and its cleanup when it fails) |
+| Virtual machine → Edit Inventory | Create new · Remove (restore, and its cleanup when it fails) · Unregister (instant recovery: stop) |
 | Virtual machine → Guest operations | Guest operation program execution · Guest operation modifications · Guest operation queries (agent installation through VMware Tools) |
 | Virtual machine → Interaction | Power on · Power off · Guest operating system management (shutdown for restores) |
 | Virtual machine → Snapshot management | Create snapshot · Remove snapshot · Revert to snapshot (quick rollback) |

@@ -231,21 +231,10 @@ internal sealed partial class VSphereRestoreSession : IVmRestoreSession
 
         var first = _created.FirstOrDefault() ?? throw new InvalidOperationException($"No disk of {config.Name} was restored, so there is no folder for the VM.");
         var vmx = first.FileName[..(first.FileName.LastIndexOf('/') + 1)] + SafeName(_plan.VmName) + ".vmx";
-        var changes = await DeviceChangesAsync(config, sourceToNewDiskId, cancellationToken).ConfigureAwait(false);
-        var spec = VimXml.E(
-            "config",
-            VimXml.E("name", _plan.VmName),
-            config.HardwareVersion is { Length: > 0 } version ? VimXml.E("version", version) : null,
-            _plan.Mode == RestoreMode.OriginalLocation && config.BiosUuid is { Length: > 0 } bios ? VimXml.E("uuid", bios) : null,
-            VimXml.E("guestId", config.GuestId ?? "otherGuest64"),
-            config.Annotation is { Length: > 0 } annotation ? VimXml.E("annotation", annotation) : null,
-            VimXml.E("files", VimXml.E("vmPathName", vmx)),
-            VimXml.E("numCPUs", config.NumCpu),
-            config.CoresPerSocket is { } cores ? VimXml.E("numCoresPerSocket", cores) : null,
-            VimXml.E("memoryMB", config.MemoryMb),
-            changes,
-            config.EfiSecureBoot == true ? VimXml.E("bootOptions", VimXml.E("efiSecureBootEnabled", "true")) : null,
-            VimXml.E("firmware", config.Firmware ?? "bios"));
+        var builder = new VSphereVmSpecBuilder(Vim, config, _log);
+        var connect = await ConnectNicsAsync(cancellationToken).ConfigureAwait(false);
+        var changes = await builder.DeviceChangesAsync(sourceToNewDiskId, _plan.NetworkMap, connect, keepMacs: !_plan.RegenerateMacs, cancellationToken).ConfigureAwait(false);
+        var spec = builder.ConfigSpec(_plan.VmName, vmx, changes, _plan.Mode == RestoreMode.OriginalLocation ? config.BiosUuid : null);
 
         _vmArtifact = await _ledger.RecordAsync(VSphereArtifactKinds.RestoredVm, string.Empty, _plan.VmName, null, cancellationToken).ConfigureAwait(false);
         var task = await Vim.StartTaskAsync("CreateVM_Task", folder!, cancellationToken,
@@ -464,89 +453,6 @@ internal sealed partial class VSphereRestoreSession : IVmRestoreSession
     }
 
     /// <summary>
-    /// The new VM's devices: the disk controllers again, each restored disk on its controller and unit, the NICs (mapped
-    /// network, original or new MAC). Other devices (CD-ROM, USB, serial) are left out.
-    /// </summary>
-    private async Task<List<XElement>> DeviceChangesAsync(VSphereConfig config, IReadOnlyDictionary<string, string> sourceToNewDiskId, CancellationToken cancellationToken)
-    {
-        var devices = string.IsNullOrEmpty(config.DevicesXml) ? [] : XElement.Parse(config.DevicesXml).Elements().Select(e => new VimObject(e)).ToList();
-        var changes = new List<XElement>();
-        var keys = new Dictionary<int, int>();
-        var next = -200;
-        foreach (var controller in devices.Where(d => VSphereDevices.ScsiControllerTypes.Contains(d.Type) || VSphereDevices.OtherDiskControllerTypes.Contains(d.Type)))
-        {
-            var key = next--;
-            keys[controller.Int("key") ?? 0] = key;
-            var scsi = VSphereDevices.ScsiControllerTypes.Contains(controller.Type);
-            changes.Add(Add(VimXml.Typed("device", controller.Type!, VimXml.E("key", key), PciSlot(controller), VimXml.E("busNumber", controller.Int("busNumber") ?? 0),
-                scsi ? VimXml.E("sharedBus", controller.Str("sharedBus") ?? "noSharing") : null)));
-        }
-
-        foreach (var disk in devices.Where(d => d.Type == "VirtualDisk"))
-        {
-            var backing = disk.Child("backing");
-            var root = backing;
-            while (root?.Child("parent") is { } parent)
-            {
-                root = parent;
-            }
-
-            var label = disk.Child("deviceInfo")?.Str("label") ?? $"disk {disk.Int("key")}";
-            var file = new[] { root?.Str("uuid"), backing?.Str("uuid"), disk.Int("key")?.ToString(CultureInfo.InvariantCulture) }
-                .Where(id => id is not null).Select(id => sourceToNewDiskId.GetValueOrDefault(id!)).FirstOrDefault(f => f is not null);
-            if (file is null)
-            {
-                _log.Warning($"{label} of {config.Name} is not in the restore point; the restored VM has no such disk.");
-                continue;
-            }
-
-            var mode = backing?.Str("diskMode") is { } original && original.StartsWith("independent", StringComparison.Ordinal) ? original : "persistent";
-            var controllerKey = disk.Int("controllerKey") ?? 0;
-            changes.Add(Add(VimXml.Typed(
-                "device", "VirtualDisk",
-                VimXml.E("key", next--),
-                VimXml.Typed("backing", "VirtualDiskFlatVer2BackingInfo", VimXml.E("fileName", file), VimXml.E("diskMode", mode)),
-                VimXml.E("controllerKey", keys.GetValueOrDefault(controllerKey, controllerKey)),
-                VimXml.E("unitNumber", disk.Int("unitNumber") ?? 0),
-                VimXml.E("capacityInKB", disk.Long("capacityInKB") ?? (disk.Long("capacityInBytes") ?? 0) / 1024))));
-        }
-
-        var connect = await ConnectNicsAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var nic in devices.Where(d => VSphereDevices.NicTypes.Contains(d.Type)))
-        {
-            var deviceKey = (nic.Int("key") ?? 0).ToString(CultureInfo.InvariantCulture);
-            var original = nic.Child("backing");
-            var backing = _plan.NetworkMap.TryGetValue(deviceKey, out var network)
-                ? await NetworkBackingAsync(network, cancellationToken).ConfigureAwait(false)
-                : original?.Type == "VirtualEthernetCardDistributedVirtualPortBackingInfo"
-                    // The same port group, but not the original's port: vCenter picks a free one.
-                    ? VimXml.Typed("backing", original.Type, VimXml.E("port", VimXml.E("switchUuid", original.Child("port")?.Str("switchUuid")), VimXml.E("portgroupKey", original.Child("port")?.Str("portgroupKey"))))
-                    : original is null ? null : new XElement(original.Element);
-            var mac = nic.Str("macAddress");
-            var keepMac = !_plan.RegenerateMacs && !string.IsNullOrEmpty(mac);
-            changes.Add(Add(VimXml.Typed(
-                "device", nic.Type!,
-                VimXml.E("key", next--),
-                backing,
-                VimXml.E("connectable", VimXml.E("startConnected", connect ? nic.Child("connectable")?.Str("startConnected") ?? "true" : "false"), VimXml.E("allowGuestControl", "true"),
-                    VimXml.E("connected", "false")),
-                // The guest knows its NICs by PCI slot (Windows keeps a static address with it): the same slot as before.
-                PciSlot(nic),
-                VimXml.E("addressType", keepMac ? "manual" : "generated"),
-                keepMac ? VimXml.E("macAddress", mac) : null)));
-        }
-
-        return changes;
-
-        static XElement Add(XElement device) => VimXml.E("deviceChange", VimXml.E("operation", "add"), device);
-
-        static XElement? PciSlot(VimObject device) =>
-            device.Child("slotInfo") is { Type: "VirtualDevicePciBusSlotInfo" } slot && slot.Int("pciSlotNumber") is { } number
-                ? VimXml.Typed("slotInfo", "VirtualDevicePciBusSlotInfo", VimXml.E("pciSlotNumber", number))
-                : null;
-    }
-
-    /// <summary>
     /// Whether the NICs start connected: as asked; else a copy whose original still exists starts with its NICs
     /// disconnected (the guest would come up with the original's addresses), everything else as it was.
     /// </summary>
@@ -570,24 +476,6 @@ internal sealed partial class VSphereRestoreSession : IVmRestoreSession
         _log.Info($"The NICs of {_plan.VmName} start disconnected: the original VM {original.Name} still exists, and the copy would come up with its network settings " +
                      "(IP addresses, host name). Connect them in vCenter once that is sorted out.");
         return false;
-    }
-
-    /// <summary>The NIC backing for a network: a standard network by name and reference, a distributed port group by switch and key.</summary>
-    private async Task<XElement> NetworkBackingAsync(string networkId, CancellationToken cancellationToken)
-    {
-        if (networkId.StartsWith("dvportgroup-", StringComparison.Ordinal))
-        {
-            var group = new ManagedObjectReference("DistributedVirtualPortgroup", networkId);
-            var row = (await Vim.RetrievePropertiesAsync([group], ["key", "config.distributedVirtualSwitch"], cancellationToken).ConfigureAwait(false)).FirstOrDefault();
-            var dvs = row?["config.distributedVirtualSwitch"]?.AsRef() ?? throw new InvalidOperationException($"Port group {networkId} belongs to no distributed switch.");
-            var uuid = (await Vim.RetrievePropertiesAsync([dvs], ["uuid"], cancellationToken).ConfigureAwait(false)).FirstOrDefault()?.Str("uuid")
-                ?? throw new InvalidOperationException($"Distributed switch {dvs.Value} has no UUID.");
-            return VimXml.Typed("backing", "VirtualEthernetCardDistributedVirtualPortBackingInfo",
-                VimXml.E("port", VimXml.E("switchUuid", uuid), VimXml.E("portgroupKey", row.Str("key") ?? networkId)));
-        }
-
-        var name = (await NamesAsync([new ManagedObjectReference("Network", networkId)], cancellationToken).ConfigureAwait(false))[0];
-        return VimXml.Typed("backing", "VirtualEthernetCardNetworkBackingInfo", VimXml.E("deviceName", name), VimXml.Ref("network", new ManagedObjectReference("Network", networkId)));
     }
 
     /// <summary>Folder and resource pool: as asked, else where the backed-up VM was, else the target host's cluster and its datacenter's VM folder.</summary>
@@ -778,7 +666,7 @@ internal sealed partial class VSphereRestoreSession : IVmRestoreSession
         await Vim.WaitForTaskAsync(await Vim.StartTaskAsync("Rename_Task", vm, cancellationToken, VimXml.E("newName", name)).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
 
     /// <summary>A VM name as a datastore folder and file name.</summary>
-    private static string SafeName(string name)
+    internal static string SafeName(string name)
     {
         var chars = name.Trim().Select(c => c is '/' or '\\' or '[' or ']' or ':' or '*' or '?' or '"' or '<' or '>' or '|' || char.IsControl(c) ? '_' : c).ToArray();
         return chars.Length == 0 ? "restored-vm" : new string(chars);
