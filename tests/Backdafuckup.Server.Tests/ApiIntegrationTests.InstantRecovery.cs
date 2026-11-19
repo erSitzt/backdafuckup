@@ -38,9 +38,12 @@ public sealed partial class ApiIntegrationTests
         try
         {
             var point = await BackUpVsphereAsync(client, vcenter, repository, "app03");
-            var control = _factory!.Services.GetRequiredService<InstantRecoveryControl>();
-            var sessionId = await control.StartAsync(
-                new InstantRecoveryRequest(vcenter.Id, lab.Host.Value, [new InstantRecoveryVmRequest(point.Id, "app03 (instant)")]) { FolderId = lab.TestFolder.Value }, "test", Ct);
+            var server = await client.GetFromJsonAsync<InstantRecoveryServerDto>("/api/instant-recoveries/server", Ct);
+            Assert.True(server is { Enabled: true, Listening: true, Running: 0 }, $"{server}");
+            var sessionId = (await Read<StartedDto>(client.PostAsJsonAsync("/api/instant-recoveries", new StartInstantRecoveryDto
+            {
+                ConnectionId = vcenter.Id, HostId = lab.Host.Value, Vms = [new InstantRecoveryVmRequestDto(point.Id)], FolderId = lab.TestFolder.Value,
+            }, Ct))).SessionId;
             var recovery = await WaitForRecoveryAsync(sessionId, InstantRecoveryState.Running);
 
             // vCenter: our export mounted from the listen address, the VM registered around its files there and powered on.
@@ -64,8 +67,15 @@ public sealed partial class ApiIntegrationTests
             await export.FileSystem.WriteAsync(EsxCaller, flat, 4096, new byte[4096], NfsStable.FileSync, Ct);
             Assert.True(Directory.Exists(recovery.OverlayDirectory));
 
-            // Migrate: Storage vMotion to the production datastore, then the instant recovery's datastore goes.
-            Assert.True(await control.RequestMigrationAsync(sessionId, new InstantRecoveryMigration(lab.Datastore.Value), Ct));
+            // The list shows it running, with what ESXi wrote.
+            var listed = Assert.Single((await client.GetFromJsonAsync<List<InstantRecoveryDto>>("/api/instant-recoveries", Ct))!, r => r.SessionId == sessionId);
+            Assert.Equal(("Running", "esx01.corp.example", "app03 (instant)", "app03"), (listed.State, listed.HostName, listed.Vms[0].Name, listed.Vms[0].SourceVmName));
+            Assert.True(listed.OverlayBytes >= 4096, $"overlay {listed.OverlayBytes}");
+
+            // Migrate: not onto its own datastore; Storage vMotion to the production datastore, then the instant recovery's datastore goes.
+            var own = await client.PostAsJsonAsync($"/api/instant-recoveries/{sessionId}/migrate", new MigrateInstantRecoveryDto(recovery.DatastoreId!), Ct);
+            Assert.Equal(HttpStatusCode.BadRequest, own.StatusCode);
+            Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsJsonAsync($"/api/instant-recoveries/{sessionId}/migrate", new MigrateInstantRecoveryDto(lab.Datastore.Value), Ct)).StatusCode);
             var detail = await WaitForSessionAsync(client, sessionId);
             var log = await SessionLogAsync(client, sessionId);
             Assert.True(detail.Session.State == "Succeeded", $"{detail.Session.State}: {string.Join(" | ", log)}");
@@ -83,6 +93,9 @@ public sealed partial class ApiIntegrationTests
             Assert.Equal(InstantRecoveryState.Migrated, (await db.InstantRecoveries.SingleAsync(r => r.SessionId == sessionId, Ct)).State);
             Assert.All(await db.Artifacts.Where(a => a.SessionId == sessionId).ToListAsync(Ct), a => Assert.Equal(ArtifactState.Done, a.State));
             Assert.Null(await InstantRecoveryCatalog.FindUseAsync(db, point.Id, Ct));
+            var again = await client.PostAsync($"/api/instant-recoveries/{sessionId}/stop", null, Ct);
+            Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
+            Assert.Contains("The instant recovery is Migrated; only a running one can be stopped.", await again.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
         }
         finally
         {

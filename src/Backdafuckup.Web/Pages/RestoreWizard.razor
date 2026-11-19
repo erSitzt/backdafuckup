@@ -82,6 +82,13 @@ else
                         </span>
                     }
                 </MudText>
+                @if (SourceIsVsphere && !FromTape)
+                {
+                    <MudAlert Severity="Severity.Normal" Dense="true" Class="mt-2 mb-2" Icon="@Icons.Material.Filled.Bolt">
+                        Needed right now? <MudLink Href="@($"/instant-recovery?point={Id}")">Instant recovery</MudLink> runs @_point.VmName from this restore point within minutes,
+                        from a datastore this backup server serves, and moves it to production storage later while it runs.
+                    </MudAlert>
+                }
                 @if (_mode == RestoreModeDto.OriginalLocation && SourceIsVsphere)
                 {
                     <MudCheckBox @bind-Value="_quickRollback" Label="Quick rollback: write back into the existing VM only what changed since the restore point" Class="mt-2"

@@ -197,6 +197,7 @@ Encrypted disks are refused, naming the VM and disk. *Changed in task 6:* a vTPM
    - A start interrupted by a service stop is recognised on resume by its overlay directory (the start's first side effect): the export is served once more so the host can still reach the VMs' files, the ledger rows are undone newest first, and the session fails with the reason.
    - Disks left out of the backup get an empty base (`empty:<bytes>`), read as zeros.
 8. **API and console:**
+   *As built:* `/api/instant-recoveries` (list, detail, `server` status, start, stop, migrate). The start form starts one VM, from a restore point (`/instant-recovery?point=`, linked from the restore wizard for vSphere points); the API takes several. Not yet shown: read rates and cache hits (task 9).
    - an "Instant recovery" entry in `RestoreWizard.razor`;
    - a new `InstantRecovery.razor`:
      - a wizard: restore point(s), host or cluster, network (disconnected by default), name, overlay limit, summary;
