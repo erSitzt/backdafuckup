@@ -1106,9 +1106,12 @@ internal sealed class VmBackupTask(
 
             if (verification is { Passed: false })
             {
+                var details = $"{verification.Mismatches} of {verification.Regions} regions that change tracking reports unchanged read differently from the previous restore point " +
+                              $"through {_arrayLease.Description}";
+                await _arrayLease.ReportMismatchAsync(disk, details, CancellationToken.None).ConfigureAwait(false);
                 throw new InvalidDataException(
-                    $"{DiskNoun} {disk.Name}: {verification.Mismatches} of {verification.Regions} regions that change tracking reports unchanged read differently from the previous restore point " +
-                    $"through {_arrayLease.Description}. The restore point is not kept; turn off 'Experimental readers' for this storage system and report the case.");
+                    $"{DiskNoun} {disk.Name}: {details}. The restore point is not kept, and the {_arrayLease.Reader} reader is switched off for this storage system " +
+                    "until it is turned back on under Storage systems; the next backup reads from the VM snapshot.");
             }
 
             if (verification is not null)
@@ -1116,6 +1119,17 @@ internal sealed class VmBackupTask(
                 _log.Info($"{DiskNoun} {disk.Name}: {verification.Regions} unchanged region(s) read from the array snapshot match the previous restore point.");
                 stats = stats with { Verification = verification };
             }
+        }
+
+        // Verify mode compared this disk with the VM snapshot before it was released; recorded with the unchanged check, if any.
+        if (_arrayLease?.GetVerification(disk) is { } verified)
+        {
+            stats = stats with
+            {
+                Verification = stats.Verification is { } unchanged
+                    ? new DiskVerification($"{verified.Method}+{unchanged.Method}", verified.Regions + unchanged.Regions, verified.Mismatches + unchanged.Mismatches)
+                    : verified,
+            };
         }
 
         var indexRef = await writer.WriteDiskIndexAsync(disk.Key, result.Index, cancellationToken).ConfigureAwait(false);

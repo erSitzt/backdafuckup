@@ -318,6 +318,9 @@ A dedicated test volume on the array, used as an LVM over iSCSI SR in the pool, 
 | N6 | Remove the proxy's initiator from the host object and run the job. | The VM is read normally, the log names the proxy and its initiator; `bdfu_array_fallback_total{reason="no_proxy"}` rises. |
 | N7 | Restart the server after the array snapshot was taken (while the disks are read). | At start the cleanup removes the presentation, then the snapshot, then the VM snapshot leftovers; nothing of ours is left on the array. |
 | N8 | Create a `bdfu-` snapshot by hand with another comment, wait for the orphan scan. | It is not touched (not ours). |
+| N9 | With *Verify runs* 2, run the job three times. | Runs 1 and 2 log "Verify mode (… backup n of 2)" before the VM snapshot is released; run 3 does not compare. *Storage systems* shows "verified (2 backups compared)". |
+| N10 | Only if a reader was switched off by a real difference (it should not be): look at the alert and the console, keep the session log, then *Turn back on* and run the job. | While switched off: the VM is read from its VM snapshot, the log names the reason, `bdfu_array_reader_tripped` is 1 and `BackdafuckupArrayReaderSwitchedOff` fires. After *Turn back on*: verify mode again. |
+| N11 | vSphere, once the OpenVmfs reader is in the build: a test datastore on a dedicated volume of the array, a test VM on it, a job with *Backup from storage snapshots*; run it three times. | Run 1 through HotAdd ("no restore point yet"); runs 2 and 3 read `array-vmfs` from the disk under the VM snapshot, which is removed before; verify mode compares through HotAdd in run 2; restore and boot as in N4; no `bdfu-` snapshot, VLUN or VM snapshot left. Also an independent disk: refused as open for writing, the VM read through HotAdd. |
 
 ## Results
 

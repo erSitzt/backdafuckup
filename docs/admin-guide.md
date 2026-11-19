@@ -799,7 +799,7 @@ Create a role with these privileges and assign it to the backup account on the v
 
 ## Backup from storage snapshots
 
-For VMs on an **HPE Alletra MP** (B10000), the disks can be read from a snapshot of the array instead of from the VM snapshot. The VM snapshot is still taken (with guest processing as usual), then the array snapshot of the volume, then the VM snapshot is removed **before** the disks are read: it exists for seconds instead of the whole backup, so less changed data piles up in it and its removal is quick. So far for **XCP-ng LVM storage over iSCSI or FC (LVHD)**; vSphere datastores follow.
+For VMs on an **HPE Alletra MP** (B10000), the disks can be read from a snapshot of the array instead of from the VM snapshot. The VM snapshot is still taken (with guest processing as usual), then the array snapshot of the volume, then the VM snapshot is removed **before** the disks are read: it exists for seconds instead of the whole backup, so less changed data piles up in it and its removal is quick. So far for **XCP-ng LVM storage over iSCSI or FC (LVHD)**. **vSphere VMFS6 datastores** are prepared: their disks are read from the snapshot LUN by the OpenVmfs reader, which this build does not include yet; until then vSphere VMs with the job option on are read through HotAdd, and the log says so.
 
 ### Requirements
 
@@ -816,10 +816,15 @@ Turn on *Backup from storage snapshots* in the job (Transport). For each VM whos
 2. Array snapshot of the volume, read-only, named `bdfu-…-01`, with this server's id in its comment and an expiry (6 hours by default, moved forward while it is read). VMs of the same job run that reach this point within the batch window (60 s) share one array snapshot (up to 8 by default).
 3. The snapshot is presented to the proxy's host object, the proxy logs in and opens the LUN read-only.
 4. Each disk's chain is found on the LUN and compared with what XAPI reported (volume group of the SR, logical volumes and their sizes, the VHD chain and its links). Any difference, or the storage manager working on the chain (coalesce, clone), keeps the VM on the normal path.
-5. The VM snapshot is removed (its change tracking data is kept for the next incremental), and the disks are read from the array snapshot.
-6. When the last VM of the batch is done, the LUN is closed on the proxy, the presentation removed and the snapshot deleted.
+5. **Verify mode** (the first backups per reader and storage system, *Verify runs*, 5 by default): 16 regions of up to 1 MiB of each disk, spread over the blocks this backup reads, are read from the array snapshot and from the VM snapshot (NBD) and compared.
+6. The VM snapshot is removed (its change tracking data is kept for the next incremental), and the disks are read from the array snapshot.
+7. When the last VM of the batch is done, the LUN is closed on the proxy, the presentation removed and the snapshot deleted.
 
-Every incremental backup compares 32 regions that change tracking reports as unchanged with the previous restore point; a difference fails the backup of that VM (turn off *Experimental readers* and report it). Every other VM, and every VM where a step fails before its VM snapshot is removed, is read from its VM snapshot; the log says why, and `bdfu_array_fallback_total` counts it.
+**On vSphere** (with the VMFS reader): the disk read is the one *under* the VM snapshot, which the host closed for writing when it took the snapshot; the array snapshot waits at least 2 s after the last VM snapshot of its batch (*Gap after VM snapshot*), so that the host has written the disk's block map. A disk a host still had open for writing (an independent disk, say) is refused and the VM read through HotAdd. The VMFS reader is used only from a disk's second backup on, so that every run is checked against the previous restore point; VMs that already had snapshots are fine, datastores on several LUNs are not.
+
+Every incremental backup also compares 32 regions that change tracking reports as unchanged with the previous restore point. **Any difference switches the reader off** for that storage system (the console shows why, the alert `BackdafuckupArrayReaderSwitchedOff` fires): a difference in verify mode sends that VM to its VM snapshot, which still exists; a difference in the unchanged regions fails the backup of that VM, since its VM snapshot is gone, and no restore point is kept. From then on VMs on that storage are read from their VM snapshots until *Turn back on* under *Storage systems*; verify mode then starts again. Report such a case with the session log.
+
+Every other VM, and every VM where a step fails before its VM snapshot is removed, is read from its VM snapshot; the log says why, and `bdfu_array_fallback_total` counts it.
 
 ### Leftovers
 
@@ -1486,9 +1491,10 @@ What is measured (prefix `bdfu_`; `pool` is the connection name of a pool or vCe
 | `bdfu_array_snapshot_seconds` {storage_system} | histogram | Backup from storage snapshots: taking the array snapshot of a batch |
 | `bdfu_array_batch_vms` {storage_system} | histogram | VMs served by one array snapshot |
 | `bdfu_vm_snapshot_lifetime_seconds` {storage_system, path} | histogram | How long a VM snapshot existed when it was released before its disks were read (path `array`) |
-| `bdfu_array_fallback_total` {storage_system, reason} | counter | VMs meant for an array snapshot that were read from their VM snapshot (`no_proxy`, `lvhd_refused`, `lun_error`, `array_error`, `not_found`, `release_failed`) |
-| `bdfu_array_verify_total` {storage_system, method, result} | counter | Checks of disks read from array snapshots against the previous restore point (`passed`, `mismatch`) |
+| `bdfu_array_fallback_total` {storage_system, reason} | counter | VMs meant for an array snapshot that were read from their VM snapshot (`no_proxy`, `lvhd_refused`, `vmfs_in_use`, `vmfs_unsupported`, `vmfs_not_found`, `vmfs_corrupt`, `lun_error`, `array_error`, `not_found`, `release_failed`, `verify_mismatch`, `verify_unavailable`) |
+| `bdfu_array_verify_total` {storage_system, method, result} | counter | Checks of disks read from array snapshots (`passed`, `mismatch`): method `verify` against the VM snapshot (verify mode), `cbt-unchanged` against the previous restore point |
 | `bdfu_array_leftovers` {storage_system} | gauge | Snapshots and presentations of this server on a storage system that no running session uses |
+| `bdfu_array_reader_tripped` {storage_system, reader} | gauge | 1 while an experimental reader (`lvhd`, `vmfs6`) is switched off for a storage system after a difference |
 | `bdfu_sessions_total`, `bdfu_session_duration_seconds` {kind, result} | counter, histogram | Finished sessions |
 | `bdfu_sessions_running`, `bdfu_sessions_queued` {kind} | gauge | Sessions now |
 | `bdfu_vm_backups_total` {backup_job, result} | counter | Backups of single VMs, each attempt |

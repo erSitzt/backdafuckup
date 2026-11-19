@@ -209,6 +209,7 @@ public sealed class StorageSystems(
         Check(options.MaxVmsPerSnapshot, 1, 32, "VMs per snapshot");
         Check(options.BatchWindowSeconds, 0, 600, "The batch window");
         Check(options.ProbationRuns, 0, 50, "Verify runs");
+        Check(options.MinSecondsAfterVmSnapshot, 0, 60, "The gap after the VM snapshot");
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var system = await FindAsync(db, id, cancellationToken).ConfigureAwait(false);
         system.Options = new StorageSystemOptions
@@ -218,6 +219,7 @@ public sealed class StorageSystems(
             BatchWindowSeconds = options.BatchWindowSeconds,
             ExperimentalReaders = options.ExperimentalReaders,
             ProbationRuns = options.ProbationRuns,
+            MinSecondsAfterVmSnapshot = options.MinSecondsAfterVmSnapshot,
         };
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         var volumes = await db.StorageVolumes.Where(v => v.StorageSystemId == id).Select(v => v.Enabled).ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -417,8 +419,10 @@ public sealed class StorageSystems(
             ? new StorageSystemFactsDto(f.Name, f.Model, f.Serial, f.SystemWwn, f.OsVersion, f.ApiVersion, [.. f.Licenses.Select(l => new StorageLicenseDto(l.Name, l.ExpiresUtc))],
                 f.Privileges, f.SessionTimeout is { } t ? (int)t.TotalSeconds : null, LicenseWarning(f))
             : null,
-        new StorageSystemOptionsDto(s.Options.ExpiryHours, s.Options.MaxVmsPerSnapshot, s.Options.BatchWindowSeconds, s.Options.ExperimentalReaders, s.Options.ProbationRuns),
-        s.PinnedSpki ?? [], volumes, enabled);
+        new StorageSystemOptionsDto(
+            s.Options.ExpiryHours, s.Options.MaxVmsPerSnapshot, s.Options.BatchWindowSeconds, s.Options.ExperimentalReaders, s.Options.ProbationRuns, s.Options.MinSecondsAfterVmSnapshot),
+        s.PinnedSpki ?? [], volumes, enabled,
+        [.. ArrayReaderStates.All.Select(r => ArrayReaderStates.ToDto(ArrayReaderStates.Find(s, r), s.Options))]);
 
     /// <summary>A warning when no snapshot feature (HPE "Virtual Copy") is licensed or it has expired; nothing is blocked.</summary>
     private static string? LicenseWarning(ArrayInfo facts)

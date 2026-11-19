@@ -240,8 +240,17 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "A disk read from an array snapshot of {{ $labels.storage_system }} differed from the previous restore point"
-          description: "Regions that change tracking reported unchanged read differently through the experimental reader ({{ $labels.method }}); that backup failed and no restore point was kept. Turn off 'Experimental readers' for the storage system (the VMs are then read from their VM snapshots) and report the case with the session log."
+          summary: "A disk read from an array snapshot of {{ $labels.storage_system }} differed from another reading of it ({{ $labels.method }})"
+          description: "verify: in verify mode, a sample read from the array snapshot differed from the VM snapshot; that VM was read from its VM snapshot instead. cbt-unchanged: regions that change tracking reported unchanged read differently from the previous restore point; that backup failed and no restore point was kept. Either way the reader is now switched off for the storage system (BackdafuckupArrayReaderSwitchedOff). Report the case with the session log."
+
+      - alert: BackdafuckupArrayReaderSwitchedOff
+        expr: bdfu_array_reader_tripped == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The {{ $labels.reader }} reader is switched off for {{ $labels.storage_system }}"
+          description: "It read a disk differently from the VM snapshot or from the previous restore point. VMs on that storage are read from their VM snapshots (longer-lived VM snapshots, no data at risk). Storage Systems shows the reason; turn the reader back on there once the cause is known (verify mode starts again)."
 
       - alert: BackdafuckupArrayFallbacks
         expr: increase(bdfu_array_fallback_total[1d]) > 0

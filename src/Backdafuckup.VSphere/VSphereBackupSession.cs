@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
+using Backdafuckup.Core.Arrays;
 using Backdafuckup.Core.DataMover;
 using Backdafuckup.Core.Extents;
 using Backdafuckup.Core.Hypervisor;
@@ -36,6 +37,18 @@ public static class VSphereArtifactKinds
 /// <summary>A disk of the snapshot as vCenter describes it.</summary>
 internal sealed record VSphereSnapshotDisk(int DeviceKey, string Key, string Label, string FileName, string Uuid, string RootUuid, string? ChangeId, long CapacityBytes, string? DatastoreId);
 
+/// <summary>Paths of files on a datastore.</summary>
+public static class VSphereDatastorePaths
+{
+    /// <summary>"[ds1] vm1/vm1.vmdk" → "vm1/vm1.vmdk"; null for a name without the datastore in brackets.</summary>
+    public static string? DescriptorPath(string fileName)
+    {
+        ArgumentNullException.ThrowIfNull(fileName);
+        var close = fileName.IndexOf("] ", StringComparison.Ordinal);
+        return fileName.StartsWith('[') && close > 0 && close + 2 < fileName.Length ? fileName[(close + 2)..] : null;
+    }
+}
+
 /// <summary>Where a hot-added disk sits (kept in the ledger for crash cleanup).</summary>
 internal sealed record HotAddRecord(int DeviceKey, int ControllerKey, int Bus, int Unit, string FileName, long CapacityBytes);
 
@@ -43,7 +56,7 @@ internal sealed record HotAddRecord(int DeviceKey, int ControllerKey, int Bus, i
 /// The backup of one vSphere VM: a snapshot (between guest freeze and thaw), CBT through QueryChangedDiskAreas, and its
 /// disks read through a proxy VM by HotAdd. The snapshot is removed at commit, or when the session ends without one.
 /// </summary>
-internal sealed class VSphereBackupSession : IVmBackupSession
+internal sealed class VSphereBackupSession : IVmBackupSession, IArraySnapshotFacts
 {
     private readonly VSphereHypervisorSession _owner;
     private readonly IArtifactLedger _ledger;
@@ -58,6 +71,7 @@ internal sealed class VSphereBackupSession : IVmBackupSession
     private readonly List<HotAddReader> _readers = [];
     private ProxyVm? _proxy;
     private bool _finished;
+    private bool _released;
 
     private VSphereBackupSession(
         VSphereHypervisorSession owner, VSphereVm vm, IArtifactLedger ledger, IOperationLog log, ManagedObjectReference snapshot, Guid snapshotArtifact,
@@ -113,6 +127,56 @@ internal sealed class VSphereBackupSession : IVmBackupSession
     public GuestFreezeResult? GuestFreeze { get; }
 
     public SnapshotFacts? Snapshot { get; }
+
+    public TimeSpan? ReleaseDuration { get; private set; }
+
+    /// <summary>
+    /// The snapshot may go before the disks are read (backup from an array snapshot) when every disk has a change id: the
+    /// changed areas are asked while it exists, and the change ids stay valid after its removal.
+    /// </summary>
+    public bool CanReleaseEarly => _disks.Count > 0 && _disks.Values.All(d => !string.IsNullOrEmpty(d.ChangeId));
+
+    /// <summary>
+    /// Each disk's datastore, its VMFS version and the descriptor of the disk under the snapshot ("vm1/vm1.vmdk", or
+    /// "vm1/vm1-000002.vmdk" when the VM had snapshots already): what is read from the array snapshot of the datastore's LUN.
+    /// Disks on other datastores (NFS, vSAN, several LUNs) are left out, and the VM takes the normal path.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, ArrayDiskFacts>> GetArrayDisksAsync(CancellationToken cancellationToken)
+    {
+        var datastores = _disks.Values.Select(d => d.DatastoreId).OfType<string>().Distinct(StringComparer.Ordinal).ToList();
+        var backings = await _owner.GetStorageBackingAsync(datastores, cancellationToken).ConfigureAwait(false);
+        var result = new Dictionary<string, ArrayDiskFacts>(StringComparer.Ordinal);
+        foreach (var info in _disks.Values)
+        {
+            if (info.DatastoreId is { } datastore && backings.FirstOrDefault(b => b.StorageId == datastore) is { Refusal: null } backing
+                && backing.Layout is StorageLayout.Vmfs6 or StorageLayout.Vmfs5 && VSphereDatastorePaths.DescriptorPath(info.FileName) is { } path)
+            {
+                result[info.Key] = new ArrayDiskFacts(datastore, backing.Layout, [new ArrayChainMember(path, info.CapacityBytes, 0)]);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>Removes the snapshot now; the disks are read from an array snapshot. Throws (the snapshot still whole) when vCenter refuses.</summary>
+    public async Task ReleaseSnapshotAsync(IOperationLog log, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(log);
+        if (!CanReleaseEarly)
+        {
+            throw new InvalidOperationException($"The snapshot of {VmInfo.Name} cannot be released before its disks are read (a disk without change tracking).");
+        }
+
+        await CloseReadersAsync().ConfigureAwait(false);
+        var watch = Stopwatch.StartNew();
+        await RemoveSnapshotAsync(Vim, _snapshot, VmInfo.Name, log, cancellationToken).ConfigureAwait(false);
+        await _ledger.UpdateAsync(_snapshotArtifact, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);
+        _released = true;
+        _finished = true;
+        ReleaseDuration = watch.Elapsed;
+        log.Info($"Snapshot of {VmInfo.Name} removed before its disks are read ({watch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s); " +
+                 "changed block tracking keeps its change ids for the next backup.");
+    }
 
     private VimSession Vim => _owner.Vim;
 
@@ -270,6 +334,11 @@ internal sealed class VSphereBackupSession : IVmBackupSession
     public async Task<IDiskSource> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (_released)
+        {
+            throw new InvalidOperationException($"The snapshot of {VmInfo.Name} was removed; its disks are read from the array snapshot.");
+        }
+
         var info = _disks[disk.Key];
         var pool = _owner.Provider.Proxies ?? throw new InvalidOperationException("This server has no proxies to read vSphere disks.");
         var proxy = await ProxyAsync(pool, cancellationToken).ConfigureAwait(false);
@@ -327,6 +396,11 @@ internal sealed class VSphereBackupSession : IVmBackupSession
     public async Task CommitAsync(IOperationLog log, CancellationToken cancellationToken)
     {
         await CloseReadersAsync().ConfigureAwait(false);
+        if (_released)
+        {
+            return;
+        }
+
         var watch = Stopwatch.StartNew();
         await RemoveSnapshotAsync(Vim, _snapshot, VmInfo.Name, log, cancellationToken).ConfigureAwait(false);
         await _ledger.UpdateAsync(_snapshotArtifact, ArtifactState.Done, null, CancellationToken.None).ConfigureAwait(false);

@@ -63,6 +63,9 @@ public sealed class StateMetrics
         meter.CreateObservableGauge("bdfu_array_leftovers", () =>
             (_catalog.ArrayLeftovers ?? []).Select(r => new Measurement<int>(r.Objects, Tag("storage_system", r.System))),
             description: "Snapshots and presentations of this server on a storage system that no running session uses (the cleanup removes them).");
+        meter.CreateObservableGauge("bdfu_array_reader_tripped", () =>
+            (_catalog.ArrayReaders ?? []).Select(r => new Measurement<int>(r.Tripped ? 1 : 0, Tag("storage_system", r.System), Tag("reader", r.Reader))),
+            description: "1 while an experimental reader (lvhd, vmfs6) is switched off for a storage system after it read a disk differently (until an administrator turns it back on).");
 
         meter.CreateObservableGauge("bdfu_repository_size_bytes", () => Repositories(r => r.SizeBytes), "By", "Size of the repository's volume.");
         meter.CreateObservableGauge("bdfu_repository_free_bytes", () => Repositories(r => r.FreeBytes), "By", "Free space on the repository's volume.");
@@ -241,7 +244,8 @@ public sealed class StateMetrics
         int TapeRequestsPending = 0,
         IReadOnlyList<ExtentRow>? Extents = null,
         IReadOnlyList<ScaleOutRow>? ScaleOuts = null,
-        IReadOnlyList<ArrayLeftoverRow>? ArrayLeftovers = null)
+        IReadOnlyList<ArrayLeftoverRow>? ArrayLeftovers = null,
+        IReadOnlyList<ArrayReaderRow>? ArrayReaders = null)
     {
         public static CatalogSnapshot Empty { get; } = new([], [], new Dictionary<string, int>(), 0, [], [], 0, 0, []);
     }
@@ -250,6 +254,9 @@ public sealed class StateMetrics
 
     /// <summary>A storage system and how many of our objects on it no running session uses (snapshots, presentations).</summary>
     internal sealed record ArrayLeftoverRow(string System, int Objects);
+
+    /// <summary>An experimental reader on a storage system, and whether it is switched off.</summary>
+    internal sealed record ArrayReaderRow(string System, string Reader, bool Tripped);
 
     internal sealed record ScaleOutRow(string Name, long SizeBytes, long FreeBytes, double MaxFreeRatio, int PendingDeletes);
 
@@ -442,8 +449,11 @@ public sealed class MetricsStateService(
             .Where(a => a.StorageSystemId != null && a.State != ArtifactState.Done && (a.SessionId == null || !runningSessions.Contains(a.SessionId.Value)))
             .GroupBy(a => a.StorageSystemId!.Value).Select(g => new { g.Key, Count = g.Count() })
             .ToDictionaryAsync(g => g.Key, g => g.Count, cancellationToken).ConfigureAwait(false);
-        var arrayRows = (await db.StorageSystems.AsNoTracking().Select(s => new { s.Id, s.Name }).ToListAsync(cancellationToken).ConfigureAwait(false))
-            .Select(s => new StateMetrics.ArrayLeftoverRow(s.Name, arrayObjects.GetValueOrDefault(s.Id))).ToList();
+        var arraySystems = await db.StorageSystems.AsNoTracking().Select(s => new { s.Id, s.Name, s.Readers }).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var arrayRows = arraySystems.Select(s => new StateMetrics.ArrayLeftoverRow(s.Name, arrayObjects.GetValueOrDefault(s.Id))).ToList();
+        var readerRows = arraySystems
+            .SelectMany(s => Arrays.ArrayReaderStates.All.Select(r => new StateMetrics.ArrayReaderRow(s.Name, r, s.Readers?.FirstOrDefault(x => x.Reader == r)?.Tripped == true)))
+            .ToList();
 
         return new StateMetrics.CatalogSnapshot(
             vms,
@@ -461,7 +471,8 @@ public sealed class MetricsStateService(
             await db.TapeOperatorRequests.CountAsync(r => r.ResolvedUtc == null, cancellationToken).ConfigureAwait(false),
             extentRows,
             scaleOutRows,
-            arrayRows);
+            arrayRows,
+            readerRows);
     }
 
     internal async Task ReadPoolsAsync(CancellationToken cancellationToken)

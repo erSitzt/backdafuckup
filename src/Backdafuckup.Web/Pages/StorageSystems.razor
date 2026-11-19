@@ -118,6 +118,19 @@ else
             {
                 <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">@warning</MudAlert>
             }
+            @foreach (var reader in (system.Readers ?? []).Where(r => r.TrippedUtc is not null))
+            {
+                <MudAlert Severity="Severity.Error" Dense="true" Class="mt-2">
+                    <div class="d-flex align-center gap-2">
+                        <span>
+                            The @reader.Name reader is switched off since @Fmt.Time(reader.TrippedUtc): @reader.TripReason.
+                            VMs on this storage are read from their VM snapshots.
+                        </span>
+                        <MudSpacer />
+                        <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Error" Disabled="_busy" OnClick="@(() => ResetReaderAsync(system, reader))">Turn back on</MudButton>
+                    </div>
+                </MudAlert>
+            }
 
             <MudText Typo="Typo.subtitle2" Class="mt-4">Volumes (@system.VolumesEnabled of @system.Volumes turned on)</MudText>
             @if (_volumes.GetValueOrDefault(system.Id) is { } volumes)
@@ -163,13 +176,24 @@ else
                         <MudNumericField @bind-Value="options.BatchWindowSeconds" Label="Batch window (s)" Min="0" Max="600" Variant="Variant.Outlined"
                                          HelperText="How long a snapshot waits for more VMs of the job run." />
                         <MudNumericField @bind-Value="options.ProbationRuns" Label="Verify runs" Min="0" Max="50" Variant="Variant.Outlined" />
+                        <MudNumericField @bind-Value="options.MinSecondsAfterVmSnapshot" Label="Gap after VM snapshot (s)" Min="0" Max="60" Variant="Variant.Outlined"
+                                         HelperText="The array snapshot waits this long after the last VM snapshot." />
                     </div>
                     <MudSwitch T="bool" @bind-Value="options.ExperimentalReaders" Color="Color.Primary" Class="mt-2"
-                               Label="Experimental readers: read XCP-ng LVM storage (LVHD) on the snapshot LUN" />
+                               Label="Experimental readers: read XCP-ng LVM storage (LVHD) and VMFS6 datastores on the snapshot LUN" />
                     <MudText Typo="Typo.caption" Class="help-text">
-                        The layout on the LUN is read by backdafuckup itself, read-only. Each disk's chain is checked against what XCP-ng reports before the VM
-                        snapshot is removed, and every incremental compares regions that change tracking reports unchanged with the previous restore point.
+                        The layout on the LUN is read by backdafuckup itself, read-only, without activating or mounting anything. Each disk is checked against what
+                        XCP-ng or vCenter reports before the VM snapshot is removed, and every incremental compares regions that change tracking reports unchanged
+                        with the previous restore point.
+                        In verify mode (the first backups per reader, set by "Verify runs", and again after the on-disk format changed) a sample of each disk
+                        is also compared with the VM snapshot before it is removed. Any difference switches the reader off for this storage system.
                     </MudText>
+                    @foreach (var reader in system.Readers ?? [])
+                    {
+                        <MudText Typo="Typo.caption" Class="d-block mt-1">
+                            @reader.Name: @ReaderState(reader)
+                        </MudText>
+                    }
                     <div class="d-flex mt-2"><MudSpacer /><MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="_busy" OnClick="@(() => SaveOptionsAsync(system))">Save options</MudButton></div>
                 </MudExpansionPanel>
                 <MudExpansionPanel Text="Objects of this server on the array" ExpandedChanged="@(open => open ? LoadLeftoversAsync(system) : Task.CompletedTask)">
@@ -232,13 +256,15 @@ else
 
         public int ProbationRuns { get; set; }
 
+        public int MinSecondsAfterVmSnapshot { get; set; }
+
         public static OptionsModel From(StorageSystemOptionsDto o) => new()
         {
             ExpiryHours = o.ExpiryHours, MaxVmsPerSnapshot = o.MaxVmsPerSnapshot, BatchWindowSeconds = o.BatchWindowSeconds, ExperimentalReaders = o.ExperimentalReaders,
-            ProbationRuns = o.ProbationRuns,
+            ProbationRuns = o.ProbationRuns, MinSecondsAfterVmSnapshot = o.MinSecondsAfterVmSnapshot,
         };
 
-        public StorageSystemOptionsDto ToDto() => new(ExpiryHours, MaxVmsPerSnapshot, BatchWindowSeconds, ExperimentalReaders, ProbationRuns);
+        public StorageSystemOptionsDto ToDto() => new(ExpiryHours, MaxVmsPerSnapshot, BatchWindowSeconds, ExperimentalReaders, ProbationRuns, MinSecondsAfterVmSnapshot);
     }
 
     protected override Task OnInitializedAsync() => LoadAsync();
@@ -333,6 +359,19 @@ else
     {
         await Api.PutAsync<StorageSystemDto>($"api/storage-systems/{system.Id}/options", _options[system.Id].ToDto());
         Snackbar.Add($"{system.Name}: options saved.", Severity.Success);
+        await LoadAsync();
+    });
+
+    private static string ReaderState(StorageReaderDto reader) =>
+        (reader.TrippedUtc is not null ? "switched off"
+            : reader.VerifiedRuns < reader.ProbationRuns ? $"verify mode, {reader.VerifiedRuns} of {reader.ProbationRuns} backups compared"
+            : $"verified ({reader.VerifiedRuns} backups compared)")
+        + (reader.FormatVersion is { } version ? $", format {version}" : string.Empty);
+
+    private Task ResetReaderAsync(StorageSystemDto system, StorageReaderDto reader) => RunAsync(async () =>
+    {
+        await Api.PostAsync<StorageReaderDto>($"api/storage-systems/{system.Id}/readers/{reader.Reader}/reset");
+        Snackbar.Add($"{system.Name}: the {reader.Name} reader is on again; the next backups run in verify mode.", Severity.Success);
         await LoadAsync();
     });
 

@@ -2236,6 +2236,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("port");
 
+                    b.Property<string>("Readers")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("readers");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(32)

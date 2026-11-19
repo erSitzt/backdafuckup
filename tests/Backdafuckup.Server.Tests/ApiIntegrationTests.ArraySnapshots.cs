@@ -253,6 +253,8 @@ public sealed partial class ApiIntegrationTests
         Assert.True(transport == "array-lvhd", string.Join("\n", log.Select(l => l.Message)));
         Assert.Contains(log, l => l.Message.Contains("are read from array snapshot bdfu-", StringComparison.Ordinal));
         Assert.Contains(log, l => l.Message.Contains("released before its disks are read", StringComparison.Ordinal));
+        // Verify mode (5 runs by default) compared a sample with NBD reads of the XAPI snapshot VDI before the release.
+        Assert.Contains(log, l => l.Message.Contains("Verify mode (LVHD (XCP-ng LVM storage) reader on Alletra, backup 1 of 5)", StringComparison.Ordinal));
         await AssertStoredAsync();
         Assert.DoesNotContain(_pool.Records("VM"), v => v["is_a_snapshot"]!.GetValue<bool>());
         Assert.Contains(_pool.Records("VDI"), v => v.Str("type") == "cbt_metadata");
@@ -262,8 +264,10 @@ public sealed partial class ApiIntegrationTests
         (transport, log) = await RunAsync();
         Assert.True(transport == "array-lvhd", string.Join("\n", log.Select(l => l.Message)));
         Assert.Contains(log, l => l.Message.Contains("unchanged region(s) read from the array snapshot match the previous restore point", StringComparison.Ordinal));
+        Assert.Contains(log, l => l.Message.Contains("backup 2 of 5)", StringComparison.Ordinal));
         await AssertStoredAsync();
         Assert.Equal(2, SanProxies.Attached);
+        Assert.Equal(2, (await ReaderStateAsync(system.Id)).VerifiedRuns);
 
         // Nothing is left on the array, and every ledger row of it is closed.
         Assert.Empty(array.Vluns);
@@ -287,7 +291,7 @@ public sealed partial class ApiIntegrationTests
 
     /// <summary>A storage system with the SR's volume turned on, a host object for the proxy, an iSCSI port, and the service with a fake SAN proxy.</summary>
     private async Task<(ArraySnapshotService Service, Testing.Arrays.FakeAlletra Array, FakeSanProxies Pool, string SrUuid, Guid ConnectionId, Guid SystemId)> ArraySetupAsync(
-        bool experimental = true)
+        bool experimental = true, int probation = 0, int gap = 0)
     {
         var client = await SignedInClientAsync();
         var array = Alletra;
@@ -307,7 +311,7 @@ public sealed partial class ApiIntegrationTests
         await using (var db = await dbFactory.CreateDbContextAsync(Ct))
         {
             var entity = await db.StorageSystems.SingleAsync(s => s.Id == system.Id, Ct);
-            entity.Options = new StorageSystemOptions { ExperimentalReaders = experimental, BatchWindowSeconds = 0 };
+            entity.Options = new StorageSystemOptions { ExperimentalReaders = experimental, BatchWindowSeconds = 0, ProbationRuns = probation, MinSecondsAfterVmSnapshot = gap };
             await db.SaveChangesAsync(Ct);
         }
 
@@ -386,13 +390,152 @@ public sealed partial class ApiIntegrationTests
         public Task<ChangedExtents> GetChangedExtentsAsync(SnapshotDisk disk, ChangeToken? since, IOperationLog log, CancellationToken cancellationToken) =>
             Task.FromResult(since is null ? ChangedExtents.Full("no previous backup") : Changes);
 
-        public Task<IDiskSource> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken) => throw new NotSupportedException();
+        /// <summary>What the disk reads as through the platform's own transport (verify mode); null: no such reader.</summary>
+        public byte[]? Normal { get; init; }
+
+        public int ReadersOpened { get; private set; }
+
+        public Task<IDiskSource> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken)
+        {
+            Assert.False(Released, "The VM snapshot is read after it was released.");
+            ReadersOpened++;
+            return Normal is null ? throw new NotSupportedException("No reader in this test.") : Task.FromResult<IDiskSource>(new SnapshotReader(Normal));
+        }
 
         public ChangeToken? GetNewChangeToken(SnapshotDisk disk) => new("xen-cbt", disk.SnapshotDiskId);
 
         public Task CommitAsync(IOperationLog log, CancellationToken cancellationToken) => Task.CompletedTask;
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>The VM snapshot's disk read through NBD.</summary>
+    private sealed class SnapshotReader(byte[] data) : IDiskReader
+    {
+        public long Capacity => data.Length;
+
+        public string TransportName => "nbd";
+
+        public int MaxRequestBytes => 256 * 1024;
+
+        public int MaxConcurrentRequests => 4;
+
+        public ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken)
+        {
+            data.AsMemory((int)offset, destination.Length).CopyTo(destination);
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private async Task<StorageReaderState> ReaderStateAsync(Guid systemId)
+    {
+        await using var db = await _factory!.Services.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContextAsync(Ct);
+        return ArrayReaderStates.Find(await db.StorageSystems.AsNoTracking().SingleAsync(s => s.Id == systemId, Ct), ArrayReaderStates.Lvhd);
+    }
+
+    [Fact]
+    public async Task Verify_mode_compares_a_sample_with_the_vm_snapshot_before_releasing_it_for_the_first_backups()
+    {
+        var (service, array, _, srUuid, connectionId, systemId) = await ArraySetupAsync(probation: 2);
+        var (leaf, baseVdi, image, expected) = LvhdImage(srUuid);
+        SanProxies.Luns[SrWwn.ToLowerInvariant()] = image;
+
+        for (var run = 1; run <= 3; run++)
+        {
+            var backup = new ArrayFakeSession(srUuid, leaf, baseVdi, image) { Normal = expected };
+            var log = new RecordingLog();
+            await using (var lease = await service.OnVmSnapshotCreatedAsync(Context(connectionId, backup), log, Ct))
+            {
+                Assert.NotNull(lease);
+                Assert.True(backup.Released);
+                var verification = lease.GetVerification(backup.Disks[0]);
+                if (run <= 2)
+                {
+                    Assert.Equal(1, backup.ReadersOpened);
+                    Assert.NotNull(verification);
+                    Assert.Equal("verify", verification.Method);
+                    Assert.True(verification is { Passed: true, Regions: > 1 }, $"{verification}");
+                    Assert.Contains(log.Entries, e => e.Message.Contains($"Verify mode (LVHD (XCP-ng LVM storage) reader on Alletra, backup {run} of 2)", StringComparison.Ordinal));
+                }
+                else
+                {
+                    Assert.Equal(0, backup.ReadersOpened);
+                    Assert.Null(verification);
+                }
+            }
+
+            Assert.Empty(array.Vluns);
+        }
+
+        Assert.Equal(2, (await ReaderStateAsync(systemId)).VerifiedRuns);
+    }
+
+    [Fact]
+    public async Task A_verify_mismatch_keeps_the_vm_snapshot_and_switches_the_reader_off_until_it_is_turned_back_on()
+    {
+        var (service, array, _, srUuid, connectionId, systemId) = await ArraySetupAsync(probation: 5);
+        var (leaf, baseVdi, image, expected) = LvhdImage(srUuid);
+        SanProxies.Luns[SrWwn.ToLowerInvariant()] = image;
+        var different = (byte[])expected.Clone();
+        different[100_000] ^= 0x5a;
+
+        var backup = new ArrayFakeSession(srUuid, leaf, baseVdi, image) { Normal = different };
+        var log = new RecordingLog();
+        Assert.Null(await service.OnVmSnapshotCreatedAsync(Context(connectionId, backup), log, Ct));
+        Assert.False(backup.Released);
+        var error = Assert.Single(log.Entries, e => e.Severity == LogSeverity.Error).Message;
+        Assert.Contains("read differently from array snapshot bdfu-", error, StringComparison.Ordinal);
+        Assert.Contains("first at byte 100000", error, StringComparison.Ordinal);
+        Assert.Contains("reader is switched off for Alletra", error, StringComparison.Ordinal);
+        Assert.Empty(array.Vluns);
+        Assert.DoesNotContain(array.Volumes.Values, v => v["copyOfID"] is not null);
+        var state = await ReaderStateAsync(systemId);
+        Assert.True(state.Tripped);
+        Assert.Contains("disk app01 disk of app01", state.TripReason, StringComparison.Ordinal);
+
+        // Switched off: the next VM is not even planned onto the array.
+        var next = new ArrayFakeSession(srUuid, leaf, baseVdi, image) { Normal = expected };
+        Assert.Null(await service.OnVmSnapshotCreatedAsync(Context(connectionId, next), log, Ct));
+        Assert.Contains(log.Entries, e => e.Message.Contains("reader is switched off for storage system Alletra since", StringComparison.Ordinal));
+        Assert.Equal(0, next.ReadersOpened);
+
+        // The console shows it, and turns it back on; verify mode starts again.
+        var client = _factory!.CreateClient(new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions { HandleCookies = true, BaseAddress = new Uri("https://localhost") });
+        client.DefaultRequestHeaders.Add(ApiHeaders.Csrf, "1");
+        await Ok(client.PostAsJsonAsync("/api/auth/login", new LoginRequestDto("admin", "correct horse battery"), Ct));
+        var shown = (await client.GetFromJsonAsync<List<StorageSystemDto>>("/api/storage-systems", Ct))!.Single(s => s.Id == systemId);
+        var reader = Assert.Single(shown.Readers!, r => r.Reader == "lvhd");
+        Assert.NotNull(reader.TrippedUtc);
+        var reset = await Read<StorageReaderDto>(client.PostAsync($"/api/storage-systems/{systemId}/readers/lvhd/reset", null, Ct));
+        Assert.Equal((null, 0, 5), (reset.TrippedUtc, reset.VerifiedRuns, reset.ProbationRuns));
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, (await client.PostAsync($"/api/storage-systems/{systemId}/readers/ntfs/reset", null, Ct)).StatusCode);
+
+        await using (var lease = await service.OnVmSnapshotCreatedAsync(Context(connectionId, next), log, Ct))
+        {
+            Assert.NotNull(lease);
+            Assert.True(lease.GetVerification(next.Disks[0])!.Passed);
+        }
+    }
+
+    [Fact]
+    public async Task A_mismatch_found_after_the_release_switches_the_reader_off()
+    {
+        var (service, _, _, srUuid, connectionId, systemId) = await ArraySetupAsync();
+        var (leaf, baseVdi, image, _) = LvhdImage(srUuid);
+        SanProxies.Luns[SrWwn.ToLowerInvariant()] = image;
+        var backup = new ArrayFakeSession(srUuid, leaf, baseVdi, image);
+        await using (var lease = await service.OnVmSnapshotCreatedAsync(Context(connectionId, backup), new RecordingLog(), Ct))
+        {
+            Assert.NotNull(lease);
+            Assert.Equal("LVHD (XCP-ng LVM storage)", lease.Reader);
+            await lease.ReportMismatchAsync(backup.Disks[0], "3 of 32 unchanged regions differ", Ct);
+        }
+
+        var state = await ReaderStateAsync(systemId);
+        Assert.True(state.Tripped);
+        Assert.Equal("disk app01 disk of app01: 3 of 32 unchanged regions differ", state.TripReason);
     }
 
     /// <summary>

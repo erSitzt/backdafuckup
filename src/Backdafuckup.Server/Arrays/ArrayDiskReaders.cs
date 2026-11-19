@@ -126,3 +126,93 @@ internal static class UnchangedRegionCheck
         return false;
     }
 }
+
+/// <summary>
+/// Verify mode: before the VM snapshot is given up, a sample of the regions this backup reads is read twice, from the
+/// array snapshot through the experimental reader and from the VM snapshot through the platform's normal transport, and
+/// must be equal. Used for the first backups per reader and storage system, and after the on-disk format changed.
+/// </summary>
+internal static class VerifyAgainstVmSnapshot
+{
+    public const string Method = "verify";
+    public const int RegionBytes = 1024 * 1024;
+    public const int RegionsPerDisk = 16;
+
+    /// <summary>The disk's verification, and where the first difference was (null when none).</summary>
+    public sealed record Result(DiskVerification Verification, string? FirstMismatch);
+
+    /// <summary>Up to <paramref name="count"/> regions of at most 1 MiB, spread evenly over the bytes of <paramref name="extents"/>.</summary>
+    public static IReadOnlyList<DiskExtent> PickRegions(IReadOnlyList<DiskExtent> extents, long capacity, int count)
+    {
+        ArgumentNullException.ThrowIfNull(extents);
+        var sorted = ExtentMath.Normalize([.. extents.Where(e => e.Length > 0 && e.Offset < capacity)
+            .Select(e => new DiskExtent(e.Offset, Math.Min(e.Length, capacity - e.Offset)))]);
+        var total = sorted.Sum(e => e.Length);
+        if (total == 0 || count <= 0)
+        {
+            return [];
+        }
+
+        var regions = new List<DiskExtent>();
+        for (var i = 0; i < count; i++)
+        {
+            // The middle of the i-th of count equal shares of the data, mapped back into its extent.
+            var position = (long)(((2.0 * i) + 1) / (2.0 * count) * total);
+            foreach (var extent in sorted)
+            {
+                if (position < extent.Length)
+                {
+                    var start = Math.Max(extent.Offset, (extent.Offset + position) / 4096 * 4096);
+                    var length = Math.Min(RegionBytes, extent.Offset + extent.Length - start);
+                    if (length > 0 && regions.All(r => r.Offset != start))
+                    {
+                        regions.Add(new DiskExtent(start, length));
+                    }
+
+                    break;
+                }
+
+                position -= extent.Length;
+            }
+        }
+
+        return regions;
+    }
+
+    public static async Task<Result> RunAsync(IDiskReader arrayReader, IDiskReader normalReader, IReadOnlyList<DiskExtent> regions, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(arrayReader);
+        ArgumentNullException.ThrowIfNull(normalReader);
+        ArgumentNullException.ThrowIfNull(regions);
+        var fromArray = new byte[RegionBytes];
+        var fromSnapshot = new byte[RegionBytes];
+        var mismatches = 0;
+        string? first = null;
+        foreach (var region in regions)
+        {
+            var length = (int)region.Length;
+            await ReadFullyAsync(arrayReader, region.Offset, fromArray.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
+            await ReadFullyAsync(normalReader, region.Offset, fromSnapshot.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
+            var span = fromArray.AsSpan(0, length);
+            var other = fromSnapshot.AsSpan(0, length);
+            var at = span.CommonPrefixLength(other);
+            if (at < length)
+            {
+                mismatches++;
+                first ??= $"at byte {region.Offset + at} (region of {length} bytes at {region.Offset})";
+            }
+        }
+
+        return new Result(new DiskVerification(Method, regions.Count, mismatches), first);
+    }
+
+    private static async Task ReadFullyAsync(IDiskReader reader, long offset, Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        var max = Math.Max(4096, reader.MaxRequestBytes);
+        for (var done = 0; done < destination.Length; done += max)
+        {
+            var piece = destination.Slice(done, Math.Min(max, destination.Length - done));
+            await reader.ReadAsync(offset + done, piece, cancellationToken).ConfigureAwait(false);
+        }
+    }
+}

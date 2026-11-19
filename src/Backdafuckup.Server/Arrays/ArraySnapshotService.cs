@@ -28,10 +28,12 @@ public sealed class ArrayPathException(string message, string reason, Exception?
 /// VM's chains are found and checked on the LUN, its VM snapshot is released, so the VM snapshot lives only seconds. The
 /// last VM of a batch gives the LUN back (device removed on the proxy, presentation and snapshot removed on the array).
 /// Whatever does not fit, or fails before the VM snapshot is released, falls back to the normal path with a log line.
+/// The disks are found on the LUN by an experimental reader per layout: LVHD (XCP-ng LVM SRs) or VMFS6 (vSphere datastores,
+/// through <see cref="IVmfsReader"/> when the build has one).
 /// </summary>
 public sealed class ArraySnapshotService(
-    IDbContextFactory<AppDbContext> dbFactory, StorageSystems systems, IProxyPool proxies, Telemetry.BackupMetrics metrics, TimeProvider time,
-    ILogger<ArraySnapshotService> logger) : ISnapshotLifecycleHook
+    IDbContextFactory<AppDbContext> dbFactory, StorageSystems systems, ArrayReaderStates readerStates, IProxyPool proxies, Telemetry.BackupMetrics metrics, TimeProvider time,
+    ILogger<ArraySnapshotService> logger, IVmfsReader? vmfs = null) : ISnapshotLifecycleHook
 {
     /// <summary>How often the expiry of a snapshot still in use is moved forward.</summary>
     internal static readonly TimeSpan ExtendEvery = TimeSpan.FromMinutes(30);
@@ -44,6 +46,7 @@ public sealed class ArraySnapshotService(
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(log);
         var started = Stopwatch.GetTimestamp();
+        var snapshotAt = time.GetUtcNow();
         var backup = context.Session;
         var plan = await PlanAsync(context, cancellationToken).ConfigureAwait(false);
         if (plan.Refusal is { } refusal)
@@ -59,7 +62,7 @@ public sealed class ArraySnapshotService(
             changes[disk.Key] = await backup.GetChangedExtentsAsync(disk, context.Previous.GetValueOrDefault(disk.Key), log, cancellationToken).ConfigureAwait(false);
         }
 
-        var batch = Join(context, plan, log);
+        var batch = Join(context, plan, log, snapshotAt);
         BatchState state;
         try
         {
@@ -78,8 +81,9 @@ public sealed class ArraySnapshotService(
             throw;
         }
 
-        // Each disk's chain on the LUN, checked against what XAPI reported, before the VM snapshot is given up.
-        var readers = new Dictionary<string, LvhdDisk>(StringComparer.Ordinal);
+        // Each disk found on the LUN and checked against what the platform reported, before the VM snapshot is given up.
+        var readers = new Dictionary<string, OpenedDisk>(StringComparer.Ordinal);
+        var verifiedRuns = plan.ReaderState.VerifiedRuns;
         try
         {
             foreach (var disk in backup.Disks)
@@ -87,23 +91,111 @@ public sealed class ArraySnapshotService(
                 var facts = plan.Disks[disk.Key];
                 var volume = plan.Volumes[facts.StorageId];
                 var lun = state.Luns[volume.VolumeUid];
-                var chain = await LvhdSnapshot.OpenAsync(
-                    new DiskReaderBlockSource(lun.Reader), facts.StorageId, [.. facts.Chain.Select(m => new ExpectedVdi(m.Id, m.VirtualSize, m.PhysicalUtilisation))], cancellationToken)
-                    .ConfigureAwait(false);
-                if (chain.Capacity != disk.CapacityBytes)
-                {
-                    throw new LvhdRefusedException($"disk {disk.Name} is {disk.CapacityBytes} bytes, its chain on the LUN {chain.Capacity}");
-                }
+                readers[disk.Key] = plan.Reader == ArrayReaderStates.Vmfs6
+                    ? await OpenVmfsDiskAsync(lun, disk, facts, cancellationToken).ConfigureAwait(false)
+                    : await OpenLvhdDiskAsync(lun, disk, facts, cancellationToken).ConfigureAwait(false);
+            }
 
-                readers[disk.Key] = new LvhdDisk(chain, lun.Reader, $"{lun.Snapshot.Name} on {lun.Disk.Description}");
+            // A new on-disk format version (an ESXi update, say) starts verify mode again.
+            foreach (var version in state.Luns.Values.Select(l => l.VmfsVolume).OfType<Task<IVmfsVolume>>().Where(t => t.IsCompletedSuccessfully).Select(t => t.Result.FormatVersion).Distinct())
+            {
+                if (await readerStates.ObserveFormatAsync(plan.System.Id, plan.Reader, version, cancellationToken).ConfigureAwait(false) is { } previous)
+                {
+                    verifiedRuns = 0;
+                    log.Info($"Storage system {plan.System.Name}: the datastore format is {version} now (was {previous}); verify mode starts again.");
+                }
             }
         }
-        catch (Exception ex) when (ex is LvhdRefusedException or IOException or InvalidDataException or HttpRequestException)
+        catch (Exception ex) when (ex is LvhdRefusedException or VmfsRefusedException or IOException or InvalidDataException or HttpRequestException)
         {
+            await CloseAsync(readers.Values).ConfigureAwait(false);
             await LeaveAsync(batch).ConfigureAwait(false);
-            metrics.RecordArrayFallback(plan.System.Name, ex is LvhdRefusedException ? "lvhd_refused" : "lun_error");
-            log.Warning($"Backup from storage snapshots: the disks of {backup.Vm.Name} are not read from array snapshot {state.Names} ({ex.Message}). They are read from the VM snapshot.");
+            var reason = ex switch
+            {
+                LvhdRefusedException => "lvhd_refused",
+                VmfsRefusedException { Kind: VmfsRefusalKinds.Io } => "lun_error",
+                VmfsRefusedException vmfsRefused => $"vmfs_{vmfsRefused.Kind}",
+                _ => "lun_error",
+            };
+            metrics.RecordArrayFallback(plan.System.Name, reason);
+            var message = $"Backup from storage snapshots: the disks of {backup.Vm.Name} are not read from array snapshot {state.Names} ({ex.Message}). They are read from the VM snapshot.";
+            if (ex is VmfsRefusedException { Kind: VmfsRefusalKinds.InUse })
+            {
+                message += " A host had the disk open for writing when the array snapshot was taken, so it holds no consistent state of it: is the disk independent, or was the VM snapshot not over it?";
+            }
+
+            if (ex is VmfsRefusedException { Kind: VmfsRefusalKinds.Corrupt })
+            {
+                log.Error(message);
+            }
+            else
+            {
+                log.Warning(message);
+            }
+
             return null;
+        }
+
+        // Verify mode: the first backups through this reader compare a sample with the VM snapshot, which still exists.
+        var verifications = new Dictionary<string, DiskVerification>(StringComparer.Ordinal);
+        var readerName = ArrayReaderStates.DisplayName(plan.Reader);
+        if (verifiedRuns < plan.System.Options.ProbationRuns)
+        {
+            try
+            {
+                foreach (var disk in backup.Disks)
+                {
+                    var arrayReader = readers[disk.Key].Reader;
+                    var c = changes[disk.Key];
+                    var regions = VerifyAgainstVmSnapshot.PickRegions(
+                        c.IsFull ? c.Allocated ?? readers[disk.Key].Allocated : c.Extents, disk.CapacityBytes, VerifyAgainstVmSnapshot.RegionsPerDisk);
+                    if (regions.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    await using var normal = await backup.OpenReaderAsync(disk, new DiskReaderOptions(1, 4), cancellationToken).ConfigureAwait(false);
+                    if (normal is not IDiskReader random)
+                    {
+                        throw new ArrayPathException($"disk {disk.Name} cannot be read at given offsets through {normal.TransportName}, which verify mode needs", "verify_unavailable");
+                    }
+
+                    var result = await VerifyAgainstVmSnapshot.RunAsync(arrayReader, random, regions, cancellationToken).ConfigureAwait(false);
+                    metrics.RecordArrayVerify(plan.System.Name, VerifyAgainstVmSnapshot.Method, result.Verification.Passed);
+                    if (!result.Verification.Passed)
+                    {
+                        var reason = $"verify mode: disk {disk.Name} of {backup.Vm.Name} read differently from array snapshot {state.Names} than through {random.TransportName} " +
+                                     $"in {result.Verification.Mismatches} of {result.Verification.Regions} regions, first {result.FirstMismatch}";
+                        await readerStates.TripAsync(plan.System.Id, plan.Reader, reason, CancellationToken.None).ConfigureAwait(false);
+                        throw new ArrayPathException(
+                            $"{reason}. The {readerName} reader is switched off for {plan.System.Name} until it is turned back on under Storage systems.", "verify_mismatch");
+                    }
+
+                    verifications[disk.Key] = result.Verification;
+                }
+            }
+            catch (Exception ex) when (ex is ArrayPathException or IOException or InvalidDataException or HttpRequestException or NotSupportedException or InvalidOperationException)
+            {
+                await CloseAsync(readers.Values).ConfigureAwait(false);
+                await LeaveAsync(batch).ConfigureAwait(false);
+                var reason = ex is ArrayPathException path ? path.Reason : "verify_unavailable";
+                metrics.RecordArrayFallback(plan.System.Name, reason);
+                var message = $"Backup from storage snapshots: {ex.Message}{(ex is ArrayPathException ? string.Empty : " (verify mode could not compare)")}. The disks of {backup.Vm.Name} are read from the VM snapshot.";
+                if (reason == "verify_mismatch")
+                {
+                    log.Error(message);
+                }
+                else
+                {
+                    log.Warning(message);
+                }
+
+                return null;
+            }
+
+            var verified = await readerStates.RecordVerifiedAsync(plan.System.Id, plan.Reader, cancellationToken).ConfigureAwait(false);
+            log.Info($"Verify mode ({readerName} reader on {plan.System.Name}, backup {verified.VerifiedRuns} of {plan.System.Options.ProbationRuns}): " +
+                     $"{verifications.Values.Sum(v => v.Regions)} region(s) of {backup.Vm.Name} read the same from the array snapshot and from the VM snapshot.");
         }
 
         // The disks are found on the LUN: the VM snapshot goes now.
@@ -113,6 +205,7 @@ public sealed class ArraySnapshotService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            await CloseAsync(readers.Values).ConfigureAwait(false);
             await LeaveAsync(batch).ConfigureAwait(false);
             metrics.RecordArrayFallback(plan.System.Name, "release_failed");
             log.Warning($"Backup from storage snapshots: the VM snapshot of {backup.Vm.Name} could not be released early ({ex.Message}); its disks are read from it.");
@@ -123,7 +216,56 @@ public sealed class ArraySnapshotService(
         metrics.RecordVmSnapshotLifetime(plan.System.Name, "array", lifetime);
         log.Info($"Disks of {backup.Vm.Name} are read from array snapshot {state.Names} on {plan.System.Name} through proxy {state.Proxy.Name}; " +
                  $"the VM snapshot existed {lifetime.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s.");
-        return new Lease(this, batch, state, plan, changes, readers, backup, lifetime);
+        return new Lease(this, batch, state, plan, changes, readers, verifications, backup, lifetime);
+    }
+
+    private Task TripAsync(Plan plan, string reason, CancellationToken cancellationToken) => readerStates.TripAsync(plan.System.Id, plan.Reader, reason, cancellationToken);
+
+    /// <summary>The VHD chain of an XCP-ng disk in the SR's volume group on the LUN, checked against what XAPI reported.</summary>
+    private static async Task<OpenedDisk> OpenLvhdDiskAsync(Lun lun, SnapshotDisk disk, ArrayDiskFacts facts, CancellationToken cancellationToken)
+    {
+        var chain = await LvhdSnapshot.OpenAsync(
+            new DiskReaderBlockSource(lun.Reader), facts.StorageId, [.. facts.Chain.Select(m => new ExpectedVdi(m.Id, m.VirtualSize, m.PhysicalUtilisation))], cancellationToken)
+            .ConfigureAwait(false);
+        if (chain.Capacity != disk.CapacityBytes)
+        {
+            throw new LvhdRefusedException($"disk {disk.Name} is {disk.CapacityBytes} bytes, its chain on the LUN {chain.Capacity}");
+        }
+
+        return new OpenedDisk(new LvhdDiskReader(chain, lun.Reader), chain.AllocatedExtents);
+    }
+
+    /// <summary>
+    /// The VMDK under the VM snapshot (the descriptor vim25 named in the snapshot's configuration) on the datastore on the
+    /// LUN, its size checked against vim25. The volume is opened once per LUN and shared by the batch's VMs.
+    /// </summary>
+    private async Task<OpenedDisk> OpenVmfsDiskAsync(Lun lun, SnapshotDisk disk, ArrayDiskFacts facts, CancellationToken cancellationToken)
+    {
+        var reader = vmfs ?? throw new VmfsRefusedException("this build has no VMFS reader", VmfsRefusalKinds.Unsupported);
+        Task<IVmfsVolume> opening;
+        lock (lun)
+        {
+            opening = lun.VmfsVolume ??= reader.OpenVolumeAsync(lun.Reader, $"array snapshot {lun.Snapshot.Name} on {lun.Disk.Description}", CancellationToken.None);
+        }
+
+        var volume = await opening.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var path = facts.Chain[0].Id;
+        var opened = await volume.OpenDiskAsync(path, cancellationToken).ConfigureAwait(false);
+        if (opened.Capacity != disk.CapacityBytes)
+        {
+            await opened.DisposeAsync().ConfigureAwait(false);
+            throw new VmfsRefusedException($"disk {disk.Name} ({path}) is {disk.CapacityBytes} bytes in vCenter, {opened.Capacity} on the LUN", VmfsRefusalKinds.Unsupported);
+        }
+
+        return new OpenedDisk(opened, opened.AllocatedExtents);
+    }
+
+    private static async Task CloseAsync(IEnumerable<OpenedDisk> disks)
+    {
+        foreach (var disk in disks)
+        {
+            await disk.Reader.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     /// <summary>Whether every disk of the VM can be read from an array snapshot, and from which volumes; or why not.</summary>
@@ -158,7 +300,26 @@ public sealed class ArraySnapshotService(
         var outside = backup.Disks.Where(d => !disks.ContainsKey(d.Key)).ToList();
         if (outside.Count > 0)
         {
-            return Plan.Refused($"disk(s) {string.Join(", ", outside.Select(d => $"{d.Name} on {d.StorageName}"))} lie on no LVM storage over iSCSI or FC");
+            return Plan.Refused($"disk(s) {string.Join(", ", outside.Select(d => $"{d.Name} on {d.StorageName}"))} lie on no storage that can be read from array snapshots " +
+                                "(XCP-ng LVM over iSCSI or FC, a VMFS datastore on one LUN)");
+        }
+
+        var layouts = disks.Values.Select(d => d.Layout).Distinct().ToList();
+        var reader = layouts is [StorageLayout.Lvhd] ? ArrayReaderStates.Lvhd : layouts is [StorageLayout.Vmfs6] ? ArrayReaderStates.Vmfs6 : null;
+        if (reader is null)
+        {
+            return Plan.Refused($"its disks lie on {string.Join(" and ", layouts)} storage; XCP-ng LVM storage (LVHD) and VMFS6 datastores are read from array snapshots");
+        }
+
+        if (reader == ArrayReaderStates.Vmfs6 && vmfs is null)
+        {
+            return Plan.Refused("reading VMFS6 datastores from array snapshots needs the OpenVmfs reader, which this build of the server does not include");
+        }
+
+        // Trust anchor: the VMFS reader is used only for disks that have a restore point, so every run can be checked against it.
+        if (reader == ArrayReaderStates.Vmfs6 && backup.Disks.FirstOrDefault(d => context.Previous.GetValueOrDefault(d.Key) is null) is { } first)
+        {
+            return Plan.Refused($"disk {first.Name} has no restore point yet; the VMFS reader is used from a disk's second backup on, so that every run is checked against the previous one");
         }
 
         var storageIds = disks.Values.Select(d => d.StorageId).Distinct(StringComparer.Ordinal).ToList();
@@ -190,9 +351,9 @@ public sealed class ArraySnapshotService(
                 return Plan.Refused($"volume {mapping.VolumeName} (storage {name}) is not turned on for storage snapshots");
             }
 
-            if (mapping.Layout != StorageLayout.Lvhd || disks.Values.Any(d => d.StorageId == storageId && d.Layout != StorageLayout.Lvhd))
+            if (disks.Values.Any(d => d.StorageId == storageId && d.Layout != mapping.Layout))
             {
-                return Plan.Refused($"storage {name} is {mapping.Layout}; only XCP-ng LVM storage (LVHD) is read from array snapshots so far");
+                return Plan.Refused($"storage {name} is {mapping.Layout} by the volume mapping, but {disks.Values.First(d => d.StorageId == storageId).Layout} by the platform now (Storage systems → refresh the mapping)");
             }
 
             volumes[storageId] = mapping;
@@ -217,14 +378,22 @@ public sealed class ArraySnapshotService(
 
         if (!system.Options.ExperimentalReaders)
         {
-            return Plan.Refused($"reading XCP-ng LVM storage from array snapshots is experimental; turn on 'Experimental readers' for storage system {system.Name}");
+            return Plan.Refused($"reading {ArrayReaderStates.DisplayName(reader)} from array snapshots is experimental; turn on 'Experimental readers' for storage system {system.Name}");
         }
 
-        return new Plan(null, system, volumes, disks);
+        var readerState = ArrayReaderStates.Find(system, reader);
+        if (readerState.Tripped)
+        {
+            return Plan.Refused(
+                $"the {ArrayReaderStates.DisplayName(reader)} reader is switched off for storage system {system.Name} since " +
+                $"{readerState.TrippedUtc:yyyy-MM-dd HH:mm} UTC ({readerState.TripReason}); turn it back on under Storage systems once the cause is known");
+        }
+
+        return new Plan(null, system, volumes, disks, reader, readerState);
     }
 
     /// <summary>Joins the open batch of this job run on this storage system, or opens one (which then waits for others).</summary>
-    private Batch Join(VmSnapshotContext context, Plan plan, IOperationLog log)
+    private Batch Join(VmSnapshotContext context, Plan plan, IOperationLog log, DateTimeOffset snapshotAt)
     {
         Batch? batch;
         var start = false;
@@ -239,7 +408,7 @@ public sealed class ArraySnapshotService(
                 start = true;
             }
 
-            batch.Members.Add(new Member(context, plan, log));
+            batch.Members.Add(new Member(context, plan, log, snapshotAt));
             batch.Users++;
             if (batch.Members.Count >= batch.Capacity)
             {
@@ -332,6 +501,14 @@ public sealed class ArraySnapshotService(
         if (portals.Count == 0)
         {
             throw new ArrayPathException($"Storage system {system.Name} ({system.Address}) reports no iSCSI port with a target name.", "array_error");
+        }
+
+        // Not sooner than the gap after the last VM snapshot: measured on VMFS, a disk's block map is in place on the LUN within
+        // 0.6-2 s after the host closed it for writing (the VM snapshot), not necessarily at once.
+        var ready = members.Max(m => m.SnapshotAt) + TimeSpan.FromSeconds(Math.Max(0, system.Options.MinSecondsAfterVmSnapshot));
+        if (ready - time.GetUtcNow() is { Ticks: > 0 } wait)
+        {
+            await Task.Delay(wait, time, ct).ConfigureAwait(false);
         }
 
         // The snapshot, while no snapshot of ours is half done on these storages.
@@ -462,6 +639,11 @@ public sealed class ArraySnapshotService(
         {
             try
             {
+                if (lun.VmfsVolume is { IsCompletedSuccessfully: true } volume)
+                {
+                    await volume.Result.DisposeAsync().ConfigureAwait(false);
+                }
+
                 if (lun.Reader is not null)
                 {
                     await lun.Reader.DisposeAsync().ConfigureAwait(false);
@@ -524,12 +706,16 @@ public sealed class ArraySnapshotService(
         }
     }
 
-    private sealed record Plan(string? Refusal, StorageSystemEntity System, IReadOnlyDictionary<string, StorageVolumeMapping> Volumes, IReadOnlyDictionary<string, ArrayDiskFacts> Disks)
+    /// <param name="Reader">The experimental reader the disks need (<see cref="ArrayReaderStates.Lvhd"/>), and its state on the system.</param>
+    private sealed record Plan(
+        string? Refusal, StorageSystemEntity System, IReadOnlyDictionary<string, StorageVolumeMapping> Volumes, IReadOnlyDictionary<string, ArrayDiskFacts> Disks,
+        string Reader = ArrayReaderStates.Lvhd, StorageReaderState ReaderState = null!)
     {
         public static Plan Refused(string reason) => new(reason, null!, new Dictionary<string, StorageVolumeMapping>(), new Dictionary<string, ArrayDiskFacts>());
     }
 
-    private sealed record Member(VmSnapshotContext Context, Plan Plan, IOperationLog Log);
+    /// <param name="SnapshotAt">When the VM snapshot was there (the hook was called right after it).</param>
+    private sealed record Member(VmSnapshotContext Context, Plan Plan, IOperationLog Log, DateTimeOffset SnapshotAt);
 
     private sealed class Batch(Guid id, Guid sessionId, StorageSystemEntity system, int capacity, IHypervisorSession hypervisor)
     {
@@ -563,6 +749,9 @@ public sealed class ArraySnapshotService(
         public ArraySnapshot Snapshot { get; } = snapshot;
 
         public IProxyDisk Disk { get; } = disk;
+
+        /// <summary>The VMFS datastore on the LUN, opened by the first VM that needs it (under a lock on the Lun).</summary>
+        public Task<IVmfsVolume>? VmfsVolume { get; set; }
 
         public IDiskReader Reader { get; set; } = null!;
     }
@@ -639,18 +828,42 @@ public sealed class ArraySnapshotService(
         }
     }
 
-    private sealed record LvhdDisk(VhdChainReader Chain, IDiskReader Lun, string Where);
+    /// <summary>A disk found on the LUN: its reader (owned by the lease) and the areas that hold data.</summary>
+    private sealed record OpenedDisk(IDiskReader Reader, IReadOnlyList<Core.Extents.DiskExtent> Allocated);
+
+    /// <summary>The lease's reader handed to the backup, which disposes what it is given; the lease closes the real one.</summary>
+    private sealed class BorrowedReader(IDiskReader inner) : IDiskReader
+    {
+        public long Capacity => inner.Capacity;
+
+        public string TransportName => inner.TransportName;
+
+        public int MaxRequestBytes => inner.MaxRequestBytes;
+
+        public int MaxConcurrentRequests => inner.MaxConcurrentRequests;
+
+        public ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken) => inner.ReadAsync(offset, destination, cancellationToken);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
 
     /// <summary>One VM's disks read from the batch's LUNs; disposing gives its share of the batch back.</summary>
     private sealed class Lease(
-        ArraySnapshotService owner, Batch batch, BatchState state, Plan plan, IReadOnlyDictionary<string, ChangedExtents> changes, IReadOnlyDictionary<string, LvhdDisk> disks,
-        IVmBackupSession backup, TimeSpan lifetime) : ArrayReadLease
+        ArraySnapshotService owner, Batch batch, BatchState state, Plan plan, IReadOnlyDictionary<string, ChangedExtents> changes, IReadOnlyDictionary<string, OpenedDisk> disks,
+        IReadOnlyDictionary<string, DiskVerification> verifications, IVmBackupSession backup, TimeSpan lifetime) : ArrayReadLease
     {
+        public override DiskVerification? GetVerification(SnapshotDisk disk) => verifications.GetValueOrDefault(disk.Key);
+
+        public override Task ReportMismatchAsync(SnapshotDisk disk, string details, CancellationToken cancellationToken) =>
+            owner.TripAsync(plan, $"disk {disk.Name} of {backup.Vm.Name}: {details}", cancellationToken);
+
+        public override string Reader => ArrayReaderStates.DisplayName(plan.Reader);
+
         private int _disposed;
 
         public override string Description => $"array snapshot {state.Names} on {plan.System.Name}";
 
-        public override string Transport => "array-lvhd";
+        public override string Transport => plan.Reader == ArrayReaderStates.Vmfs6 ? "array-vmfs" : "array-lvhd";
 
         public override ArraySnapshotInfo Info => new()
         {
@@ -658,23 +871,24 @@ public sealed class ArraySnapshotService(
             Kind = plan.System.Kind,
             Snapshots = [.. state.Snapshots.Select(s => s.Name)],
             TakenUtc = state.TakenUtc,
-            Method = "lvhd",
+            Method = plan.Reader,
             VmSnapshotLifetime = lifetime,
         };
 
         /// <summary>The changes asked before the VM snapshot went; a full read covers only the blocks the chain holds.</summary>
         public override ChangedExtents GetChangedExtents(SnapshotDisk disk) =>
-            changes[disk.Key] is { IsFull: true, Allocated: null } full ? full with { Allocated = disks[disk.Key].Chain.AllocatedExtents } : changes[disk.Key];
+            changes[disk.Key] is { IsFull: true, Allocated: null } full ? full with { Allocated = disks[disk.Key].Allocated } : changes[disk.Key];
 
         public override ChangeToken? GetNewChangeToken(SnapshotDisk disk) => backup.GetNewChangeToken(disk);
 
         public override Task<IDiskSource> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken) =>
-            Task.FromResult<IDiskSource>(new LvhdDiskReader(disks[disk.Key].Chain, disks[disk.Key].Lun));
+            Task.FromResult<IDiskSource>(new BorrowedReader(disks[disk.Key].Reader));
 
         public override async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref _disposed, 1) == 0)
             {
+                await CloseAsync(disks.Values).ConfigureAwait(false);
                 await owner.LeaveAsync(batch).ConfigureAwait(false);
             }
         }

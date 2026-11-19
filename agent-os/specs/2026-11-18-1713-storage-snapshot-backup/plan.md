@@ -27,6 +27,7 @@ Changed blocks still come from the hypervisor's CBT.
   - **(a) supported default:** present the snapshot LUN to an ESXi host, resignature and mount it as a temporary datastore with public vim25 calls, and let the proxy hot-add the VMDKs from it;
   - **(b) opt-in accelerator:** a **VMFS6 reader** of our own in the Linux proxy reads the snapshot LUN directly over iSCSI.
 - **The VMFS policy exception.** VMware never documented VMFS. The user accepted relaxing "nothing undocumented" for this one on-disk format. Only GPL-2.0-or-later code may be ported, with verification and a fallback.
+- **2026-11-19: OpenVmfs instead of a port.** The user's own Apache-2.0 reader is used as a dependency (nuget.org once published; until then the backdafuckup side is built against a fake). Nothing is ported, so the GPL conditions do not apply; opt-in, verification and fallback still do.
 - **XCP-ng:** the proxy reads LVHD (LVM VG with VHD-in-LV) from the snapshot LUN in user space. Opt-in, with safeguards.
 - **One Linux proxy agent** (from spec 1) does HotAdd and SAN reads.
 - **Test environment:** the vSphere 8 test host with Alletra MP over iSCSI, and the lab XCP-ng pool on the Alletra. **Only dedicated test volumes**, never production volumes without explicit approval. Nothing is deleted that the product did not create.
@@ -170,33 +171,23 @@ Document a DRS override for proxy VMs. Presenting the LUN to one host only keeps
 
 ## vSphere method (b): VMFS6 reader (experimental, opt-in)
 
-### Licence first
-- Audit every file of vmfs6-tools 0.2.1 that we would port (mainly `libvmfs/*`). Debian's copyright file marks all files GPL-2+; `libvmfs/vmfs_volume.c` says "version 2 … or (at your option) any later version".
-- Only files whose own header says "or any later version" are ported.
-- Ported C# files keep the original copyright lines plus `SPDX-License-Identifier: GPL-2.0-or-later`, and are combined with the AGPL product under GPLv3 §13. Have this confirmed legally before shipping.
-- Add a `NOTICE.md` in the library and a row in `THIRD-PARTY-NOTICES.md`.
-- Files without "or later" are not ported. Their behaviour is rebuilt from fixtures.
+### The reader: OpenVmfs (decided 2026-11-19, replaces the port of vmfs6-tools)
+The user wrote **OpenVmfs** in a side project: a read-only VMFS6 and VMDK reader of its own (Rust library, C interface, .NET binding; Apache-2.0, nothing ported from vmfs-tools, vmfs6-tools or dissect). It replaces the planned port of vmfs6-tools, so the licence audit, the GPL-2.0-or-later headers and the legal review fall away. Background and measurements: the OpenVmfs repository (`docs/consistency.md`).
 
-### Go/no-go spike S5
-Run vmfs6-tools (`debugvmfs`, `vmfs6-fuse`) on a lab Linux machine, purely as an outside oracle and never shipped, against a snapshot LUN of a vSphere 8 datastore (VMFS 6.82). Release 0.2.1 predates ESXi 7 and 8.
-
-### Library (`src/Backdafuckup.Vmfs`, no server dependencies, runs in the proxy)
-
-| Part | What it does |
-|---|---|
-| Volume | GPT, then the VMFS partition, then the volume/LVM header at +1 MiB (magic `0xC001D00D`: size, extents, segments). Exactly one extent. |
-| `FsInfo` | Magic, version and minor version, file-block, sub-block and large-file-block sizes, UUID, checked against an allow-list. |
-| Resource files | `.fbb`, `.sbc`, `.pbc`, `.pb2`, `.fdc`, `.jbc`, `.sdd`: bitmap headers, clusters, decoding an address into type, cluster, item and device offset. |
-| File descriptor | Addressing modes: resident; direct (file block, large file block, sub-block); indirect through pointer blocks; double-indirect through secondary pointer blocks. **To-be-zeroed blocks read as zeros**, otherwise stale data leaks into the backup. |
-| VMDK | Walk the directory to the `.vmdk`. Parse the descriptor: `createType vmfs`, a single `RW … VMFS "*-flat.vmdk"` extent, `parentCID=ffffffff`. Expose an `IDiskReader` and `AllocatedExtents` for sparse full backups. |
-| Refusals (each falls back to (a)) | VMFS5 or an unknown minor version; more than one extent; delta chains (the VM already had snapshots); RDM; encryption; unknown address types or addresses out of range; file size different from the vim25 capacity. |
+- **What it reads:** VMFS 6.82 thin and thick disks (to-be-zeroed blocks read as zeros), SESparse snapshot chains, datastores over 16 TiB and over several LUNs. Compared with ESXi itself (hashes, `vmkfstools`, consolidated clones), dissect.vmfs and QEMU; vmfs6-tools reads lazy-zeroed blocks and volumes over 16 TiB wrongly.
+- **What it refuses:** VMFS5, VMFS-L, RDM, encryption, COWD deltas, chains across datastores (`Unsupported`), and **a disk a host had open for writing when the array snapshot was taken (`InUse`)**. The measurements make the order of the spec mandatory: VM snapshot, then array snapshot, and the disk *under* the VM snapshot is read; without a VM snapshot the newest blocks were missing in 10 of 10 runs.
+- **Where it runs:** first in the server, over the LUN reader the proxy already serves (as LVHD). A reader in the proxy stays a later optimisation.
+- **In backdafuckup:** `Core/Arrays/VmfsReader.cs` (`IVmfsReader`, `IVmfsVolume`, `IVmfsDisk`, `VmfsRefusedException`), the VMFS branch of `ArraySnapshotService`, `IArraySnapshotFacts` and the early release in `VSphereBackupSession`. The adapter over the OpenVmfs package (`src/Backdafuckup.Vmfs`) comes once the package is on nuget.org; until then a build has no VMFS reader and VMFS VMs take the normal path. The package is not committed to this repository.
+- **Accepted, unlike the first plan:** VMs that already had snapshots (the disk under our snapshot is a closed delta). **Still refused:** datastores on several LUNs (they would need one consistent snapshot of all volumes).
+- **Wanted from OpenVmfs:** an extent mapping ("logical offset → LUN offset or zero"), so that data is read asynchronously through our pipelined reader and only metadata through its blocking device callback; a licence list of the linked Rust crates for the notices; build paths remapped out of the binaries before publishing.
 
 ### Safety
 - The snapshot is presented read-only.
-- **Trust anchor:** method (b) is used only for a disk that already has a restore point.
+- **Trust anchor:** method (b) is used only for a disk that already has a restore point (built).
+- **Gap:** the array snapshot is taken at least `MinSecondsAfterVmSnapshot` (2 s) after the batch's last VM snapshot; the measurements covered 0.6-2 s.
 - **Every run** first compares 32 chunk-aligned 1 MiB regions that CBT reports unchanged with the previous restore point's chunk ids (content hashes).
-- **Verify mode** for the first 5 runs per storage system, and after an ESXi or VMFS version change: a sample of changed regions is compared with HotAdd of the VM snapshot's base disk on the live datastore, while the VM snapshot is still held.
-- **On a mismatch,** the disk falls back, the reader is switched off ("tripped") for that storage system until an admin turns it back on, and an alert fires.
+- **Verify mode** for the first 5 runs per storage system and reader, and after a VMFS format version change: 16 regions of each disk, spread over the regions read, are compared with HotAdd of the VM snapshot's disk, while the VM snapshot is still held (built for LVHD and VMFS: `VerifyAgainstVmSnapshot`, state in `storage_systems.readers`).
+- **On a mismatch,** the disk falls back, the reader is switched off ("tripped") for that storage system until an admin turns it back on (Storage systems, `POST /api/storage-systems/{id}/readers/{reader}/reset`), and `BackdafuckupArrayReaderSwitchedOff` fires. A mismatch of the unchanged regions after the release trips it too (that backup fails).
 
 ### Recording the read method
 - `DiskBackupStats.Transport` gains `array-vmfs`, `array-esxi-hotadd` and `array-lvhd`.
@@ -205,9 +196,9 @@ Run vmfs6-tools (`debugvmfs`, `vmfs6-fuse`) on a lab Linux machine, purely as an
 - New `RestorePointDisk.Transport` column, so the console shows the method.
 
 ### Tests
-- **Fixtures** made by ESXi 8 on small 2–4 GiB test LUNs: thin; lazy-zeroed thick with stale data under to-be-zeroed blocks; eager-zeroed; resident small files; a file larger than one large file block; many files. Each is snapshotted and imaged, stored zstd-compressed and sparse in `tests/fixtures/vmfs6` (or on the lab share if over 50 MiB). The expected hashes come from method (a).
-- **Parser unit tests** on crafted bytes.
-- **Lab differential test:** SHA-256 per MiB of whole disks read by (a) and by (b); vmfs6-tools as a second oracle.
+- **Without the package:** the orchestration against a fake `IVmfsReader` whose files are byte ranges of the snapshot LUN (`FakeVmfsReader`): reading, refusals (`InUse`, missing, size), verify mode, format change, trust anchor, gap.
+- **With the adapter:** OpenVmfs's own fixtures (`fixture-zero-v1`, `fixture-chain-v1`, with ESXi's hashes) behind a `IDiskReader`; the format itself is tested in OpenVmfs.
+- **Lab differential test:** SHA-256 per MiB of whole disks read by (a) and by (b).
 
 ## XCP-ng path (LVHD, opt-in)
 
@@ -277,7 +268,7 @@ Run vmfs6-tools (`debugvmfs`, `vmfs6-fuse`) on a lab Linux machine, purely as an
 | S2 | Proxy VM iSCSI in the lab XCP-ng pool: host persona, rescan, WWN lookup, throughput compared with NBD. |
 | S3 | LVHD read from a snapshot of a dedicated test SR compared with NBD; `list_changed_blocks` after `data_destroy`; whether the VHD headers are on disk when the array snapshot is taken. |
 | S4 | Resignature on vSphere 8 plus HotAdd plus teardown, timing each step. |
-| S5 | vmfs6-tools against VMFS 6.82 (go/no-go for method (b)). |
+| S5 | Done differently: OpenVmfs compared with ESXi, dissect.vmfs and QEMU (OpenVmfs repository, `docs/consistency.md`). |
 
 **Build tasks**
 1. Core interfaces, the hook, early release, artifact kinds, manifest fields (unit tests).
@@ -288,7 +279,7 @@ Run vmfs6-tools (`debugvmfs`, `vmfs6-fuse`) on a lab Linux machine, purely as an
 6. The Lvhd library.
 7. **XCP-ng integration plus lab rows: the first part that can ship.**
 8. vSphere method (a). Needs spec 1's vim25 client and HotAdd.
-9. Licence audit, then the Vmfs library, then method (b) with probation.
+9. Method (b) with OpenVmfs: verify mode and trip (done for LVHD and VMFS), the VMFS branch with a fake reader (done), then the OpenVmfs adapter once the package is published.
 10. Console, metrics, alerts, Grafana row, documentation.
 
 **Metrics:**
@@ -302,18 +293,17 @@ Alerts fire on leftovers older than 1 h and on any verify mismatch.
 **Documentation:**
 - `docs/admin-guide.md` section "Backup from storage snapshots": WSAPI user in a Virtual Domain, the proxy's host object, storage networks, LVM filter, DRS, what is experimental, what is refused, cleanup.
 - `docs/lab-runbook.md` section N: register, mapping, XCP-ng incremental, verify mode, vSphere (a), (b) against (a), crash after the array snapshot, proxy unreachable, coalesce in progress refused, expiry safety net, leftovers.
-- `THIRD-PARTY-NOTICES.md` rows: vmfs6-tools (derived code), libvslvm description, VHD specification, `sm` (read for the layout, no code copied), WSAPI OpenAPI.
+- `THIRD-PARTY-NOTICES.md` rows: OpenVmfs (Apache-2.0, with the licences of its linked crates), libvslvm description, VHD specification, `sm` (read for the layout, no code copied), WSAPI OpenAPI.
 
 ## Risks
 
-- VMFS 6.82 may differ from what vmfs6-tools knows (S5 decides).
+- OpenVmfs was measured in a small lab (one ESXi 7.0.3 host, VMFS 6.82): nothing yet against a real Alletra snapshot LUN, other ESXi versions or several hosts on one datastore. Verify mode, the unchanged check and the trip carry that risk.
 - To-be-zeroed blocks and the VMFS journal can leak stale data; the verification layers catch it.
 - `sm` layout changes and garbage-collection states: the refusal rules plus the allow-list.
 - The proxy writing to the snapshot or seeing the live LUN: read-only on every path, and the LVM self-check.
 - Leftovers on the array or on ESXi: ledger, orphan scan, `expireSecs`.
 - The "edit" role is powerful: a Virtual Domain limits it.
 - Batching makes VM snapshots live longer; the 60 s window and the batch size limit this.
-- Legal review of porting GPL-2.0-or-later code.
 
 ## Prerequisites from the user (asked again before the matching task)
 

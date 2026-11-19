@@ -107,8 +107,17 @@ public abstract class ArrayReadLease : IAsyncDisposable
 
     public abstract Task<IDiskSource> OpenReaderAsync(SnapshotDisk disk, DiskReaderOptions options, CancellationToken cancellationToken);
 
-    /// <summary>A check of the array reader for one disk (verify mode, CBT-unchanged comparison); null if none was made.</summary>
+    /// <summary>The verify-mode check of one disk (compared with the VM snapshot before it was released); null if none was made.</summary>
     public virtual DiskVerification? GetVerification(SnapshotDisk disk) => null;
+
+    /// <summary>The reader, for messages: "LVHD (XCP-ng LVM storage)".</summary>
+    public virtual string Reader => Transport;
+
+    /// <summary>
+    /// The reader read a disk wrongly (a check after the VM snapshot was released found it): it is switched off for this
+    /// storage system until an administrator turns it back on.
+    /// </summary>
+    public virtual Task ReportMismatchAsync(SnapshotDisk disk, string details, CancellationToken cancellationToken) => Task.CompletedTask;
 
     public abstract ValueTask DisposeAsync();
 }

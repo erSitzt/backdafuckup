@@ -127,7 +127,8 @@ Both contain the same 27 alerts:
 | BackdafuckupExtentOffline | an extent of a scale-out repository cannot be reached (15 minutes) |
 | BackdafuckupEvacuationStuck | an extent being evacuated still holds restore points and nothing moved for 6 hours |
 | BackdafuckupArrayLeftovers | snapshots or presentations of backdafuckup on a storage system no session has used for an hour |
-| BackdafuckupArrayReaderMismatch | a disk read from an array snapshot differed from the previous restore point (in the last day) |
+| BackdafuckupArrayReaderMismatch | a disk read from an array snapshot differed from the VM snapshot (verify mode) or from the previous restore point (in the last day) |
+| BackdafuckupArrayReaderSwitchedOff | an experimental reader is switched off for a storage system after such a difference |
 | BackdafuckupArrayFallbacks | VMs meant for storage snapshots were read from their VM snapshots (info, in the last day) |
 
 After changing `backdafuckup.rules.yml`, check it and regenerate the `PrometheusRule`:

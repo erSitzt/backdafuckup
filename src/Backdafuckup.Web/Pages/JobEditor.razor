@@ -257,6 +257,13 @@ else
                                             <MudNumericField @bind-Value="_nbdConnections" Label="Connections per disk" Min="1" Max="12" Variant="Variant.Outlined" />
                                             <MudNumericField @bind-Value="_retries" Label="Retries for failed VMs" Min="0" Max="10" Variant="Variant.Outlined" />
                                         </div>
+                                        <MudSwitch T="bool" @bind-Value="_fromStorageSnapshots" Color="Color.Primary" Class="mt-3" Label="Backup from storage snapshots (automatic)" />
+                                        <MudText Typo="Typo.caption" Class="help-text">
+                                            VMs whose disks all lie on VMFS6 datastores on volumes turned on under Storage systems are read from a snapshot of the array, taken
+                                            right after their VM snapshot: the disk under the VM snapshot is read from the LUN by an experimental reader, and the VM snapshot is
+                                            removed before. Needs a backup proxy with SAN access and 'Experimental readers' on the storage system. Every other VM, and every VM
+                                            where a step fails, is read through HotAdd as usual (the log says why).
+                                        </MudText>
                                     }
                                     else
                                     {
@@ -585,7 +592,7 @@ else
                                 {
                                     <dt>Disk transport</dt><dd>@TransportText(_transport)</dd>
                                     <dt>In parallel</dt><dd>@_parallelVms VM(s), @_parallelDisks disk(s) per VM, @_nbdConnections NBD connection(s) per disk</dd>
-                                    @if (_fromStorageSnapshots && !IsVsphere)
+                                    @if (_fromStorageSnapshots)
                                     {
                                         <dt>Storage snapshots</dt><dd>automatic: VMs on turned-on volumes are read from array snapshots</dd>
                                     }
@@ -1019,7 +1026,7 @@ else
             MaxParallelDisks = _parallelDisks,
             GuestProcessing = _guest && !IsCluster,
             KubernetesPodVolumes = IsCluster && _podVolumes,
-            FromStorageSnapshots = !IsCluster && !IsVsphere && _fromStorageSnapshots,
+            FromStorageSnapshots = !IsCluster && _fromStorageSnapshots,
             GuestFailurePolicy = _guestPolicy,
             GuestCredentialId = _guest ? _guestCredentialId : null,
             GuestProcessingMode = _guestMode,

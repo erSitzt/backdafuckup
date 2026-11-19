@@ -653,6 +653,7 @@ public static class EngineServiceCollectionExtensions
         services.AddHostedService(sp => sp.GetRequiredService<SessionEventWriter>());
         services.TryAddSingleton<ILiveNotifier, NullLiveNotifier>();
         services.AddSingleton<BackupSessionRunner>();
+        services.AddSingleton<Arrays.ArrayReaderStates>();
         services.AddSingleton<Arrays.ArraySnapshotService>();
         services.AddSingleton<RestoreSessionRunner>();
         services.AddSingleton<MaintenanceSessionRunner>();

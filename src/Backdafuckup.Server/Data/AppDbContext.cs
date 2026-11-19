@@ -277,6 +277,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasOne(x => x.Credential).WithMany().HasForeignKey(x => x.CredentialId).OnDelete(DeleteBehavior.Restrict);
             e.Property(x => x.Version).IsRowVersion();
             ConfigureJsonList(e.Property(x => x.PinnedSpki));
+            ConfigureJsonList(e.Property(x => x.Readers));
             e.Property(x => x.Options).HasColumnType("jsonb").HasConversion(
                 v => JsonSerializer.Serialize(v, JsonSerializerOptions.Default),
                 v => JsonSerializer.Deserialize<StorageSystemOptions>(v, JsonSerializerOptions.Default) ?? new StorageSystemOptions(),

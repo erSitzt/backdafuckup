@@ -48,7 +48,7 @@
   - Opt-in, with verification against NBD reads (spec `2026-11-18-1713-storage-snapshot-backup`)
 - **vSphere data path from an array snapshot** (same spec):
   - Supported: the snapshot LUN is presented to an ESXi host, resignatured and mounted as a temporary datastore (public vim25), and the HotAdd proxy reads the VMDKs from it
-  - Opt-in accelerator: our own VMFS6 reader on the proxy reads the snapshot LUN directly (see the VMFS exception in the Integration Policy)
+  - Opt-in accelerator: a VMFS6 reader (OpenVmfs) reads the snapshot LUN directly, first in the server over the proxy's LUN reader (see the VMFS exception in the Integration Policy)
 - **Proxy requirement:** the backup proxy needs SAN access (iSCSI or FC) to the primary array
 
 ## Other
@@ -73,6 +73,7 @@ We use only publicly available, documented APIs and documentation. That means:
 - **No gated SDKs:** no VDDK
 - **Nothing undocumented:** no internal or undocumented APIs and protocols, such as VMware NFC or `RetrieveInternalContent`
   - **One exception (user decision 2026-11-18): undocumented on-disk formats may be read through open-source readers, here VMFS6.** Only code under GPL-2.0-or-later (or a more permissive licence) may be ported, file by file after a licence audit. Such a reader is opt-in, verified on every run against data known from CBT and the previous restore point, and falls back to the supported path (ESXi resignature + HotAdd) on any doubt. Protocols and APIs stay public-only
+  - Since 2026-11-19 the VMFS6 reader is **OpenVmfs**, the user's own Apache-2.0 library used as a dependency: nothing is ported, so the porting rule does not apply to it; opt-in, verification on every run (plus verify mode for the first runs) and the fallback do
 - **Record every dependency** in `THIRD-PARTY-NOTICES.md`
 
 Background: `reports/VMware vSphere integration access.md`.

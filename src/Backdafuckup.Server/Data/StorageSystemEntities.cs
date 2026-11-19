@@ -28,6 +28,9 @@ public sealed class StorageSystemEntity
 
     public StorageSystemOptions Options { get; set; } = new();
 
+    /// <summary>The experimental readers' state on this system (verify runs, format version, switched off); replaced, never mutated.</summary>
+    public List<StorageReaderState>? Readers { get; set; }
+
     /// <summary>What the last connection test found (model, serial, OS, licences, privileges).</summary>
     public ArrayInfo? Facts { get; set; }
 
@@ -42,6 +45,15 @@ public sealed class StorageSystemEntity
     public uint Version { get; set; }
 }
 
+/// <summary>
+/// An experimental reader (LVHD, VMFS6) on one storage system: how many backups it passed in verify mode, the on-disk format
+/// version it last saw (a new version starts verify mode again), and whether it was switched off after a mismatch.
+/// </summary>
+public sealed record StorageReaderState(string Reader, int VerifiedRuns = 0, string? FormatVersion = null, DateTimeOffset? TrippedUtc = null, string? TripReason = null)
+{
+    public bool Tripped => TrippedUtc is not null;
+}
+
 /// <summary>How the server uses a storage system's snapshots.</summary>
 public sealed class StorageSystemOptions
 {
@@ -54,10 +66,16 @@ public sealed class StorageSystemOptions
     /// <summary>How long a batch waits for more VMs after its first one joined.</summary>
     public int BatchWindowSeconds { get; set; } = 60;
 
+    /// <summary>The array snapshot is taken at least this long after the batch's last VM snapshot (the host settles the disk's metadata).</summary>
+    public int MinSecondsAfterVmSnapshot { get; set; } = 2;
+
     /// <summary>Experimental readers (VMFS6 in the proxy, LVHD) may be used; off by default.</summary>
     public bool ExperimentalReaders { get; set; }
 
-    /// <summary>The first backups per storage system compare samples with the normal path (verify mode).</summary>
+    /// <summary>
+    /// Verify mode: the first this many VM backups per experimental reader (and again after a format version change) compare
+    /// a sample of the changed regions with the normal path while the VM snapshot still exists.
+    /// </summary>
     public int ProbationRuns { get; set; } = 5;
 }
 

@@ -45,6 +45,9 @@ public static class StorageSystemEndpoints
         systems.MapPut("/{id:guid}/options", (Guid id, StorageSystemOptionsDto request, StorageSystems service, CancellationToken ct) => Run(async () =>
             Results.Ok(await service.SetOptionsAsync(id, request, ct))))
             .WithDescription("Sets how the server uses the array's snapshots: expiry, batches, experimental readers, verify runs.");
+        systems.MapPost("/{id:guid}/readers/{reader}/reset", (Guid id, string reader, ArrayReaderStates states, CancellationToken ct) => Run(async () =>
+                Results.Ok(await states.ResetAsync(id, reader, ct))))
+            .WithDescription("Turns an experimental reader (lvhd, vmfs6) back on after a mismatch switched it off; verify mode starts again.");
         systems.MapGet("/{id:guid}/leftovers", (Guid id, StorageSystems service, CancellationToken ct) => Run(async () => Results.Ok(await service.LeftoversAsync(id, ct))))
             .WithDescription("This server's snapshots and presentations on the array, and whether the cleanup knows them.");
     }

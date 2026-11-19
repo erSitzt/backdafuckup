@@ -124,9 +124,10 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
                 services.RemoveAll<Backdafuckup.Core.Arrays.IStorageArrayProvider>();
                 services.AddSingleton<Backdafuckup.Core.Arrays.IStorageArrayProvider>(new Backdafuckup.Arrays.Alletra.AlletraProvider(_ => Alletra.CreateHandler(), TimeSpan.FromSeconds(30)));
                 services.AddSingleton(sp => new Backdafuckup.Server.Arrays.ArraySnapshotService(
-                    sp.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>(), sp.GetRequiredService<Backdafuckup.Server.Arrays.StorageSystems>(), SanProxies,
+                    sp.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>(), sp.GetRequiredService<Backdafuckup.Server.Arrays.StorageSystems>(),
+                    sp.GetRequiredService<Backdafuckup.Server.Arrays.ArrayReaderStates>(), SanProxies,
                     sp.GetRequiredService<Backdafuckup.Server.Telemetry.BackupMetrics>(), TimeProvider.System,
-                    sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Backdafuckup.Server.Arrays.ArraySnapshotService>>()));
+                    sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Backdafuckup.Server.Arrays.ArraySnapshotService>>(), FakeVmfs));
                 services.AddSingleton<IHypervisorProvider>(sp => new Backdafuckup.VSphere.VSphereProvider(
                     new Backdafuckup.VSphere.VSphereOptions(), _ => Vsphere.Vcenter.CreateHandler(), sp.GetRequiredService<Backdafuckup.Core.Proxies.IProxyPool>()));
             });

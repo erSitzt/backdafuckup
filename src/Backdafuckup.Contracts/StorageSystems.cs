@@ -2,9 +2,18 @@ namespace Backdafuckup.Contracts;
 
 /// <summary>A storage array for backups from storage snapshots.</summary>
 /// <param name="Volumes">Volumes on which a datastore or SR of a connection lies.</param>
+/// <param name="Readers">The experimental readers on this system: verify runs, format version, switched off after a mismatch.</param>
 public sealed record StorageSystemDto(
     Guid Id, string Kind, string Name, string Address, int Port, string UserName, string Status, string? LastError, DateTimeOffset? LastCheckedUtc,
-    StorageSystemFactsDto? Facts, StorageSystemOptionsDto Options, IReadOnlyList<string> PinnedSpki, int Volumes, int VolumesEnabled);
+    StorageSystemFactsDto? Facts, StorageSystemOptionsDto Options, IReadOnlyList<string> PinnedSpki, int Volumes, int VolumesEnabled,
+    IReadOnlyList<StorageReaderDto>? Readers = null);
+
+/// <summary>
+/// An experimental reader on a storage system. While <see cref="VerifiedRuns"/> is below <see cref="ProbationRuns"/>, backups
+/// run in verify mode. <see cref="TrippedUtc"/> set: switched off after a mismatch until turned back on.
+/// </summary>
+public sealed record StorageReaderDto(
+    string Reader, string Name, int VerifiedRuns, int ProbationRuns, string? FormatVersion, DateTimeOffset? TrippedUtc, string? TripReason);
 
 /// <param name="LicenseWarning">Set when no snapshot feature is licensed or it has expired (a warning, nothing is blocked).</param>
 public sealed record StorageSystemFactsDto(
@@ -13,7 +22,8 @@ public sealed record StorageSystemFactsDto(
 
 public sealed record StorageLicenseDto(string Name, DateTimeOffset? ExpiresUtc);
 
-public sealed record StorageSystemOptionsDto(int ExpiryHours, int MaxVmsPerSnapshot, int BatchWindowSeconds, bool ExperimentalReaders, int ProbationRuns);
+/// <param name="MinSecondsAfterVmSnapshot">The array snapshot waits at least this long after the batch's last VM snapshot.</param>
+public sealed record StorageSystemOptionsDto(int ExpiryHours, int MaxVmsPerSnapshot, int BatchWindowSeconds, bool ExperimentalReaders, int ProbationRuns, int MinSecondsAfterVmSnapshot = 2);
 
 public sealed record CreateStorageSystemDto
 {
