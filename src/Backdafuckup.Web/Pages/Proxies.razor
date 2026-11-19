@@ -49,6 +49,9 @@
                 </div>
             </li>
             <li>Start it: <span class="mono">systemctl daemon-reload &amp;&amp; systemctl enable --now backdafuckup-proxy</span>. It shows as online here within seconds.</li>
+            <li>For backup from storage snapshots (SAN access), as root: <span class="mono">/opt/backdafuckup-proxy/backdafuckup-proxy prepare-san</span>. It sets the iSCSI initiator name,
+                keeps LVM from activating volume groups on array snapshots, and stops multipathd and udisks2; <span class="mono">--dry-run</span> only shows what it would do.
+                The proxy's initiator name then shows here; list it in the proxy's host object on the array.</li>
         </ol>
         <div class="d-flex mt-3"><MudSpacer /><MudButton Variant="Variant.Filled" OnClick="@(() => _install = null)">Done</MudButton></div>
     </MudPaper>
@@ -84,7 +87,16 @@ else if (_proxies.Count > 0)
                 }
                 @if (context.Online && context.SanRefusal is { } refusal)
                 {
-                    <br /><span class="caption" title="Why the proxy offers no SAN access (backup from storage snapshots)">No SAN: @refusal</span>
+                    <div class="caption" title="Why the proxy offers no SAN access (backup from storage snapshots)">
+                        No SAN access:
+                        <ul class="ma-0 pl-4">
+                            @foreach (var problem in refusal.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                            {
+                                <li>@problem</li>
+                            }
+                        </ul>
+                        <span class="mono">backdafuckup-proxy prepare-san</span> (as root on the proxy) makes these settings.
+                    </div>
                 }
             </MudTd>
             <MudTd>@context.Devices</MudTd>

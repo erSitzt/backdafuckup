@@ -80,34 +80,76 @@ public sealed class SanTests
     }
 
     [Theory]
-    [InlineData("use_devicesfile=1\nglobal_filter=[]\nevent_activation=0\n", 3, null)]
-    [InlineData("use_devicesfile=0\nglobal_filter=[\"a|^/dev/sda$|\", \"r|.*|\"]\nevent_activation=0\n", 3, null)]
-    [InlineData("use_devicesfile=0\nglobal_filter=[]\nevent_activation=0\n", 3, "LVM would scan every disk")]
-    [InlineData("use_devicesfile=1\nglobal_filter=[]\nevent_activation=1\n", 3, "set global/event_activation=0")]
-    [InlineData("use_devicesfile=1\nglobal_filter=[]\nevent_activation=0\n", 0, "udisks2 runs")]
-    public async Task San_access_is_offered_only_when_lvm_leaves_foreign_disks_alone_and_nothing_mounts(string lvmconfig, int udisksActive, string? refusal)
+    [InlineData(0, "use_devicesfile=1", true, 5, null, "global_filter=[\"a|.*|\"]", null)]
+    [InlineData(0, "use_devicesfile=1", false, 5, null, "global_filter=[\"a|.*|\"]", "LVM would activate the volume groups")]
+    [InlineData(0, "use_devicesfile=0", false, 0, "auto_activation_volume_list=[]", "global_filter=[\"a|.*|\"]", null)]
+    [InlineData(0, "use_devicesfile=0", false, 0, "auto_activation_volume_list=[\"ubuntu-vg\"]", "global_filter=[\"a|.*|\"]", null)]
+    [InlineData(0, "use_devicesfile=0", false, 0, "auto_activation_volume_list=[\"@*\"]", "global_filter=[\"a|.*|\"]", "LVM would activate the volume groups")]
+    [InlineData(0, "use_devicesfile=0", false, 5, null, "global_filter=[\"a|^/dev/sda3$|\", \"r|.*|\"]", null)]
+    [InlineData(0, "use_devicesfile=0", false, 5, null, "global_filter=[\"r|/dev/cdrom|\"]", "LVM would activate the volume groups")]
+    // LVM before 2.03.12 does not know use_devicesfile: no devices file, and no "lvmconfig failed".
+    [InlineData(5, "Configuration node devices/use_devicesfile not found", false, 5, null, "global_filter=[\"a|.*|\"]", "list the local ones in activation/auto_activation_volume_list")]
+    public async Task Lvm_leaves_foreign_volume_groups_alone_with_a_devices_file_an_activation_list_or_an_accept_list(
+        int devicesCode, string devicesFile, bool systemDevicesExists, int listCode, string? list, string filter, string? problem)
+    {
+        var etc = Directory.CreateTempSubdirectory("bdfu-san-");
+        try
+        {
+            if (systemDevicesExists)
+            {
+                Directory.CreateDirectory(Path.Combine(etc.FullName, "lvm", "devices"));
+                await File.WriteAllTextAsync(Path.Combine(etc.FullName, "lvm", "devices", "system.devices"), "VERSION=1.1.1\n", Ct);
+            }
+
+            var commands = new FakeCommands(new()
+            {
+                ["lvmconfig --typeconfig full devices/use_devicesfile"] = (devicesCode, devicesFile),
+                ["lvmconfig activation/auto_activation_volume_list"] = (listCode, list ?? "Configuration node activation/auto_activation_volume_list not found"),
+                ["lvmconfig --typeconfig full devices/global_filter"] = (0, filter),
+                ["systemctl is-active"] = (3, string.Empty),
+            });
+            var problems = await SanSelfCheck.CheckAsync(commands.RunAsync, Ct, etc.FullName);
+            if (problem is null)
+            {
+                Assert.Empty(problems);
+            }
+            else
+            {
+                Assert.Contains(problem, Assert.Single(problems), StringComparison.Ordinal);
+            }
+
+            // event_activation=0 is not asked for any more: since LVM 2.03.15 nothing activates volume groups at boot then.
+            Assert.DoesNotContain(commands.Calls, c => c.Contains("event_activation", StringComparison.Ordinal));
+        }
+        finally
+        {
+            etc.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Every_missing_setting_is_reported_at_once()
     {
         var commands = new FakeCommands(new()
         {
-            ["lvmconfig"] = (0, lvmconfig),
-            ["systemctl is-active --quiet udisks2"] = (udisksActive, string.Empty),
+            ["lvmconfig --typeconfig full devices/use_devicesfile"] = (0, "use_devicesfile=0"),
+            ["lvmconfig activation/auto_activation_volume_list"] = (5, "Configuration node activation/auto_activation_volume_list not found"),
+            ["lvmconfig --typeconfig full devices/global_filter"] = (0, "global_filter=[\"a|.*|\"]"),
+            ["systemctl is-active --quiet multipathd.socket"] = (3, string.Empty),
         });
-        var finding = await SanSelfCheck.CheckAsync(commands.RunAsync, Ct);
-        if (refusal is null)
-        {
-            Assert.Null(finding);
-        }
-        else
-        {
-            Assert.Contains(refusal, finding, StringComparison.Ordinal);
-        }
+        var problems = await SanSelfCheck.CheckAsync(commands.RunAsync, Ct, Path.GetTempPath());
+
+        Assert.Equal(3, problems.Count);
+        Assert.StartsWith("LVM would activate the volume groups it finds on an array snapshot", problems[0], StringComparison.Ordinal);
+        Assert.StartsWith("multipathd runs: it would claim a snapshot LUN", problems[1], StringComparison.Ordinal);
+        Assert.StartsWith("udisks2 runs", problems[2], StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task Without_lvm_tools_nothing_activates_volume_groups()
     {
-        var commands = new FakeCommands(new() { ["lvmconfig"] = (Commands.NotFound, "lvmconfig is not installed"), ["systemctl is-active --quiet udisks2"] = (3, string.Empty) });
-        Assert.Null(await SanSelfCheck.CheckAsync(commands.RunAsync, Ct));
+        var commands = new FakeCommands(new() { ["lvmconfig"] = (Commands.NotFound, "lvmconfig is not installed"), ["systemctl is-active"] = (3, string.Empty) });
+        Assert.Empty(await SanSelfCheck.CheckAsync(commands.RunAsync, Ct));
     }
 }
 

@@ -49,10 +49,15 @@ public sealed partial class ApiIntegrationTests
         await File.WriteAllBytesAsync(diskFile, content, Ct);
         var devices = new FileBlockDevices();
         var log = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        // open-iscsi as Debian installs it (no name before iscsid's first start), and two more settings missing: all three are reported at once.
+        var etc = Path.Combine(_root, "etc");
+        Directory.CreateDirectory(Path.Combine(etc, "iscsi"));
+        await File.WriteAllTextAsync(Path.Combine(etc, "iscsi", "initiatorname.iscsi"), "## DO NOT EDIT OR REMOVE THIS FILE!\nGenerateName=yes\n", Ct);
         var agent = new ProxyAgentClient(
             new ProxyAgentSettings(_factory.Server.BaseAddress, created.Proxy.Id, enrolled.AgentKey),
             new ProxyHostInfo("proxy01.corp.example", "421a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8", "VMware-42 1a 2b 3c 4d 5e 6f 70-81 92 a3 b4 c5 d6 e7 f8", ["10.26.16.91"], "test", null),
-            devices, ConnectAgentSocketAsync, log.Enqueue);
+            devices, ConnectAgentSocketAsync, log.Enqueue, new IscsiadmInitiator(etcRoot: etc),
+            _ => Task.FromResult<IReadOnlyList<string>>(["LVM would activate the volume groups it finds on an array snapshot", "udisks2 runs"]));
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
         var running = agent.RunAsync(stop.Token);
         try
@@ -62,6 +67,11 @@ public sealed partial class ApiIntegrationTests
             var online = await WaitAsync(async () => (await client.GetFromJsonAsync<List<ProxyDto>>("/api/proxies", Ct))!.SingleOrDefault(p => p.Online));
             Assert.Equal(("proxy01", true, "proxy01.corp.example", "421a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"), (online.Name, online.Enrolled, online.HostName, online.SmbiosUuid));
             Assert.Equal([ProxyAgentProtocol.CapabilityHotAdd, ProxyAgentProtocol.CapabilityNbd], online.Capabilities);
+            Assert.Null(online.InitiatorName);
+            Assert.Equal(
+                [$"open-iscsi is installed, but has no initiator name yet ({Path.Combine(etc, "iscsi", "initiatorname.iscsi")} says GenerateName=yes): start iscsid once (systemctl start iscsid)",
+                 "LVM would activate the volume groups it finds on an array snapshot", "udisks2 runs"],
+                online.SanRefusal!.Split('\n'));
 
             var pool = _factory.Services.GetRequiredService<IProxyPool>();
             var info = Assert.Single(pool.Connected());

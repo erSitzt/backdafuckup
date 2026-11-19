@@ -4,7 +4,7 @@ namespace Backdafuckup.Core.Proxies;
 
 /// <summary>A connected backup proxy: who it is and where it runs (the SMBIOS UUID finds its VM in the hypervisor).</summary>
 /// <param name="InitiatorName">The proxy's iSCSI initiator name (for the array's host object), if it has one.</param>
-/// <param name="SanRefusal">Why the proxy offers no SAN access (its self-check), or null.</param>
+/// <param name="SanRefusal">Why the proxy offers no SAN access (its self-check), one reason per line, or null.</param>
 public sealed record ProxyInfo(
     Guid Id, string Name, string? HostName, string? SmbiosUuid, string? BiosSerial, IReadOnlyList<string> Capabilities, string? InitiatorName = null, string? SanRefusal = null);
 

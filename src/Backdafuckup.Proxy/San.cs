@@ -115,47 +115,97 @@ public sealed class IscsiadmInitiator(CommandRunner? run = null, string etcRoot 
 }
 
 /// <summary>
-/// Whether this machine may see an array's snapshot LUNs: the system's LVM must leave foreign physical volumes alone (a
-/// devices file or a global filter, and no event activation), or it would activate the snapshot's volume groups, and no
-/// auto-mounter may run. Until then the proxy offers no SAN access.
+/// Whether this machine may see an array's snapshot LUNs. LVM must not activate the volume groups it finds on one (an
+/// XCP-ng SR holds one), multipathd must not claim the LUN (the proxy finds it by its serial as a plain SCSI disk), and
+/// udisks2 must not run. Until all of that holds the proxy offers no SAN access; <c>backdafuckup-proxy prepare-san</c>
+/// sets it (<see cref="SanPreparation"/>).
 /// </summary>
 public static class SanSelfCheck
 {
-    /// <summary>Null if SAN access is safe; otherwise why not, with what to set.</summary>
-    public static async Task<string?> CheckAsync(CommandRunner? run, CancellationToken cancellationToken)
+    /// <summary>The marker of the block <see cref="SanPreparation"/> writes into lvmlocal.conf.</summary>
+    public const string LvmBlockBegin = "# backdafuckup-proxy prepare-san (begin)";
+    public const string LvmBlockEnd = "# backdafuckup-proxy prepare-san (end)";
+
+    /// <summary>Every reason why SAN access is not safe yet, each with what to set; empty if it is.</summary>
+    public static async Task<IReadOnlyList<string>> CheckAsync(CommandRunner? run, CancellationToken cancellationToken, string etcRoot = "/etc")
     {
         run ??= Commands.RunAsync;
-        var (code, output) = await run("lvmconfig", ["--typeconfig", "full", "devices/use_devicesfile", "devices/global_filter", "global/event_activation"], cancellationToken)
-            .ConfigureAwait(false);
-        if (code == Commands.NotFound)
+        var problems = new List<string>();
+        if ((await LvmAsync(run, etcRoot, cancellationToken).ConfigureAwait(false)).Problem is { } lvm)
         {
-            // No LVM tools: nothing would activate a volume group.
-        }
-        else if (code != 0)
-        {
-            return $"lvmconfig failed ({code}): {output.Trim()}";
-        }
-        else
-        {
-            var values = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Select(l => l.Split('=', 2)).Where(p => p.Length == 2).ToDictionary(p => p[0].Trim(), p => p[1].Trim(), StringComparer.Ordinal);
-            var devicesFile = values.GetValueOrDefault("use_devicesfile") == "1";
-            var filter = values.GetValueOrDefault("global_filter") is { Length: > 2 } f && f.Contains("r|", StringComparison.Ordinal);
-            if (!devicesFile && !filter)
-            {
-                return "LVM would scan every disk, also an array snapshot's: set devices/use_devicesfile=1 with only the local disks in /etc/lvm/devices/system.devices, " +
-                       "or a devices/global_filter that rejects the others.";
-            }
-
-            if (values.GetValueOrDefault("event_activation") != "0")
-            {
-                return "LVM activates volume groups as disks appear: set global/event_activation=0 in /etc/lvm/lvm.conf.";
-            }
+            problems.Add(lvm);
         }
 
-        var (udisks, _) = await run("systemctl", ["is-active", "--quiet", "udisks2"], cancellationToken).ConfigureAwait(false);
-        return udisks == 0 ? "udisks2 runs and may mount file systems of new disks: stop and disable it (systemctl disable --now udisks2)." : null;
+        if (await MultipathProblemAsync(run, cancellationToken).ConfigureAwait(false) is { } multipath)
+        {
+            problems.Add(multipath);
+        }
+
+        if (await UdisksProblemAsync(run, cancellationToken).ConfigureAwait(false) is { } udisks)
+        {
+            problems.Add(udisks);
+        }
+
+        return problems;
     }
+
+    /// <summary>
+    /// How LVM is kept off foreign volume groups (for the report), or why it is not: a devices file in use (new disks are
+    /// not even scanned), an accept list as global filter, or a defined <c>activation/auto_activation_volume_list</c>
+    /// (only the listed local volume groups activate by themselves). <c>global/event_activation=0</c> is no answer: since
+    /// LVM 2.03.15 nothing activates volume groups at boot then.
+    /// </summary>
+    internal static async Task<(string? Ok, string? Problem)> LvmAsync(CommandRunner run, string etcRoot, CancellationToken cancellationToken)
+    {
+        var (devicesCode, devicesFile) = await run("lvmconfig", ["--typeconfig", "full", "devices/use_devicesfile"], cancellationToken).ConfigureAwait(false);
+        if (devicesCode == Commands.NotFound)
+        {
+            return ("LVM is not installed: nothing activates volume groups", null);
+        }
+
+        // Older LVM (before 2.03.12) does not know the setting: no devices file then.
+        var devicesFilePath = Path.Combine(etcRoot, "lvm", "devices", "system.devices");
+        if (devicesCode == 0 && Value(devicesFile) == "1" && File.Exists(devicesFilePath))
+        {
+            return ($"LVM uses only the disks in its devices file ({devicesFilePath})", null);
+        }
+
+        var (listCode, list) = await run("lvmconfig", ["activation/auto_activation_volume_list"], cancellationToken).ConfigureAwait(false);
+        if (listCode == 0 && Value(list) is { } listed && listed.StartsWith('[') && !listed.Contains("\"@*\"", StringComparison.Ordinal))
+        {
+            return ($"LVM activates by itself only {(listed == "[]" ? "no volume group" : listed)} (activation/auto_activation_volume_list)", null);
+        }
+
+        var (filterCode, filter) = await run("lvmconfig", ["--typeconfig", "full", "devices/global_filter"], cancellationToken).ConfigureAwait(false);
+        if (filterCode == 0 && Value(filter) is { } patterns && patterns.Replace(" ", string.Empty, StringComparison.Ordinal).EndsWith("\"r|.*|\"]", StringComparison.Ordinal))
+        {
+            return ($"LVM sees only the disks its global filter accepts ({patterns})", null);
+        }
+
+        return (null, "LVM would activate the volume groups it finds on an array snapshot (an XCP-ng SR holds one): " +
+                      "list the local ones in activation/auto_activation_volume_list (an empty list if there are none), " +
+                      "or use a devices file with only the local disks");
+    }
+
+    internal static async Task<string?> MultipathProblemAsync(CommandRunner run, CancellationToken cancellationToken)
+    {
+        var (service, _) = await run("systemctl", ["is-active", "--quiet", "multipathd.service"], cancellationToken).ConfigureAwait(false);
+        var (socket, _) = await run("systemctl", ["is-active", "--quiet", "multipathd.socket"], cancellationToken).ConfigureAwait(false);
+        return service == 0 || socket == 0
+            ? "multipathd runs: it would claim a snapshot LUN reached over two iSCSI paths, and the proxy would not find it by its serial; " +
+              "stop and mask it (systemctl mask --now multipathd.service multipathd.socket) if this machine uses no multipath devices"
+            : null;
+    }
+
+    internal static async Task<string?> UdisksProblemAsync(CommandRunner run, CancellationToken cancellationToken)
+    {
+        var (udisks, _) = await run("systemctl", ["is-active", "--quiet", "udisks2.service"], cancellationToken).ConfigureAwait(false);
+        return udisks == 0 ? "udisks2 runs and may mount file systems of new disks: stop and mask it (systemctl mask --now udisks2.service)" : null;
+    }
+
+    /// <summary>The value of lvmconfig's "name=value" line.</summary>
+    private static string? Value(string output) =>
+        output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(l => l.Split('=', 2)).FirstOrDefault(p => p.Length == 2)?[1].Trim();
 }
 
 /// <summary>Running a program for the proxy (iscsiadm, lvmconfig, systemctl).</summary>

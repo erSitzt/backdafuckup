@@ -21,7 +21,7 @@ public sealed record ProxyHostInfo(string HostName, string? SmbiosUuid, string? 
 /// <param name="update">Installs the server's program file (a self-update) and restarts the agent; null: the agent does not update itself.</param>
 public sealed class ProxyAgentClient(
     ProxyAgentSettings settings, ProxyHostInfo host, IBlockDevices devices, Func<Uri, string, CancellationToken, Task<WebSocket>> connect, Action<string> log,
-    IIscsiInitiator? iscsi = null, Func<CancellationToken, Task<string?>>? sanCheck = null, Func<ProxyAgentMessage, Task>? update = null)
+    IIscsiInitiator? iscsi = null, Func<CancellationToken, Task<IReadOnlyList<string>>>? sanCheck = null, Func<ProxyAgentMessage, Task>? update = null)
 {
     private readonly ConcurrentDictionary<string, OpenHandle> _handles = new(StringComparer.Ordinal);
 
@@ -72,7 +72,7 @@ public sealed class ProxyAgentClient(
         var (initiator, sanRefusal) = await SanStateAsync(cancellationToken).ConfigureAwait(false);
         if (sanRefusal is not null && iscsi is not null)
         {
-            log($"No SAN access: {sanRefusal}");
+            log($"No SAN access: {sanRefusal.Replace("\n", "; ", StringComparison.Ordinal)} (backdafuckup-proxy prepare-san makes these settings).");
         }
 
         await ProxyAgentProtocol.SendAsync(socket, send, new ProxyAgentMessage
@@ -121,7 +121,7 @@ public sealed class ProxyAgentClient(
     /// <summary>How often the SAN state (initiator name, self-check) is read again while connected.</summary>
     internal static TimeSpan SanRecheckInterval { get; set; } = TimeSpan.FromMinutes(1);
 
-    /// <summary>The initiator name and why the proxy offers no SAN access (null: it does).</summary>
+    /// <summary>The initiator name and every reason why the proxy offers no SAN access, one per line (null: it does).</summary>
     private async Task<(string? Initiator, string? Refusal)> SanStateAsync(CancellationToken cancellationToken)
     {
         if (iscsi is null)
@@ -129,11 +129,19 @@ public sealed class ProxyAgentClient(
             return (null, "no iSCSI initiator (open-iscsi) is installed");
         }
 
+        var problems = new List<string>();
         var initiator = await iscsi.InitiatorNameAsync(cancellationToken).ConfigureAwait(false);
-        var refusal = initiator is null
-            ? await iscsi.InitiatorProblemAsync(cancellationToken).ConfigureAwait(false) ?? "no iSCSI initiator name"
-            : sanCheck is null ? null : await sanCheck(cancellationToken).ConfigureAwait(false);
-        return (initiator, refusal);
+        if (initiator is null)
+        {
+            problems.Add(await iscsi.InitiatorProblemAsync(cancellationToken).ConfigureAwait(false) ?? "no iSCSI initiator name");
+        }
+
+        if (sanCheck is not null)
+        {
+            problems.AddRange(await sanCheck(cancellationToken).ConfigureAwait(false));
+        }
+
+        return (initiator, problems.Count == 0 ? null : string.Join('\n', problems));
     }
 
     /// <summary>
@@ -150,7 +158,7 @@ public sealed class ProxyAgentClient(
                 var (now, nowRefusal) = await SanStateAsync(session.Token).ConfigureAwait(false);
                 if ((now, nowRefusal) != (initiator, refusal) && _handles.IsEmpty)
                 {
-                    log($"SAN access changed ({nowRefusal ?? $"available, initiator {now}"}); connecting again to tell the server.");
+                    log($"SAN access changed ({nowRefusal?.Replace("\n", "; ", StringComparison.Ordinal) ?? $"available, initiator {now}"}); connecting again to tell the server.");
                     await session.CancelAsync().ConfigureAwait(false);
                     return;
                 }

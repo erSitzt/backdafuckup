@@ -19,6 +19,8 @@ namespace Backdafuckup.ProxyAgent;
 /// one-time install token for the proxy's own key and writes /etc/backdafuckup-proxy/agent.json (mode 600).</item>
 /// <item><c>backdafuckup-proxy run</c> (the systemd service): connects to the server and carries out its commands.</item>
 /// <item><c>backdafuckup-proxy devices</c>: lists the block devices it would report.</item>
+/// <item><c>backdafuckup-proxy prepare-san [--dry-run]</c>: makes the settings SAN access needs (as root), see
+/// <see cref="SanPreparation"/>.</item>
 /// </list>
 /// The agent trusts exactly the server's key (its SHA-256 pin).
 /// </summary>
@@ -56,10 +58,12 @@ internal static class Program
                     return 0;
                 case "enroll":
                     return await EnrollAsync(args, configPath, stop.Token).ConfigureAwait(false);
+                case "prepare-san":
+                    return await new SanPreparation(Console.WriteLine).RunAsync(args.Contains("--dry-run"), stop.Token).ConfigureAwait(false);
                 case "run" or null:
                     return await RunAsync(configPath, version, stop.Token).ConfigureAwait(false);
                 default:
-                    Console.Error.WriteLine("Usage: backdafuckup-proxy enroll --server URL --proxy ID --token TOKEN --pins SPKI | run | devices [--config FILE]");
+                    Console.Error.WriteLine("Usage: backdafuckup-proxy enroll --server URL --proxy ID --token TOKEN --pins SPKI | run | devices | prepare-san [--dry-run] [--config FILE]");
                     return 2;
             }
         }

@@ -4,7 +4,7 @@
 #   install -D -m 755 backdafuckup-proxy /opt/backdafuckup-proxy/backdafuckup-proxy
 #   /opt/backdafuckup-proxy/backdafuckup-proxy enroll --server … --proxy … --token … --pins …   (the console's command)
 #   install -m 644 backdafuckup-proxy.service /etc/systemd/system/ && systemctl enable --now backdafuckup-proxy
-# Keep LVM and udisks away from attached disks (see the admin guide: LVM devices file, multipath blacklist).
+# For SAN access (backup from storage snapshots), run once as root: /opt/backdafuckup-proxy/backdafuckup-proxy prepare-san
 [Unit]
 Description=backdafuckup backup proxy
 Wants=network-online.target

@@ -580,7 +580,7 @@ public sealed class ArraySnapshotService(
         var san = connected.Where(p => p.Capabilities.Contains(ProxyAgentProtocol.CapabilitySan, StringComparer.Ordinal) && p.InitiatorName is { Length: > 0 }).ToList();
         if (san.Count == 0)
         {
-            var why = connected.Count == 0 ? "no proxy is connected" : string.Join("; ", connected.Select(p => $"{p.Name}: {p.SanRefusal ?? "no SAN access"}"));
+            var why = connected.Count == 0 ? "no proxy is connected" : string.Join("; ", connected.Select(p => $"{p.Name}: {p.SanRefusal?.Replace("\n", "; ", StringComparison.Ordinal) ?? "no SAN access"}"));
             throw new ArrayPathException($"No proxy with SAN access ({why}).", "no_proxy");
         }
 

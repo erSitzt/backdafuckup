@@ -282,7 +282,7 @@ public sealed class ProxyAgents(
             ?? throw new InvalidOperationException($"Proxy {proxyId} is not connected.");
         if (connection.Hello.Capabilities?.Contains(ProxyAgentProtocol.CapabilitySan) != true)
         {
-            throw new InvalidOperationException($"Proxy {connection.Name} has no SAN access: {connection.Hello.SanRefusal ?? "its agent does not offer it"}.");
+            throw new InvalidOperationException($"Proxy {connection.Name} has no SAN access: {connection.Hello.SanRefusal?.Replace("\n", "; ", StringComparison.Ordinal) ?? "its agent does not offer it"}.");
         }
 
         await connection.CommandAsync(new ProxyAgentMessage { Type = ProxyMessageTypes.IscsiLogin, Portals = portals, TargetIqn = targetIqn }, TimeSpan.FromMinutes(2), cancellationToken)

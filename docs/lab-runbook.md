@@ -310,7 +310,7 @@ A dedicated test volume on the array, used as an LVM over iSCSI SR in the pool, 
 
 | # | Do | Expect |
 |---|---|---|
-| N1 | Proxy: `lvmconfig` without a devices file or filter; then set `use_devicesfile=1` (only the system disk), `event_activation=0`, stop udisks2. | First the proxy's page names the missing setting and offers no SAN access; afterwards it offers it and shows its initiator name. |
+| N1 | Proxy as installed (Ubuntu 24.04: open-iscsi without a name, multipathd and udisks2 running): look at its line under *Backup Proxies*; run `backdafuckup-proxy prepare-san --dry-run`, then `prepare-san` as root; run it again. | First the line lists every missing setting at once (initiator name, LVM, multipathd, udisks2) and the proxy offers no SAN access; the dry run changes nothing. Afterwards, within a minute, it offers SAN access and shows its initiator name; the second run reports only `[ok]`. The proxy still boots. |
 | N2 | Add the array (*Storage systems*), refresh the mapping, turn on the test volume and *Experimental readers*. | The volume maps to the SR (by WWN, layout LVHD); production volumes are listed but stay off. |
 | N3 | A job with *Backup from storage snapshots* for the test VM; run it twice, writing in between. | Each run: VM snapshot, array snapshot `bdfu-…-01` presented to the proxy only, chain found on the LUN, VM snapshot released within seconds (log), disks read through the proxy (`array-lvhd`); the second run is incremental and its unchanged regions match. Afterwards no VLUN, no `bdfu-` snapshot, no snapshot VM; only the CBT metadata VDI. |
 | N4 | Restore the second restore point as a new VM and boot it; compare a file with the original. | Same as from a normal backup. |
