@@ -119,6 +119,23 @@ public sealed class FileSystemTests : IDisposable
     }
 
     [Fact]
+    public async Task The_peak_of_the_overlay_stays_known_after_the_files_are_removed()
+    {
+        // As at the end of a Storage vMotion: what the VM wrote is reported although ESXi removed its files already.
+        using var fs = Open();
+        var vm = fs.CreateDirectory("vm01");
+        var log = (await fs.CreateAsync(Esx, vm, "vmware.log", NfsCreateMode.Unchecked, NfsSetAttributes.None, 0, Ct)).Handle;
+        await fs.WriteAsync(Esx, log, 0, new byte[3 << 20], NfsStable.FileSync, Ct);
+        var written = fs.OverlayBytes;
+        Assert.True(written >= 3 << 20, $"overlay {written}");
+
+        await fs.RemoveAsync(Esx, vm, "vmware.log", Ct);
+
+        Assert.True(fs.OverlayBytes < written, $"overlay {fs.OverlayBytes} after the remove");
+        Assert.Equal(written, fs.PeakOverlayBytes);
+    }
+
+    [Fact]
     public async Task After_a_crash_committed_writes_survive_and_a_torn_journal_record_is_dropped()
     {
         var fs = Open();

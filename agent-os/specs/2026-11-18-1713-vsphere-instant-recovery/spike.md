@@ -39,6 +39,20 @@ Still open: a killed process (no clean stop), and outages of 90 and 180 s (guest
 Port 111 binds (own portmapper), the firewall rules work program-bound. Throughput (target 300 MB/s sequential) not
 measured yet.
 
-## S2: Storage vMotion — not done yet
+## S2: Storage vMotion under write load (2026-11-19) — passed
 
-Needs a production datastore to move a test VM to, and its removal afterwards.
+The Windows VM (40 GiB) ran from its restore point; inside it, a PowerShell loop wrote 4 GiB of seeded random data in
+4 MiB steps (each flushed to disk) and noted its SHA-256. Twenty seconds into the loop, Migrate (thin) to a shared VMFS
+datastore through the API:
+
+- `RelocateVM_Task` took about a minute (31 %, 51 %, done); the session then unmounted the datastore, deleted the
+  overlay and ended as Migrated.
+- The loop ran on across the switchover and finished three minutes later; the file's SHA-256 matched.
+- Windows' own boot time lies before the migration: no reboot. vCenter's `quickStats.uptimeSeconds` restarts at the
+  switchover (a new VMX process), so it is no sign of a reboot.
+- At its end Storage vMotion removes the source files, so the overlay is nearly empty by then: the summary now
+  reports the most the VMs wrote (`PeakOverlayBytes`), not what is left.
+- The host has no swap datastore configured, so the swap file (`swapPlacement=hostLocal`) went into the VM's
+  directory, i.e. into the overlay; it stays sparse there.
+
+The migrated test VM was deleted afterwards (ours: name, folder, note, and all files in its own folder checked first).

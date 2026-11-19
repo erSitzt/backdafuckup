@@ -211,10 +211,12 @@ Encrypted disks are refused, naming the VM and disk. *Changed in task 6:* a vTPM
    - `bdfu_nfs_requests_total{proc,status}`, `bdfu_nfs_request_seconds`, `bdfu_nfs_connections`.
 
    Alerts `BackdafuckupInstantRecoveryLongRunning` (more than 24 h), `…OverlayAlmostFull` (above 85 %), `…NoIo`, `…MigrationFailed` in `deploy/monitoring/`.
+   *As built:* per instant recovery (labels session, vms, host) the age, overlay bytes and limit, last I/O time and migration progress, from a live registry the runners keep (no catalog query per scrape); `bdfu_instant_recovery_overlay_free_bytes` for the volume (measured on its own mount point on Linux); read bytes by source `overlay`/`backup`/`zero` and write bytes counted in the instant recovery library on the server's meter; cache hits and loads; `bdfu_instant_recovery_migrations_total{result}`; NFS calls through the NFS program's call hook. Alerts as planned plus `…OverlayVolumeLow` (under 10 GiB while instant recoveries run); NoIo fires after 10 minutes without a read or write (ESXi's lock files are written every few seconds). The dashboard has an "Instant recovery" section.
 10. **Documentation:**
     - `docs/admin-guide.md` section "Instant VM recovery (vSphere)": ports and firewall, the Windows role and rpcbind conflicts, overlay sizing, vCenter needed for Migrate, restart behaviour, limits, security;
     - the deploy script made aware of instant recoveries;
     - `THIRD-PARTY-NOTICES.md` (test tools only).
+   *As built:* the admin guide's section "Instant VM recovery" (before the NFS server's settings), lab runbook section J with the results of 2026-11-19, `bdfu_deploy.py install` names running instant recoveries and restarts under them only with `--pause-instant-recoveries`, and the test-only NFS images in `THIRD-PARTY-NOTICES.md`.
 11. **Live checks:** `docs/lab-runbook.md` section J on the vSphere 8 test host.
 
 | Check | What it shows |

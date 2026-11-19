@@ -60,9 +60,11 @@ public sealed class RestorePointBaseImage : IBaseImage
             if (id.IsZero)
             {
                 destination.Span.Slice(position, take).Clear();
+                InstantRecoveryTelemetry.Read("zero", take);
             }
             else
             {
+                InstantRecoveryTelemetry.Read("backup", take);
                 var block = await _cache.GetAsync(id, _chunks, size, cancellationToken).ConfigureAwait(false);
                 if (block.Length < inChunk + take)
                 {

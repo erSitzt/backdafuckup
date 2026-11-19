@@ -322,6 +322,25 @@ A dedicated test volume on the array, used as an LVM over iSCSI SR in the pool, 
 | N10 | Only if a reader was switched off by a real difference (it should not be): look at the alert and the console, keep the session log, then *Turn back on* and run the job. | While switched off: the VM is read from its VM snapshot, the log names the reason, `bdfu_array_reader_tripped` is 1 and `BackdafuckupArrayReaderSwitchedOff` fires. After *Turn back on*: verify mode again. |
 | N11 | vSphere, once the OpenVmfs reader is in the build: a test datastore on a dedicated volume of the array, a test VM on it, a job with *Backup from storage snapshots*; run it three times. | Run 1 through HotAdd ("no restore point yet"); runs 2 and 3 read `array-vmfs` from the disk under the VM snapshot, which is removed before; verify mode compares through HotAdd in run 2; restore and boot as in N4; no `bdfu-` snapshot, VLUN or VM snapshot left. Also an independent disk: refused as open for writing, the VM read through HotAdd. |
 
+### J. Instant VM recovery (vSphere)
+
+The vCenter of section V, a host whose VMkernel addresses reach the backup server; on the backup server `InstantRecovery:Enabled` and the firewall rules for the host (admin guide, *The NFS server for instant recovery*); restore points of the Linux and the Windows VM of section V. VMs only in the test folder and pool.
+
+| # | Do | Expect |
+|---|---|---|
+| J1 | *Instant recovery* of the Windows VM's restore point on the host (NICs disconnected). | The host check names its VMkernel addresses and NFS datastores; datastore `bdfu-ir-…` mounted, VM `… (instant)` created in the test folder and powered on, NICs disconnected, new MACs; VMware Tools running within minutes. |
+| J2 | The same with the Linux VM (LVM). | It boots; a disk left out of the backup is there, empty. |
+| J3 | In the Windows VM, 30 minutes of writes with verification (e.g. diskspd or a script that hashes what it wrote). | No errors; `bdfu_instant_recovery_overlay_bytes` grows, `…_read_bytes_total` shows overlay and backup reads. |
+| J4 | Restart the backup service while J3 runs. | I/O pauses for less than 60 s; the session logs the stop and resumes with the same export; the guest carries on (its own boot time unchanged). |
+| J5 | During an instant recovery, run the VM's backup job with retention 1 and move its chain in a scale-out repository. | The restore point stays ("runs an instant recovery and is removed after it ends"); after the end, retention removes it. |
+| J6 | Migrate to a VMFS datastore (thin) while the VM writes a file of known hash. | Storage vMotion finishes; the hash matches; the datastore is unmounted, the overlay deleted, `…_migrations_total{result="succeeded"}` rises; the VM is ordinary afterwards. |
+| J7 | Migrate the VM by hand in the vSphere client. | The session notices it, unmounts the datastore and ends as Migrated. |
+| J8 | Stop an instant recovery. | VM powered off and unregistered (no file deleted), datastore unmounted, overlay folder empty; nothing `bdfu-ir-` left in vCenter. |
+| J9 | Remove the firewall rule for 2049 and start one. | The start fails naming the host, the server's address and export, and that the host never reached 2049; nothing is left. |
+| J10 | Kill the server process between the datastore mount and the VM's creation (or after it), start it again. | The interrupted start is undone at the next start: the VM unregistered, the datastore unmounted, the session failed with the reason. |
+| J11 | A write limit of 1 GiB; write 2 GiB in the VM. | Writes beyond it fail with "no space", the VM pauses with a question in vCenter; `BackdafuckupInstantRecoveryOverlayAlmostFull` fired before. |
+| J12 | Windows server with the role *Server for NFS* installed (a separate test machine). | The NFS server cannot bind 111/2049; the log and the console name the program holding the port. |
+
 ## Results
 
 | Check | Date | Server / agent version | Result | Notes |
@@ -423,3 +442,8 @@ A dedicated test volume on the array, used as an LVM over iSCSI SR in the pool, 
 | V7 | 2026-11-18 | 0.3.0 (`38db069`) | passed | 106.4 MiB changed, exactly that written back; 14 s including the shutdown; the proxy found the hot-added delta disk by its serial; after the boot the marker file was back, the 100 MB file gone, no file system errors. |
 | V4 | 2026-11-18 | 0.3.0 (`7494d43`) | passed | The Windows VM's agent service stopped, a job with guest processing and no credentials: "VMware Tools quiesce the snapshot instead", the quiesced snapshot took 13.8 s (VSS in the guest), restore point *application*; session *Succeeded*. |
 | V11 | 2026-11-18 | 0.3.0 (`7494d43`) | passed | The Linux VM with a 1 GiB independent disk and a user snapshot: the independent disk left out with a warning; the incremental read 29 MB through the snapshot chain (the hot-added disk was the delta under the user snapshot); the user snapshot untouched. |
+| J1 | 2026-11-19 | 0.3.0 (`8624af2`, server on Windows) | passed | bdfu-vs-win01 (40 GiB, full point): mounted, created and powered on within a second; VMware Tools running 24 s later, heartbeat green after about a minute. Stop left nothing. |
+| J2 | 2026-11-19 | 0.3.0 (`8624af2`) | passed | bdfu-vs-linux01 (Ubuntu, incremental point; its second disk was left out of the backup and was there empty): up within two minutes, Tools running, host name as before. |
+| J4 (clean restart, idle VM) | 2026-11-19 | 0.3.0 (`8624af2`) | passed | `Restart-Service` on the Windows server: health 200 after 35 s, the session resumed with the same export, the Linux guest kept running (uptime on, no reboot). Under write load, and a killed process, still open. |
+| J6 | 2026-11-19 | 0.3.0 (`8624af2`) | passed | bdfu-vs-win01 copy, a script writing 4 GiB of seeded data (each 4 MiB flushed) across the migration to a shared VMFS datastore: Storage vMotion about a minute, SHA-256 equal, Windows' boot time before the migration (vCenter's uptime counter restarts at the switchover, no reboot). The summary said "overlay (0 MiB)" (the move removes the source files at its end); it now reports the peak. The migrated test VM was deleted afterwards. |
+| J8 | 2026-11-19 | 0.3.0 (`8624af2`) | passed | After J1, J2 and the S3 restart: VM unregistered, datastore unmounted, overlay folder holds only the handle key; no `bdfu-ir-` datastore or `(instant)` VM in vCenter. |

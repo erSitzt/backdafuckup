@@ -81,6 +81,7 @@ internal sealed partial class OverlayFile : IDisposable
         if (!IsBaseBacked)
         {
             await ReadDataAsync(offset, result, cancellationToken).ConfigureAwait(false);
+            InstantRecoveryTelemetry.Read("overlay", length);
             return result;
         }
 
@@ -98,6 +99,7 @@ internal sealed partial class OverlayFile : IDisposable
                 if (IsSet(block))
                 {
                     await ReadDataAsync(at, target, cancellationToken).ConfigureAwait(false);
+                    InstantRecoveryTelemetry.Read("overlay", piece);
                 }
                 else
                 {

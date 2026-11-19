@@ -730,6 +730,7 @@ public static class EngineServiceCollectionExtensions
             return new Backdafuckup.InstantRecovery.AsyncChunkCache(o.CacheBytes, Math.Max(1, o.MaxConcurrentChunkLoads));
         });
         services.AddSingleton<InstantRecovery.InstantRecoveryControl>();
+        services.AddSingleton<Telemetry.InstantRecoveryMetrics>();
         services.AddSingleton<InstantRecovery.InstantRecoverySessionRunner>();
         services.AddHostedService<PendingArtifactRetryService>();
         services.AddSingleton<JobScheduler>();

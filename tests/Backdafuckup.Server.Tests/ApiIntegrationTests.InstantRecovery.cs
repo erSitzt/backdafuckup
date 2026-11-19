@@ -71,6 +71,17 @@ public sealed partial class ApiIntegrationTests
             await export.FileSystem.WriteAsync(EsxCaller, flat, 4096, new byte[4096], NfsStable.FileSync, Ct);
             Assert.True(Directory.Exists(recovery.OverlayDirectory));
 
+            // Metrics: the running instant recovery with what it wrote and its last I/O, the NFS calls, the reads by source.
+            var metrics = await client.GetStringAsync("/metrics", Ct);
+            Assert.Matches(@"bdfu_instant_recovery_sessions\{[^}]*state=""Running""[^}]*\} 1", metrics);
+            Assert.Matches(@"bdfu_instant_recovery_overlay_bytes\{[^}]*vms=""app03 \(instant\)""[^}]*\} [1-9]", metrics);
+            Assert.Contains("bdfu_instant_recovery_last_io_timestamp_seconds{", metrics, StringComparison.Ordinal);
+            Assert.Contains("bdfu_instant_recovery_age_seconds{", metrics, StringComparison.Ordinal);
+            Assert.Matches(@"bdfu_instant_recovery_read_bytes_total\{[^}]*source=""backup""[^}]*\} [1-9]", metrics);
+            Assert.Matches(@"bdfu_instant_recovery_write_bytes_total(\{[^}]*\})? [1-9]", metrics);
+            Assert.Contains("bdfu_instant_recovery_cache_loads_total", metrics, StringComparison.Ordinal);
+            Assert.Contains("bdfu_nfs_connections", metrics, StringComparison.Ordinal);
+
             // The list shows it running, with what ESXi wrote.
             var listed = Assert.Single((await client.GetFromJsonAsync<List<InstantRecoveryDto>>("/api/instant-recoveries", Ct))!, r => r.SessionId == sessionId);
             Assert.Equal(("Running", "esx01.corp.example", "app03 (instant)", "app03"), (listed.State, listed.HostName, listed.Vms[0].Name, listed.Vms[0].SourceVmName));
@@ -97,6 +108,9 @@ public sealed partial class ApiIntegrationTests
             Assert.Equal(InstantRecoveryState.Migrated, (await db.InstantRecoveries.SingleAsync(r => r.SessionId == sessionId, Ct)).State);
             Assert.All(await db.Artifacts.Where(a => a.SessionId == sessionId).ToListAsync(Ct), a => Assert.Equal(ArtifactState.Done, a.State));
             Assert.Null(await InstantRecoveryCatalog.FindUseAsync(db, point.Id, Ct));
+            // The exporter answers a scrape from its cache for a moment: wait for the next one, as Prometheus would.
+            await MetricsAsync(client, text => System.Text.RegularExpressions.Regex.IsMatch(text, @"bdfu_instant_recovery_migrations_total\{[^}]*result=""succeeded""[^}]*\} 1")
+                && !System.Text.RegularExpressions.Regex.IsMatch(text, @"bdfu_instant_recovery_sessions\{[^}]*state=""Running"""));
             var again = await client.PostAsync($"/api/instant-recoveries/{sessionId}/stop", null, Ct);
             Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
             Assert.Contains("The instant recovery is Migrated; only a running one can be stopped.", await again.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
@@ -244,6 +258,26 @@ public sealed partial class ApiIntegrationTests
         }
 
         throw new TimeoutException($"The instant recovery did not reach {state}; it is {last?.State} ({last?.Message}).");
+    }
+
+    /// <summary>The metrics once <paramref name="ready"/> holds for them (they are scraped again until then, up to 10 s).</summary>
+    private static async Task<string> MetricsAsync(HttpClient client, Func<string, bool> ready)
+    {
+        var text = string.Empty;
+        for (var i = 0; i < 50; i++)
+        {
+            text = await client.GetStringAsync("/metrics", Ct);
+            if (ready(text))
+            {
+                return text;
+            }
+
+            await Task.Delay(200, Ct);
+        }
+
+        Assert.Fail("The metrics did not show what was expected: " +
+                    string.Join(" | ", text.Split('\n').Where(l => l.StartsWith("bdfu_instant_recovery", StringComparison.Ordinal) && !l.Contains("_bucket", StringComparison.Ordinal))));
+        return text;
     }
 
     private static async Task<List<string>> SessionLogAsync(HttpClient client, Guid sessionId) =>

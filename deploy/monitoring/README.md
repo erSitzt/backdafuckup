@@ -8,7 +8,7 @@ This folder contains:
 |---|---|
 | `backdafuckup.rules.yml` | Alert rules as a plain Prometheus rule group (`rule_files:`) |
 | `prometheusrule.yaml` | The same rules as a `PrometheusRule` for the Prometheus Operator (kube-prometheus-stack), generated from the rule group |
-| `grafana-dashboard.json` | A Grafana dashboard: backups, VM snapshots, disks and transports, pool storage, server, scale-out repositories, backup proxies, backup from storage snapshots |
+| `grafana-dashboard.json` | A Grafana dashboard: backups, VM snapshots, disks and transports, pool storage, server, scale-out repositories, backup proxies, backup from storage snapshots, instant recovery |
 
 The metric names and their meaning are listed in the admin guide (`docs/admin-guide.md`, *Monitoring with Prometheus*).
 
@@ -130,6 +130,11 @@ Both contain the same 27 alerts:
 | BackdafuckupArrayReaderMismatch | a disk read from an array snapshot differed from the VM snapshot (verify mode) or from the previous restore point (in the last day) |
 | BackdafuckupArrayReaderSwitchedOff | an experimental reader is switched off for a storage system after such a difference |
 | BackdafuckupArrayFallbacks | VMs meant for storage snapshots were read from their VM snapshots (info, in the last day) |
+| BackdafuckupInstantRecoveryLongRunning | an instant recovery runs for more than a day |
+| BackdafuckupInstantRecoveryOverlayAlmostFull | the VMs of an instant recovery wrote more than 85 % of its write limit |
+| BackdafuckupInstantRecoveryOverlayVolumeLow | less than 10 GiB left for overlays on the backup server while instant recoveries run |
+| BackdafuckupInstantRecoveryNoIo | the host has not read or written an instant recovery's datastore for 10 minutes |
+| BackdafuckupInstantRecoveryMigrationFailed | a migration of an instant recovery to production storage failed (in the last day) |
 
 After changing `backdafuckup.rules.yml`, check it and regenerate the `PrometheusRule`:
 

@@ -10,6 +10,7 @@ public sealed class EmptyBaseImage(long size) : IBaseImage
     public ValueTask ReadAsync(long offset, Memory<byte> destination, CancellationToken cancellationToken)
     {
         destination.Span.Clear();
+        InstantRecoveryTelemetry.Read("zero", destination.Length);
         return ValueTask.CompletedTask;
     }
 }

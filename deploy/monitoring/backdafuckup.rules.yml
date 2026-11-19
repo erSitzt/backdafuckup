@@ -260,3 +260,48 @@ groups:
         annotations:
           summary: "VMs meant for storage snapshots on {{ $labels.storage_system }} were read from their VM snapshots ({{ $labels.reason }})"
           description: "The backups succeeded the normal way, with longer-lived VM snapshots. The session logs say why the array path was not taken (no proxy with SAN access, the chain differed on the LUN, an array error)."
+
+      - alert: BackdafuckupInstantRecoveryLongRunning
+        expr: bdfu_instant_recovery_age_seconds > 86400
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.vms }} runs as an instant recovery on {{ $labels.host }} for more than a day"
+          description: "Its VMs depend on the backup server (a restart pauses their disks) and everything they write grows the overlay on the server. Migrate them to production storage, or stop the instant recovery (Instant Recovery in the console)."
+
+      - alert: BackdafuckupInstantRecoveryOverlayAlmostFull
+        expr: bdfu_instant_recovery_overlay_bytes / bdfu_instant_recovery_overlay_limit_bytes > 0.85
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.vms }} wrote {{ $value | humanizePercentage }} of its instant recovery's write limit"
+          description: "At the limit the VMs' writes fail with \"no space\" and they pause with a question in vCenter. Migrate them now, or stop the instant recovery."
+
+      - alert: BackdafuckupInstantRecoveryOverlayVolumeLow
+        expr: bdfu_instant_recovery_overlay_free_bytes < 10737418240 and on() (sum(bdfu_instant_recovery_sessions) > 0)
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Less than 10 GiB left for instant recovery overlays on the backup server ({{ $value | humanize1024 }}B)"
+          description: "Writes of running instant recoveries fail once the overlay volume reaches the reserve (InstantRecovery:FreeSpaceReserveBytes). Migrate or stop instant recoveries, or free space on the volume of InstantRecovery:OverlayDirectory."
+
+      - alert: BackdafuckupInstantRecoveryNoIo
+        expr: time() - bdfu_instant_recovery_last_io_timestamp_seconds > 600
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host }} has not read or written the instant recovery datastore of {{ $labels.vms }} for 10 minutes"
+          description: "A running VM and ESXi's own lock files touch the datastore every few seconds. The host may have lost the mount (network, firewall, the server's address changed), or the VMs were powered off. bdfu_nfs_requests_total and the session log show what the NFS server still gets."
+
+      - alert: BackdafuckupInstantRecoveryMigrationFailed
+        expr: increase(bdfu_instant_recovery_migrations_total{result="failed"}[1d]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A migration of an instant recovery to production storage failed"
+          description: "The VMs keep running from the backup server; the session log names the vCenter error (space on the target datastore, the host does not see it, licensing). Migrate them again, or stop the instant recovery."

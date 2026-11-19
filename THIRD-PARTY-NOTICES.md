@@ -31,7 +31,7 @@ backdafuckup uses the following third-party components. Keep this list in sync w
 
 Build tools (not shipped): mingw-w64 GCC (GPL-3.0) and osslsigncode (GPL-3.0) in the Docker image of `native/bdfu-vss`.
 
-Test-only dependencies (not shipped): xUnit (Apache-2.0), Testcontainers and Testcontainers.MsSql (MIT), the SQL Server container image (Developer edition, development and test use only), bUnit (MIT), BenchmarkDotNet (MIT), coverlet (MIT). Container images built only for interoperability tests: nbdkit (BSD-3-Clause) and the libnfs utilities (LGPL-2.1-or-later), from Debian packages.
+Test-only dependencies (not shipped): xUnit (Apache-2.0), Testcontainers and Testcontainers.MsSql (MIT), the SQL Server container image (Developer edition, development and test use only), bUnit (MIT), BenchmarkDotNet (MIT), coverlet (MIT). Container images built only for interoperability tests, from Debian packages: nbdkit (BSD-3-Clause), the libnfs utilities (LGPL-2.1-or-later), rpcbind (BSD-3-Clause), nfs-common (the Linux NFS client utilities, GPL-2.0-or-later) and fio (GPL-2.0-only), the last two in a privileged container that mounts the instant recovery NFS server with the kernel's client. None of them is shipped or linked.
 
 Specifications implemented from public documents (no code copied):
 - NBD protocol (`doc/proto.md`, public domain)

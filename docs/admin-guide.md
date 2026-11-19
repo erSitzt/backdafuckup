@@ -756,9 +756,37 @@ A job uses a connected proxy whose VM is powered on, has a free SCSI place and s
 
 Not restored: vSphere tags and custom attributes, storage policies, the NVRAM (UEFI boot entries; Windows and Linux boot through their fallback boot loader), a virtual TPM's contents, CD-ROM, USB and serial devices. Disks get new UUIDs: an `/etc/fstab` that names a disk by `/dev/disk/by-id/scsi-36000c29…` must be adjusted (by file system UUID, the usual way, works).
 
+### Instant VM recovery
+
+*Instant Recovery* runs a vSphere VM straight from a restore point, within minutes and before anything is copied. Start it from *Backups & Restore → restore point → Restore entire VM → Instant recovery*, or under *Instant Recovery*; the page also lists the running ones with *Migrate* and *Stop*.
+
+- **How it runs:** the backup server serves the restore point's disks over NFS 3 as a datastore `bdfu-ir-<id>` (export `/bdfu/<id>`), which one ESXi host mounts from this server. Only that host's VMkernel addresses may mount it. The VM `<name> (instant)` is created around these files from the backed-up configuration, in the chosen folder and resource pool, with new MAC addresses and its NICs **disconnected** by default (the original may still run with the same addresses), and powered on.
+- **Reads and writes:** the VM reads its disks from the repository, through a memory cache (`InstantRecovery:CacheBytes`). What it writes goes into an *overlay* on the backup server (`InstantRecovery:OverlayDirectory`); the backup is never changed. The restore points an instant recovery runs from are kept by retention and deletes until it ends.
+- **How fast:** measured on vSphere 7.0.3 with the server on Windows: the VM is powered on a second after the mount; a Windows VM had VMware Tools running 24 s later, an Ubuntu VM was up within two minutes.
+
+**Before the first one:**
+1. Turn on the NFS server and let the hosts' VMkernel addresses through the firewall: [The NFS server for instant recovery](#the-nfs-server-for-instant-recovery).
+2. Give the vCenter account the instant recovery privileges in [vCenter account](#vcenter-account).
+3. Plan room for the overlay: what the VMs write until they are migrated or stopped, plus their swap file when the host has no swap datastore of its own (it stays sparse).
+
+When you choose the host, the start form checks it: its VMkernel addresses, how many NFS datastores it mounts against its `NFS.MaxVolumes`, and the address of this server it will mount from. A host that is disconnected, in maintenance mode or at its NFS limit cannot be chosen.
+
+**Then, one of:**
+- **Migrate** moves the VMs to production storage by Storage vMotion while they run: a datastore of the vCenter, thin (default) or thick disks, optionally another host. A 40 GiB Windows VM moved in about a minute while it was writing. Afterwards the datastore is unmounted and the overlay deleted; the VM is an ordinary VM (add it to a backup job). A failed migration leaves the VMs running from the backup server and says why.
+- **Stop** powers the VMs off, removes them from vCenter (unregister: no file is deleted anywhere), unmounts the datastore and deletes the overlay. **What the VMs wrote is lost.** It is refused while a VM has a disk on another datastore (added by hand); migrate it instead. Stopping the session under *History* is the same as Stop.
+- A VM that is migrated or deleted in vCenter by hand is noticed within seconds (`InstantRecovery:WatchInterval`); once none is left on the datastore, the instant recovery ends.
+
+**While it runs:**
+- **Restarts of the backup service:** the VMs' disk I/O waits until the service is back, then the instant recovery resumes by itself with the same file handles and the guests carry on (a clean restart on Windows took 35 s). Guests tolerate pauses up to their disk timeout (VMware Tools set 180 s). Update the server only after migrating.
+- **Age:** an instant recovery is meant to be migrated or stopped soon. After `InstantRecovery:AgeWarning` (24 hours) the session log warns and `BackdafuckupInstantRecoveryLongRunning` fires. Metrics and the other alerts: [Monitoring with Prometheus](#monitoring-with-prometheus).
+
+**Limits:** vCenter only, one host per instant recovery (Migrate can change the host); disks that were encrypted are refused; a virtual TPM is not carried over (Windows boots, BitLocker with a TPM protector asks for its recovery key); disks left out of the backup start empty; physical RDMs are not in backups, so the VM runs without them.
+
+**When the host cannot mount:** the session fails and names the host, the server address and export, and what the NFS server saw of each of the host's addresses, e.g. "192.0.2.21 has not reached this server on any of 111/tcp (portmapper), 20048/tcp (MOUNT), 2049/tcp (NFS): a firewall between them, or the host uses another of its addresses". Everything the start made is removed again.
+
 ### The NFS server for instant recovery
 
-Instant VM recovery (in development) runs a VM straight from a restore point: the backup server serves the restore point's disks as an NFS v3 datastore, which the ESXi host mounts. The NFS server is part of the backup server and is **off** until it is turned on in `appsettings.json` (Linux `/etc/backdafuckup/`, Windows `%ProgramData%\backdafuckup\`), followed by a restart of the service:
+Instant VM recovery runs a VM straight from a restore point: the backup server serves the restore point's disks as an NFS v3 datastore, which the ESXi host mounts. The NFS server is part of the backup server and is **off** until it is turned on in `appsettings.json` (Linux `/etc/backdafuckup/`, Windows `%ProgramData%\backdafuckup\`), followed by a restart of the service:
 
 ```json
 "InstantRecovery": {
@@ -1500,6 +1528,13 @@ What is measured (prefix `bdfu_`; `pool` is the connection name of a pool or vCe
 | `bdfu_array_verify_total` {storage_system, method, result} | counter | Checks of disks read from array snapshots (`passed`, `mismatch`): method `verify` against the VM snapshot (verify mode), `cbt-unchanged` against the previous restore point |
 | `bdfu_array_leftovers` {storage_system} | gauge | Snapshots and presentations of this server on a storage system that no running session uses |
 | `bdfu_array_reader_tripped` {storage_system, reader} | gauge | 1 while an experimental reader (`lvhd`, `vmfs6`) is switched off for a storage system after a difference |
+| `bdfu_instant_recovery_sessions` {state} | gauge | Instant recoveries this server runs, by state |
+| `bdfu_instant_recovery_age_seconds`, `bdfu_instant_recovery_overlay_bytes`, `bdfu_instant_recovery_overlay_limit_bytes`, `bdfu_instant_recovery_last_io_timestamp_seconds`, `bdfu_instant_recovery_migration_progress_ratio` {session, vms, host} | gauge | Per instant recovery: how long it runs, what its VMs wrote and its write limit (if set), when the host last read or wrote its datastore, the progress of a migration |
+| `bdfu_instant_recovery_overlay_free_bytes` | gauge | Free space for overlays above `InstantRecovery:FreeSpaceReserveBytes` |
+| `bdfu_instant_recovery_read_bytes_total` {source}, `bdfu_instant_recovery_write_bytes_total` | counter | What hosts read from instant recovery datastores (`overlay`: written by the VMs, `backup`: restore points, `zero`) and wrote |
+| `bdfu_instant_recovery_cache_hits_total`, `bdfu_instant_recovery_cache_loads_total`, `bdfu_instant_recovery_cache_bytes` | counter, gauge | Chunks of restore points from the memory cache vs. loaded from the repositories, and the cache's size (`InstantRecovery:CacheBytes`) |
+| `bdfu_instant_recovery_migrations_total` {result} | counter | Migrations to production storage (`succeeded`, `failed`) |
+| `bdfu_nfs_requests_total` {proc, status}, `bdfu_nfs_request_seconds` {proc}, `bdfu_nfs_connections` | counter, histogram, gauge | The NFS server for instant recovery: calls by procedure and result, their time, open connections |
 | `bdfu_sessions_total`, `bdfu_session_duration_seconds` {kind, result} | counter, histogram | Finished sessions |
 | `bdfu_sessions_running`, `bdfu_sessions_queued` {kind} | gauge | Sessions now |
 | `bdfu_vm_backups_total` {backup_job, result} | counter | Backups of single VMs, each attempt |

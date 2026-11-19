@@ -37,6 +37,7 @@ public sealed class InstantRecoverySessionRunner(
     SessionEventWriter events,
     ConnectionManager connections,
     InstantRecoveryControl control,
+    Telemetry.InstantRecoveryMetrics metrics,
     IHostApplicationLifetime lifetime,
     IOptions<InstantRecoveryOptions> options,
     TimeProvider time,
@@ -61,6 +62,7 @@ public sealed class InstantRecoverySessionRunner(
                 return (SessionState.Failed, "No instant recovery belongs to this session.");
             }
 
+            var live = control.Track(recovery);
             switch (recovery.State)
             {
                 case InstantRecoveryState.Stopped or InstantRecoveryState.Migrated:
@@ -79,11 +81,13 @@ public sealed class InstantRecoverySessionRunner(
 
                     await using (started.ConfigureAwait(false))
                     {
+                        live.FileSystem = started.FileSystem;
                         return await LiveAsync(session.Id, started, log, cancellationToken).ConfigureAwait(false);
                     }
             }
 
             await using var served = await ServeAsync(recovery, log, wait: true, null, cancellationToken).ConfigureAwait(false);
+            live.FileSystem = served.FileSystem;
             log.Info($"Instant recovery resumed: datastore {recovery.DatastoreName} (export {recovery.ExportPath}) is served again for " +
                      $"{string.Join(", ", recovery.Vms.Select(v => v.Name))}.");
             return await LiveAsync(session.Id, served, log, cancellationToken).ConfigureAwait(false);
@@ -407,6 +411,7 @@ public sealed class InstantRecoverySessionRunner(
             {
                 var recovery = await LoadAsync(sessionId, token).ConfigureAwait(false)
                     ?? throw new InvalidOperationException("The instant recovery is no longer in the catalog.");
+                control.Track(recovery);
                 var result = recovery.State switch
                 {
                     InstantRecoveryState.Stopping => await StopAsync(recovery, served, handle, log, watch, token).ConfigureAwait(false),
@@ -552,7 +557,7 @@ public sealed class InstantRecoverySessionRunner(
             if (recovery.MigrateTaskId is { } pending)
             {
                 // After a restart: the Storage vMotion that was running.
-                if (await WaitTaskAsync(platform, pending, "a VM", log, cancellationToken).ConfigureAwait(false) is { } error)
+                if (await WaitTaskAsync(recovery.SessionId, platform, pending, "a VM", log, cancellationToken).ConfigureAwait(false) is { } error)
                 {
                     throw new InvalidOperationException(error);
                 }
@@ -571,7 +576,7 @@ public sealed class InstantRecoverySessionRunner(
 
                 var task = await platform.StartMigrationAsync(vm.VmId!, target, log, cancellationToken).ConfigureAwait(false);
                 await UpdateAsync(recovery.SessionId, r => r.MigrateTaskId = task, cancellationToken).ConfigureAwait(false);
-                if (await WaitTaskAsync(platform, task, vm.Name, log, cancellationToken).ConfigureAwait(false) is { } error)
+                if (await WaitTaskAsync(recovery.SessionId, platform, task, vm.Name, log, cancellationToken).ConfigureAwait(false) is { } error)
                 {
                     throw new InvalidOperationException(error);
                 }
@@ -591,6 +596,7 @@ public sealed class InstantRecoverySessionRunner(
             var message = $"Migrating {(current is null ? "the VMs" : $"VM {current}")} failed: {ex.Message}. " +
                           $"It keeps running from datastore {recovery.DatastoreName}; migrate it again, or stop the instant recovery.";
             log.Error(message);
+            metrics.RecordMigration(succeeded: false);
             await UpdateAsync(recovery.SessionId, r =>
             {
                 r.State = InstantRecoveryState.Running;
@@ -606,13 +612,18 @@ public sealed class InstantRecoverySessionRunner(
     }
 
     /// <summary>Waits for a platform task; logs its progress by quarters. Null on success, else its error.</summary>
-    private async Task<string?> WaitTaskAsync(IInstantRecoveryPlatform platform, string taskId, string vmName, IOperationLog log, CancellationToken cancellationToken)
+    private async Task<string?> WaitTaskAsync(Guid sessionId, IInstantRecoveryPlatform platform, string taskId, string vmName, IOperationLog log, CancellationToken cancellationToken)
     {
         var reported = 0;
         var poll = Interval < TimeSpan.FromSeconds(2) ? Interval : TimeSpan.FromSeconds(2);
         while (true)
         {
             var task = await platform.GetTaskAsync(taskId, cancellationToken).ConfigureAwait(false);
+            if (control.Find(sessionId) is { } live && task.Progress is { } percent)
+            {
+                live.MigrationProgress = Math.Clamp(percent / 100.0, 0, 1);
+            }
+
             if (task.Done)
             {
                 return task.State == "success" ? null : task.Error ?? "the task failed without a message";
@@ -650,7 +661,17 @@ public sealed class InstantRecoverySessionRunner(
             }
         }
 
-        var overlay = served.FileSystem?.OverlayBytes ?? 0;
+        var overlay = served.FileSystem?.PeakOverlayBytes ?? 0;
+        if (control.Find(recovery.SessionId) is { } live)
+        {
+            live.FileSystem = null;
+        }
+
+        if (migrated)
+        {
+            metrics.RecordMigration(succeeded: true);
+        }
+
         await served.DisposeAsync().ConfigureAwait(false);
         DeleteOverlay(recovery.OverlayDirectory, log);
         await using (var db = await dbFactory.CreateDbContextAsync(CancellationToken.None).ConfigureAwait(false))
@@ -667,8 +688,8 @@ public sealed class InstantRecoverySessionRunner(
             r.Message = null;
         }, CancellationToken.None).ConfigureAwait(false);
         var summary = migrated
-            ? $"Migrated: {string.Join(", ", recovery.Vms.Select(v => v.Name))} {(recovery.Vms.Count == 1 ? "runs" : "run")} from production storage; datastore {recovery.DatastoreName} is gone, the overlay ({Bytes(overlay)}) deleted."
-            : $"Stopped: {string.Join(", ", recovery.Vms.Select(v => v.Name))} removed, datastore {recovery.DatastoreName} unmounted, the overlay ({Bytes(overlay)}) deleted.";
+            ? $"Migrated: {string.Join(", ", recovery.Vms.Select(v => v.Name))} {(recovery.Vms.Count == 1 ? "runs" : "run")} from production storage; datastore {recovery.DatastoreName} is gone, the overlay deleted (the VMs wrote {Bytes(overlay)} into it at most)."
+            : $"Stopped: {string.Join(", ", recovery.Vms.Select(v => v.Name))} removed, datastore {recovery.DatastoreName} unmounted, the overlay deleted (the VMs wrote {Bytes(overlay)} into it at most).";
         log.Info(summary);
         return (SessionState.Succeeded, summary);
     }

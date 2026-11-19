@@ -38,6 +38,8 @@ public sealed class InstantRecoveryFileSystem : INfsFileSystem, IDisposable
     private readonly NamespaceJournal _journal;
     private ulong _nextId = RootId + 1;
     private long _overlayBytes;
+    private long _peakOverlayBytes;
+    private long _lastIoTicks;
 
     private sealed class Node(ulong id, ulong parent, string name, NfsFileType type)
     {
@@ -84,6 +86,7 @@ public sealed class InstantRecoveryFileSystem : INfsFileSystem, IDisposable
         _bases = bases;
         _options = options;
         _time = time;
+        _lastIoTicks = time.GetUtcNow().UtcTicks;
         _journal = journal;
         WriteVerifier = BinaryPrimitives.ReadUInt64BigEndian(RandomNumberGenerator.GetBytes(8));
         RootHandle = Handle(RootId);
@@ -122,6 +125,29 @@ public sealed class InstantRecoveryFileSystem : INfsFileSystem, IDisposable
     /// <summary>Bytes the overlay holds now.</summary>
     public long OverlayBytes => Interlocked.Read(ref _overlayBytes);
 
+    /// <summary>
+    /// The most the overlay held since the file system was opened: what the VMs wrote, even after a Storage vMotion
+    /// removed their files at its end.
+    /// </summary>
+    public long PeakOverlayBytes => Math.Max(Interlocked.Read(ref _peakOverlayBytes), OverlayBytes);
+
+    /// <summary>When a host last read or wrote a file (or when the file system was opened).</summary>
+    public DateTimeOffset LastIoUtc => new(Interlocked.Read(ref _lastIoTicks), TimeSpan.Zero);
+
+    private void Touch() => Interlocked.Exchange(ref _lastIoTicks, _time.GetUtcNow().UtcTicks);
+
+    private void AddOverlay(long bytes)
+    {
+        var now = Interlocked.Add(ref _overlayBytes, bytes);
+        for (var peak = Interlocked.Read(ref _peakOverlayBytes); now > peak; peak = Interlocked.Read(ref _peakOverlayBytes))
+        {
+            if (Interlocked.CompareExchange(ref _peakOverlayBytes, now, peak) == peak)
+            {
+                break;
+            }
+        }
+    }
+
     public string DirectoryPath => _directory;
 
     // ---- setup by the session (before the datastore is mounted) ----
@@ -138,7 +164,7 @@ public sealed class InstantRecoveryFileSystem : INfsFileSystem, IDisposable
             var node = Ensure(path, NfsFileType.Regular, null, bytes.Length, null);
             node.Data!.WriteAsync(0, bytes, bytes.Length, CancellationToken.None).AsTask().GetAwaiter().GetResult();
             node.Data.Flush();
-            Interlocked.Add(ref _overlayBytes, bytes.Length);
+            AddOverlay(bytes.Length);
             return Handle(node.Id);
         });
     }
@@ -282,7 +308,7 @@ public sealed class InstantRecoveryFileSystem : INfsFileSystem, IDisposable
             OpenData(node);
             node.Size = Math.Max(node.Size, node.Data!.DataLength);
             node.MtimeTicks = Math.Max(node.MtimeTicks, System.IO.File.GetLastWriteTimeUtc(DataPath(node.Id)).Ticks);
-            Interlocked.Add(ref _overlayBytes, node.Data!.OverlayBytes);
+            AddOverlay(node.Data!.OverlayBytes);
         }
 
         foreach (var file in System.IO.Directory.EnumerateFiles(_dataDirectory))
@@ -504,6 +530,7 @@ public sealed class InstantRecoveryFileSystem : INfsFileSystem, IDisposable
         }
 
         var data = await (node.Data ?? throw new NfsException(NfsStatus.Stale, "removed")).ReadAsync(offset, count, size, cancellationToken).ConfigureAwait(false);
+        Touch();
         return new NfsReadResult(data, offset + data.Length >= size, Attributes(node));
     }
 
@@ -531,7 +558,9 @@ public sealed class InstantRecoveryFileSystem : INfsFileSystem, IDisposable
         }
 
         var taken = await overlay.WriteAsync(offset, data, size, cancellationToken).ConfigureAwait(false);
-        Interlocked.Add(ref _overlayBytes, taken);
+        AddOverlay(taken);
+        Touch();
+        InstantRecoveryTelemetry.Written(data.Length);
         var now = _time.GetUtcNow().UtcTicks;
         lock (node)
         {
@@ -764,12 +793,37 @@ public sealed class InstantRecoveryFileSystem : INfsFileSystem, IDisposable
     {
         try
         {
-            return new DriveInfo(Path.GetPathRoot(Path.GetFullPath(_directory))!).AvailableFreeSpace - _options.FreeSpaceReserveBytes;
+            return VolumeAvailableBytes(_directory) - _options.FreeSpaceReserveBytes;
         }
         catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
         {
             return long.MaxValue;
         }
+    }
+
+    /// <summary>
+    /// The free bytes of the volume that holds <paramref name="directory"/>: on Linux the mount point with the longest
+    /// matching path (an overlay directory on its own volume is not measured on the root file system), else its drive.
+    /// </summary>
+    public static long VolumeAvailableBytes(string directory)
+    {
+        var full = Path.GetFullPath(directory);
+        if (!OperatingSystem.IsWindows())
+        {
+            var mount = DriveInfo.GetDrives()
+                .Where(d => d.IsReady && Under(full, d.RootDirectory.FullName))
+                .OrderByDescending(d => d.RootDirectory.FullName.Length)
+                .FirstOrDefault();
+            if (mount is not null)
+            {
+                return mount.AvailableFreeSpace;
+            }
+        }
+
+        return new DriveInfo(Path.GetPathRoot(full)!).AvailableFreeSpace;
+
+        static bool Under(string path, string root) =>
+            root == "/" || path.Equals(root.TrimEnd('/'), StringComparison.Ordinal) || path.StartsWith(root.TrimEnd('/') + "/", StringComparison.Ordinal);
     }
 
     public void Dispose()

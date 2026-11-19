@@ -16,6 +16,10 @@ public sealed class InstantRecoveryControl(
     IDbContextFactory<AppDbContext> dbFactory, SessionQueue queue, NfsServerHost nfs, IOptions<InstantRecoveryOptions> options, TimeProvider time)
 {
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _wake = new();
+    private readonly ConcurrentDictionary<Guid, LiveInstantRecovery> _live = new();
+
+    /// <summary>The instant recoveries this process runs now (for metrics): state, age, overlay, last I/O, migration progress.</summary>
+    public IReadOnlyCollection<LiveInstantRecovery> Live => [.. _live.Values];
 
     /// <summary>
     /// Queues an instant recovery: its session and its catalog row. The datastore (<c>bdfu-ir-&lt;id&gt;</c>), the export
@@ -150,14 +154,34 @@ public sealed class InstantRecoveryControl(
         await signal.WaitAsync(interval, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>The session ended: its wake signal goes.</summary>
+    /// <summary>The session ended: its wake signal and its live state go.</summary>
     internal void Forget(Guid sessionId)
     {
+        _live.TryRemove(sessionId, out _);
         if (_wake.TryRemove(sessionId, out var signal))
         {
             signal.Dispose();
         }
     }
+
+    /// <summary>Records (or refreshes) a running instant recovery's state from the catalog.</summary>
+    internal LiveInstantRecovery Track(InstantRecoveryEntity recovery)
+    {
+        var live = _live.GetOrAdd(recovery.SessionId, id => new LiveInstantRecovery(id));
+        live.Vms = string.Join(", ", recovery.Vms.Select(v => v.Name));
+        live.Host = recovery.HostName ?? recovery.HostId;
+        live.CreatedUtc = recovery.CreatedUtc;
+        live.OverlayLimitBytes = recovery.OverlayLimitBytes;
+        live.State = recovery.State.ToString();
+        if (recovery.State != InstantRecoveryState.Migrating)
+        {
+            live.MigrationProgress = null;
+        }
+
+        return live;
+    }
+
+    internal LiveInstantRecovery? Find(Guid sessionId) => _live.GetValueOrDefault(sessionId);
 }
 
 /// <summary>An instant recovery to start: the vCenter and ESXi host, the restore points to run, where the VMs go in vCenter.</summary>
@@ -176,3 +200,25 @@ public sealed record InstantRecoveryRequest(Guid ConnectionId, string HostId, IR
 
 /// <summary>A VM of an instant recovery: its restore point, its name in vCenter, its NICs' networks (NIC device key → network).</summary>
 public sealed record InstantRecoveryVmRequest(Guid RestorePointId, string Name, IReadOnlyDictionary<string, string>? NetworkMap = null);
+
+/// <summary>What the metrics show of an instant recovery this process runs.</summary>
+public sealed class LiveInstantRecovery(Guid sessionId)
+{
+    public Guid SessionId { get; } = sessionId;
+
+    public string Vms { get; set; } = string.Empty;
+
+    public string Host { get; set; } = string.Empty;
+
+    public DateTimeOffset CreatedUtc { get; set; }
+
+    public long? OverlayLimitBytes { get; set; }
+
+    public string State { get; set; } = nameof(InstantRecoveryState.Starting);
+
+    /// <summary>The served file system (overlay size, last I/O); null while it is not served.</summary>
+    public Backdafuckup.InstantRecovery.InstantRecoveryFileSystem? FileSystem { get; set; }
+
+    /// <summary>0–1 while a Storage vMotion runs.</summary>
+    public double? MigrationProgress { get; set; }
+}

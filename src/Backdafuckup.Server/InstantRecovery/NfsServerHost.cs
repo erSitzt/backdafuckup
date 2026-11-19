@@ -61,6 +61,24 @@ public sealed class NfsServerHost : IHostedService, IAsyncDisposable
     /// <summary>Which hosts reached which ports, for "the host never reached port 2049" in a failed mount.</summary>
     public NfsClientLog Clients { get; }
 
+    /// <summary>Raised for every NFS 3 call answered (metrics).</summary>
+    public event Action<NfsCallRecord>? Called;
+
+    /// <summary>Open TCP connections of the NFS, MOUNT and portmapper listeners.</summary>
+    public int Connections
+    {
+        get
+        {
+            RpcListener[] listeners;
+            lock (_listeners)
+            {
+                listeners = [.. _listeners];
+            }
+
+            return listeners.Sum(l => l.Connections);
+        }
+    }
+
     public string OverlayDirectory { get; }
 
     public InstantRecoveryOptions Options => _options;
@@ -195,7 +213,7 @@ public sealed class NfsServerHost : IHostedService, IAsyncDisposable
         var portmapper = new PortmapperProgram();
         var limits = new NfsServerLimits { MaxTransfer = o.MaxTransferBytes, PreferredTransfer = o.MaxTransferBytes };
         var dispatcher = new RpcDispatcher(
-            [portmapper, new MountProgram(Exports), new Nfs3Program(Exports, limits)],
+            [portmapper, new MountProgram(Exports), new Nfs3Program(Exports, limits, record => Called?.Invoke(record))],
             log: message => _logger.LogDebug("NFS: {Message}", message),
             replies: new RpcReplyCache(o.ReplyCacheLifetime));
         var rpc = new RpcServerOptions { MaxRecordBytes = o.MaxTransferBytes + 4096, MaxInFlight = o.MaxInFlightPerConnection };
@@ -261,7 +279,10 @@ public sealed class NfsServerHost : IHostedService, IAsyncDisposable
             throw new NfsHostException(Explain(ex, role), ex);
         }
 
-        _listeners.Add(bound);
+        lock (_listeners)
+        {
+            _listeners.Add(bound);
+        }
         return bound;
 
         void Contact(IPEndPoint remote, string transport)
@@ -394,7 +415,10 @@ public sealed class NfsServerHost : IHostedService, IAsyncDisposable
             await listener.DisposeAsync().ConfigureAwait(false);
         }
 
-        _listeners.Clear();
+        lock (_listeners)
+        {
+            _listeners.Clear();
+        }
     }
 
     private byte[] LoadOrCreateHandleKey()

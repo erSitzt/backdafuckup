@@ -266,13 +266,24 @@ if ($code -ne 0) {{ throw "psql failed with $code" }}
 """
 
 
-def running_sessions(target: Target, args) -> int:
-    """Sessions that a restart would break (0 if the catalog is not there yet)."""
+def running_sessions(target: Target, args) -> tuple[int, list[str]]:
+    """
+    Sessions that a restart would break, and the VMs of running instant recoveries (a restart only pauses their disks:
+    the sessions resume). (0, []) if the catalog is not there yet.
+    """
     secret = load_secrets(args.env).get("BDFU_PG_SUPERUSER_PASSWORD", "")
-    out = target.ps(psql("select count(*) from information_schema.tables where table_name = 'sessions'", superuser_password=secret)).strip()
-    if out != "1":
-        return 0
-    return int(target.ps(psql("select count(*) from sessions where state in ('Running','Queued','Stopping')", superuser_password=secret)).strip() or "0")
+    out = target.ps(psql("select count(*) from information_schema.tables where table_name in ('sessions', 'instant_recoveries')", superuser_password=secret)).strip()
+    if out == "0":
+        return 0, []
+    if out == "1":
+        return int(target.ps(psql("select count(*) from sessions where state in ('Running','Queued','Stopping')", superuser_password=secret)).strip() or "0"), []
+    others = int(target.ps(psql(
+        "select count(*) from sessions where state in ('Running','Queued','Stopping') and kind <> 'InstantRecovery'", superuser_password=secret)).strip() or "0")
+    instant = target.ps(psql(
+        "select v.name || ' on ' || coalesce(r.host_name, r.host_id) || ' (' || r.state || ')' from instant_recoveries r "
+        "join instant_recovery_vms v on v.session_id = r.session_id where r.state in ('Starting','Running','Migrating','Stopping') order by v.name",
+        superuser_password=secret)).strip()
+    return others, [line for line in instant.splitlines() if line.strip()]
 
 
 def cmd_copy_repo(target: Target, args) -> None:
@@ -324,8 +335,16 @@ if ($code -ne 0) {{ throw "pg_restore failed with $code" }}
 
 def cmd_install(target: Target, args) -> None:
     """Installs or updates the server: files to Program Files, config and data to ProgramData, the Windows service."""
-    if (count := running_sessions(target, args)) and not args.force:
+    count, instant = running_sessions(target, args)
+    if count and not args.force:
         raise SystemExit(f"{count} session(s) are running on {target.host}; not restarting (use --force).")
+    if instant and not (args.force or args.pause_instant_recoveries):
+        raise SystemExit(
+            f"Instant recoveries run on {target.host}: {'; '.join(instant)}.\n"
+            "Their VMs' disk I/O pauses while the service restarts (about half a minute); they resume afterwards. "
+            "Migrate or stop them first, or run again with --pause-instant-recoveries.")
+    if instant:
+        print(f"Restarting under running instant recoveries ({'; '.join(instant)}): their disk I/O pauses until the service is back.", flush=True)
     publish = pathlib.Path(args.publish)
     archive = CACHE / "backdafuckup-win-x64.zip"
     CACHE.mkdir(parents=True, exist_ok=True)
@@ -452,6 +471,8 @@ def main() -> None:
     install.add_argument("--publish", required=True, help="dotnet publish output for win-x64")
     install.add_argument("--data", help="data folder of an existing installation (keys, certificate) to take over")
     install.add_argument("--force", action="store_true", help="restart even while sessions run")
+    install.add_argument("--pause-instant-recoveries", action="store_true",
+                         help="restart while instant recoveries run (their VMs' disk I/O waits for the service; other sessions still need --force)")
     args = parser.parse_args()
 
     env = load_env(args.env)
