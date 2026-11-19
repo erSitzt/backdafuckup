@@ -424,10 +424,14 @@ public sealed class StorageSystems(
         s.PinnedSpki ?? [], volumes, enabled,
         [.. ArrayReaderStates.All.Select(r => ArrayReaderStates.ToDto(ArrayReaderStates.Find(s, r), s.Options))]);
 
-    /// <summary>A warning when no snapshot feature (HPE "Virtual Copy") is licensed or it has expired; nothing is blocked.</summary>
+    /// <summary>
+    /// A warning when no snapshot feature (HPE "Virtual Copy", or "All features …" as the B10000 lists its licence) is
+    /// licensed or it has expired; nothing is blocked.
+    /// </summary>
     private static string? LicenseWarning(ArrayInfo facts)
     {
-        var snapshot = facts.Licenses.FirstOrDefault(l => l.Name.Contains("Virtual Copy", StringComparison.OrdinalIgnoreCase) || l.Name.Contains("Snapshot", StringComparison.OrdinalIgnoreCase));
+        var snapshot = facts.Licenses.FirstOrDefault(l => l.Name.Contains("Virtual Copy", StringComparison.OrdinalIgnoreCase) || l.Name.Contains("Snapshot", StringComparison.OrdinalIgnoreCase)
+                                                          || l.Name.StartsWith("All features", StringComparison.OrdinalIgnoreCase));
         return snapshot is null
             ? $"The array lists no snapshot licence ({(facts.Licenses.Count == 0 ? "no licences reported" : string.Join(", ", facts.Licenses.Select(l => l.Name)))}); snapshots may be refused."
             : snapshot.ExpiresUtc is { } expires && expires < DateTimeOffset.UtcNow ? $"The licence {snapshot.Name} expired on {expires:yyyy-MM-dd}." : null;

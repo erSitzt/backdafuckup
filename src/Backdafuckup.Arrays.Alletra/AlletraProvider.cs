@@ -72,11 +72,15 @@ public sealed class AlletraProvider(
                 continue;
             }
 
+            // The B10000 (OS 10.5) gives {"ms": …, "tz": "+0100"}; other versions a date text.
+            var expiresMs = AlletraClient.Long(feature?["expiration"]?["ms"]);
             var expires = AlletraClient.Text(feature?["expiryDate"]) ?? AlletraClient.Text(feature?["expiration"]) ?? AlletraClient.Text(feature?["expires"]);
-            licenses.Add(new ArrayLicense(name, DateTimeOffset.TryParse(expires, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var when) ? when : null));
+            licenses.Add(new ArrayLicense(name, expiresMs is { } ms ? DateTimeOffset.FromUnixTimeMilliseconds(ms)
+                : DateTimeOffset.TryParse(expires, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var when) ? when : null));
         }
 
-        var timeout = server?["timeout"] is JsonValue t && t.TryGetValue<int>(out var seconds) ? TimeSpan.FromSeconds(seconds) : (TimeSpan?)null;
+        // In minutes: a B10000 (OS 10.5) says 15 here and sessionTimeout 15 in its WSAPI 1.x configuration (minutes).
+        var timeout = server?["timeout"] is JsonValue t && t.TryGetValue<int>(out var minutes) && minutes > 0 ? TimeSpan.FromMinutes(minutes) : (TimeSpan?)null;
         return new ArrayInfo(
             AlletraClient.Text(server?["systemName"]) ?? AlletraClient.Text(system?["name"]) ?? client.Endpoint,
             AlletraClient.Text(server?["systemModel"]) ?? AlletraClient.Text(server?["hwmodel"]) ?? "HPE Alletra",

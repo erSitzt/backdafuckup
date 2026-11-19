@@ -48,6 +48,9 @@ public sealed class FakeAlletra
 
     public List<JsonObject> DomainSets { get; } = [];
 
+    /// <summary><c>licenses.consolidatedFeatures</c> of <c>/systems</c>.</summary>
+    public JsonArray Licenses { get; set; } = new(new JsonObject { ["name"] = "Virtual Copy" }, new JsonObject { ["name"] = "Remote Copy", ["expiryDate"] = "2027-01-31T00:00:00Z" });
+
     public Dictionary<string, JsonObject> Volumes { get; } = new(StringComparer.Ordinal);
 
     public Dictionary<string, JsonObject> Vluns { get; } = new(StringComparer.Ordinal);
@@ -120,7 +123,8 @@ public sealed class FakeAlletra
             if (Refuse?.Invoke($"{method.Method} {path}") is var (refusedStatus, refusedMessage))
             {
                 Requests.Add($"{method.Method} {path} (refused: {(int)refusedStatus})");
-                return (refusedStatus, new JsonObject { ["message"] = refusedMessage }, null);
+                // Localised as the B10000 sends its errors: the sentence in "default".
+                return (refusedStatus, new JsonObject { ["message"] = new JsonObject { ["key"] = "REFUSED", ["default"] = refusedMessage }, ["resourceUri"] = string.Empty, ["data"] = null }, null);
             }
 
             if (method == HttpMethod.Post && path == "/api/v3/credentials")
@@ -153,13 +157,13 @@ public sealed class FakeAlletra
                     return (HttpStatusCode.OK, new JsonObject
                     {
                         ["systemName"] = "alletra-test", ["systemModel"] = "HPE Alletra Storage MP B10000", ["systemSerial"] = "CZ0000TEST",
-                        ["systemWwn"] = "2FF70002AC000001", ["osVersion"] = new JsonObject { ["display"] = "10.4.2" }, ["timeout"] = 1800,
+                        ["systemWwn"] = "2FF70002AC000001", ["osVersion"] = new JsonObject { ["display"] = "10.4.2" }, ["timeout"] = 30,
                     }, null);
                 case ("GET", "systems", 3):
                     return (HttpStatusCode.OK, List([new JsonObject
                     {
                         ["uid"] = "sys1", ["name"] = "alletra-test", ["systemWWN"] = "2FF70002AC000001", ["version"] = new JsonObject { ["display"] = "10.4.2" },
-                        ["licenses"] = new JsonObject { ["consolidatedFeatures"] = new JsonArray(new JsonObject { ["name"] = "Virtual Copy" }, new JsonObject { ["name"] = "Remote Copy", ["expiryDate"] = "2027-01-31T00:00:00Z" }) },
+                        ["licenses"] = new JsonObject { ["consolidatedFeatures"] = Licenses.DeepClone() },
                     }]), null);
                 case ("GET", "volumes", 3):
                     return (HttpStatusCode.OK, List(Volumes.Values), null);
@@ -293,7 +297,12 @@ public sealed class FakeAlletra
         {
             ["uid"] = uid, ["status"] = failed is null ? "STATE_FINISHED" : "STATE_FAILED",
             ["createdUids"] = createdUid is null ? new JsonArray() : new JsonArray(createdUid),
-            ["detailsMap"] = new JsonObject { ["message"] = new JsonObject { ["default"] = failed ?? "done" } },
+            // As the B10000 gives it: numbered entries, the last one with the outcome.
+            ["detailsMap"] = new JsonObject
+            {
+                ["0"] = new JsonObject { ["time"] = new JsonObject { ["ms"] = 1795100000000, ["tz"] = "+0100" }, ["message"] = new JsonObject { ["key"] = "TASK_CREATED", ["default"] = "Created" } },
+                ["1"] = new JsonObject { ["message"] = new JsonObject { ["key"] = failed is null ? "TASK_COMPLETED" : "TASK_FAILED", ["default"] = failed ?? "Completed" } },
+            },
         };
         return (HttpStatusCode.Accepted, null, $"/api/v3/tasks/{uid}");
     }
@@ -311,7 +320,10 @@ public sealed class FakeAlletra
         {
             var text = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var body = string.IsNullOrEmpty(text) ? null : JsonNode.Parse(text);
-            var (status, answer, location) = array.Dispatch(request.Method, request.RequestUri!.AbsolutePath, request.Headers.Authorization?.ToString(), body);
+            // The B10000 (OS 10.5) refuses any /api/v3 request without a media type, a GET too.
+            var (status, answer, location) = request.RequestUri!.AbsolutePath.StartsWith("/api/v3/", StringComparison.Ordinal) && request.Content?.Headers.ContentType is null
+                ? (HttpStatusCode.BadRequest, new JsonObject { ["message"] = new JsonObject { ["key"] = "MISSING_MEDIA_TYPE_HEADER", ["default"] = "Missing media type header" }, ["resourceUri"] = string.Empty, ["data"] = null }, (string?)null)
+                : array.Dispatch(request.Method, request.RequestUri!.AbsolutePath, request.Headers.Authorization?.ToString(), body);
             var response = new HttpResponseMessage(status)
             {
                 Content = answer is null ? new StringContent(string.Empty) : new StringContent(answer.ToJsonString(), Encoding.UTF8, "application/json"),

@@ -39,7 +39,8 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
             {
                 var name = h["name"]?.GetValue<string>() ?? string.Empty;
                 var iqns = paths.Where(p => p["hostName"]?.GetValue<string>() == name).Select(p => p["address"]?.GetValue<string>())
-                    .OfType<string>().Where(a => a.StartsWith("iqn.", StringComparison.OrdinalIgnoreCase) || a.StartsWith("eui.", StringComparison.OrdinalIgnoreCase)).ToList();
+                    .OfType<string>().Where(a => a.StartsWith("iqn.", StringComparison.OrdinalIgnoreCase) || a.StartsWith("eui.", StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToList(); // one host path per array port
                 return new ArrayHost(h["uid"]?.GetValue<string>() ?? string.Empty, name, iqns, h["persona"]?["name"]?.GetValue<string>(), h["domain"]?.GetValue<string>());
             }),
         ];

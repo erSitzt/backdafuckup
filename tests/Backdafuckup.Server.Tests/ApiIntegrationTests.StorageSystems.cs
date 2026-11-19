@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.Net;
 using System.Net.Http.Json;
 using Backdafuckup.Contracts;
@@ -27,6 +28,8 @@ public sealed partial class ApiIntegrationTests
     {
         var client = await SignedInClientAsync();
         var array = Alletra;
+        // The licence list as a B10000 gives it: no "Virtual Copy", but all features (no warning).
+        array.Licenses = [new JsonObject { ["name"] = "All features including SED Encryption", ["expiration"] = new JsonObject { ["ms"] = 2147483647000, ["tz"] = "+0100" } }];
         var srVolume = array.AddVolume("xcp-sr1", SrWwn, 512 * 1024);
         var dsVolume = array.AddVolume("vdi-ds1", DatastoreWwn, 1024 * 1024);
         array.AddVolume("unrelated", "60002AC0000000000000002400019C45", 1024);

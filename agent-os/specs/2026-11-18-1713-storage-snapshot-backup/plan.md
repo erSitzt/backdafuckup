@@ -95,6 +95,18 @@ A B10000 can replicate synchronously with a second array (Remote Copy with a quo
 - **The proxy.** Its host object exists on each array that may take the snapshot, and it reaches that array's iSCSI ports (Remote Copy runs on its own ports).
 - **Proposed, until it is seen:** the array path takes a replicated volume only on the array where `rcopyStatus` says it is the source, else the VM uses the normal path with the reason in the log; the values are filled in once seen.
 
+### Seen on both arrays (2026-11-19, read-only, browse account)
+
+- **Active Peer Persistence.** WSAPI 1.x shows the Remote Copy groups with their mode, state, each volume's `syncStatus` and the policies (`activeActive` and others). Replicated both ways, each array is primary (role 1) for the volumes made on it and holds the other array's as secondary (role 2; group name with a `.r<id>` suffix).
+- **`rcopyStatus`** on `/api/v3/volumes` is `none`, `primary` or `secondary`.
+- **WWN:** confirmed on both arrays: every replicated volume has the same WWN on both, the WWN of the array where it was made (that array's system WWN in its last digits). Roles are mirrored (primary on one, secondary on the other).
+- **Exported from both arrays:** each replicated volume is presented by both arrays to the same hosts (mostly through host sets), so the hypervisors see every LUN over paths to both. A proxy's host object therefore has to exist on both arrays.
+- **Role and sync state only through WSAPI 1.x:** `/api/v1/remotecopygroups` (its own session: `POST /api/v1/credentials`, header `X-HP3PAR-WSAPI-SessionKey`; a v3 key gets 403 code 6). v3 lists the groups only as application sets of the same names, without role or state.
+- **No virtual domains:** every object is in domain `-`. A least-privilege account scoped to a domain needs that domain made first.
+- **WSAPI v3 quirks** (fixed in the client, 2026-11-19): every `/api/v3` call needs a `Content-Type`, a GET too (else HTTP 400 `MISSING_MEDIA_TYPE_HEADER`); errors and task messages are `{key, default}`; a task's `detailsMap` has numbered entries; licences say "All features including …" with `{"ms", "tz"}` expiries; `/server/info` `timeout` is in minutes; a host has one host path per array port.
+
+**What follows for the design:** take the snapshot on the array where the volume is `primary`. Use the secondary only while its group is started and the volume synced (value 3 here; to be confirmed with a stopped group, or from HPE's WSAPI 1.x reference). The mapping by WWN has to expect the same WWN on both arrays and pick the primary side. Next: a read-only watch of both arrays during a storage-snapshot backup of the other product, if it uses them at all; then the design for adding both arrays (one volume per WWN on each, the primary one used).
+
 ### Later: a Windows proxy for physical hosts (decided 2026-11-19)
 
 Existing physical Windows servers (FC HBAs or iSCSI) are to read array snapshots directly. A separate spec after this one: the agent on Windows (service, self-update), disks by SCSI serial (`IOCTL_STORAGE_QUERY_PROPERTY`), SAN policy OfflineAll and no automount checked before any LUN is presented, every snapshot disk kept offline and read-only, the Microsoft iSCSI initiator, FC through host objects with the HBAs' WWNs (made by the admin, like iSCSI ones), MPIO. No HotAdd.

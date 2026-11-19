@@ -43,6 +43,29 @@ public sealed class AlletraTests
     }
 
     [Fact]
+    public async Task Answers_shaped_as_a_b10000_gives_them_are_read()
+    {
+        // Seen on a B10000 (OS 10.5.51): licences with {"ms", "tz"} expiries, privileges per domain ("all"), and
+        // every /api/v3 call refused without a media type (the fake refuses it too, so every test here covers that).
+        var array = new FakeAlletra
+        {
+            Licenses =
+            [
+                new JsonObject { ["name"] = "All features including SED Encryption", ["expiration"] = new JsonObject { ["ms"] = 2147483647000, ["tz"] = "+0100" } },
+                new JsonObject { ["name"] = "Thin Provisioning (102492160 GiB)", ["expiration"] = new JsonObject { ["ms"] = 1863907200000, ["tz"] = "+0100" }, ["sizeOrCount"] = "102492160 GiB" },
+            ],
+            Privileges = [new JsonObject { ["domain"] = "all", ["domainId"] = 0, ["role"] = "browse", ["roleId"] = 2, ["localizedRole"] = new JsonObject { ["key"] = "USER_ROLE_BROWSE", ["default"] = "browse" } }],
+        };
+        var (provider, settings) = Connect(array);
+        var info = await provider.TestConnectionAsync(settings, Ct);
+
+        Assert.Equal(["All features including SED Encryption", "Thin Provisioning (102492160 GiB)"], info.Licenses.Select(l => l.Name));
+        Assert.Equal(DateTimeOffset.FromUnixTimeMilliseconds(1863907200000), info.Licenses[1].ExpiresUtc);
+        Assert.Equal(["browse in all domains"], info.Privileges);
+        Assert.DoesNotContain(array.Requests, r => r.Contains("refused", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task A_wrong_password_names_the_array_and_the_account()
     {
         var array = new FakeAlletra();

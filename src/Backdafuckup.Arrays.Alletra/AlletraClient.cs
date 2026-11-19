@@ -139,7 +139,7 @@ internal sealed partial class AlletraClient : IAsyncDisposable
             try
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                using var request = new HttpRequestMessage(HttpMethod.Delete, $"api/v3/credentials/{Uri.EscapeDataString(key)}");
+                using var request = new HttpRequestMessage(HttpMethod.Delete, $"api/v3/credentials/{Uri.EscapeDataString(key)}") { Content = EmptyJson() };
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                 using var response = await _http.SendAsync(request, timeout.Token).ConfigureAwait(false);
             }
@@ -178,6 +178,14 @@ internal sealed partial class AlletraClient : IAsyncDisposable
 
     internal static bool? Bool(JsonNode? node) => node is JsonValue v && v.TryGetValue<bool>(out var b) ? b : null;
 
+    /// <summary>A localised text for people: its <c>default</c> (the sentence), else its <c>key</c>, or a plain string.</summary>
+    internal static string? Readable(JsonNode? node) => node switch
+    {
+        JsonValue v when v.TryGetValue<string>(out var s) => s,
+        JsonObject o => (o["default"] ?? o["key"]) is JsonValue inner && inner.TryGetValue<string>(out var t) ? t : null,
+        _ => null,
+    };
+
     /// <summary>A localised value (<c>{"key": "…", "default": "…"}</c>) or a plain string.</summary>
     internal static string? Text(JsonNode? node) => node switch
     {
@@ -213,9 +221,16 @@ internal sealed partial class AlletraClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// The task's last message: <c>detailsMap</c> holds numbered entries (<c>{"0": {"time", "message"}, "1": …}</c>),
+    /// the last one says why it failed.
+    /// </summary>
     private static string TaskMessage(JsonObject task) =>
-        (task["detailsMap"]?["message"] is JsonObject message ? message["default"]?.GetValue<string>() : null)
-        ?? Text(task["state"]?["detailed"]?.AsArray().LastOrDefault())
+        (task["detailsMap"] is JsonObject details
+            ? details.Where(kv => kv.Value is JsonObject).OrderBy(kv => int.TryParse(kv.Key, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i) ? i : int.MaxValue)
+                .Select(kv => Readable(kv.Value!["message"])).LastOrDefault(m => m is not null) ?? Readable(details["message"])
+            : null)
+        ?? (task["state"]?["detailed"] is JsonArray detailed ? Readable(detailed.LastOrDefault()) : null)
         ?? "no message";
 
     private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, object? body, CancellationToken cancellationToken)
@@ -316,7 +331,7 @@ internal sealed partial class AlletraClient : IAsyncDisposable
         try
         {
             var node = JsonNode.Parse(text);
-            return Text(node?["message"]) ?? Text(node?["desc"]) ?? Text(node?["description"]) ?? Text(node?["detail"]);
+            return Readable(node?["message"]) ?? Readable(node?["desc"]) ?? Readable(node?["description"]) ?? Readable(node?["detail"]);
         }
         catch (JsonException)
         {
@@ -324,9 +339,20 @@ internal sealed partial class AlletraClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// An empty body that carries the media type: the array refuses any /api/v3 request without one, a GET too
+    /// (HTTP 400 MISSING_MEDIA_TYPE_HEADER, seen on a B10000 with OS 10.5).
+    /// </summary>
+    private static ByteArrayContent EmptyJson()
+    {
+        var content = new ByteArrayContent([]);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        return content;
+    }
+
     private HttpRequestMessage Request(HttpMethod method, string path, object? body)
     {
-        var request = new HttpRequestMessage(method, path) { Content = body is null ? null : JsonContent.Create(body) };
+        var request = new HttpRequestMessage(method, path) { Content = body is null ? EmptyJson() : JsonContent.Create(body) };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _key);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         return request;
