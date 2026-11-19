@@ -294,8 +294,10 @@ public sealed class RpcListener : IAsyncDisposable
             {
                 client = await _tcp.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException)
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException
+                                       || (ex is InvalidOperationException && cancellationToken.IsCancellationRequested))
             {
+                // Stopped; also "not listening" when the listener was stopped before this loop first got to accept.
                 break;
             }
 

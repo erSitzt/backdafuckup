@@ -16,6 +16,19 @@ public sealed class NfsProtocolTests
     // ---- XDR and record marking ----
 
     [Fact]
+    public async Task A_listener_disposed_right_after_it_started_stops_cleanly()
+    {
+        // The accept loop starts on the thread pool; a dispose before it first accepts must not fail with "not listening".
+        var dispatcher = new RpcDispatcher([new PortmapperProgram()]);
+        for (var i = 0; i < 200; i++)
+        {
+            var listener = new RpcListener(new IPEndPoint(IPAddress.Loopback, 0), dispatcher, new RpcServerOptions(), udp: i % 2 == 0);
+            listener.Start();
+            await listener.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public void Xdr_pads_opaque_data_and_refuses_lengths_beyond_their_limit()
     {
         var writer = new XdrWriter().WriteString("abcde").WriteUInt64(0x0102030405060708).WriteBool(true);
