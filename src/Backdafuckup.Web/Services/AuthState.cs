@@ -133,6 +133,17 @@ public static class Fmt
         return value.ToString(unit == 0 ? "0" : "0.0", CultureInfo.CurrentCulture) + " " + units[unit];
     }
 
+    /// <summary>A VM's power state in one wording for both platforms (XAPI: Running/Halted/Suspended/Paused; vSphere: poweredOn/poweredOff/suspended).</summary>
+    public static string Power(string? state) => state switch
+    {
+        "Running" or "poweredOn" => "Running",
+        "Halted" or "poweredOff" => "Off",
+        "Suspended" or "suspended" => "Suspended",
+        "Paused" => "Paused",
+        null or "" => "–",
+        var other => other,
+    };
+
     public static string Rate(double? bytesPerSecond) => bytesPerSecond is > 0 and var rate ? Bytes((long)rate) + "/s" : "–";
 
     public static string Ratio(double? ratio) => ratio switch

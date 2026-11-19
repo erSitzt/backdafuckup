@@ -81,6 +81,7 @@ else
             }
         </MudSelect>
         <MudTextField @bind-Value="_filter" Placeholder="Filter VMs" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Variant="Variant.Outlined" Margin="Margin.Dense" Immediate="true" Style="min-width:220px" />
+        <MudSwitch T="bool" @bind-Value="_withoutAgent" Color="Color.Primary" Label="@($"VMs without agent ({WithoutAgentCount})")" />
         <MudSpacer />
         <MudSelect T="Guid?" @bind-Value="_credentialId" Label="Windows credentials" Variant="Variant.Outlined" Margin="Margin.Dense" Style="min-width:240px">
             @foreach (var credential in _credentials)
@@ -119,7 +120,7 @@ else
         <RowTemplate>
             <MudTd>
                 @context.Vm.Name
-                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block">@context.Vm.Properties.GetValueOrDefault("powerState")</MudText>
+                <span class="cell-sub">@Fmt.Power(context.Vm.Properties.GetValueOrDefault("powerState"))</span>
             </MudTd>
             <MudTd>
                 @if (context.Agent is null)
@@ -185,10 +186,21 @@ else
     private AgentTestResultDto? _test;
     private string? _testHost;
 
-    private IEnumerable<VmRow> Rows => _vms
+    private bool _withoutAgent;
+
+    /// <summary>
+    /// VMs with an agent first; those without only when asked for (they are most of a pool), when nothing has an agent yet,
+    /// when the filter finds them, or while selected for an installation.
+    /// </summary>
+    private IEnumerable<VmRow> Rows => AllRows
+        .Where(r => r.Agent is not null || _withoutAgent || _filter.Length > 0 || _selected.Contains(r) || AllRows.All(a => a.Agent is null))
+        .OrderBy(r => r.Agent is null).ThenBy(r => r.Vm.Name, StringComparer.OrdinalIgnoreCase);
+
+    private IEnumerable<VmRow> AllRows => _vms
         .Where(v => v.Kind == "Vm" && (_filter.Length == 0 || v.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase)))
-        .OrderBy(v => v.Name)
         .Select(v => new VmRow(v, _agents?.FirstOrDefault(a => a.VmNativeId == v.NativeId)));
+
+    private int WithoutAgentCount => _vms.Count(v => v.Kind == "Vm" && _agents?.Any(a => a.VmNativeId == v.NativeId) != true);
 
     protected override async Task OnInitializedAsync()
     {

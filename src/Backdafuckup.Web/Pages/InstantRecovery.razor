@@ -135,45 +135,99 @@ else if (_recoveries.Count == 0)
 }
 else
 {
-    <MudTable Items="_recoveries" Dense="true" Hover="true" Elevation="1">
-        <HeaderContent>
-            <MudTh>VM</MudTh><MudTh>Runs on</MudTh><MudTh>Datastore</MudTh><MudTh>Age</MudTh><MudTh>Written</MudTh><MudTh>State</MudTh><MudTh></MudTh>
-        </HeaderContent>
-        <RowTemplate>
-            <MudTd>
-                @foreach (var vm in context.Vms)
-                {
-                    <div>@vm.Name</div>
-                    <span class="caption">@vm.SourceVmName, restore point of @Fmt.Time(vm.RestorePointCreatedUtc)</span>
-                }
-            </MudTd>
-            <MudTd>@context.ConnectionName<br /><span class="caption">@(context.HostName ?? context.HostId)</span></MudTd>
-            <MudTd>@context.DatastoreName<br /><span class="caption mono">@context.RemoteHost:@context.ExportPath</span></MudTd>
-            <MudTd>@(Ended(context) ? "–" : Fmt.Span(DateTimeOffset.UtcNow - context.CreatedUtc))</MudTd>
-            <MudTd>@(context.OverlayBytes is { } written ? Fmt.Bytes(written) : "–")@(context.OverlayLimitBytes is { } limit ? $" of {Fmt.Bytes(limit)}" : null)</MudTd>
-            <MudTd>
-                <StateChip State="@context.State" />
-                @if (context.Message is { } message)
-                {
-                    <br /><span class="caption">@message</span>
-                }
-            </MudTd>
-            <MudTd Style="white-space:nowrap">
-                @if (context.State == "Running")
-                {
-                    <MudTooltip Text="Move the VM to production storage while it runs (Storage vMotion)">
-                        <MudIconButton Icon="@Icons.Material.Filled.DriveFileMove" aria-label="Migrate" Size="Size.Small" Color="Color.Primary" OnClick="@(() => OpenMigrateAsync(context))" Disabled="_busy" />
+    var live = _recoveries.Where(r => !Ended(r)).ToList();
+    var ended = _recoveries.Where(Ended).OrderByDescending(r => r.UpdatedUtc).ToList();
+    @if (live.Count == 0)
+    {
+        <MudAlert Severity="Severity.Info" Dense="true" Class="mb-3">Nothing runs from a restore point now.</MudAlert>
+    }
+    else
+    {
+        <div class="cq mb-4">
+        <MudTable Items="live" Dense="true" Hover="true" Elevation="1">
+            <HeaderContent>
+                <MudTh>VM</MudTh><MudTh Class="c-760">Runs on</MudTh><MudTh Class="c-950">Datastore</MudTh><MudTh Class="num">Age</MudTh><MudTh Class="c-560">Written</MudTh><MudTh>State</MudTh><MudTh></MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd>
+                    @foreach (var vm in context.Vms)
+                    {
+                        <div>@vm.Name</div>
+                        <span class="cell-sub">@vm.SourceVmName, restore point of @Fmt.Time(vm.RestorePointCreatedUtc)</span>
+                    }
+                </MudTd>
+                <MudTd Class="c-760">@context.ConnectionName<span class="cell-sub">@(context.HostName ?? context.HostId)</span></MudTd>
+                <MudTd Class="c-950">
+                    <span class="nowrap">@context.DatastoreName</span>
+                    <span class="cell-sub mono">@context.RemoteHost:@context.ExportPath</span>
+                </MudTd>
+                <MudTd Class="num">@Fmt.Span(DateTimeOffset.UtcNow - context.CreatedUtc)</MudTd>
+                <MudTd Class="c-560" Style="min-width:140px">
+                    @(context.OverlayBytes is { } written ? Fmt.Bytes(written) : "–")
+                    @if (context.OverlayLimitBytes is { } limit && limit > 0)
+                    {
+                        var share = Math.Min(1, (context.OverlayBytes ?? 0) / (double)limit);
+                        <span class="cell-sub">of @Fmt.Bytes(limit)</span>
+                        <MudProgressLinear Value="@(share * 100)" Size="Size.Small" Rounded="true" Color="@(share > 0.9 ? Color.Error : share > 0.75 ? Color.Warning : Color.Primary)" />
+                    }
+                </MudTd>
+                <MudTd>
+                    <StateChip State="@context.State" />
+                    @if (context.Message is { } message)
+                    {
+                        <span class="cell-sub">@message</span>
+                    }
+                </MudTd>
+                <MudTd Style="white-space:nowrap; text-align:right">
+                    @if (context.State == "Running")
+                    {
+                        <MudTooltip Text="Move the VM to production storage while it runs (Storage vMotion)">
+                            <MudIconButton Icon="@Icons.Material.Filled.DriveFileMove" aria-label="Migrate" Size="Size.Small" Color="Color.Primary" OnClick="@(() => OpenMigrateAsync(context))" Disabled="_busy" />
+                        </MudTooltip>
+                        <MudTooltip Text="Stop: power off and remove the VM, unmount the datastore">
+                            <MudIconButton Icon="@Icons.Material.Filled.Stop" aria-label="Stop" Size="Size.Small" Color="Color.Error" OnClick="@(() => OpenStop(context))" Disabled="_busy" />
+                        </MudTooltip>
+                    }
+                    <MudTooltip Text="Session log">
+                        <MudIconButton Icon="@Icons.Material.Filled.Article" aria-label="Session log" Size="Size.Small" Href="@($"/sessions/{context.SessionId}")" />
                     </MudTooltip>
-                    <MudTooltip Text="Stop: power off and remove the VM, unmount the datastore">
-                        <MudIconButton Icon="@Icons.Material.Filled.Stop" aria-label="Stop" Size="Size.Small" Color="Color.Error" OnClick="@(() => OpenStop(context))" Disabled="_busy" />
-                    </MudTooltip>
-                }
-                <MudTooltip Text="Session log">
-                    <MudIconButton Icon="@Icons.Material.Filled.Article" aria-label="Session log" Size="Size.Small" Href="@($"/sessions/{context.SessionId}")" />
-                </MudTooltip>
-            </MudTd>
-        </RowTemplate>
-    </MudTable>
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+        </div>
+    }
+    @if (ended.Count > 0)
+    {
+        <MudExpansionPanels Elevation="1">
+            <MudExpansionPanel Text="@($"Finished ({ended.Count})")">
+                <div class="cq">
+                <MudTable Items="ended" Dense="true" Hover="true" Elevation="0">
+                    <HeaderContent><MudTh>VM</MudTh><MudTh>Ended</MudTh><MudTh Class="c-760">When</MudTh><MudTh Class="c-950">Ran on</MudTh><MudTh></MudTh></HeaderContent>
+                    <RowTemplate>
+                        <MudTd>
+                            @string.Join(", ", context.Vms.Select(v => v.Name))
+                            <span class="cell-sub">@string.Join(", ", context.Vms.Select(v => $"{v.SourceVmName}, restore point of {Fmt.Time(v.RestorePointCreatedUtc)}"))</span>
+                        </MudTd>
+                        <MudTd>
+                            <StateChip State="@context.State" />
+                            @if (context.Message is { } message)
+                            {
+                                <span class="cell-sub">@message</span>
+                            }
+                        </MudTd>
+                        <MudTd Class="c-760 nowrap">@Fmt.Time(context.UpdatedUtc)<span class="cell-sub">after @Fmt.Span(context.UpdatedUtc - context.CreatedUtc)</span></MudTd>
+                        <MudTd Class="c-950">@context.ConnectionName<span class="cell-sub">@(context.HostName ?? context.HostId)</span></MudTd>
+                        <MudTd Style="text-align:right">
+                            <MudTooltip Text="Session log">
+                                <MudIconButton Icon="@Icons.Material.Filled.Article" aria-label="Session log" Size="Size.Small" Href="@($"/sessions/{context.SessionId}")" />
+                            </MudTooltip>
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
+                </div>
+            </MudExpansionPanel>
+        </MudExpansionPanels>
+    }
 }
 
 @if (_migrate is { } migrating)

@@ -8,11 +8,11 @@
                 <th class="c-560">Started</th>
                 <th class="c-560 num">Duration</th>
                 <th class="c-1100 num">Processed</th>
-                <th class="c-1100 num">Read</th>
+                <th class="c-1300 num">Read</th>
                 <th class="c-560 num">Transferred</th>
                 <th class="c-950 num">Rate</th>
-                <th class="c-1100 num">Dedupe</th>
-                <th class="c-1100 num">Compression</th>
+                <th class="c-1300 num">Dedupe</th>
+                <th class="c-1300 num">Compression</th>
             </tr>
         </thead>
         <tbody>
@@ -43,11 +43,11 @@
                     </td>
                     <td class="c-560 num">@(day ? "–" : Fmt.Duration(s.StartedUtc, s.EndedUtc))</td>
                     <td class="c-1100 num">@Fmt.Bytes(m?.ProcessedBytes)</td>
-                    <td class="c-1100 num">@Fmt.Bytes(s.ReadBytes)</td>
+                    <td class="c-1300 num">@Fmt.Bytes(s.ReadBytes)</td>
                     <td class="c-560 num">@Fmt.Bytes(s.TransferredBytes)</td>
                     <td class="c-950 num">@Fmt.Rate(m?.ProcessingRate)</td>
-                    <td class="c-1100 num">@Fmt.Ratio(m?.DedupeRatio)</td>
-                    <td class="c-1100 num">@Fmt.Ratio(m?.CompressionRatio)</td>
+                    <td class="c-1300 num">@Fmt.Ratio(m?.DedupeRatio)</td>
+                    <td class="c-1300 num">@Fmt.Ratio(m?.CompressionRatio)</td>
                 </tr>
             }
         </tbody>

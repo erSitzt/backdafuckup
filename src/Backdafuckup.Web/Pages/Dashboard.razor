@@ -68,12 +68,12 @@ else
                         var used = r.TotalBytes is > 0 && r.FreeBytes is { } free ? 100.0 * (r.TotalBytes.Value - free) / r.TotalBytes.Value : 0;
                         <div class="mb-3">
                             <div class="d-flex align-center mb-1">
-                                <MudText Typo="Typo.body1" Style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">@r.Name@(r.Kind == "ScaleOut" ? $" (scale-out, {r.Extents} extents)" : "")</MudText>
+                                <MudText Typo="Typo.body1" Style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="@r.Name">@r.Name</MudText>
                                 <MudSpacer />
                                 <StateChip State="@r.State" />
                             </div>
                             <MudProgressLinear Color="@(used > 90 ? Color.Error : used > 75 ? Color.Warning : Color.Primary)" Value="@used" Size="Size.Medium" Rounded="true" />
-                            <span class="cell-sub mt-1">@($"{used:0} % used") · @Fmt.Bytes(r.FreeBytes) free of @Fmt.Bytes(r.TotalBytes) · @r.RestorePoints restore points</span>
+                            <span class="cell-sub mt-1">@($"{used:0} % used") · @Fmt.Bytes(r.FreeBytes) free of @Fmt.Bytes(r.TotalBytes) · @r.RestorePoints restore points@(r.Kind == "ScaleOut" ? $" · scale-out, {r.Extents} extents" : "")</span>
                         </div>
                     }
                     @if (_data.Repositories.Count == 0)

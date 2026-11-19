@@ -2,124 +2,260 @@
 @inject ApiClient Api
 
 <PageTitle>Inventory – backdafuckup</PageTitle>
-<PageHeader Title="Inventory" Description="The VMs, hosts, storage and networks of the pools and vCenters, as they report them." />
+<PageHeader Title="Inventory" Description="The VMs, hosts, storage and networks of the pools and vCenters, as they report them, and whether each VM has a backup." />
 
 @if (_pools is null)
 {
     <MudProgressLinear Indeterminate="true" />
 }
+else if (_pools.Count == 0)
+{
+    <MudAlert Severity="Severity.Info">Add a pool or vCenter under Backup Infrastructure → Virtualization first.</MudAlert>
+}
 else
 {
-    @foreach (var (pool, items) in _pools)
-    {
-        <MudPaper Class="pa-4 mb-4" Elevation="1">
-            <MudText Typo="Typo.h6" Class="mb-2">@pool.DisplayName</MudText>
-            <MudTabs Elevation="0" Rounded="true" TabPanelsClass="pt-2">
-                <MudTabPanel Text="@($"VMs ({items.Count(i => i.Kind == "Vm")})")">
-                    <MudTable Items="@items.Where(i => i.Kind == "Vm")" Dense="true" Hover="true" Elevation="0" Filter="@(new Func<InventoryItemDto, bool>(Matches))">
-                        <ToolBarContent>
-                            <MudTextField @bind-Value="_search" Placeholder="Search" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" />
-                        </ToolBarContent>
-                        <HeaderContent><MudTh>Name</MudTh><MudTh>Power</MudTh><MudTh>vCPU</MudTh><MudTh>Memory</MudTh><MudTh>Disks</MudTh><MudTh>CBT</MudTh></HeaderContent>
-                        <RowTemplate>
-                            <MudTd>@context.Name</MudTd>
-                            <MudTd>@context.Properties.GetValueOrDefault("powerState")</MudTd>
-                            <MudTd>@context.Properties.GetValueOrDefault("vcpus")</MudTd>
-                            <MudTd>@Fmt.Bytes(Long(context, "memoryBytes"))</MudTd>
-                            <MudTd>@context.Properties.GetValueOrDefault("diskCount") (@Fmt.Bytes(Long(context, "diskBytes")))</MudTd>
-                            <MudTd>@(context.Properties.GetValueOrDefault("cbtEnabled") == "True" ? "on" : "off")</MudTd>
-                        </RowTemplate>
-                    </MudTable>
-                </MudTabPanel>
-                <MudTabPanel Text="Storage">
-                    <MudSimpleTable Dense="true" Elevation="0">
-                        <thead><tr><th>Name</th><th>Type</th><th>Shared</th><th>Used</th><th>Size</th></tr></thead>
-                        <tbody>
-                            @foreach (var sr in items.Where(i => i.Kind == "Storage"))
-                            {
-                                <tr><td>@sr.Name</td><td>@sr.Properties.GetValueOrDefault("type")</td><td>@sr.Properties.GetValueOrDefault("shared")</td><td>@Fmt.Bytes(Long(sr, "physicalUtilisation"))</td><td>@Fmt.Bytes(Long(sr, "physicalSize"))</td></tr>
-                            }
-                        </tbody>
-                    </MudSimpleTable>
-                </MudTabPanel>
-                <MudTabPanel Text="Networks">
-                    @if (pool.Kind == "VSphere")
-                    {
-                    <MudSimpleTable Dense="true" Elevation="0">
-                        <thead><tr><th>Name</th><th>Type</th><th>Id</th></tr></thead>
-                        <tbody>
-                            @foreach (var net in items.Where(i => i.Kind == "Network"))
-                            {
-                                <tr><td>@net.Name</td><td>@(net.Properties.GetValueOrDefault("type") switch { "DistributedVirtualPortgroup" => "distributed port group", "OpaqueNetwork" => "NSX network", _ => "standard network" })</td><td class="mono">@net.NativeId</td></tr>
-                            }
-                        </tbody>
-                    </MudSimpleTable>
-                    }
-                    else
-                    {
-                    <MudSimpleTable Dense="true" Elevation="0">
-                        <thead><tr><th>Name</th><th>Bridge</th><th>MTU</th><th>NBD</th><th>UUID</th></tr></thead>
-                        <tbody>
-                            @foreach (var net in items.Where(i => i.Kind == "Network"))
-                            {
-                                var nbd = net.Properties.GetValueOrDefault("nbd");
-                                <tr>
-                                    <td>@net.Name</td><td>@net.Properties.GetValueOrDefault("bridge")</td><td>@net.Properties.GetValueOrDefault("mtu")</td>
-                                    <td><MudChip T="string" Size="Size.Small" Color="@(nbd == "tls" ? Color.Success : nbd == "insecure" ? Color.Warning : Color.Default)">@nbd</MudChip></td>
-                                    <td class="mono">@net.NativeId</td>
-                                </tr>
-                            }
-                        </tbody>
-                    </MudSimpleTable>
-                    }
-                </MudTabPanel>
-                <MudTabPanel Text="Hosts">
-                    <MudSimpleTable Dense="true" Elevation="0">
-                        <thead><tr><th>Name</th><th>Address</th>@if (pool.Kind == "VSphere")
-                            {
-                                <th>Cluster</th><th>Version</th><th>State</th>
-                            }</tr></thead>
-                        <tbody>
-                            @foreach (var host in items.Where(i => i.Kind == "Host"))
-                            {
-                                <tr>
-                                    <td>@host.Name</td><td>@host.Properties.GetValueOrDefault("address")</td>
+    <div class="d-flex flex-wrap align-center gap-3 mb-3">
+        <MudTextField @bind-Value="_search" Placeholder="Search by name, host or guest OS" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search"
+                      Immediate="true" Clearable="true" Variant="Variant.Outlined" Margin="Margin.Dense" Style="max-width:360px" />
+        <MudToggleGroup T="string" @bind-Value="_show" Size="Size.Small" Outlined="true" Color="Color.Primary">
+            <MudToggleItem Value="@("all")" Text="All VMs" />
+            <MudToggleItem Value="@("running")" Text="Running" />
+            <MudToggleItem Value="@("unprotected")" Text="Without backup" />
+        </MudToggleGroup>
+    </div>
+
+    <MudExpansionPanels MultiExpansion="true" Elevation="1">
+        @foreach (var (pool, items) in _pools)
+        {
+            var vms = items.Where(i => i.Kind == "Vm").ToList();
+            var shown = vms.Where(Shown).ToList();
+            <MudExpansionPanel Expanded="true" Class="mb-3">
+                <TitleContent>
+                    <div class="d-flex flex-wrap align-center gap-2">
+                        <MudIcon Icon="@(pool.Kind == "VSphere" ? Icons.Material.Filled.Cloud : Icons.Material.Filled.Dns)" Size="Size.Small" Color="Color.Secondary" />
+                        <MudText Typo="Typo.h6">@pool.DisplayName</MudText>
+                        <MudText Typo="Typo.body2" Color="Color.Secondary">@pool.ProductName @pool.ProductVersion</MudText>
+                        <MudSpacer />
+                        <span class="caption">
+                            @vms.Count VMs · @vms.Count(IsOn) running · @vms.Count(v => Backup(v) is not null) with backup · @items.Count(i => i.Kind == "Host") host(s)
+                        </span>
+                    </div>
+                </TitleContent>
+                <ChildContent>
+                    <MudTabs Elevation="0" Rounded="true" TabPanelsClass="pt-2">
+                        <MudTabPanel Text="@(shown.Count == vms.Count ? $"VMs ({vms.Count})" : $"VMs ({shown.Count} of {vms.Count})")">
+                            <div class="cq">
+                            <MudTable Items="shown" Dense="true" Hover="true" Elevation="0" SortLabel="Sort by">
+                                <HeaderContent>
+                                    <MudTh><MudTableSortLabel T="InventoryItemDto" SortBy="@(v => v.Name)" InitialDirection="SortDirection.Ascending">Name</MudTableSortLabel></MudTh>
+                                    <MudTh><MudTableSortLabel T="InventoryItemDto" SortBy="@(v => Power(v))">Power</MudTableSortLabel></MudTh>
+                                    <MudTh Class="c-1100"><MudTableSortLabel T="InventoryItemDto" SortBy="@(v => HostOf(v, items) ?? string.Empty)">Host</MudTableSortLabel></MudTh>
+                                    <MudTh Class="c-760 num"><MudTableSortLabel T="InventoryItemDto" SortBy="ByCpus">vCPU</MudTableSortLabel></MudTh>
+                                    <MudTh Class="c-760 num"><MudTableSortLabel T="InventoryItemDto" SortBy="ByMemory">Memory</MudTableSortLabel></MudTh>
+                                    <MudTh Class="c-560 num"><MudTableSortLabel T="InventoryItemDto" SortBy="ByDisks">Disks</MudTableSortLabel></MudTh>
+                                    <MudTh Class="c-950">CBT</MudTh>
+                                    <MudTh><MudTableSortLabel T="InventoryItemDto" SortBy="ByBackup">Newest backup</MudTableSortLabel></MudTh>
+                                </HeaderContent>
+                                <RowTemplate>
+                                    <MudTd>
+                                        @context.Name
+                                        @if (Sub(context) is { Length: > 0 } sub)
+                                        {
+                                            <span class="cell-sub">@sub</span>
+                                        }
+                                    </MudTd>
+                                    <MudTd Class="nowrap">
+                                        <MudIcon Icon="@Icons.Material.Filled.Circle" Style="font-size:.7rem; vertical-align:middle" Color="@PowerColor(context)" />
+                                        <span class="ml-1">@Power(context)</span>
+                                    </MudTd>
+                                    <MudTd Class="c-1100">@HostOf(context, items)</MudTd>
+                                    <MudTd Class="c-760 num">@context.Properties.GetValueOrDefault("vcpus")</MudTd>
+                                    <MudTd Class="c-760 num">@Fmt.Bytes(Long(context, "memoryBytes"))</MudTd>
+                                    <MudTd Class="c-560 num">
+                                        @Fmt.Bytes(Long(context, "diskBytes"))
+                                        <span class="cell-sub">@Disks(context)</span>
+                                    </MudTd>
+                                    <MudTd Class="c-950">
+                                        @if (context.Properties.GetValueOrDefault("cbtEnabled") is "True" or "true")
+                                        {
+                                            <MudTooltip Text="Changed block tracking is on: incremental backups read only what changed."><MudIcon Icon="@Icons.Material.Filled.Check" Size="Size.Small" Color="Color.Success" /></MudTooltip>
+                                        }
+                                        else
+                                        {
+                                            <MudTooltip Text="Changed block tracking is off: a job turns it on with its first backup."><MudIcon Icon="@Icons.Material.Filled.Remove" Size="Size.Small" Color="Color.Default" /></MudTooltip>
+                                        }
+                                    </MudTd>
+                                    <MudTd>
+                                        @if (Backup(context) is { } backup)
+                                        {
+                                            <MudLink Href="@($"backups?group=vm&q={Uri.EscapeDataString(context.Name)}")">
+                                                @(backup.Latest is { } latest ? $"{Fmt.Span(DateTimeOffset.UtcNow - latest.CreatedUtc)} ago" : "no restore point")
+                                            </MudLink>
+                                            <span class="cell-sub">@string.Join(", ", backup.Jobs.Select(j => j.JobName).Distinct())</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="caption">none</span>
+                                        }
+                                    </MudTd>
+                                </RowTemplate>
+                                <NoRecordsContent><MudText Typo="Typo.body2">No VM matches.</MudText></NoRecordsContent>
+                            </MudTable>
+                            </div>
+                        </MudTabPanel>
+                        <MudTabPanel Text="@($"Storage ({items.Count(i => i.Kind == "Storage")})")">
+                            <MudTable Items="@items.Where(i => i.Kind == "Storage" && NameMatches(i))" Dense="true" Hover="true" Elevation="0">
+                                <HeaderContent><MudTh>Name</MudTh><MudTh>Type</MudTh><MudTh>Used</MudTh><MudTh class="num">Size</MudTh></HeaderContent>
+                                <RowTemplate>
+                                    <MudTd>
+                                        @context.Name
+                                        @if (context.Properties.GetValueOrDefault("shared") is "True" or "true")
+                                        {
+                                            <span class="cell-sub">shared</span>
+                                        }
+                                    </MudTd>
+                                    <MudTd>@(context.Properties.GetValueOrDefault("type") ?? "–")</MudTd>
+                                    <MudTd Style="min-width:180px">
+                                        @if (Used(context) is { } used)
+                                        {
+                                            <MudProgressLinear Value="@(used * 100)" Color="@(used > 0.9 ? Color.Error : used > 0.8 ? Color.Warning : Color.Primary)" Rounded="true" Size="Size.Small" />
+                                            <span class="cell-sub">@Fmt.Bytes(Long(context, "physicalUtilisation")) used · @Fmt.Percent(used)</span>
+                                        }
+                                    </MudTd>
+                                    <MudTd Class="num">@Fmt.Bytes(Long(context, "physicalSize"))</MudTd>
+                                </RowTemplate>
+                            </MudTable>
+                        </MudTabPanel>
+                        <MudTabPanel Text="@($"Networks ({items.Count(i => i.Kind == "Network")})")">
+                            <MudTable Items="@items.Where(i => i.Kind == "Network" && NameMatches(i))" Dense="true" Hover="true" Elevation="0">
+                                <HeaderContent>
+                                    <MudTh>Name</MudTh>
                                     @if (pool.Kind == "VSphere")
                                     {
-                                        <td>@host.Properties.GetValueOrDefault("cluster")</td><td>@host.Properties.GetValueOrDefault("version")</td>
-                                        <td>@(host.Properties.GetValueOrDefault("maintenance") == "true" ? "maintenance" : host.Properties.GetValueOrDefault("connectionState"))</td>
+                                        <MudTh>Type</MudTh>
                                     }
-                                </tr>
-                            }
-                        </tbody>
-                    </MudSimpleTable>
-                </MudTabPanel>
-            </MudTabs>
-        </MudPaper>
-    }
-    @if (_pools.Count == 0)
-    {
-        <MudAlert Severity="Severity.Info">Add a pool or vCenter under Backup Infrastructure → Virtualization first.</MudAlert>
-    }
+                                    else
+                                    {
+                                        <MudTh>Bridge</MudTh><MudTh class="num">MTU</MudTh><MudTh>NBD</MudTh>
+                                    }
+                                    <MudTh Class="c-760">Id</MudTh>
+                                </HeaderContent>
+                                <RowTemplate>
+                                    <MudTd>@context.Name</MudTd>
+                                    @if (pool.Kind == "VSphere")
+                                    {
+                                        <MudTd>@(context.Properties.GetValueOrDefault("type") switch { "DistributedVirtualPortgroup" => "distributed port group", "OpaqueNetwork" => "NSX network", _ => "standard network" })</MudTd>
+                                    }
+                                    else
+                                    {
+                                        var nbd = context.Properties.GetValueOrDefault("nbd");
+                                        <MudTd>@context.Properties.GetValueOrDefault("bridge")</MudTd>
+                                        <MudTd Class="num">@context.Properties.GetValueOrDefault("mtu")</MudTd>
+                                        <MudTd>
+                                            @if (nbd is { Length: > 0 })
+                                            {
+                                                <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@(nbd == "tls" ? Color.Success : nbd == "insecure" ? Color.Warning : Color.Default)">@nbd</MudChip>
+                                            }
+                                        </MudTd>
+                                    }
+                                    <MudTd Class="c-760"><span class="mono caption">@context.NativeId</span></MudTd>
+                                </RowTemplate>
+                            </MudTable>
+                        </MudTabPanel>
+                        <MudTabPanel Text="@($"Hosts ({items.Count(i => i.Kind == "Host")})")">
+                            <MudTable Items="@items.Where(i => i.Kind == "Host" && NameMatches(i))" Dense="true" Hover="true" Elevation="0">
+                                <HeaderContent>
+                                    <MudTh>Name</MudTh><MudTh>Address</MudTh>
+                                    @if (pool.Kind == "VSphere")
+                                    {
+                                        <MudTh>Cluster</MudTh><MudTh>Version</MudTh><MudTh>State</MudTh>
+                                    }
+                                    <MudTh Class="num">VMs</MudTh>
+                                </HeaderContent>
+                                <RowTemplate>
+                                    <MudTd>@context.Name</MudTd>
+                                    <MudTd>@context.Properties.GetValueOrDefault("address")</MudTd>
+                                    @if (pool.Kind == "VSphere")
+                                    {
+                                        var state = context.Properties.GetValueOrDefault("maintenance") == "true" ? "maintenance" : context.Properties.GetValueOrDefault("connectionState");
+                                        <MudTd>@context.Properties.GetValueOrDefault("cluster")</MudTd>
+                                        <MudTd>@context.Properties.GetValueOrDefault("version")</MudTd>
+                                        <MudTd><StateChip State="@(state == "connected" ? "Connected" : state)" Label="@state" /></MudTd>
+                                    }
+                                    <MudTd Class="num">@vms.Count(v => v.ParentNativeId == context.NativeId)</MudTd>
+                                </RowTemplate>
+                            </MudTable>
+                        </MudTabPanel>
+                    </MudTabs>
+                </ChildContent>
+            </MudExpansionPanel>
+        }
+    </MudExpansionPanels>
 }
 
 @code {
     private List<(ConnectionDto Pool, List<InventoryItemDto> Items)>? _pools;
+    private Dictionary<string, BackupVmDto> _backups = new(StringComparer.OrdinalIgnoreCase);
     private string _search = string.Empty;
+    private string _show = "all";
 
     protected override async Task OnInitializedAsync()
     {
         var pools = await Api.GetAsync<List<ConnectionDto>>("api/connections?kind=XenServer,VSphere");
-        var result = new List<(ConnectionDto, List<InventoryItemDto>)>();
-        foreach (var pool in pools)
+        var loads = pools.Select(async pool => (pool, await Api.GetAsync<List<InventoryItemDto>>($"api/connections/{pool.Id}/inventory"))).ToList();
+        try
         {
-            result.Add((pool, await Api.GetAsync<List<InventoryItemDto>>($"api/connections/{pool.Id}/inventory")));
+            _backups = (await Api.GetAsync<List<BackupVmDto>>("api/restore-points/vms")).Where(b => b.PlatformId is null)
+                .GroupBy(b => b.VmNativeId, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        }
+        catch (ApiException)
+        {
+            // Without the backup list the inventory still shows; the column stays empty.
         }
 
-        _pools = result;
+        _pools = [.. (await Task.WhenAll(loads)).OrderBy(p => p.pool.DisplayName, StringComparer.OrdinalIgnoreCase)];
     }
 
-    private bool Matches(InventoryItemDto item) => string.IsNullOrWhiteSpace(_search) || item.Name.Contains(_search, StringComparison.OrdinalIgnoreCase);
+    private BackupVmDto? Backup(InventoryItemDto vm) => _backups.GetValueOrDefault(vm.NativeId);
+
+    private static readonly Func<InventoryItemDto, object> ByCpus = v => Long(v, "vcpus") ?? 0;
+    private static readonly Func<InventoryItemDto, object> ByMemory = v => Long(v, "memoryBytes") ?? 0;
+    private static readonly Func<InventoryItemDto, object> ByDisks = v => Long(v, "diskBytes") ?? 0;
+
+    private Func<InventoryItemDto, object> ByBackup => v => Backup(v)?.Latest?.CreatedUtc ?? DateTimeOffset.MinValue;
+
+    private bool Shown(InventoryItemDto vm) =>
+        (_show switch { "running" => IsOn(vm), "unprotected" => Backup(vm) is null, _ => true })
+        && (string.IsNullOrWhiteSpace(_search) || vm.Name.Contains(_search, StringComparison.OrdinalIgnoreCase)
+            || vm.Properties.GetValueOrDefault("guestOs")?.Contains(_search, StringComparison.OrdinalIgnoreCase) == true
+            || vm.Properties.GetValueOrDefault("host")?.Contains(_search, StringComparison.OrdinalIgnoreCase) == true);
+
+    private bool NameMatches(InventoryItemDto item) => string.IsNullOrWhiteSpace(_search) || item.Name.Contains(_search, StringComparison.OrdinalIgnoreCase);
+
+    private static string Power(InventoryItemDto vm) => Fmt.Power(vm.Properties.GetValueOrDefault("powerState"));
+
+    private static bool IsOn(InventoryItemDto vm) => Power(vm) == "Running";
+
+    private static Color PowerColor(InventoryItemDto vm) => Power(vm) switch
+    {
+        "Running" => Color.Success,
+        "Suspended" or "Paused" => Color.Warning,
+        _ => Color.Default,
+    };
+
+    /// <summary>The guest OS (vSphere) or the description (XCP-ng) under the name.</summary>
+    private static string? Sub(InventoryItemDto vm) =>
+        vm.Properties.GetValueOrDefault("guestOs") is { Length: > 0 } os ? os : vm.Properties.GetValueOrDefault("description");
+
+    private static string? HostOf(InventoryItemDto vm, List<InventoryItemDto> items) =>
+        vm.Properties.GetValueOrDefault("host") is { Length: > 0 } host ? host
+        : vm.ParentNativeId is { } parent ? items.FirstOrDefault(i => i.Kind == "Host" && i.NativeId == parent)?.Name
+        : null;
+
+    private static string Disks(InventoryItemDto vm) => Long(vm, "diskCount") is { } count ? count == 1 ? "1 disk" : $"{count} disks" : string.Empty;
+
+    private static double? Used(InventoryItemDto sr) =>
+        Long(sr, "physicalUtilisation") is { } used && Long(sr, "physicalSize") is { } size && size > 0 ? Math.Min(1, (double)used / size) : null;
 
     private static long? Long(InventoryItemDto item, string key) => long.TryParse(item.Properties.GetValueOrDefault(key), out var v) ? v : null;
 }

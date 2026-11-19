@@ -6,6 +6,14 @@
 <PageTitle>History – backdafuckup</PageTitle>
 <PageHeader Title="History" Description="Every backup, restore and maintenance session, newest first. Open one for its details and log.">
     <Actions>
+    <MudTextField @bind-Value="_search" Placeholder="Search" Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Immediate="true" Clearable="true"
+                  Variant="Variant.Outlined" Margin="Margin.Dense" Style="width:220px" />
+    <MudSelect T="string" @bind-Value="_state" Label="State" Dense="true" Margin="Margin.Dense" Variant="Variant.Outlined" Style="width:170px">
+        <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
+        <MudSelectItem T="string" Value="@("problems")">Failed or warning</MudSelectItem>
+        <MudSelectItem T="string" Value="@("Failed")">Failed</MudSelectItem>
+        <MudSelectItem T="string" Value="@("Running")">Running</MudSelectItem>
+    </MudSelect>
     <MudSelect T="string" Value="_kind" ValueChanged="OnKindChangedAsync" Label="Type" Dense="true" Margin="Margin.Dense" Variant="Variant.Outlined" Style="width:220px">
         <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
         <MudSelectItem T="string" Value="@("Backup")">Backup</MudSelectItem>
@@ -33,12 +41,47 @@
 }
 else
 {
-    <MudPaper Elevation="1" Class="pa-2"><SessionTable Sessions="_sessions" /></MudPaper>
+    var matching = _sessions.Where(Matches).ToList();
+    <MudPaper Elevation="1" Class="pa-2"><SessionTable Sessions="@matching.Take(_shown).ToList()" /></MudPaper>
+    <div class="d-flex align-center gap-3 mt-2">
+        <MudText Typo="Typo.caption" Color="Color.Secondary">
+            @(matching.Count <= _shown ? $"{matching.Count} session(s)" : $"{_shown} of {matching.Count} sessions")@(_sessions.Count >= _limit ? $" (the newest {_limit})" : null)
+        </MudText>
+        @if (matching.Count > _shown)
+        {
+            <MudButton Variant="Variant.Text" Size="Size.Small" OnClick="@(() => _shown += PageSize)">Show @Math.Min(PageSize, matching.Count - _shown) more</MudButton>
+        }
+        else if (_sessions.Count >= _limit)
+        {
+            <MudButton Variant="Variant.Text" Size="Size.Small" OnClick="LoadOlderAsync">Load older sessions</MudButton>
+        }
+    </div>
 }
 
 @code {
+    private const int PageSize = 50;
     private List<SessionSummaryDto>? _sessions;
     private string _kind = string.Empty;
+    private string _state = string.Empty;
+    private string _search = string.Empty;
+    private int _shown = PageSize;
+    private int _limit = 200;
+
+    private bool Matches(SessionSummaryDto session) =>
+        (_state switch
+        {
+            "problems" => session.State is "Failed" or "Warning",
+            "" => true,
+            var state => session.State == state,
+        })
+        && (string.IsNullOrWhiteSpace(_search) || session.Name.Contains(_search, StringComparison.OrdinalIgnoreCase));
+
+    private async Task LoadOlderAsync()
+    {
+        _limit += 200;
+        _shown += PageSize;
+        await LoadAsync();
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -56,10 +99,11 @@ else
     private async Task OnKindChangedAsync(string kind)
     {
         _kind = kind;
+        _shown = PageSize;
         await LoadAsync();
     }
 
-    private async Task LoadAsync() => _sessions = await Api.GetAsync<List<SessionSummaryDto>>($"api/sessions?limit=200&kind={_kind}");
+    private async Task LoadAsync() => _sessions = await Api.GetAsync<List<SessionSummaryDto>>($"api/sessions?limit={_limit}&kind={_kind}");
 
     private void OnSessionUpdated(SessionSummaryDto session) => _ = InvokeAsync(() =>
     {

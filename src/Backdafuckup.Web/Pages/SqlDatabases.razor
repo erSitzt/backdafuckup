@@ -44,7 +44,17 @@ else
         <RowTemplate>
             <MudTd DataLabel="VM" Class="c-560 nowrap">@context.VmName</MudTd>
             <MudTd DataLabel="Instance" Class="c-760">@context.Instance</MudTd>
-            <MudTd DataLabel="Database"><b>@context.Name</b><span class="cell-sub n-560">@context.Instance on @context.VmName</span></MudTd>
+            <MudTd DataLabel="Database">
+                @if (IsSystem(context))
+                {
+                    <span class="caption" title="A system database">@context.Name</span>
+                }
+                else
+                {
+                    <b>@context.Name</b>
+                }
+                <span class="cell-sub n-560">@context.Instance on @context.VmName</span>
+            </MudTd>
             <MudTd DataLabel="Recovery" Class="c-950">@(context.RecoveryModel ?? "–")</MudTd>
             <MudTd DataLabel="Log chain">
                 <MudTooltip Text="@(context.ChainReason ?? ChainText(context.ChainState))">
@@ -53,7 +63,17 @@ else
             </MudTd>
             <MudTd DataLabel="Last log backup" Class="c-560 nowrap">@Fmt.Time(context.LastLogUtc)</MudTd>
             <MudTd DataLabel="Last full backup" Class="c-1100 nowrap">@Fmt.Time(context.LastFullUtc)</MudTd>
-            <MudTd DataLabel="Restorable" Class="c-950">@(context.CoveredFromUtc is { } from ? $"{Fmt.Time(from)} – {Fmt.Time(context.CoveredToUtc)}" : "–")</MudTd>
+            <MudTd DataLabel="Restorable" Class="c-950 nowrap">
+                @if (context.CoveredFromUtc is { } from)
+                {
+                    <span>until @Fmt.Time(context.CoveredToUtc)</span>
+                    <span class="cell-sub">from @Fmt.Time(from)</span>
+                }
+                else
+                {
+                    <span>–</span>
+                }
+            </MudTd>
         </RowTemplate>
     </MudTable>
     </div>
@@ -76,16 +96,21 @@ else
         }
     }
 
+    /// <summary>Per VM and instance, the user databases first, the system databases after them.</summary>
     private IEnumerable<SqlCatalogDatabaseDto> Filtered() =>
         (_databases ?? []).Where(d => _filter.Length == 0
-            || $"{d.VmName} {d.Instance} {d.Name}".Contains(_filter, StringComparison.OrdinalIgnoreCase));
+            || $"{d.VmName} {d.Instance} {d.Name}".Contains(_filter, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(d => d.VmName, StringComparer.OrdinalIgnoreCase).ThenBy(d => d.Instance, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(IsSystem).ThenBy(d => d.Name, StringComparer.OrdinalIgnoreCase);
+
+    private static bool IsSystem(SqlCatalogDatabaseDto database) => database.Name is "master" or "model" or "msdb" or "tempdb";
 
     internal static string ChainLabel(string state) => state switch
     {
         "Ok" => "intact",
         "NoBase" => "no full backup",
         "Broken" => "broken",
-        "Simple" => "SIMPLE",
+        "Simple" => "no log backups",
         _ => "not checked yet",
     };
 

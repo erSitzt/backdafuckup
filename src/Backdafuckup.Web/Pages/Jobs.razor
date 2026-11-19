@@ -32,7 +32,7 @@ else
                 <span class="cell-sub n-560">@Describe(context.Schedule) · next @Fmt.Time(context.NextRunUtc)@(SqlLine(context) is { } sql ? $" · {sql}" : "")</span>
             </MudTd>
             <MudTd Class="c-760">@BacksUp(context)<span class="cell-sub">@(IsCluster(context) ? "cluster" : _vcenters.Contains(context.ConnectionId) ? "vCenter" : "pool") @context.ConnectionName</span></MudTd>
-            <MudTd Class="c-950">@context.RepositoryName</MudTd>
+            <MudTd Class="c-950 nowrap">@context.RepositoryName</MudTd>
             <MudTd Class="c-560 nowrap">
                 @Describe(context.Schedule)
                 @if (context.SqlBackup is { Enabled: true } sqlSettings)
