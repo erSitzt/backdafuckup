@@ -81,7 +81,7 @@ public sealed class MountProgram(NfsExportTable exports) : RpcProgram
     /// <summary>The hosts that mounted, by address and export path (DUMP).</summary>
     public IReadOnlyCollection<(string Host, string Path)> Mounts => [.. _mounts.Keys];
 
-    public override ValueTask<RpcAcceptStatus> HandleAsync(RpcCall call, XdrReader arguments, XdrWriter reply, RpcContext context, CancellationToken cancellationToken)
+    public override async ValueTask<RpcAcceptStatus> HandleAsync(RpcCall call, XdrReader arguments, XdrWriter reply, RpcContext context, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(call);
         ArgumentNullException.ThrowIfNull(arguments);
@@ -91,9 +91,10 @@ public sealed class MountProgram(NfsExportTable exports) : RpcProgram
         {
             case 0: // NULL
                 break;
-            case 1: // MNT
-                var path = arguments.ReadString(MaxPathBytes);
-                var export = exports.FindByPath(path);
+            case 1: // MNT: an export, or a directory below one (as Linux nfsd allows)
+                var path = arguments.ReadString(MaxPathBytes).TrimEnd('/');
+                var export = exports.FindByPath(path)
+                    ?? exports.All.Where(e => path.StartsWith(e.Path + "/", StringComparison.Ordinal)).MaxBy(e => e.Path.Length);
                 if (export is null)
                 {
                     reply.WriteUInt32((uint)NfsStatus.NoEnt);
@@ -105,9 +106,14 @@ public sealed class MountProgram(NfsExportTable exports) : RpcProgram
                 }
                 else
                 {
-                    _mounts[(context.Remote.Address.ToString(), export.Path)] = 0;
-                    reply.WriteUInt32((uint)NfsStatus.Ok).WriteOpaque(export.FileSystem.RootHandle.Span);
-                    reply.WriteUInt32(1).WriteUInt32(RpcConstants.AuthSys); // auth_flavors: AUTH_SYS
+                    var (status, handle) = await ResolveAsync(export, path, new NfsCaller(call.Credential, context.Remote), cancellationToken).ConfigureAwait(false);
+                    reply.WriteUInt32((uint)status);
+                    if (status == NfsStatus.Ok)
+                    {
+                        _mounts[(context.Remote.Address.ToString(), path)] = 0;
+                        reply.WriteOpaque(handle.Span);
+                        reply.WriteUInt32(1).WriteUInt32(RpcConstants.AuthSys); // auth_flavors: AUTH_SYS
+                    }
                 }
 
                 break;
@@ -144,9 +150,34 @@ public sealed class MountProgram(NfsExportTable exports) : RpcProgram
                 reply.WriteBool(false);
                 break;
             default:
-                return ValueTask.FromResult(RpcAcceptStatus.ProcedureUnavailable);
+                return RpcAcceptStatus.ProcedureUnavailable;
         }
 
-        return ValueTask.FromResult(RpcAcceptStatus.Success);
+        return RpcAcceptStatus.Success;
+    }
+
+    /// <summary>The handle of the export's root, or of the directory the rest of the path names below it.</summary>
+    private static async ValueTask<(NfsStatus Status, ReadOnlyMemory<byte> Handle)> ResolveAsync(NfsExport export, string path, NfsCaller caller, CancellationToken cancellationToken)
+    {
+        var handle = export.FileSystem.RootHandle;
+        try
+        {
+            foreach (var part in path[export.Path.Length..].Split('/', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var (next, attributes) = await export.FileSystem.LookupAsync(caller, handle, part, cancellationToken).ConfigureAwait(false);
+                if (attributes.Type != NfsFileType.Directory)
+                {
+                    return (NfsStatus.NotDir, default);
+                }
+
+                handle = next;
+            }
+        }
+        catch (NfsException ex)
+        {
+            return (ex.Status, default);
+        }
+
+        return (NfsStatus.Ok, handle);
     }
 }

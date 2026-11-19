@@ -31,6 +31,9 @@ public sealed class Nfs3Program(NfsExportTable exports, NfsServerLimits limits, 
 
     public override uint MaxVersion => 3;
 
+    /// <summary>SETATTR, CREATE, MKDIR, SYMLINK, MKNOD, REMOVE, RMDIR, RENAME, LINK: a retransmission must get the first reply.</summary>
+    public override bool IsNonIdempotent(uint procedure) => procedure is 2 or 8 or 9 or 10 or 11 or 12 or 13 or 14 or 15;
+
     private static readonly string[] Names =
     [
         "NULL", "GETATTR", "SETATTR", "LOOKUP", "ACCESS", "READLINK", "READ", "WRITE", "CREATE", "MKDIR", "SYMLINK", "MKNOD", "REMOVE", "RMDIR", "RENAME", "LINK",

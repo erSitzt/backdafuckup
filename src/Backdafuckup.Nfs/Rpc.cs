@@ -59,10 +59,84 @@ public abstract class RpcProgram
     /// returns ProcedureUnavailable / GarbageArgs / SystemError (nothing written). <see cref="XdrException"/> means GarbageArgs.
     /// </summary>
     public abstract ValueTask<RpcAcceptStatus> HandleAsync(RpcCall call, XdrReader arguments, XdrWriter reply, RpcContext context, CancellationToken cancellationToken);
+
+    /// <summary>A procedure that must not run twice for a retransmitted call (its reply is kept and sent again).</summary>
+    public virtual bool IsNonIdempotent(uint procedure) => false;
+}
+
+/// <summary>
+/// The duplicate request cache: replies of non-idempotent calls by (client address, xid, program, procedure), kept for a
+/// while, so that a retransmission (the reply was lost) gets the same answer instead of e.g. NOENT for a second REMOVE.
+/// A retransmission of a call still running is dropped; the client sends it again.
+/// </summary>
+public sealed class RpcReplyCache(TimeSpan window, TimeProvider? time = null)
+{
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(IPAddress Client, uint Xid, uint Program, uint Procedure), Entry> _entries = new();
+    private long _nextSweep;
+
+    private sealed class Entry(DateTimeOffset created)
+    {
+        public DateTimeOffset Created { get; } = created;
+
+        public byte[]? Reply { get; set; }
+
+        public bool Done { get; set; }
+    }
+
+    public int Count => _entries.Count;
+
+    /// <summary>Null: run the call (and <see cref="Store"/> its reply). Otherwise the cached reply, or an empty array to drop the call.</summary>
+    internal byte[]? TryBegin(IPAddress client, RpcCall call)
+    {
+        Sweep();
+        var key = (client, call.Xid, call.Program, call.Procedure);
+        var entry = new Entry(_time.GetUtcNow());
+        if (_entries.TryAdd(key, entry))
+        {
+            return null;
+        }
+
+        var existing = _entries[key];
+        lock (existing)
+        {
+            return existing.Done ? existing.Reply ?? [] : [];
+        }
+    }
+
+    internal void Store(IPAddress client, RpcCall call, byte[]? reply)
+    {
+        if (_entries.TryGetValue((client, call.Xid, call.Program, call.Procedure), out var entry))
+        {
+            lock (entry)
+            {
+                entry.Reply = reply;
+                entry.Done = true;
+            }
+        }
+    }
+
+    private void Sweep()
+    {
+        var now = _time.GetUtcNow();
+        if (now.UtcTicks < Interlocked.Read(ref _nextSweep))
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref _nextSweep, (now + TimeSpan.FromSeconds(10)).UtcTicks);
+        foreach (var (key, entry) in _entries)
+        {
+            if (now - entry.Created > window)
+            {
+                _entries.TryRemove(key, out _);
+            }
+        }
+    }
 }
 
 /// <summary>Decodes calls, routes them to their program, and encodes the replies (RFC 5531).</summary>
-public sealed class RpcDispatcher(IEnumerable<RpcProgram> programs, Action<string>? log = null)
+public sealed class RpcDispatcher(IEnumerable<RpcProgram> programs, Action<string>? log = null, RpcReplyCache? replies = null)
 {
     private readonly IReadOnlyList<RpcProgram> _programs = [.. programs];
 
@@ -137,6 +211,24 @@ public sealed class RpcDispatcher(IEnumerable<RpcProgram> programs, Action<strin
             return Accepted(xid, RpcAcceptStatus.ProgramMismatch, w => w.WriteUInt32(target.MinVersion).WriteUInt32(target.MaxVersion));
         }
 
+        var cached = replies is not null && target.IsNonIdempotent(call.Procedure);
+        if (cached && replies!.TryBegin(context.Remote.Address, call) is { } known)
+        {
+            return known.Length == 0 ? null : known;
+        }
+
+        var answer = await HandleAsync(target, call, context, cancellationToken).ConfigureAwait(false);
+        if (cached)
+        {
+            replies!.Store(context.Remote.Address, call, answer);
+        }
+
+        return answer;
+    }
+
+    private async ValueTask<byte[]> HandleAsync(RpcProgram target, RpcCall call, RpcContext context, CancellationToken cancellationToken)
+    {
+        var xid = call.Xid;
         var result = new XdrWriter();
         RpcAcceptStatus status;
         try

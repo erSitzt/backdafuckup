@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- LibraryImport of DeviceIoControl (sparse overlay files on NTFS). -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Nfs\Backdafuckup.Nfs.csproj" />
+  </ItemGroup>
+
+</Project>

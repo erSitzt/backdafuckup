@@ -11,6 +11,7 @@
     <Project Path="src/Backdafuckup.Mover/Backdafuckup.Mover.csproj" />
     <Project Path="src/Backdafuckup.Nbd/Backdafuckup.Nbd.csproj" />
     <Project Path="src/Backdafuckup.Nfs/Backdafuckup.Nfs.csproj" />
+    <Project Path="src/Backdafuckup.InstantRecovery/Backdafuckup.InstantRecovery.csproj" />
     <Project Path="src/Backdafuckup.Proxy/Backdafuckup.Proxy.csproj" />
     <Project Path="src/Backdafuckup.ProxyAgent/Backdafuckup.ProxyAgent.csproj" />
     <Project Path="src/Backdafuckup.Server/Backdafuckup.Server.csproj" />
@@ -40,6 +41,7 @@
     <Project Path="tests/Backdafuckup.Lab.Tests/Backdafuckup.Lab.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Nbd.Tests/Backdafuckup.Nbd.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Nfs.Tests/Backdafuckup.Nfs.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.InstantRecovery.Tests/Backdafuckup.InstantRecovery.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Server.Tests/Backdafuckup.Server.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Storage.Tests/Backdafuckup.Storage.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Tape.Tests/Backdafuckup.Tape.Tests.csproj" />
