@@ -441,35 +441,36 @@ public abstract class LocalDirectoryRepositoryTests : IDisposable
         var blob = await writer.WriteBlobAsync("vm-metadata", "test", new MemoryStream("metadata"u8.ToArray()), Ct);
         if (commit)
         {
-            await writer.CommitAsync(
-                new RestorePointManifest
-                {
-                    RestorePointId = rpId,
-                    RepositoryId = repo.Info.RepositoryId,
-                    CreatedUtc = DateTimeOffset.UtcNow,
-                    Kind = RestorePointKind.Full,
-                    Source = new ManifestSource(HypervisorKind.XenServer, "pool", vm, vm, null),
-                    Vm = new VmDescriptor { VmId = vm, Name = vm },
-                    Metadata = blob,
-                    Chunking = new ManifestChunking(ChunkSize, "sha256", "zstd"),
-                    Disks =
-                    [
-                        new ManifestDisk
-                        {
-                            Key = "0",
-                            SourceDiskId = "disk",
-                            Name = "disk",
-                            CapacityBytes = disk.Length,
-                            Index = indexRef,
-                            Stats = new DiskBackupStats(),
-                        },
-                    ],
-                },
-                Ct);
+            await writer.CommitAsync(Manifest(repo, rpId, vm, disk.Length, indexRef, blob), Ct);
         }
 
         return (rpId, new PutStats(stored, deduplicated, zero));
     }
+
+    /// <summary>The manifest of a restore point with one disk "0".</summary>
+    internal static RestorePointManifest Manifest(LocalDirectoryRepository repo, Guid rpId, string vm, long capacity, ManifestIndexRef index, ManifestBlob metadata) => new()
+    {
+        RestorePointId = rpId,
+        RepositoryId = repo.Info.RepositoryId,
+        CreatedUtc = DateTimeOffset.UtcNow,
+        Kind = RestorePointKind.Full,
+        Source = new ManifestSource(HypervisorKind.XenServer, "pool", vm, vm, null),
+        Vm = new VmDescriptor { VmId = vm, Name = vm },
+        Metadata = metadata,
+        Chunking = new ManifestChunking(ChunkSize, "sha256", "zstd"),
+        Disks =
+        [
+            new ManifestDisk
+            {
+                Key = "0",
+                SourceDiskId = "disk",
+                Name = "disk",
+                CapacityBytes = capacity,
+                Index = index,
+                Stats = new DiskBackupStats(),
+            },
+        ],
+    };
 
     internal static async Task<byte[]> RestoreAsync(IChunkReader chunks, ChunkIndex index)
     {

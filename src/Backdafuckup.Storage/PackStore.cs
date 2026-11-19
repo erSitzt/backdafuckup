@@ -83,27 +83,52 @@ internal sealed class PackStore : IDisposable
         }
     }
 
-    public PackAppender CreateAppender() => new(this, TargetSize);
+    /// <summary>Tests only: runs before an appender is created (to hold a writer inside its first put).</summary>
+    internal Action? CreatingAppender { get; set; }
+
+    public PackAppender CreateAppender()
+    {
+        CreatingAppender?.Invoke();
+        return new(this, TargetSize);
+    }
 
     // ---- Opening and recovery ----
 
     /// <summary>Builds the registry and the index; returns what it found and repaired.</summary>
-    public async Task<List<string>> OpenAsync(CancellationToken cancellationToken)
+    /// <param name="maxChunkSize">The repository's chunk size: no record of a pack holds more (bounds the salvage of unsealed packs).</param>
+    public async Task<List<string>> OpenAsync(int maxChunkSize, CancellationToken cancellationToken)
     {
         var report = new List<string>();
         CreateDirectories(_root);
 
-        // Packs that were never sealed: nothing committed can depend on them (a commit seals its dependencies first).
-        var abandoned = 0;
-        foreach (var file in Directory.EnumerateFiles(_incomingDirectory))
+        // Packs that were never sealed (a writer or GC stopped before sealing them) are salvaged, not deleted: every
+        // complete record, checked against its id, goes into a sealed pack that the trailer scan below indexes. A commit
+        // seals what it refers to, but if a writer ever breaks that rule, a restart must cost disk space, not a chunk of
+        // a committed restore point. Chunks that nothing refers to go with the next garbage collection.
+        int salvagedPacks = 0, salvagedChunks = 0, abandoned = 0;
+        foreach (var file in Directory.EnumerateFiles(_incomingDirectory).ToList())
         {
-            File.Delete(file);
-            abandoned++;
+            switch (SalvageIncoming(file, maxChunkSize, report))
+            {
+                case > 0 and var chunks:
+                    salvagedPacks++;
+                    salvagedChunks += chunks;
+                    break;
+                case 0:
+                    abandoned++;
+                    break;
+            }
+        }
+
+        if (salvagedPacks > 0)
+        {
+            report.Add($"Sealed {salvagedPacks} unsealed pack(s) of interrupted writes from '{_incomingDirectory}' into '{_packsDirectory}': " +
+                       $"{salvagedChunks} complete chunk(s), each checked against its id; those no restore point refers to go with the next garbage collection.");
         }
 
         if (abandoned > 0)
         {
-            report.Add($"Removed {abandoned} unsealed pack(s) of interrupted writes from '{_incomingDirectory}'.");
+            report.Add($"Removed {abandoned} unsealed pack(s) of interrupted writes from '{_incomingDirectory}' (no complete chunk in them).");
         }
 
         foreach (var file in Directory.EnumerateFiles(_packsDirectory, "*" + PackFormat.Extension, SearchOption.AllDirectories))
@@ -781,6 +806,75 @@ internal sealed class PackStore : IDisposable
         }
 
         return (path, name[0] == 'B', seq);
+    }
+
+    /// <summary>
+    /// Seals an unsealed pack's complete records (cut after the last one that decodes and matches its id) and moves it
+    /// into <c>packs/</c>. Returns the number of records; 0 when it had none (it is deleted); null when it is left alone.
+    /// </summary>
+    private int? SalvageIncoming(string file, int maxChunkSize, List<string> report)
+    {
+        try
+        {
+            int count;
+            using (var handle = File.OpenHandle(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                Guid owner;
+                try
+                {
+                    owner = RandomAccess.GetLength(handle) < PackFormat.HeaderSize ? Guid.Empty : ReadHeaderOf(handle, file);
+                }
+                catch (InvalidDataException)
+                {
+                    owner = Guid.Empty;
+                }
+
+                if (owner != Guid.Empty && owner != _repositoryId)
+                {
+                    report.Add($"Unsealed pack '{file}' belongs to repository {owner}, not {_repositoryId}; it is left alone.");
+                    return null;
+                }
+
+                var entries = owner == Guid.Empty ? [] : PackFormat.Salvage(handle, maxChunkSize);
+                if (entries.Count == 0)
+                {
+                    count = 0;
+                }
+                else
+                {
+                    var end = (long)entries[^1].Offset + entries[^1].StoredLength;
+                    var tail = PackFormat.BuildTail(entries, end);
+                    RandomAccess.Write(handle, tail, end);
+                    RandomAccess.SetLength(handle, end + tail.Length);
+                    RandomAccess.FlushToDisk(handle);
+                    count = entries.Count;
+                }
+            }
+
+            if (count == 0)
+            {
+                File.Delete(file);
+                return 0;
+            }
+
+            var name = Path.GetFileNameWithoutExtension(file);
+            if (!Guid.TryParseExact(name, "N", out _))
+            {
+                name = Guid.NewGuid().ToString("N");
+            }
+
+            var directory = Path.Combine(_packsDirectory, name[..2]);
+            Directory.CreateDirectory(directory);
+            File.Move(file, Path.Combine(directory, name + PackFormat.Extension));
+            AtomicFile.SyncDirectory(directory);
+            AtomicFile.SyncDirectory(_packsDirectory);
+            return count;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            report.Add($"Unsealed pack '{file}' could not be salvaged ({ex.Message}); it is left in place and tried again at the next open.");
+            return null;
+        }
     }
 
     private static Guid ReadHeaderOf(SafeFileHandle handle, string path)

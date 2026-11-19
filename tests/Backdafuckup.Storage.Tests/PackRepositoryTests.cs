@@ -67,6 +67,44 @@ public sealed class PackRepositoryTests : IDisposable
     }
 
     [Fact]
+    public async Task An_unsealed_pack_with_chunks_of_a_committed_restore_point_is_sealed_not_deleted_when_the_repository_opens()
+    {
+        // A pack a writer never sealed although its commit referred to it (as the race of two appenders left one):
+        // it is in incoming/, no index segment knows it, and its last record was cut off by the crash.
+        var disk = RandomDisk(3);
+        Guid id;
+        await using (var repo = await CreateAsync(packTargetSize: 64L * ChunkSize))
+        {
+            (id, _) = await BackupAsync(repo, "vm-1", disk);
+        }
+
+        var sealedPack = Assert.Single(Packs());
+        byte[] records;
+        using (var handle = File.OpenHandle(sealedPack))
+        {
+            var entries = PackFormat.ReadTrailer(handle, sealedPack);
+            records = new byte[entries.Max(e => (long)e.Offset + e.StoredLength)];
+            PackFormat.ReadExactly(handle, records, 0, sealedPack);
+        }
+
+        var orphan = Path.Combine(_root, "incoming", Guid.NewGuid().ToString("N") + ".pack");
+        await File.WriteAllBytesAsync(orphan, [.. records, .. RandomNumberGenerator.GetBytes(48)], Ct);
+        File.Delete(sealedPack);
+
+        await using var reopened = await LocalDirectoryRepository.OpenAsync(_root, Ct, _time);
+        Assert.False(File.Exists(orphan));
+        Assert.Contains(reopened.OpenReport, r => r.StartsWith($"Sealed 1 unsealed pack(s) of interrupted writes from '{Path.Combine(_root, "incoming")}'", StringComparison.Ordinal)
+            && r.Contains(": 3 complete chunk(s)", StringComparison.Ordinal));
+        Assert.Contains(Packs(), p => Path.GetFileName(p) == Path.GetFileName(orphan));
+        await using (var reader = await reopened.OpenRestorePointAsync(id, Ct))
+        {
+            Assert.Equal(disk, await RestoreAsync(reader.Chunks, await reader.ReadDiskIndexAsync("0", Ct)));
+        }
+
+        Assert.True((await reopened.VerifyAsync(id, VerifyDepth.Full, null, Ct)).Ok);
+    }
+
+    [Fact]
     public async Task Packs_the_index_does_not_cover_are_indexed_from_their_trailers()
     {
         var disk = RandomDisk(9);
@@ -196,6 +234,60 @@ public sealed class PackRepositoryTests : IDisposable
         await using var reopened = await LocalDirectoryRepository.OpenAsync(_root, Ct, _time);
         await using var reader = await reopened.OpenRestorePointAsync(committed, Ct);
         Assert.Equal(disk, await RestoreAsync(reader.Chunks, await reader.ReadDiskIndexAsync("0", Ct)));
+    }
+
+    [Fact]
+    public async Task Puts_that_race_to_create_the_writers_appender_all_land_in_packs_its_commit_seals()
+    {
+        // The backup pipeline puts several chunks of a writer at once. Two first puts (different stripes) both found no
+        // appender and each created one; the one that lost kept its open pack in incoming/. The commit sealed only the
+        // other, and the next open deleted the unsealed pack with a chunk the committed restore point refers to.
+        byte[] disk;
+        ChunkId first, second;
+        do
+        {
+            disk = RandomDisk(2);
+            first = ChunkId.Compute(disk.AsSpan(0, ChunkSize));
+            second = ChunkId.Compute(disk.AsSpan(ChunkSize, ChunkSize));
+        }
+        while (first.Stripe(LocalDirectoryRepository.StripeCount) == second.Stripe(LocalDirectoryRepository.StripeCount));
+
+        var rpId = Guid.CreateVersion7();
+        await using (var repo = await CreateAsync())
+        {
+            using var creating = new SemaphoreSlim(0);
+            using var release = new ManualResetEventSlim();
+            var calls = 0;
+            repo.Packs!.CreatingAppender = () =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    creating.Release();
+                    release.Wait(TimeSpan.FromSeconds(30));
+                }
+            };
+
+            await using var writer = repo.BeginWrite(rpId, "vm-1", null);
+            var index = ChunkIndex.CreateEmpty(ChunkSize, disk.Length);
+            (index.Entries[0], index.Entries[1]) = (first, second);
+
+            // The first put is held while it creates the writer's appender; the second creates one too and appends.
+            var held = Task.Run(async () => await writer.PutChunkAsync(first, disk.AsMemory(0, ChunkSize), Ct), Ct);
+            Assert.True(await creating.WaitAsync(TimeSpan.FromSeconds(30), Ct));
+            await writer.PutChunkAsync(second, disk.AsMemory(ChunkSize, ChunkSize), Ct);
+            release.Set();
+            await held;
+
+            var indexRef = await writer.WriteDiskIndexAsync("0", index, Ct);
+            var blob = await writer.WriteBlobAsync("vm-metadata", "test", new MemoryStream("metadata"u8.ToArray()), Ct);
+            await writer.CommitAsync(Manifest(repo, rpId, "vm-1", disk.Length, indexRef, blob), Ct);
+        }
+
+        // The service restarts: the restore point is complete, and no pack was left unsealed.
+        await using var reopened = await LocalDirectoryRepository.OpenAsync(_root, Ct, _time);
+        await using var reader = await reopened.OpenRestorePointAsync(rpId, Ct);
+        Assert.Equal(disk, await RestoreAsync(reader.Chunks, await reader.ReadDiskIndexAsync("0", Ct)));
+        Assert.Empty(reopened.OpenReport);
     }
 
     [Fact]

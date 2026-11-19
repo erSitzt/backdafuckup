@@ -31,7 +31,7 @@ public sealed partial class LocalDirectoryRepository : IBackupRepository
     public const string DescriptorFileName = "repo.json";
     public const string ManifestFileName = "manifest.json";
     private const string DeletedManifestFileName = "manifest.deleted";
-    private const int StripeCount = 4096;
+    internal const int StripeCount = 4096;
     private static readonly TimeSpan GcSafetyWindow = TimeSpan.FromMinutes(10);
 
     private readonly string _chunksDirectory;

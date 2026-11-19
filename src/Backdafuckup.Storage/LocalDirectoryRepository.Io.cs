@@ -465,7 +465,10 @@ public sealed partial class LocalDirectoryRepository
                         return new ChunkPutResult(ChunkPutOutcome.Deduplicated, 0);
                     }
 
-                    var appender = _appender ??= packs.CreateAppender();
+                    // Puts of different stripes run at the same time: they must all share the one appender the commit
+                    // flushes. An appender that loses this race would keep its open pack (and the chunk in it) in
+                    // incoming/, where the next open deletes it although the committed restore point refers to it.
+                    var appender = _appender ?? LazyInitializer.EnsureInitialized(ref _appender, packs.CreateAppender);
                     var location = appender.Append(id, buffer.AsMemory(0, length), (uint)rawLength, out full);
                     packs.AddLive(id, location);
                 }

@@ -29,6 +29,9 @@ public sealed partial class LocalDirectoryRepository : IChunkLocator
     /// <summary>True while loose chunk files (format 1, or not yet packed) may exist.</summary>
     public bool LooseChunksMayExist => _packs is null || _looseMayExist;
 
+    /// <summary>The packs and their index (format 2), for tests.</summary>
+    internal PackStore? Packs => _packs;
+
     /// <summary>Distinct chunks stored (packed and loose); reads the whole index and lists every loose file.</summary>
     public long CountStoredChunks()
     {
@@ -86,7 +89,7 @@ public sealed partial class LocalDirectoryRepository : IChunkLocator
             PackStore.CreateDirectories(Root);
             var descriptor = _descriptor with { FormatVersion = RepositoryDescriptor.PackFormatVersion, Packs = new RepositoryPacks(packTargetSize) };
             var store = new PackStore(Root, Info.RepositoryId, packTargetSize, _time);
-            _openReport = await store.OpenAsync(cancellationToken).ConfigureAwait(false);
+            _openReport = await store.OpenAsync(_descriptor.ChunkSize, cancellationToken).ConfigureAwait(false);
             var json = JsonSerializer.SerializeToUtf8Bytes(descriptor, CoreJsonContext.Default.RepositoryDescriptor);
             await AtomicFile.WriteAsync(_tempDirectory, Path.Combine(Root, DescriptorFileName), json, overwrite: true, cancellationToken).ConfigureAwait(false);
             AtomicFile.SyncDirectory(Root);
@@ -513,7 +516,7 @@ public sealed partial class LocalDirectoryRepository : IChunkLocator
         var store = new PackStore(Root, Info.RepositoryId, _descriptor.Packs!.TargetSize, _time);
         try
         {
-            _openReport = await store.OpenAsync(cancellationToken).ConfigureAwait(false);
+            _openReport = await store.OpenAsync(_descriptor.ChunkSize, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
