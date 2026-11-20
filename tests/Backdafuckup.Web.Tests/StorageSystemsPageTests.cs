@@ -91,14 +91,54 @@ public sealed class StorageSystemsPageTests : BunitContext
         Assert.Equal(!mayChange, dialogs.Markup.Contains("Run the CLI line as an array administrator", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Editing_opens_with_the_stored_settings_and_saving_without_a_password_keeps_the_stored_one()
+    {
+        var system = new StorageSystemDto(SystemId, "AlletraMp", "array01", "array01.corp.example", 443, "backup-ro", "Connected", null, DateTimeOffset.UtcNow,
+            new StorageSystemFactsDto("array01", "HPE Alletra Storage MP", "CZ0000TEST", "2FF70002AC000001", "10.5.51", "WSAPI v3", [], ["browse in all domains"], 900, null),
+            new StorageSystemOptionsDto(6, 8, 60, false, 5, 2), [], 0, 0);
+        _api.Answers["api/storage-systems"] = new List<StorageSystemDto> { system };
+        _api.Answers[$"api/storage-systems/{SystemId}"] = system;
+        _api.Answers[$"api/storage-systems/{SystemId}/volumes"] = new List<StorageVolumeDto>();
+        _api.Answers[$"api/storage-systems/{SystemId}/proxy-access"] = new StorageProxyAccessDto([], [], null, null, null, false);
+
+        Render<MudPopoverProvider>();
+        var dialogs = Render<MudDialogProvider>();
+        var cut = Render<StorageSystems>();
+        cut.WaitForAssertion(() => Assert.NotEmpty(cut.FindAll("button[aria-label=Edit]")));
+        cut.Find("button[aria-label=Edit]").Click();
+        dialogs.WaitForAssertion(() => Assert.Contains("Empty: the stored password stays.", dialogs.Markup, StringComparison.Ordinal));
+
+        Assert.Contains(dialogs.FindAll("input"), i => i.GetAttribute("value") == "array01.corp.example");
+        Assert.DoesNotContain("Show certificate", dialogs.Markup, StringComparison.Ordinal); // same address: no new certificate
+        dialogs.FindAll("button").Single(b => b.TextContent.Trim() == "Save").Click();
+
+        dialogs.WaitForAssertion(() => Assert.Contains(_api.Changes, c => c.StartsWith($"PUT api/storage-systems/{SystemId} ", StringComparison.Ordinal)));
+        var body = System.Text.Json.Nodes.JsonNode.Parse(_api.Changes.Single(c => c.StartsWith("PUT ", StringComparison.Ordinal)).Split(' ', 3)[2])!;
+        Assert.Equal(("array01", "array01.corp.example", "backup-ro"), (body["name"]!.GetValue<string>(), body["address"]!.GetValue<string>(), body["userName"]!.GetValue<string>()));
+        Assert.Null(body["password"]);
+        Assert.Empty(body["trustedCertificates"]!.AsArray());
+    }
+
     /// <summary>Answers GET requests from a table of paths (without the query); everything else is 404.</summary>
     private sealed class FakeApi : HttpMessageHandler
     {
         public Dictionary<string, object> Answers { get; } = new(StringComparer.Ordinal);
 
+        /// <summary>"METHOD path body" of every request that is not a GET.</summary>
+        public List<string> Changes { get; } = [];
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri!.AbsolutePath.TrimStart('/');
+            if (request.Method != HttpMethod.Get)
+            {
+                lock (Changes)
+                {
+                    Changes.Add($"{request.Method} {path} {request.Content?.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult()}");
+                }
+            }
+
             return Task.FromResult(Answers.TryGetValue(path, out var answer)
                 ? new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(answer, answer.GetType()) }
                 : new HttpResponseMessage(HttpStatusCode.NotFound));

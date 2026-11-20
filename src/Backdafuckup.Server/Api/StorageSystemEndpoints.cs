@@ -29,6 +29,8 @@ public static class StorageSystemEndpoints
         systems.MapPost("/", (CreateStorageSystemDto request, StorageSystems service, CancellationToken ct) => Run(async () => Results.Ok(await service.CreateAsync(request, ct))))
             .WithDescription("Adds a storage system: signs in with the account, reads the array's facts and maps its volumes to the datastores and SRs on them.");
         systems.MapPost("/{id:guid}/test", (Guid id, StorageSystems service, CancellationToken ct) => Run(async () => Results.Ok(await service.TestAsync(id, ct))));
+        systems.MapPut("/{id:guid}", (Guid id, UpdateStorageSystemDto request, StorageSystems service, CancellationToken ct) => Run(async () =>
+            Results.Ok(await service.UpdateAsync(id, request, ct))));
         systems.MapDelete("/{id:guid}", (Guid id, StorageSystems service, CancellationToken ct) => Run(async () =>
         {
             await service.DeleteAsync(id, ct);

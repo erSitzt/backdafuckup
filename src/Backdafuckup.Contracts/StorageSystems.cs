@@ -25,6 +25,26 @@ public sealed record StorageLicenseDto(string Name, DateTimeOffset? ExpiresUtc);
 /// <param name="MinSecondsAfterVmSnapshot">The array snapshot waits at least this long after the batch's last VM snapshot.</param>
 public sealed record StorageSystemOptionsDto(int ExpiryHours, int MaxVmsPerSnapshot, int BatchWindowSeconds, bool ExperimentalReaders, int ProbationRuns, int MinSecondsAfterVmSnapshot = 2);
 
+/// <summary>
+/// Changes to a storage system: its name, the account (<see cref="Password"/> null or empty: the stored password stays)
+/// or its address. A new address needs the certificate confirmed for it in <see cref="TrustedCertificates"/> (empty:
+/// the pinned keys stay). It must lead to the same array (serial number): another array is a storage system of its own.
+/// </summary>
+public sealed record UpdateStorageSystemDto
+{
+    public required string Name { get; init; }
+
+    public required string Address { get; init; }
+
+    public int Port { get; init; } = 443;
+
+    public required string UserName { get; init; }
+
+    public string? Password { get; init; }
+
+    public List<CertificateDto> TrustedCertificates { get; init; } = [];
+}
+
 public sealed record CreateStorageSystemDto
 {
     /// <summary>"AlletraMp".</summary>

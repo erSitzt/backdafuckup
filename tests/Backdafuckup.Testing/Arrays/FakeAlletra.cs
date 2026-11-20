@@ -29,6 +29,9 @@ public sealed class FakeAlletra
 
     public string Password { get; set; } = "secret";
 
+    /// <summary>The serial number /api/v3/info answers (another array answers another one).</summary>
+    public string Serial { get; set; } = "CZ0000TEST";
+
     /// <summary>Snapshots, deletes and edits answer 202 with a task instead of 201/200.</summary>
     public bool AsyncCalls { get; set; }
 
@@ -165,7 +168,7 @@ public sealed class FakeAlletra
                 case ("GET", "info", _):
                     return (HttpStatusCode.OK, new JsonObject
                     {
-                        ["systemName"] = "alletra-test", ["systemModel"] = "HPE Alletra Storage MP B10000", ["systemSerial"] = "CZ0000TEST",
+                        ["systemName"] = "alletra-test", ["systemModel"] = "HPE Alletra Storage MP B10000", ["systemSerial"] = Serial,
                         ["systemWwn"] = "2FF70002AC000001", ["osVersion"] = new JsonObject { ["display"] = "10.4.2" }, ["timeout"] = 30,
                     }, null);
                 case ("GET", "systems", 3):

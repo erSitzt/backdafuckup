@@ -134,6 +134,93 @@ public sealed class StorageSystems(
     }
 
     /// <summary>Signs in again and refreshes the facts (model, OS, licences, privileges).</summary>
+    /// <summary>
+    /// Changes name, account or address. Signs in with the new settings first and changes nothing if that fails or if
+    /// they lead to another array (another serial number). Turned-on volumes, options and the ledger stay.
+    /// </summary>
+    public async Task<StorageSystemDto> UpdateAsync(Guid id, UpdateStorageSystemDto request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var name = request.Name.Trim();
+        if (name.Length is 0 or > 200 || string.IsNullOrWhiteSpace(request.Address) || string.IsNullOrWhiteSpace(request.UserName) || request.Port is < 1 or > 65535)
+        {
+            throw new StorageSystemRequestException("Name, address, port and user name are needed.");
+        }
+
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var system = await FindAsync(db, id, cancellationToken).ConfigureAwait(false);
+        var address = request.Address.Trim();
+        var moved = !string.Equals(address, system.Address, StringComparison.OrdinalIgnoreCase) || request.Port != system.Port;
+        var pins = request.TrustedCertificates.Select(c => c.SpkiSha256.ToLowerInvariant()).Distinct(StringComparer.Ordinal).ToList();
+        if (pins.Count == 0 && moved && system.TrustMode == TlsTrustMode.Pinned)
+        {
+            throw new StorageSystemRequestException($"The new address {address}:{request.Port} needs its certificate confirmed: the pinned key is that of {system.Address}:{system.Port}.");
+        }
+
+        var (trust, keys) = pins.Count > 0 ? (TlsTrustMode.Pinned, pins) : (system.TrustMode, system.PinnedSpki ?? []);
+        var newPassword = !string.IsNullOrEmpty(request.Password);
+        var password = newPassword ? request.Password! : protector.Unprotect(system.Credential.ProtectedSecret);
+        var settings = new ArrayConnectionSettings(address, request.Port, request.UserName.Trim(), password, trust, keys, await ServerIdAsync(cancellationToken).ConfigureAwait(false));
+        ArrayInfo info;
+        try
+        {
+            info = await Provider(system.Kind).TestConnectionAsync(settings, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not StorageSystemRequestException)
+        {
+            throw new StorageSystemRequestException($"Nothing was changed: storage system {address}:{request.Port} with user {settings.UserName}: {ex.Message}");
+        }
+
+        if (system.Facts is { Serial.Length: > 0 } known && !string.Equals(known.Serial, info.Serial, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new StorageSystemRequestException(
+                $"Nothing was changed: {address}:{request.Port} is array {info.Name} (serial {info.Serial}), not {known.Name} (serial {known.Serial}). " +
+                "Another array is a storage system of its own: add it.", StatusCodes.Status409Conflict);
+        }
+
+        if (await db.StorageSystems.AnyAsync(s => s.Id != id && s.Name == name, cancellationToken).ConfigureAwait(false))
+        {
+            throw new StorageSystemRequestException($"A storage system named '{name}' exists already.", StatusCodes.Status409Conflict);
+        }
+
+        List<string> changed = [];
+        void Note(bool differs, string what)
+        {
+            if (differs)
+            {
+                changed.Add(what);
+            }
+        }
+
+        Note(name != system.Name, $"name ({system.Name} → {name})");
+        Note(moved, $"address ({system.Address}:{system.Port} → {address}:{request.Port})");
+        Note(settings.UserName != system.Credential.Username, $"user ({system.Credential.Username} → {settings.UserName})");
+        Note(newPassword, "password");
+        Note(pins.Count > 0 && !pins.SequenceEqual(system.PinnedSpki ?? []), "trusted certificate");
+
+        var now = time.GetUtcNow();
+        system.Name = name;
+        system.Address = address;
+        system.Port = request.Port;
+        system.TrustMode = trust;
+        system.PinnedSpki = [.. keys];
+        system.Credential.Username = settings.UserName;
+        system.Credential.Description = $"Storage system {name}";
+        if (newPassword)
+        {
+            system.Credential.ProtectedSecret = protector.Protect(password);
+        }
+
+        system.Credential.UpdatedUtc = now;
+        system.Facts = info;
+        system.Status = ConnectionStatus.Connected;
+        system.LastError = null;
+        system.LastCheckedUtc = now;
+        await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        logger.LogInformation("Storage system {Name} ({Address}) changed: {Changes}.", name, address, changed.Count == 0 ? "nothing" : string.Join(", ", changed));
+        return (await ListAsync(cancellationToken).ConfigureAwait(false)).Single(s => s.Id == id);
+    }
+
     public async Task<StorageSystemDto> TestAsync(Guid id, CancellationToken cancellationToken)
     {
         await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false))

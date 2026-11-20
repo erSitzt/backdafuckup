@@ -26,16 +26,7 @@
             <MudAlert Severity="Severity.Warning" Class="mb-3">
                 Verify the certificate before you trust it, e.g. compare the certificate SHA-256 with the one your browser shows for the array's management interface.
             </MudAlert>
-            <MudSimpleTable Dense="true" Elevation="0" Class="mb-3">
-                <tbody>
-                    <tr><td style="width:180px">Host</td><td>@cert.HostAddress</td></tr>
-                    <tr><td>Subject</td><td>@cert.Subject</td></tr>
-                    <tr><td>Issuer</td><td>@cert.Issuer @(cert.ValidAgainstSystemCa ? "(trusted CA)" : "(self-signed or unknown CA)")</td></tr>
-                    <tr><td>Valid</td><td>@Fmt.Time(cert.NotBefore) – @Fmt.Time(cert.NotAfter)</td></tr>
-                    <tr><td>Public key SHA-256</td><td class="mono">@cert.SpkiSha256</td></tr>
-                    <tr><td>Certificate SHA-256</td><td class="mono">@cert.Sha256Thumbprint</td></tr>
-                </tbody>
-            </MudSimpleTable>
+            @CertificateTable(cert)
         }
         else if (_step == Step.Credentials)
         {
@@ -101,7 +92,10 @@ else
                 <MudSpacer />
                 <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.NetworkCheck" Disabled="_busy" OnClick="@(() => TestAsync(system))">Test</MudButton>
                 <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Refresh" Disabled="_busy" OnClick="@(() => RefreshAsync(system))">Refresh mapping</MudButton>
-                <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error" Disabled="_busy" OnClick="@(() => RemoveAsync(system))" />
+                <MudTooltip Text="Edit name, account or address">
+                    <MudIconButton Icon="@Icons.Material.Filled.Edit" Size="Size.Small" Disabled="_busy" aria-label="Edit" OnClick="@(() => StartEditing(system))" />
+                </MudTooltip>
+                <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error" Disabled="_busy" aria-label="Remove" OnClick="@(() => RemoveAsync(system))" />
             </div>
             <MudText Typo="Typo.body2" Class="mt-1">
                 @system.Address:@system.Port · user @system.UserName
@@ -412,6 +406,59 @@ else
     </DialogActions>
 </MudDialog>
 
+<MudDialog @bind-Visible="_editOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Small, FullWidth = true, CloseOnEscapeKey = true })">
+    <TitleContent><MudText Typo="Typo.h6">Edit @_editing?.Name</MudText></TitleContent>
+    <DialogContent>
+        <MudStack Spacing="2">
+            <MudTextField T="string" @bind-Value="_editName" Label="Name" Variant="Variant.Outlined" Immediate="true" />
+            <MudStack Row="true" AlignItems="AlignItems.Start">
+                <MudTextField T="string" Value="_editAddress" ValueChanged="@(v => { _editAddress = v; _editCertificate = null; })" Label="Host name or IP address" Variant="Variant.Outlined" Immediate="true" />
+                <MudNumericField T="int" Value="_editPort" ValueChanged="@(v => { _editPort = v; _editCertificate = null; })" Label="Port" Variant="Variant.Outlined" Style="max-width:120px" />
+            </MudStack>
+            <MudTextField T="string" @bind-Value="_editUserName" Label="WSAPI user" Variant="Variant.Outlined" Immediate="true" />
+            <MudTextField T="string" @bind-Value="_editPassword" Label="Password" InputType="InputType.Password" Variant="Variant.Outlined" Immediate="true"
+                          HelperText="Empty: the stored password stays." />
+            @if (EditMoved)
+            {
+                @if (_editCertificate is { } editCert)
+                {
+                    <MudAlert Severity="Severity.Warning" Dense="true">
+                        Verify the certificate of the new address before you trust it, e.g. compare its SHA-256 with the one your browser shows for the array's management interface.
+                    </MudAlert>
+                    @CertificateTable(editCert)
+                }
+                else
+                {
+                    <MudAlert Severity="Severity.Info" Dense="true">
+                        A new address: its certificate is shown for confirmation first. It has to be the same array (the serial number is compared); another array is a storage system of its own.
+                    </MudAlert>
+                }
+            }
+            <MudText Typo="Typo.caption">
+                Saving signs in with these settings first; if that fails, or the address leads to another array, nothing is changed. The volumes turned on,
+                the options and the objects of this server on the array stay as they are.
+            </MudText>
+            @if (_editError is not null)
+            {
+                <MudAlert Severity="Severity.Error" Dense="true">@_editError</MudAlert>
+            }
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="@(() => _editOpen = false)">Cancel</MudButton>
+        @if (EditMoved && _editCertificate is null)
+        {
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || string.IsNullOrWhiteSpace(_editAddress))" OnClick="ProbeEditAsync">Show certificate</MudButton>
+        }
+        else
+        {
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_busy || string.IsNullOrWhiteSpace(_editName) || string.IsNullOrWhiteSpace(_editUserName))" OnClick="SaveEditAsync">
+                @(EditMoved ? "Trust certificate and save" : "Save")
+            </MudButton>
+        }
+    </DialogActions>
+</MudDialog>
+
 @code {
     private enum Step { Address, Trust, Credentials }
 
@@ -454,6 +501,80 @@ else
     }
 
     private readonly Dictionary<Guid, StorageProxyAccessDto> _access = [];
+    private bool _editOpen;
+    private StorageSystemDto? _editing;
+    private string _editName = string.Empty;
+    private string _editAddress = string.Empty;
+    private int _editPort = 443;
+    private string _editUserName = string.Empty;
+    private string? _editPassword;
+    private CertificateDto? _editCertificate;
+    private string? _editError;
+
+    private static RenderFragment CertificateTable(CertificateDto cert) => @<MudSimpleTable Dense="true" Elevation="0" Class="mb-3">
+        <tbody>
+            <tr><td style="width:180px">Host</td><td>@cert.HostAddress</td></tr>
+            <tr><td>Subject</td><td>@cert.Subject</td></tr>
+            <tr><td>Issuer</td><td>@cert.Issuer @(cert.ValidAgainstSystemCa ? "(trusted CA)" : "(self-signed or unknown CA)")</td></tr>
+            <tr><td>Valid</td><td>@Fmt.Time(cert.NotBefore) – @Fmt.Time(cert.NotAfter)</td></tr>
+            <tr><td>Public key SHA-256</td><td class="mono">@cert.SpkiSha256</td></tr>
+            <tr><td>Certificate SHA-256</td><td class="mono">@cert.Sha256Thumbprint</td></tr>
+        </tbody>
+    </MudSimpleTable>;
+
+    /// <summary>The address or port differs from the stored one: the new certificate is confirmed before saving.</summary>
+    private bool EditMoved => _editing is { } s && (!string.Equals(_editAddress.Trim(), s.Address, StringComparison.OrdinalIgnoreCase) || _editPort != s.Port);
+
+    private void StartEditing(StorageSystemDto system)
+    {
+        (_editing, _editName, _editAddress, _editPort, _editUserName, _editPassword, _editCertificate, _editError) =
+            (system, system.Name, system.Address, system.Port, system.UserName, null, null, null);
+        _editOpen = true;
+    }
+
+    private async Task ProbeEditAsync()
+    {
+        _busy = true;
+        _editError = null;
+        try
+        {
+            _editCertificate = await Api.PostAsync<CertificateDto>("api/storage-systems/probe", new ProbeRequestDto(_editAddress.Trim(), _editPort, _editing!.Kind));
+        }
+        catch (ApiException ex)
+        {
+            _editError = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task SaveEditAsync()
+    {
+        _busy = true;
+        _editError = null;
+        try
+        {
+            var saved = await Api.PutAsync<StorageSystemDto>($"api/storage-systems/{_editing!.Id}", new UpdateStorageSystemDto
+            {
+                Name = _editName.Trim(), Address = _editAddress.Trim(), Port = _editPort, UserName = _editUserName.Trim(), Password = _editPassword,
+                TrustedCertificates = EditMoved && _editCertificate is { } cert ? [cert] : [],
+            });
+            _editOpen = false;
+            _editPassword = null;
+            Snackbar.Add($"{saved.Name} saved; signed in as {saved.UserName}.", Severity.Success);
+            await LoadAsync();
+        }
+        catch (ApiException ex)
+        {
+            _editError = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
     private bool _hostOpen;
     private bool _planning;
     private StorageSystemDto? _hostSystem;

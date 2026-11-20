@@ -29,6 +29,60 @@ public sealed partial class ApiIntegrationTests
     private FakeAlletra Alletra2 => _alletra2 ??= new FakeAlletra();
 
     [Fact]
+    public async Task A_storage_system_gets_a_new_name_account_or_address_but_never_becomes_another_array()
+    {
+        var client = await SignedInClientAsync();
+        var array = Alletra;
+        var system = await Read<StorageSystemDto>(client.PostAsJsonAsync("/api/storage-systems", new CreateStorageSystemDto
+        {
+            Name = "Alletra", Address = "array01.corp.example", UserName = array.User, Password = array.Password,
+        }, Ct));
+        var options = new StorageSystemOptionsDto(6, 4, 30, true, 3, 2);
+        await client.PutAsJsonAsync($"/api/storage-systems/{system.Id}/options", options, Ct);
+        UpdateStorageSystemDto Change(string name = "array01", string address = "array01.corp.example", string? user = null, string? password = null, CertificateDto? cert = null) =>
+            new() { Name = name, Address = address, UserName = user ?? array.User, Password = password, TrustedCertificates = cert is null ? [] : [cert] };
+
+        // A new name: the stored password stays, and so do the options.
+        var renamed = await Read<StorageSystemDto>(client.PutAsJsonAsync($"/api/storage-systems/{system.Id}", Change(), Ct));
+        Assert.Equal(("array01", "Connected"), (renamed.Name, renamed.Status));
+        Assert.Equal(options, renamed.Options);
+
+        // A wrong password changes nothing.
+        var wrong = await client.PutAsJsonAsync($"/api/storage-systems/{system.Id}", Change(name: "renamed-again", password: "wrong"), Ct);
+        Assert.Equal(HttpStatusCode.BadRequest, wrong.StatusCode);
+        Assert.Contains("Nothing was changed: storage system array01.corp.example:443 with user bdfu-wsapi", await wrong.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+        Assert.Equal("array01", (await client.GetFromJsonAsync<List<StorageSystemDto>>("/api/storage-systems", Ct))!.Single().Name);
+
+        // Another account that may change the array, with its password; the next test signs in with it.
+        (array.User, array.Password) = ("backup-edit", "new-secret");
+        var switched = await Read<StorageSystemDto>(client.PutAsJsonAsync($"/api/storage-systems/{system.Id}", Change(user: "backup-edit", password: "new-secret"), Ct));
+        Assert.Equal("backup-edit", switched.UserName);
+        Assert.Equal("Connected", (await Read<StorageSystemDto>(client.PostAsync($"/api/storage-systems/{system.Id}/test", null, Ct))).Status);
+
+        // Once the key is pinned, a new address needs its certificate confirmed.
+        var cert = new CertificateDto("array01.corp.example", "CN=array01", "CN=array01", DateTimeOffset.UtcNow.AddYears(-1), DateTimeOffset.UtcNow.AddYears(1),
+            new string('a', 64), new string('b', 64), false);
+        await Read<StorageSystemDto>(client.PutAsJsonAsync($"/api/storage-systems/{system.Id}", Change(user: "backup-edit", cert: cert), Ct));
+        var unconfirmed = await client.PutAsJsonAsync($"/api/storage-systems/{system.Id}", Change(address: "array02.corp.example", user: "backup-edit"), Ct);
+        Assert.Equal(HttpStatusCode.BadRequest, unconfirmed.StatusCode);
+        Assert.Contains("needs its certificate confirmed", await unconfirmed.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+
+        // Another array (another serial number) is refused, even with its certificate.
+        (Alletra2.User, Alletra2.Password, Alletra2.Serial) = ("backup-edit", "new-secret", "CZ0000OTHER");
+        var other = await client.PutAsJsonAsync($"/api/storage-systems/{system.Id}",
+            Change(address: "array02.corp.example", user: "backup-edit", cert: cert with { HostAddress = "array02.corp.example", SpkiSha256 = new string('c', 64) }), Ct);
+        Assert.Equal(HttpStatusCode.Conflict, other.StatusCode);
+        Assert.Contains("(serial CZ0000OTHER), not alletra-test (serial CZ0000TEST)", await other.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+        Assert.Equal("array01.corp.example", (await client.GetFromJsonAsync<List<StorageSystemDto>>("/api/storage-systems", Ct))!.Single().Address);
+
+        // The same array at a new address, with its certificate: moved.
+        Alletra2.Serial = "CZ0000TEST";
+        var moved = await Read<StorageSystemDto>(client.PutAsJsonAsync($"/api/storage-systems/{system.Id}",
+            Change(address: "array02.corp.example", user: "backup-edit", cert: cert with { HostAddress = "array02.corp.example", SpkiSha256 = new string('c', 64) }), Ct));
+        Assert.Equal(("array02.corp.example", new string('c', 64)), (moved.Address, Assert.Single(moved.PinnedSpki)));
+    }
+
+    [Fact]
     public async Task A_storage_system_maps_its_volumes_to_srs_and_datastores_by_wwn_and_cleans_up_only_its_own_objects()
     {
         var client = await SignedInClientAsync();
