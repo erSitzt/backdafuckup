@@ -44,7 +44,7 @@ public sealed class IscsiadmInitiator(
     public static readonly TimeSpan LoginTimeout = TimeSpan.FromSeconds(30);
 
     private readonly CommandRunner _run = run ?? Commands.RunAsync;
-    private readonly Func<string, int, CancellationToken, Task> _connect = connect ?? ConnectAsync;
+    private readonly Func<string, int, CancellationToken, Task> _connect = connect ?? IscsiPortals.ConnectAsync;
     private readonly Func<IReadOnlyList<string>> _ownAddresses = ownAddresses ?? NetworkAddresses.Ipv4;
 
     private string InitiatorFile => Path.Combine(etcRoot, "iscsi", "initiatorname.iscsi");
@@ -87,30 +87,8 @@ public sealed class IscsiadmInitiator(
             : $"{InitiatorFile} names no initiator (a line InitiatorName=iqn.…)";
     }
 
-    public async Task<IReadOnlyList<ProxyPortalReach>> ProbeAsync(IReadOnlyList<string> portals, CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(portals);
-        return await Task.WhenAll(portals.Select(async portal =>
-        {
-            var (host, port) = Split(portal);
-            var shown = $"{host}:{port}";
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(ConnectTimeout);
-            try
-            {
-                await _connect(host, port, timeout.Token).ConfigureAwait(false);
-                return new ProxyPortalReach(shown, true, null);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                return new ProxyPortalReach(shown, false, $"no TCP connection within {ConnectTimeout.TotalSeconds:0} s");
-            }
-            catch (System.Net.Sockets.SocketException ex)
-            {
-                return new ProxyPortalReach(shown, false, ex.Message);
-            }
-        })).ConfigureAwait(false);
-    }
+    public Task<IReadOnlyList<ProxyPortalReach>> ProbeAsync(IReadOnlyList<string> portals, CancellationToken cancellationToken) =>
+        IscsiPortals.ProbeAsync(portals, _connect, cancellationToken);
 
     public async Task LoginAsync(IReadOnlyList<string> portals, string targetIqn, CancellationToken cancellationToken)
     {
@@ -122,9 +100,7 @@ public sealed class IscsiadmInitiator(
         var reach = await ProbeAsync(portals, cancellationToken).ConfigureAwait(false);
         if (reach.All(r => !r.Reachable))
         {
-            throw new InvalidOperationException(
-                $"none of the array's iSCSI addresses answers: {string.Join("; ", reach.Select(r => $"{r.Portal} ({r.Error})"))}. " +
-                $"This proxy's addresses: {Own()}. It needs a network interface in the array's iSCSI network(s), or a route to them.");
+            throw new InvalidOperationException(IscsiPortals.NoneReachable(reach, _ownAddresses()));
         }
 
         errors.AddRange(reach.Where(r => !r.Reachable).Select(r => $"{r.Portal}: {r.Error}"));
@@ -154,30 +130,6 @@ public sealed class IscsiadmInitiator(
             throw new InvalidOperationException($"No iSCSI login to {targetIqn}: {string.Join("; ", errors)}");
         }
     }
-
-    /// <summary>"address[:port]" or "[v6][:port]".</summary>
-    private static (string Host, int Port) Split(string portal)
-    {
-        if (portal.StartsWith('['))
-        {
-            var end = portal.IndexOf(']', StringComparison.Ordinal);
-            var host = portal[1..end];
-            return (host, end + 2 < portal.Length && int.TryParse(portal[(end + 2)..], out var v6Port) ? v6Port : DefaultPort);
-        }
-
-        var colon = portal.LastIndexOf(':');
-        return colon > 0 && portal.IndexOf(':', StringComparison.Ordinal) == colon && int.TryParse(portal[(colon + 1)..], out var port)
-            ? (portal[..colon], port)
-            : (portal, DefaultPort);
-    }
-
-    private static async Task ConnectAsync(string host, int port, CancellationToken cancellationToken)
-    {
-        using var client = new System.Net.Sockets.TcpClient();
-        await client.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
-    }
-
-    private string Own() => _ownAddresses() is { Count: > 0 } own ? string.Join(", ", own) : "none (no IPv4 address)";
 
     /// <summary>iscsiadm with a time limit; the process is ended when it is over.</summary>
     private async Task<(int ExitCode, string Output)> RunBoundedAsync(IReadOnlyList<string> arguments, TimeSpan limit, CancellationToken cancellationToken)
@@ -371,3 +323,63 @@ public static class NetworkAddresses
     ];
 }
 
+/// <summary>The array's iSCSI portals as the proxy reaches them: a TCP connection to each, in seconds, without a login.</summary>
+public static class IscsiPortals
+{
+    /// <summary>Whether a TCP connection to each portal ("address[:port]") opens within <see cref="IscsiadmInitiator.ConnectTimeout"/>.</summary>
+    public static async Task<IReadOnlyList<ProxyPortalReach>> ProbeAsync(
+        IReadOnlyList<string> portals, Func<string, int, CancellationToken, Task>? connect, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(portals);
+        var open = connect ?? ConnectAsync;
+        return await Task.WhenAll(portals.Select(async portal =>
+        {
+            var (host, port) = Split(portal);
+            var shown = $"{host}:{port}";
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(IscsiadmInitiator.ConnectTimeout);
+            try
+            {
+                await open(host, port, timeout.Token).ConfigureAwait(false);
+                return new ProxyPortalReach(shown, true, null);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return new ProxyPortalReach(shown, false, $"no TCP connection within {IscsiadmInitiator.ConnectTimeout.TotalSeconds:0} s");
+            }
+            catch (System.Net.Sockets.SocketException ex)
+            {
+                return new ProxyPortalReach(shown, false, ex.Message);
+            }
+        })).ConfigureAwait(false);
+    }
+
+    /// <summary>The message when no portal answers: each portal and why, and the proxy's own addresses.</summary>
+    public static string NoneReachable(IReadOnlyList<ProxyPortalReach> reach, IReadOnlyList<string> ownAddresses) =>
+        $"none of the array's iSCSI addresses answers: {string.Join("; ", reach.Select(r => $"{r.Portal} ({r.Error})"))}. " +
+        $"This proxy's addresses: {(ownAddresses.Count > 0 ? string.Join(", ", ownAddresses) : "none (no IPv4 address)")}. " +
+        "It needs a network interface in the array's iSCSI network(s), or a route to them.";
+
+    /// <summary>"address[:port]" or "[v6][:port]".</summary>
+    public static (string Host, int Port) Split(string portal)
+    {
+        ArgumentNullException.ThrowIfNull(portal);
+        if (portal.StartsWith('['))
+        {
+            var end = portal.IndexOf(']', StringComparison.Ordinal);
+            var host = portal[1..end];
+            return (host, end + 2 < portal.Length && int.TryParse(portal[(end + 2)..], out var v6Port) ? v6Port : IscsiadmInitiator.DefaultPort);
+        }
+
+        var colon = portal.LastIndexOf(':');
+        return colon > 0 && portal.IndexOf(':', StringComparison.Ordinal) == colon && int.TryParse(portal[(colon + 1)..], out var port)
+            ? (portal[..colon], port)
+            : (portal, IscsiadmInitiator.DefaultPort);
+    }
+
+    public static async Task ConnectAsync(string host, int port, CancellationToken cancellationToken)
+    {
+        using var client = new System.Net.Sockets.TcpClient();
+        await client.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
+    }
+}

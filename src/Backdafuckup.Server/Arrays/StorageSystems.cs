@@ -564,7 +564,7 @@ public sealed class StorageSystems(
             }
 
             checks.Add(domain is null ? note ?? "The volumes are in no domain, so the host object goes into none." : $"Domain {domain}: {note ?? "as chosen."}");
-            var hostRequest = new ArrayHostRequest(name, iqn, domain, $"backdafuckup proxy {Comment(proxyName)}");
+            var hostRequest = new ArrayHostRequest(name, iqn, domain, $"backdafuckup proxy {Comment(proxyName)}", ProxyPlatforms.IsWindows(live.Platform));
             IReadOnlyList<ArrayChange> changes;
             try
             {
@@ -601,7 +601,8 @@ public sealed class StorageSystems(
         try
         {
             await using var array = await OpenAsync(id, cancellationToken).ConfigureAwait(false);
-            var host = await array.CreateHostAsync(new ArrayHostRequest(plan.Name, plan.InitiatorName!, plan.Domain, $"backdafuckup proxy {Comment(plan.ProxyName)}"), cancellationToken)
+            var windows = ProxyPlatforms.IsWindows(proxies.Connected().FirstOrDefault(p => p.Id == request.ProxyId)?.Platform);
+            var host = await array.CreateHostAsync(new ArrayHostRequest(plan.Name, plan.InitiatorName!, plan.Domain, $"backdafuckup proxy {Comment(plan.ProxyName)}", windows), cancellationToken)
                 .ConfigureAwait(false);
             logger.LogInformation("Created host object {Host} on storage system {System} ({Address}) for proxy {Proxy} ({Initiator}), domain {Domain}, asked for by {User}",
                 host.Name, system.Name, system.Address, plan.ProxyName, plan.InitiatorName, plan.Domain ?? "none", requestedBy ?? "(unknown)");

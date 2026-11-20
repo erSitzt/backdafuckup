@@ -29,6 +29,9 @@ public sealed class ProxyEntity
 
     public string? AgentVersion { get; set; }
 
+    /// <summary>Where the agent runs (<see cref="Core.Proxies.ProxyPlatforms"/>), from its last hello; null before the first.</summary>
+    public string? Platform { get; set; }
+
     /// <summary>The SMBIOS UUID of the machine (finds the proxy's VM in vCenter).</summary>
     public string? SmbiosUuid { get; set; }
 

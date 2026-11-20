@@ -103,12 +103,34 @@ public sealed partial class ApiIntegrationTests
         Assert.False(backup.Released);
         Assert.Contains(log.Entries, e => e.Message.StartsWith("Array snapshot bdfu-", StringComparison.Ordinal) && e.Message.Contains(" presented to host object proxy01 (proxy proxy01) as LUN ", StringComparison.Ordinal));
         Assert.Contains(log.Entries, e => e.Severity == LogSeverity.Warning &&
-            e.Message.Contains("Proxy proxy01 could not log in to iqn.2000-05.com.3pardata:20210002ac000001 on Alletra (array01.corp.example): proxy01 (host proxy01): iscsi-login failed: " +
+            e.Message.Contains("Proxy proxy01 could not log in to Alletra (array01.corp.example): iqn.2000-05.com.3pardata:20210002ac000001: proxy01 (host proxy01): iscsi-login failed: " +
                                "none of the array's iSCSI addresses answers", StringComparison.Ordinal) &&
             e.Message.Contains("Its disks are read from the VM snapshot.", StringComparison.Ordinal));
         await WaitUntilAsync(() => array.Vluns.Count == 0 && !array.Volumes.Values.Any(v => v["copyOfID"] is not null));
         await WaitUntilAsync(() => log.Entries.Any(e => e.Message.Contains("Storage system Alletra (array01.corp.example): snapshot bdfu-", StringComparison.Ordinal) && e.Message.EndsWith(" removed.", StringComparison.Ordinal)));
         Assert.Contains(log.Entries, e => e.Message.Contains("presentation of bdfu-", StringComparison.Ordinal) && e.Message.Contains("to proxy01 removed.", StringComparison.Ordinal));
+        // The proxy is asked to rescan, so a Windows proxy drops the vanished disk.
+        await WaitUntilAsync(() => pool.Rescans == 1);
+    }
+
+    [Fact]
+    public async Task One_target_the_proxy_reaches_is_enough_and_the_others_are_named()
+    {
+        var (service, array, pool, srUuid, connectionId, _) = await ArraySetupAsync();
+        array.AddIscsiPort("1:2:1", "10.26.102.10", "iqn.2000-05.com.3pardata:21210002ac000001");
+        pool.FailingTargets.Add("iqn.2000-05.com.3pardata:21210002ac000001");
+        var (leaf, baseVdi, image, _) = LvhdImage(srUuid);
+        pool.Luns[SrWwn.ToLowerInvariant()] = image;
+        var backup = new ArrayFakeSession(srUuid, leaf, baseVdi, image);
+        var log = new RecordingLog();
+
+        await using (var lease = await service.OnVmSnapshotCreatedAsync(Context(connectionId, backup), log, Ct))
+        {
+            Assert.NotNull(lease);
+        }
+
+        Assert.Contains(log.Entries, e => e.Severity == LogSeverity.Warning &&
+            e.Message == "Proxy proxy01 reaches 1 of 2 iSCSI targets of Alletra (array01.corp.example); not: iqn.2000-05.com.3pardata:21210002ac000001: no iSCSI session to iqn.2000-05.com.3pardata:21210002ac000001");
     }
 
     [Fact]
@@ -721,13 +743,27 @@ public sealed partial class ApiIntegrationTests
         /// <summary>The answer to the iSCSI probe (null: the proxy cannot say).</summary>
         public ProxyIscsiReach? Reach { get; set; }
 
+        /// <summary>Targets whose login fails (the others succeed), if set.</summary>
+        public HashSet<string> FailingTargets { get; } = [];
+
         public Task LoginIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, string targetIqn, CancellationToken cancellationToken)
         {
             Logins.AddRange(portals.Select(p => (p, targetIqn)));
-            return LoginFailure is { } failure ? Task.FromException(failure) : Task.CompletedTask;
+            return LoginFailure is { } failure ? Task.FromException(failure)
+                : FailingTargets.Contains(targetIqn) ? Task.FromException(new IOException($"no iSCSI session to {targetIqn}"))
+                : Task.CompletedTask;
         }
 
         public Task<ProxyIscsiReach?> ProbeIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, CancellationToken cancellationToken) => Task.FromResult(Reach);
+
+        /// <summary>How often the server asked the proxy to rescan (after unpresenting).</summary>
+        public int Rescans { get; private set; }
+
+        public Task RescanAsync(Guid proxyId, CancellationToken cancellationToken)
+        {
+            Rescans++;
+            return Task.CompletedTask;
+        }
 
         public Task<IProxyDisk> AttachAsync(Guid proxyId, string serial, long sizeBytes, bool writable, CancellationToken cancellationToken)
         {

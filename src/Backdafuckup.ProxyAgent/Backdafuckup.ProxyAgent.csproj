@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- The backup proxy agent: runs on a Linux VM (vSphere HotAdd) or a Linux host with SAN access, attaches disks the
-       server names and serves them to the server as NBD over WebSocket tunnels. Built as one self-contained file by
-       scripts/build-proxy.sh. -->
+  <!-- The backup proxy agent: runs on a Linux VM (vSphere HotAdd) or a Linux host with SAN access, or on a physical
+       Windows server with SAN access; opens the disks the server names and serves them to the server as NBD over
+       WebSocket tunnels. Built as one self-contained file per platform (linux-x64, win-x64) by scripts/build-proxy.sh. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>backdafuckup-proxy</AssemblyName>
@@ -15,5 +15,9 @@
     <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
     <ProjectReference Include="..\Backdafuckup.Proxy\Backdafuckup.Proxy.csproj" />
     <ProjectReference Include="..\Backdafuckup.Contracts\Backdafuckup.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The Windows service (ServiceBase); not used on Linux. -->
+    <PackageReference Include="System.ServiceProcess.ServiceController" />
   </ItemGroup>
 </Project>

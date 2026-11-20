@@ -66,25 +66,47 @@ public static class ProxyEndpoints
                 return Results.Text(ProxyInstallScript.Refusal(ex.Message), "text/x-shellscript; charset=utf-8", statusCode: ex.StatusCode);
             }
         }).AllowAnonymous().ExcludeFromDescription();
-        app.MapGet("/api/agent/proxies/{id:guid}/install/" + Proxy.ProxySelfUpdate.ProgramName, (Guid id, ProxyAgents agents, ProxyPackage package, HttpContext http, CancellationToken ct) => Run(async () =>
+        app.MapGet("/api/agent/proxies/{id:guid}/" + ProxyWindowsInstall.ScriptName, async (Guid id, ProxyAgents agents, HttpContext http, CancellationToken ct) =>
         {
+            try
+            {
+                return Results.Text(await agents.WindowsInstallScriptAsync(id, http.Request.Headers.Authorization, ct), "text/plain; charset=utf-8");
+            }
+            catch (ProxyRequestException ex)
+            {
+                // A script that throws why: the one-liner runs whatever comes, whatever its status.
+                return Results.Text(ProxyWindowsInstall.Refusal(ex.Message), "text/plain; charset=utf-8", statusCode: ex.StatusCode);
+            }
+        }).AllowAnonymous().ExcludeFromDescription();
+        app.MapGet("/api/agent/proxies/{id:guid}/install/{file}", (Guid id, string file, ProxyAgents agents, ProxyPackage package, HttpContext http, CancellationToken ct) => Run(async () =>
+        {
+            if (PlatformOf(file) is not { } platform)
+            {
+                return Results.NotFound();
+            }
+
             await agents.CheckInstallTokenAsync(id, http.Request.Headers.Authorization, ct);
-            return package.Program() is { } program
-                ? Results.File(program.Path, "application/octet-stream", Proxy.ProxySelfUpdate.ProgramName)
-                : Results.Problem("This server has no proxy agent package.", statusCode: StatusCodes.Status404NotFound);
+            return package.Program(platform) is { } program
+                ? Results.File(program.Path, "application/octet-stream", file)
+                : Results.Problem($"This server has no proxy agent package for {platform} ({file} is missing in {package.Directory}).", statusCode: StatusCodes.Status404NotFound);
         })).AllowAnonymous().ExcludeFromDescription();
 
         // The program file for the agent's self-update, for an enrolled agent only.
-        app.MapGet("/api/agent/proxies/{id:guid}/package/" + Proxy.ProxySelfUpdate.ProgramName, async (Guid id, ProxyAgents agents, ProxyPackage package, HttpContext http, CancellationToken ct) =>
+        app.MapGet("/api/agent/proxies/{id:guid}/package/{file}", async (Guid id, string file, ProxyAgents agents, ProxyPackage package, HttpContext http, CancellationToken ct) =>
         {
+            if (PlatformOf(file) is not { } platform)
+            {
+                return Results.NotFound();
+            }
+
             if (await agents.AuthenticateAsync(id, http.Request.Headers.Authorization, ct) is null)
             {
                 return Results.Problem($"There is no proxy {id}, or its key does not match.", statusCode: StatusCodes.Status401Unauthorized);
             }
 
-            return package.Program() is { } program
-                ? Results.File(program.Path, "application/octet-stream", Proxy.ProxySelfUpdate.ProgramName)
-                : Results.Problem("This server has no proxy agent package.", statusCode: StatusCodes.Status404NotFound);
+            return package.Program(platform) is { } program
+                ? Results.File(program.Path, "application/octet-stream", file)
+                : Results.Problem($"This server has no proxy agent package for {platform}.", statusCode: StatusCodes.Status404NotFound);
         }).AllowAnonymous().ExcludeFromDescription();
 
         app.MapGet("/api/agent/proxies/{id:guid}/tunnel/{stream:guid}", async (Guid id, Guid stream, ProxyAgents agents, HttpContext http, CancellationToken ct) =>
@@ -125,6 +147,12 @@ public static class ProxyEndpoints
         var address = http.Connection.RemoteIpAddress is { IsIPv4MappedToIPv6: true } mapped ? mapped.MapToIPv4() : http.Connection.RemoteIpAddress;
         return $"{address}:{http.Connection.RemotePort}";
     }
+
+    /// <summary>The platform whose program a file name is: the Linux or the Windows program, nothing else.</summary>
+    private static string? PlatformOf(string file) =>
+        file == Proxy.ProxySelfUpdate.ProgramName ? Core.Proxies.ProxyPlatforms.Linux
+        : file == Proxy.ProxySelfUpdate.WindowsProgramName ? Core.Proxies.ProxyPlatforms.Windows
+        : null;
 
     private static async Task<IResult> Run(Func<Task<IResult>> action)
     {

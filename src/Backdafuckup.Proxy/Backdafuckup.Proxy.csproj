@@ -1,4 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- The Windows proxy's aligned bounce buffers. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
     <ProjectReference Include="..\Backdafuckup.Nbd\Backdafuckup.Nbd.csproj" />

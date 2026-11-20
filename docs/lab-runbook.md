@@ -323,6 +323,17 @@ A dedicated test volume on the array, used as an LVM over iSCSI SR in the pool, 
 | N10 | Only if a reader was switched off by a real difference (it should not be): look at the alert and the console, keep the session log, then *Turn back on* and run the job. | While switched off: the VM is read from its VM snapshot, the log names the reason, `bdfu_array_reader_tripped` is 1 and `BackdafuckupArrayReaderSwitchedOff` fires. After *Turn back on*: verify mode again. |
 | N11 | vSphere, once the OpenVmfs reader is in the build: a test datastore on a dedicated volume of the array, a test VM on it, a job with *Backup from storage snapshots*; run it three times. | Run 1 through HotAdd ("no restore point yet"); runs 2 and 3 read `array-vmfs` from the disk under the VM snapshot, which is removed before; verify mode compares through HotAdd in run 2; restore and boot as in N4; no `bdfu-` snapshot, VLUN or VM snapshot left. Also an independent disk: refused as open for writing, the VM read through HotAdd. |
 
+### W. Windows proxy (a physical Windows server with SAN access)
+
+| # | Step | Expected |
+|---|---|---|
+| W1 | On a lab Windows VM (no SAN): add a proxy (*Windows*), paste the one-liner in a PowerShell as administrator; run it again; let the server offer an update (deploy a new build); `backdafuckup-proxy.exe uninstall`. | Installed and online within seconds, platform Windows, no HotAdd; *SAN: … missing* names MSiSCSI. Run again, it replaces. The update is downloaded, the service stops with exit code 3 and comes back with the new version. Uninstall leaves no service, no `%ProgramData%\backdafuckup-proxy`, no program folder. |
+| W2 | On the physical server, when it is not busy with other work: install with the one-liner. | Online with `san-v1`; its initiator name; SAN policy OfflineShared (or set to it, logged). *Storage Systems → Proxy access* shows its existing host object and all iSCSI addresses reached. No new iSCSI session. |
+| W3 | A job with *Backup from storage snapshots* for a VM on an LVHD SR. | VM snapshot, array snapshot `bdfu-…-01` presented to the server's host object; the disk found by its WWN, offline and read-only; verify mode; VM snapshot released early; the backup reads from the array snapshot. |
+| W4 | Run it again after writing in the VM. | Incremental from the array snapshot; the unchanged-region check passes. |
+| W5 | After the runs. | No `bdfu-` snapshot or VLUN on the array; after the rescan no snapshot disk on the server; the other product's sessions and disks unchanged. |
+| W6 | `backdafuckup-proxy.exe uninstall` on the physical server. | Service, key, log and program removed; nothing else changed. |
+
 ### J. Instant VM recovery (vSphere)
 
 The vCenter of section V, a host whose VMkernel addresses reach the backup server; on the backup server `InstantRecovery:Enabled` and the firewall rules for the host (admin guide, *The NFS server for instant recovery*); restore points of the Linux and the Windows VM of section V. VMs only in the test folder and pool.

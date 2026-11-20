@@ -1318,6 +1318,11 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("character varying(100)")
                         .HasColumnName("name");
 
+                    b.Property<string>("Platform")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("platform");
+
                     b.Property<string>("SmbiosUuid")
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)")

@@ -47,22 +47,30 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
     }
 
     /// <summary>
-    /// The host persona of a backup proxy: Generic-ALUA (2), what HPE names for Linux hosts, also with Peer Persistence.
-    /// The B10000 lists it as <c>{"id": 2, "name": "Generic-ALUA"}</c>.
+    /// The host persona of a Linux backup proxy: Generic-ALUA (2), what HPE names for Linux hosts, also with Peer
+    /// Persistence. The B10000 lists it as <c>{"id": 2, "name": "Generic-ALUA"}</c>.
     /// </summary>
     internal const int ProxyPersona = 2;
+
+    /// <summary>The host persona of a Windows server: WindowsServer (15), as the array lists Windows hosts.</summary>
+    internal const int WindowsPersona = 15;
+
+    private static (int Persona, string PersonaName, string Os) Personality(ArrayHostRequest request) =>
+        request.Windows ? (WindowsPersona, "WindowsServer (Windows)", "Windows Server") : (ProxyPersona, "Generic-ALUA (Linux)", "Linux");
 
     public IReadOnlyList<ArrayChange> DescribeHostCreation(ArrayHostRequest request)
     {
         Check(request);
         var domain = Domain(request.Domain);
+        var (persona, personaName, os) = Personality(request);
         return
         [
             new ArrayChange(
-                $"Create host object {request.Name} for the iSCSI initiator {request.IscsiName}: persona Generic-ALUA (Linux), " +
+                $"Create host object {request.Name} for the iSCSI initiator {request.IscsiName}: persona {personaName}, " +
                 $"{(domain is null ? "in no domain" : $"in domain {domain}")}",
                 "POST", "/api/v3/hosts", HostBody(request).ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
-                $"createhost -iscsi -persona {ProxyPersona}{(domain is null ? string.Empty : $" -domain {domain}")} -os Linux -comment \"{request.Comment}\" {request.Name} {request.IscsiName}",
+                $"createhost -iscsi -persona {persona}{(domain is null ? string.Empty : $" -domain {domain}")} -os {(os.Contains(' ', StringComparison.Ordinal) ? $"\"{os}\"" : os)} " +
+                $"-comment \"{request.Comment}\" {request.Name} {request.IscsiName}",
                 $"removehost {request.Name}"),
         ];
     }
@@ -97,13 +105,14 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
     /// <summary>The body of <c>POST /api/v3/hosts</c> (host.CreateHost), shown before it is sent.</summary>
     private static JsonObject HostBody(ArrayHostRequest request)
     {
-        var body = new JsonObject { ["name"] = request.Name, ["iscsiPaths"] = new JsonArray(request.IscsiName), ["persona"] = ProxyPersona };
+        var (persona, _, os) = Personality(request);
+        var body = new JsonObject { ["name"] = request.Name, ["iscsiPaths"] = new JsonArray(request.IscsiName), ["persona"] = persona };
         if (Domain(request.Domain) is { } domain)
         {
             body["domain"] = domain;
         }
 
-        body["descriptors"] = new JsonObject { ["os"] = "Linux", ["comment"] = request.Comment };
+        body["descriptors"] = new JsonObject { ["os"] = os, ["comment"] = request.Comment };
         return body;
     }
 

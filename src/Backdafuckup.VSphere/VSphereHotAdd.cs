@@ -115,7 +115,7 @@ internal static class VSphereHotAdd
         var refused = new List<string>();
         foreach (var proxy in pool.Connected())
         {
-            if (!proxy.Capabilities.Contains("hotadd-v1"))
+            if (!proxy.Capabilities.Contains(ProxyCapabilities.HotAdd))
             {
                 refused.Add($"proxy {proxy.Name} (host {proxy.HostName}) cannot hot-add disks");
                 continue;

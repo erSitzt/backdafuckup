@@ -5,7 +5,7 @@
 @inject IJSRuntime JS
 
 <PageTitle>Backup proxies – backdafuckup</PageTitle>
-<PageHeader Title="Backup Proxies" Description="Linux machines that read and write the disks of vSphere VMs: a proxy VM gets each disk hot-added (HotAdd) and serves it to the server.">
+<PageHeader Title="Backup Proxies" Description="Machines that read disks for the server: a Linux proxy VM gets vSphere disks hot-added (HotAdd); a Linux or Windows server with SAN access reads array snapshots.">
     <Actions><MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="@(() => _adding = true)" Disabled="_adding">Add proxy</MudButton></Actions>
 </PageHeader>
 
@@ -35,9 +35,52 @@
         </MudToggleGroup>
         @if (_os == "windows")
         {
-            <MudAlert Severity="Severity.Info" Dense="true">
-                A Windows proxy (physical Windows hosts reading array snapshots over FC or iSCSI) is planned, not available yet. Use a Linux machine for now.
-            </MudAlert>
+            <MudText Typo="Typo.body2" Class="mb-2">
+                A physical Windows server (Windows Server 2019 or later, x64) that already reaches the arrays over iSCSI, with its host object on each array and its sessions
+                connected (e.g. a backup proxy of another product), and that reaches this server@(ServerHostPort is { } whereWindows ? $" ({whereWindows})" : null).
+                It reads array snapshots for backups from storage snapshots, read-only; it does no HotAdd.
+            </MudText>
+            @if (_install.WindowsInstallCommand is { } windowsLine)
+            {
+                <MudText Typo="Typo.subtitle2">Run this in a PowerShell started as administrator on that server:</MudText>
+                <div class="d-flex align-start gap-2 mt-1 mb-2">
+                    <MudTextField Value="@windowsLine" ReadOnly="true" Variant="Variant.Outlined" Class="mono" Lines="3" FullWidth="true" />
+                    <MudTooltip Text="Copy"><MudIconButton Icon="@Icons.Material.Filled.ContentCopy" OnClick="@(() => CopyAsync(windowsLine))" /></MudTooltip>
+                </div>
+                <MudText Typo="Typo.body2" Class="mb-2">
+                    It downloads the agent with curl.exe (this server's key pinned, its SHA-256 checked) and runs its install: the program goes to
+                    <span class="mono">%ProgramFiles%\backdafuckup Proxy</span>, its key to <span class="mono">%ProgramData%\backdafuckup-proxy</span>, and the service
+                    <span class="mono">backdafuckup-proxy</span> starts; the proxy shows as online here within seconds. Run again, it replaces the installation; remove it with
+                    <span class="mono">backdafuckup-proxy.exe uninstall</span>.
+                    Or <MudLink OnClick="DownloadWindowsScriptAsync">download the same script</MudLink> and run it there:
+                    <span class="mono">powershell -ExecutionPolicy Bypass -File install-backdafuckup-proxy.ps1</span>.
+                </MudText>
+            }
+            else
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Class="mb-2">This server offers no Windows agent (backdafuckup-proxy.exe); build it with scripts/build-proxy.sh, then renew the token.</MudAlert>
+            }
+            <MudText Typo="Typo.body2" Class="mb-2">
+                What it changes on the server: nothing on iSCSI or MPIO (it uses the existing sessions and never logs in or out). If the SAN policy would bring new SAN
+                disks online, it sets it to OfflineShared, as backup proxies need. Each snapshot disk it reads it sets offline and read-only first. The server's initiator
+                name shows here; the snapshots are presented to the host object that lists it.
+            </MudText>
+            @if (_install.WindowsCommand is { } windowsCommand)
+            {
+                <MudExpansionPanels Elevation="0" Class="mt-2">
+                    <MudExpansionPanel Text="Install by hand instead">
+                        <ol class="steps">
+                            <li>
+                                Download <MudLink Href="api/proxies/package/backdafuckup-proxy.exe" Target="_blank">backdafuckup-proxy.exe</MudLink>@(_package?.Version is { } windowsVersion ? $" (version {windowsVersion})" : null)
+                                and copy it to the server.
+                            </li>
+                            <li>In a command prompt or PowerShell started as administrator, in that folder:
+                                <MudTextField Value="@windowsCommand" ReadOnly="true" Variant="Variant.Outlined" Class="mono mt-1" Lines="3" FullWidth="true" />
+                            </li>
+                        </ol>
+                    </MudExpansionPanel>
+                </MudExpansionPanels>
+            }
         }
         else
         {
@@ -112,7 +155,7 @@ else if (_proxies.Count > 0)
                 @context.Name
                 @if (context.HostName is { } hostName)
                 {
-                    <span class="cell-sub" title="@(context.SmbiosUuid is { } uuid ? $"SMBIOS UUID {uuid}: finds the proxy's VM in the vCenter" : null)">@hostName</span>
+                    <span class="cell-sub" title="@(context.SmbiosUuid is { } uuid ? $"SMBIOS UUID {uuid}: finds the proxy's VM in the vCenter" : null)">@hostName@(context.Platform == "win-x64" ? " · Windows" : context.Platform == "linux-x64" ? " · Linux" : null)</span>
                 }
             </MudTd>
             <MudTd><StateChip State="@(context.Online ? "Online" : context.Enrolled ? "Offline" : "Not enrolled")" /></MudTd>
@@ -167,7 +210,7 @@ else if (_proxies.Count > 0)
                             {
                                 <div class="caption">
                                     No SAN access yet (backup from storage snapshots). The agent prepares the machine itself; this is what it could not do
-                                    (its log: <span class="mono">journalctl -u backdafuckup-proxy</span>):
+                                    (its log: <span class="mono">@(context.Platform == "win-x64" ? @"%ProgramData%\backdafuckup-proxy\proxy.log" : "journalctl -u backdafuckup-proxy")</span>):
                                 </div>
                                 <ul class="caption ma-0 pl-5">
                                     @foreach (var problem in missing.Split('\n', StringSplitOptions.RemoveEmptyEntries))
@@ -222,6 +265,14 @@ else if (_proxies.Count > 0)
     {
         await JS.InvokeVoidAsync("navigator.clipboard.writeText", text);
         Snackbar.Add("Copied.", Severity.Success);
+    }
+
+    private async Task DownloadWindowsScriptAsync()
+    {
+        if (_install?.WindowsInstallScript is { } script)
+        {
+            await JS.InvokeVoidAsync("bdfuSaveText", "install-backdafuckup-proxy.ps1", script, "text/plain");
+        }
     }
 
     private async Task DownloadScriptAsync()

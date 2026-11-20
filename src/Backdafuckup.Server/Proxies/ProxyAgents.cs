@@ -211,7 +211,9 @@ public sealed class ProxyAgents(
     private async Task OfferUpdateAsync(ProxyConnection connection, CancellationToken cancellationToken)
     {
         await Task.Yield(); // the package's hash is computed off the connection's start
-        if (connection.Hello.FilesHash is not { Length: > 0 } current || package.Program() is not { } program
+        // The build of the agent's own platform: a Windows agent never gets the Linux file, nor the other way round.
+        var platform = ProxyPlatforms.Of(connection.Hello.Platform);
+        if (connection.Hello.FilesHash is not { Length: > 0 } current || package.Program(platform) is not { } program
             || string.Equals(current, program.Sha256, StringComparison.OrdinalIgnoreCase))
         {
             return;
@@ -226,7 +228,7 @@ public sealed class ProxyAgents(
                 new ProxyAgentMessage
                 {
                     Type = ProxyMessageTypes.Update, AgentVersion = program.Version, Sha256 = program.Sha256, SizeBytes = program.SizeBytes,
-                    Path = ProxyAgentProtocol.ProgramPath(connection.ProxyId),
+                    Path = ProxyAgentProtocol.ProgramPath(connection.ProxyId, platform),
                 },
                 TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
         }
@@ -274,7 +276,8 @@ public sealed class ProxyAgents(
     }
 
     public IReadOnlyList<ProxyInfo> Connected() =>
-        [.. _connections.Values.Select(c => new ProxyInfo(c.ProxyId, c.Name, c.Hello.HostName, c.Hello.SmbiosUuid, c.Hello.BiosSerial, c.Hello.Capabilities ?? [], c.Hello.InitiatorName, c.Hello.SanRefusal))];
+        [.. _connections.Values.Select(c => new ProxyInfo(c.ProxyId, c.Name, c.Hello.HostName, c.Hello.SmbiosUuid, c.Hello.BiosSerial, c.Hello.Capabilities ?? [], c.Hello.InitiatorName, c.Hello.SanRefusal,
+            ProxyPlatforms.Of(c.Hello.Platform)))];
 
     public async Task LoginIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, string targetIqn, CancellationToken cancellationToken)
     {
@@ -289,6 +292,23 @@ public sealed class ProxyAgents(
         var limit = TimeSpan.FromSeconds(30) + (IscsiadmInitiator.DiscoveryTimeout + IscsiadmInitiator.LoginTimeout + TimeSpan.FromSeconds(10)) * Math.Max(1, portals.Count);
         await connection.CommandAsync(new ProxyAgentMessage { Type = ProxyMessageTypes.IscsiLogin, Portals = portals, TargetIqn = targetIqn }, limit, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task RescanAsync(Guid proxyId, CancellationToken cancellationToken)
+    {
+        if (_connections.GetValueOrDefault(proxyId) is not { } connection)
+        {
+            return;
+        }
+
+        try
+        {
+            await connection.CommandAsync(new ProxyAgentMessage { Type = ProxyMessageTypes.Rescan }, TimeSpan.FromSeconds(90), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or IOException)
+        {
+            logger.LogWarning("Proxy {Proxy} did not rescan its storage: {Error}", connection.Name, ex.Message);
+        }
     }
 
     public async Task<ProxyIscsiReach?> ProbeIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, CancellationToken cancellationToken)
@@ -386,6 +406,7 @@ public sealed class ProxyAgents(
 
             await db.Proxies.Where(p => p.Id == proxyId).ExecuteUpdateAsync(
                 s => s.SetProperty(p => p.LastSeenUtc, now).SetProperty(p => p.HostName, hello.HostName).SetProperty(p => p.AgentVersion, hello.AgentVersion)
+                    .SetProperty(p => p.Platform, ProxyPlatforms.Of(hello.Platform))
                     .SetProperty(p => p.LastAddress, remote).SetProperty(p => p.SmbiosUuid, hello.SmbiosUuid).SetProperty(p => p.BiosSerial, hello.BiosSerial),
                 CancellationToken.None).ConfigureAwait(false);
         }
@@ -402,15 +423,34 @@ public sealed class ProxyAgents(
         return new ProxyDto(
             proxy.Id, proxy.Name, connection is not null, proxy.KeyHash is not null, hello?.HostName ?? proxy.HostName, hello?.AgentVersion ?? proxy.AgentVersion,
             hello?.SmbiosUuid ?? proxy.SmbiosUuid, hello?.Addresses ?? [], hello?.Capabilities ?? [], hello?.Devices?.Count ?? 0,
-            connection is not null ? time.GetUtcNow() : proxy.LastSeenUtc, proxy.LastAddress, proxy.CreatedUtc, proxy.InstallTokenExpiresUtc, hello?.InitiatorName, hello?.SanRefusal);
+            connection is not null ? time.GetUtcNow() : proxy.LastSeenUtc, proxy.LastAddress, proxy.CreatedUtc, proxy.InstallTokenExpiresUtc, hello?.InitiatorName, hello?.SanRefusal,
+            hello is not null ? ProxyPlatforms.Of(hello.Platform) : proxy.Platform);
     }
 
     /// <summary>The install answer: the enroll command, and the one-liner and script when the server has an agent package.</summary>
     private ProxyInstallDto Install(ProxyEntity proxy, string url, string token)
     {
         var script = Script(proxy, url, token);
+        var windows = WindowsScript(proxy, url, token);
+        var pins = settings.ServerPins();
         return new ProxyInstallDto(ToDto(proxy), token, Command(proxy, url, token),
-            script is null ? null : ProxyInstallScript.OneLiner(url, proxy.Id, token, settings.ServerPins()), script);
+            script is null ? null : ProxyInstallScript.OneLiner(url, proxy.Id, token, pins), script,
+            windows is null ? null : ProxyWindowsInstall.OneLiner(url, proxy.Id, token, pins), windows, ProxyWindowsInstall.Command(url, proxy.Id, token, pins));
+    }
+
+    /// <summary>The Windows installer for the proxy, or null when the package has no Windows agent.</summary>
+    private string? WindowsScript(ProxyEntity proxy, string url, string token) =>
+        package.Program(ProxyPlatforms.Windows) is { } program
+            ? ProxyWindowsInstall.Build(proxy.Name, proxy.Id, url, token, settings.ServerPins(), program.Version, program.Sha256,
+                proxy.InstallTokenExpiresUtc ?? time.GetUtcNow(), time.GetUtcNow())
+            : null;
+
+    /// <summary>The Windows installer script (install.ps1), for the one-liner: authenticated with the install token.</summary>
+    public async Task<string> WindowsInstallScriptAsync(Guid proxyId, string? authorization, CancellationToken cancellationToken)
+    {
+        var (proxy, token) = await InstallTokenAsync(proxyId, authorization, cancellationToken).ConfigureAwait(false);
+        return WindowsScript(proxy, await ServerUrlAsync(cancellationToken).ConfigureAwait(false), token)
+            ?? throw new ProxyRequestException("This server has no Windows proxy agent (backdafuckup-proxy.exe) in its package; build it with scripts/build-proxy.sh.", StatusCodes.Status404NotFound);
     }
 
     /// <summary>The installer script for the proxy, or null when the server has no complete agent package.</summary>

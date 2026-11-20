@@ -410,6 +410,23 @@ public sealed class AlletraTests
         Assert.Empty(array.Hosts);
     }
 
+    [Fact]
+    public async Task A_host_object_for_a_windows_proxy_gets_the_windows_persona()
+    {
+        var array = new FakeAlletra();
+        var (provider, settings) = Connect(array);
+        await using var session = await provider.OpenAsync(settings, Ct);
+        var request = new ArrayHostRequest("bdfu-winproxy", "iqn.1991-05.com.microsoft:winproxy.corp.example", null, "backdafuckup proxy winproxy", Windows: true);
+
+        var change = Assert.Single(session.DescribeHostCreation(request));
+        Assert.Equal("createhost -iscsi -persona 15 -os \"Windows Server\" -comment \"backdafuckup proxy winproxy\" bdfu-winproxy iqn.1991-05.com.microsoft:winproxy.corp.example", change.Cli);
+        Assert.Contains("persona WindowsServer (Windows)", change.Title, StringComparison.Ordinal);
+
+        var host = await session.CreateHostAsync(request, Ct);
+        Assert.Equal("WindowsServer", host.Persona);
+        Assert.Equal("Windows Server", array.Hosts.Single()["descriptors"]!["os"]!.GetValue<string>());
+    }
+
     [Theory]
     [InlineData("proxy01", "bdfu-proxy01")]
     [InlineData("SAN proxy (Rack 4)", "bdfu-SAN-proxy--Rack-4")]

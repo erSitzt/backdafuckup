@@ -239,4 +239,112 @@ public sealed partial class ApiIntegrationTests
         // An agent that runs the package's build is left alone.
         Assert.Null(await ConnectAsync(hash));
     }
+
+    [Fact]
+    public async Task A_windows_proxy_is_offered_the_windows_build_never_the_linux_one_and_never_hotadd()
+    {
+        var client = await SignedInClientAsync();
+        await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://localhost/", Ct);
+        var linux = RandomNumberGenerator.GetBytes(200_000);
+        var windows = RandomNumberGenerator.GetBytes(250_000);
+        Directory.CreateDirectory(Path.Combine(_root, "proxy"));
+        await File.WriteAllBytesAsync(Path.Combine(_root, "proxy", ProxySelfUpdate.ProgramName), linux, Ct);
+        await File.WriteAllTextAsync(Path.Combine(_root, "proxy", "version.txt"), "0.3.1\n", Ct);
+
+        var created = await Read<ProxyInstallDto>(client.PostAsJsonAsync("/api/proxies", new CreateProxyDto("win-proxy-1"), Ct));
+        var enrolled = await Read<EnrollProxyResponseDto>(client.PostAsJsonAsync("/api/agent/proxies/enroll", new EnrollProxyRequestDto(created.Proxy.Id, created.InstallToken, "win-proxy-1"), Ct));
+
+        async Task<ProxyAgentMessage?> ConnectAsync()
+        {
+            var offered = new TaskCompletionSource<ProxyAgentMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var agent = new ProxyAgentClient(
+                new ProxyAgentSettings(_factory.Server.BaseAddress, created.Proxy.Id, enrolled.AgentKey),
+                new ProxyHostInfo("win-proxy-1.corp.example", null, null, ["192.0.2.111"], "0.3.0+old", new string('0', 64), ProxyPlatforms.Windows, HotAdd: false),
+                new FileBlockDevices(), ConnectAgentSocketAsync, _ => { }, update: offer =>
+                {
+                    offered.TrySetResult(offer);
+                    return Task.CompletedTask;
+                });
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+            var running = agent.RunAsync(stop.Token);
+            try
+            {
+                var online = await WaitAsync(async () => (await client.GetFromJsonAsync<List<ProxyDto>>("/api/proxies", Ct))!.SingleOrDefault(p => p.Online));
+                Assert.Equal(ProxyPlatforms.Windows, online.Platform);
+                Assert.DoesNotContain(ProxyCapabilities.HotAdd, online.Capabilities);
+                Assert.Equal(ProxyPlatforms.Windows, _factory.Services.GetRequiredService<IProxyPool>().Connected().Single().Platform);
+                return await Task.WhenAny(offered.Task, Task.Delay(TimeSpan.FromSeconds(3), Ct)) == offered.Task ? offered.Task.Result : null;
+            }
+            finally
+            {
+                await stop.CancelAsync();
+                await running;
+            }
+        }
+
+        // The package has only the Linux build: nothing is offered to the Windows agent.
+        Assert.Null(await ConnectAsync());
+
+        // With the Windows build in the package, that one is offered, at its own path.
+        await File.WriteAllBytesAsync(Path.Combine(_root, "proxy", ProxySelfUpdate.WindowsProgramName), windows, Ct);
+        var offer = await ConnectAsync();
+        Assert.NotNull(offer);
+        Assert.Equal(((long?)windows.Length, Convert.ToHexStringLower(SHA256.HashData(windows)), $"api/agent/proxies/{created.Proxy.Id:D}/package/backdafuckup-proxy.exe"),
+            (offer.SizeBytes, offer.Sha256, offer.Path));
+        using var request = new HttpRequestMessage(HttpMethod.Get, offer.Path);
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", enrolled.AgentKey);
+        using var response = await _factory.CreateClient().SendAsync(request, Ct);
+        Assert.Equal(windows, await response.Content.ReadAsByteArrayAsync(Ct));
+
+        // Only the two program names are served.
+        Assert.Equal(HttpStatusCode.NotFound, (await _factory.CreateClient().GetAsync($"/api/agent/proxies/{created.Proxy.Id:D}/package/backdafuckup-proxy.service", Ct)).StatusCode);
+    }
+
+    [Fact]
+    public async Task The_windows_installer_pins_the_server_checks_the_agent_and_throws_the_reason_when_refused()
+    {
+        var client = await SignedInClientAsync();
+        await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://backup.corp.example:9555/", Ct);
+        var windows = RandomNumberGenerator.GetBytes(100_000);
+        Directory.CreateDirectory(Path.Combine(_root, "proxy"));
+        await File.WriteAllBytesAsync(Path.Combine(_root, "proxy", ProxySelfUpdate.WindowsProgramName), windows, Ct);
+
+        var created = await Read<ProxyInstallDto>(client.PostAsJsonAsync("/api/proxies", new CreateProxyDto("win-proxy-1"), Ct));
+
+        // No Linux package: no Linux one-liner, but the Windows one.
+        Assert.Null(created.InstallCommand);
+        // This test server has no pinned key (its own endpoints); with one, the line pins it (checked below).
+        var line = created.WindowsInstallCommand!;
+        Assert.StartsWith("$s = curl.exe -sSL ", line, StringComparison.Ordinal);
+        Assert.Contains($"-H 'Authorization: Bearer {created.InstallToken}' 'https://backup.corp.example:9555/api/agent/proxies/{created.Proxy.Id:D}/install.ps1'", line, StringComparison.Ordinal);
+        Assert.EndsWith("iex ($s -join \"`n\")", line, StringComparison.Ordinal);
+        var pin = new string('a', 64);
+        Assert.Contains($"curl.exe -sSL --pinnedpubkey 'sha256//{Convert.ToBase64String(Convert.FromHexString(pin))}' --insecure -H",
+            ProxyWindowsInstall.OneLiner("https://backup.corp.example:9555/", created.Proxy.Id, "bdfupi_x", [pin]), StringComparison.Ordinal);
+        Assert.Contains("$curlPins = 'sha256//", ProxyWindowsInstall.Build("p", created.Proxy.Id, "https://b/", "t", [pin], "1", "ab", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow), StringComparison.Ordinal);
+        Assert.Throws<InvalidOperationException>(() => ProxyWindowsInstall.OneLiner("https://b/", created.Proxy.Id, "it's", []));
+        Assert.StartsWith($"backdafuckup-proxy.exe install --server https://backup.corp.example:9555/ --proxy {created.Proxy.Id:D} --token {created.InstallToken} --pins ", created.WindowsCommand, StringComparison.Ordinal);
+
+        // The script the line fetches: with the install token only, the agent's SHA-256 in it.
+        var server = _factory.CreateClient();
+        using (var request = new HttpRequestMessage(HttpMethod.Get, $"/api/agent/proxies/{created.Proxy.Id:D}/install.ps1"))
+        {
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", created.InstallToken);
+            using var response = await server.SendAsync(request, Ct);
+            var script = await response.Content.ReadAsStringAsync(Ct);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Contains($"$sha256 = '{Convert.ToHexString(SHA256.HashData(windows))}'", script, StringComparison.Ordinal);
+            Assert.Contains("& $file install --server $server --proxy $proxyId --token $token --pins $pins", script, StringComparison.Ordinal);
+            Assert.Contains("& {", created.WindowsInstallScript, StringComparison.Ordinal);
+        }
+
+        // A wrong token: a script that throws the reason (the one-liner runs whatever comes).
+        using (var wrong = new HttpRequestMessage(HttpMethod.Get, $"/api/agent/proxies/{created.Proxy.Id:D}/install.ps1"))
+        {
+            wrong.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "bdfupi_wrong");
+            using var response = await server.SendAsync(wrong, Ct);
+            Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+            Assert.StartsWith("throw 'backdafuckup proxy install: Unknown proxy or wrong install token", await response.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+        }
+    }
 }

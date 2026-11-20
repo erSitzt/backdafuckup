@@ -9,7 +9,10 @@ namespace Backdafuckup.Proxy;
 public sealed record ProxyAgentSettings(Uri ServerUrl, Guid ProxyId, string AgentKey);
 
 /// <summary>What the agent tells the server about the machine it runs on.</summary>
-public sealed record ProxyHostInfo(string HostName, string? SmbiosUuid, string? BiosSerial, IReadOnlyList<string> Addresses, string AgentVersion, string? FilesHash);
+/// <param name="Platform">Where the agent runs (<see cref="Core.Proxies.ProxyPlatforms"/>); null: this process's.</param>
+/// <param name="HotAdd">Whether it offers HotAdd: only the Linux agent, which may run in a VM.</param>
+public sealed record ProxyHostInfo(
+    string HostName, string? SmbiosUuid, string? BiosSerial, IReadOnlyList<string> Addresses, string AgentVersion, string? FilesHash, string? Platform = null, bool HotAdd = true);
 
 /// <summary>
 /// The proxy agent's side of the control connection: connects out to the server (and again after a break), reports
@@ -89,14 +92,18 @@ public sealed class ProxyAgentClient(
             Type = ProxyMessageTypes.Hello,
             ProtocolVersion = ProxyAgentProtocol.Version,
             AgentVersion = host.AgentVersion,
+            Platform = host.Platform ?? Core.Proxies.ProxyPlatforms.Current,
             FilesHash = host.FilesHash,
             HostName = host.HostName,
             SmbiosUuid = host.SmbiosUuid,
             BiosSerial = host.BiosSerial,
             Addresses = host.Addresses,
-            Capabilities = sanRefusal is null
-                ? [ProxyAgentProtocol.CapabilityHotAdd, ProxyAgentProtocol.CapabilityNbd, ProxyAgentProtocol.CapabilitySan]
-                : [ProxyAgentProtocol.CapabilityHotAdd, ProxyAgentProtocol.CapabilityNbd],
+            Capabilities =
+            [
+                .. host.HotAdd ? [ProxyAgentProtocol.CapabilityHotAdd] : Array.Empty<string>(),
+                ProxyAgentProtocol.CapabilityNbd,
+                .. sanRefusal is null ? [ProxyAgentProtocol.CapabilitySan] : Array.Empty<string>(),
+            ],
             Devices = await devices.ListAsync(cancellationToken).ConfigureAwait(false),
             InitiatorName = initiator,
             SanRefusal = sanRefusal,
@@ -246,7 +253,7 @@ public sealed class ProxyAgentClient(
     {
         if (update is null)
         {
-            return Error(command, $"{host.HostName}: this agent does not update itself (not installed as {ProxySelfUpdate.ProgramName})");
+            return Error(command, $"{host.HostName}: this agent does not update itself (not installed as {ProxySelfUpdate.ProgramFile(host.Platform ?? Core.Proxies.ProxyPlatforms.Current)})");
         }
 
         if (!_handles.IsEmpty)

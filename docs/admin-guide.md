@@ -731,7 +731,7 @@ The proxy VM:
 - it must see the datastores of the VMs it serves: a proxy on each host with local datastores, one per cluster for shared datastores;
 - it reaches the backup server on port 9555.
 
-Install it under *Backup Infrastructure → Backup Proxies → Add proxy* (Linux; a Windows proxy for physical hosts is planned). The console shows one line to run as root on the proxy machine:
+Install it under *Backup Infrastructure → Backup Proxies → Add proxy* (Linux; for a Windows server see *Windows proxy* below). The console shows one line to run as root on the proxy machine:
 
 ```
 curl -sSL --pinnedpubkey 'sha256//…' --insecure -H 'Authorization: Bearer bdfupi_…' https://backup01.corp.example:9555/api/agent/proxies/<id>/install.sh | sudo bash
@@ -742,6 +742,37 @@ It downloads the agent (one file; its SHA-256 is checked), installs it as `/opt/
 **Updates:** after a server update, a proxy whose agent differs from the server's package is offered the new build as soon as it connects with no disk open. It downloads the file with its key (the server's certificate pinned as at the enrollment), checks size and SHA-256, swaps it into `/opt/backdafuckup-proxy/` and restarts through systemd. A changed systemd unit is not installed this way: copy it when the release notes say so, then `systemctl daemon-reload && systemctl restart backdafuckup-proxy`. Agents without the self-update, and units without `ReadWritePaths=/opt/backdafuckup-proxy`, are updated once by hand.
 
 A job uses a connected proxy whose VM is powered on, has a free SCSI place and sees all datastores of the VM: one on the VM's host first, then one in its cluster, then the one with the fewest disks attached. The session log names the proxy and why others were not used.
+
+### Windows proxy (physical servers with SAN access)
+
+A physical Windows server that already reaches the arrays over iSCSI can read array snapshots for *Backup from storage snapshots*, for instance a backup proxy of another product. It does no HotAdd and no restores.
+
+**Requirements:**
+- Windows Server 2019 or later, x64, with curl.exe (part of Windows since 2019).
+- Its iSCSI sessions to the arrays connected, as for the arrays' other LUNs (with MPIO).
+- Its host object on each array, listing its initiator name. The snapshots are presented to this host object; the agent never changes it.
+- It reaches this server on port 9555.
+
+**Install:** choose *Windows* under *Add proxy*. The console shows one line to run in a PowerShell started as administrator:
+
+```
+$s = curl.exe -sSL --pinnedpubkey 'sha256//…' --insecure -H 'Authorization: Bearer bdfupi_…' 'https://backup01.corp.example:9555/api/agent/proxies/<id>/install.ps1'; if ($LASTEXITCODE -ne 0) { throw … }; iex ($s -join "`n")
+```
+
+curl.exe checks the server's key with `--pinnedpubkey` even with `--insecure` (Schannel, checked on Windows Server 2022). The script:
+1. downloads `backdafuckup-proxy.exe` and checks its SHA-256;
+2. runs `backdafuckup-proxy.exe install`, which copies the program to `%ProgramFiles%\backdafuckup Proxy`, enrolls (spending the token), keeps the key in `%ProgramData%\backdafuckup-proxy` (SYSTEM and Administrators only), and creates and starts the service `backdafuckup-proxy` (delayed start, restart on failure).
+
+Run again, it replaces the installation. The same script can be downloaded as `install-backdafuckup-proxy.ps1`. `backdafuckup-proxy.exe uninstall` removes the service, the key, the log and the program.
+
+**What it changes on the server:**
+- **iSCSI and MPIO:** nothing. It uses the existing sessions; a LUN presented to the host object appears after a rescan (`Update-HostStorageCache`). It never logs in or out. Without a session to the array's target it says so, and the VM is read from its VM snapshot as usual.
+- **SAN policy:** if it would bring new SAN disks online (`OnlineAll`, `OfflineInternal`), the agent sets `OfflineShared`, as backup proxies need, and logs it. With `"prepareSan": false` in `agent.json` it only reports it.
+- **Disks:** it finds each snapshot disk by its WWN (VPD page 0x83, never by disk number), sets it offline and read-only, and reads it without the cache. Nothing is ever opened for writing.
+
+**Updates:** as on Linux, but the agent stops with exit code 3 after the swap, and the service's recovery starts the new program.
+
+**Its log:** `%ProgramData%\backdafuckup-proxy\proxy.log`.
 
 ### Backups
 

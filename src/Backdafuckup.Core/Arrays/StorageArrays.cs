@@ -60,7 +60,8 @@ public sealed record ArrayHost(string Uid, string Name, IReadOnlyList<string> Is
 /// A host object to create for one iSCSI initiator (a backup proxy), see <see cref="IStorageArraySession.CreateHostAsync"/>.
 /// <paramref name="Domain"/> null: in no domain.
 /// </summary>
-public sealed record ArrayHostRequest(string Name, string IscsiName, string? Domain, string Comment)
+/// <param name="Windows">A Windows proxy (persona WindowsServer) rather than a Linux one (Generic-ALUA).</param>
+public sealed record ArrayHostRequest(string Name, string IscsiName, string? Domain, string Comment, bool Windows = false)
 {
     /// <summary>A host object name for a proxy: "bdfu-" and the proxy's name, other characters than letters, digits, '.', '-' and '_' as '-', at most 31.</summary>
     public static string NameFor(string proxyName)

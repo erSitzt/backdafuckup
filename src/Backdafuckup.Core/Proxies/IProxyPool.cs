@@ -5,8 +5,39 @@ namespace Backdafuckup.Core.Proxies;
 /// <summary>A connected backup proxy: who it is and where it runs (the SMBIOS UUID finds its VM in the hypervisor).</summary>
 /// <param name="InitiatorName">The proxy's iSCSI initiator name (for the array's host object), if it has one.</param>
 /// <param name="SanRefusal">Why the proxy offers no SAN access (its self-check), one reason per line, or null.</param>
+/// <param name="Platform">Where the agent runs, <see cref="ProxyPlatforms"/> (null: an agent from before, Linux).</param>
 public sealed record ProxyInfo(
-    Guid Id, string Name, string? HostName, string? SmbiosUuid, string? BiosSerial, IReadOnlyList<string> Capabilities, string? InitiatorName = null, string? SanRefusal = null);
+    Guid Id, string Name, string? HostName, string? SmbiosUuid, string? BiosSerial, IReadOnlyList<string> Capabilities, string? InitiatorName = null, string? SanRefusal = null,
+    string? Platform = null);
+
+/// <summary>What a proxy agent can do, as its hello names it.</summary>
+public static class ProxyCapabilities
+{
+    /// <summary>Serves a disk hot-added to its VM (vSphere HotAdd): only a Linux agent in a VM.</summary>
+    public const string HotAdd = "hotadd-v1";
+
+    /// <summary>Serves opened devices as NBD over tunnels.</summary>
+    public const string Nbd = "nbd-v1";
+
+    /// <summary>Reads array snapshot LUNs presented to its host object (the SAN self-check passed).</summary>
+    public const string San = "san-v1";
+}
+
+/// <summary>Where a proxy agent runs: the .NET runtime identifier of its build.</summary>
+public static class ProxyPlatforms
+{
+    public const string Linux = "linux-x64";
+
+    public const string Windows = "win-x64";
+
+    /// <summary>The platform a hello names; an agent from before the field is Linux.</summary>
+    public static string Of(string? platform) => string.Equals(platform, Windows, StringComparison.OrdinalIgnoreCase) ? Windows : Linux;
+
+    public static bool IsWindows(string? platform) => Of(platform) == Windows;
+
+    /// <summary>The platform of this process.</summary>
+    public static string Current => OperatingSystem.IsWindows() ? Windows : Linux;
+}
 
 /// <summary>
 /// The backup proxies as a provider uses them: which are connected, and a disk the hypervisor attached to one of them
@@ -35,6 +66,12 @@ public interface IProxyPool
     /// </summary>
     Task<ProxyIscsiReach?> ProbeIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, CancellationToken cancellationToken) =>
         Task.FromResult<ProxyIscsiReach?>(null);
+
+    /// <summary>
+    /// The proxy asks its storage for added and removed LUNs, e.g. after snapshots were unpresented (Windows keeps a
+    /// vanished disk until the next rescan; Linux has deleted it already).
+    /// </summary>
+    Task RescanAsync(Guid proxyId, CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
 /// <summary>

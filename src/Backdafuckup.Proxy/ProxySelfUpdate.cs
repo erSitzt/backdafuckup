@@ -12,6 +12,12 @@ public static class ProxySelfUpdate
     /// <summary>The program file name of the agent (a single self-contained file).</summary>
     public const string ProgramName = "backdafuckup-proxy";
 
+    /// <summary>The program file name of the Windows agent.</summary>
+    public const string WindowsProgramName = "backdafuckup-proxy.exe";
+
+    /// <summary>The program file of a platform's build (<see cref="Core.Proxies.ProxyPlatforms"/>).</summary>
+    public static string ProgramFile(string? platform) => Core.Proxies.ProxyPlatforms.IsWindows(platform) ? WindowsProgramName : ProgramName;
+
     /// <summary>SHA-256 of a file, lower-case hex (the hello's FilesHash, compared with the server's package).</summary>
     public static string HashOf(string path)
     {
@@ -21,7 +27,8 @@ public static class ProxySelfUpdate
 
     /// <summary>The running program's hash, or null when it does not run as the installed single file (e.g. under <c>dotnet</c>).</summary>
     public static string? RunningHash() =>
-        Environment.ProcessPath is { } path && Path.GetFileName(path) == ProgramName && File.Exists(path) ? HashOf(path) : null;
+        Environment.ProcessPath is { } path && string.Equals(Path.GetFileName(path), ProgramFile(Core.Proxies.ProxyPlatforms.Current), StringComparison.OrdinalIgnoreCase)
+        && File.Exists(path) ? HashOf(path) : null;
 
     /// <summary>Downloads <paramref name="file"/>, checks it, and puts it in place of <paramref name="programPath"/>.</summary>
     public static async Task InstallAsync(HttpClient http, Uri file, string programPath, long size, string sha256, CancellationToken cancellationToken)

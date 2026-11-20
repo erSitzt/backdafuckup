@@ -116,6 +116,8 @@ A B10000 can replicate synchronously with a second array (Remote Copy with a quo
 
 Existing physical Windows servers (FC HBAs or iSCSI) are to read array snapshots directly. A separate spec after this one: the agent on Windows (service, self-update), disks by SCSI serial (`IOCTL_STORAGE_QUERY_PROPERTY`), SAN policy OfflineAll and no automount checked before any LUN is presented, every snapshot disk kept offline and read-only, the Microsoft iSCSI initiator, FC through host objects with the HBAs' WWNs (made by the admin, like iSCSI ones), MPIO. No HotAdd.
 
+**Moved forward (2026-11-20):** its own spec, `../2026-11-20-1508-windows-proxy/`. The Linux proxy VM cannot reach the array's iSCSI networks without a new address there; physical Windows servers already in them can read the snapshots.
+
 ### Server and console
 - **Entities and migration:**
   - `StorageSystemEntity`: kind, address, credential, trust mode and pins, options as JSON, facts, status;

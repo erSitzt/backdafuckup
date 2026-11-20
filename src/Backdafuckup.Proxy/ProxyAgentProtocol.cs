@@ -18,13 +18,13 @@ public static class ProxyAgentProtocol
     public const int MaxMessage = 1024 * 1024;
 
     /// <summary>The agent can serve a hot-added disk (vSphere HotAdd).</summary>
-    public const string CapabilityHotAdd = "hotadd-v1";
+    public const string CapabilityHotAdd = Core.Proxies.ProxyCapabilities.HotAdd;
 
     /// <summary>The agent serves opened devices as NBD over tunnels.</summary>
-    public const string CapabilityNbd = "nbd-v1";
+    public const string CapabilityNbd = Core.Proxies.ProxyCapabilities.Nbd;
 
-    /// <summary>Logs in to arrays over iSCSI and reads their snapshot LUNs (the SAN self-check passed).</summary>
-    public const string CapabilitySan = "san-v1";
+    /// <summary>Reads array snapshot LUNs presented to its host object (the SAN self-check passed).</summary>
+    public const string CapabilitySan = Core.Proxies.ProxyCapabilities.San;
 
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 
@@ -35,7 +35,7 @@ public static class ProxyAgentProtocol
     public const string EnrollPath = "api/agent/proxies/enroll";
 
     /// <summary>The agent's program file of the server's package, for its self-update (authenticated with the agent key).</summary>
-    public static string ProgramPath(Guid proxyId) => $"api/agent/proxies/{proxyId:D}/package/{ProxySelfUpdate.ProgramName}";
+    public static string ProgramPath(Guid proxyId, string? platform = null) => $"api/agent/proxies/{proxyId:D}/package/{ProxySelfUpdate.ProgramFile(platform)}";
 
     public static Task SendAsync(WebSocket socket, SemaphoreSlim sendLock, ProxyAgentMessage message, CancellationToken cancellationToken) =>
         AgentSocketFraming.SendAsync(socket, sendLock, message, ReadOnlyMemory<byte>.Empty, Json, cancellationToken);
@@ -104,6 +104,9 @@ public sealed record ProxyAgentMessage
     public int? ProtocolVersion { get; init; }
 
     public string? AgentVersion { get; init; }
+
+    /// <summary>The hello's <see cref="Core.Proxies.ProxyPlatforms"/> (absent from agents before it: Linux).</summary>
+    public string? Platform { get; init; }
 
     public string? FilesHash { get; init; }
 

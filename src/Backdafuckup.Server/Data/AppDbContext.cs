@@ -220,6 +220,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.Name).HasMaxLength(100);
             e.Property(x => x.HostName).HasMaxLength(255);
             e.Property(x => x.AgentVersion).HasMaxLength(64);
+            e.Property(x => x.Platform).HasMaxLength(16);
             e.Property(x => x.LastAddress).HasMaxLength(64);
             e.Property(x => x.SmbiosUuid).HasMaxLength(64);
             e.Property(x => x.BiosSerial).HasMaxLength(128);

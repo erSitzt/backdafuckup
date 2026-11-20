@@ -569,7 +569,10 @@ public sealed class ArraySnapshotService(
             log.Info($"Array snapshot {snapshot.Name} presented to host object {state.HostName} (proxy {state.Proxy.Name}) as LUN {presentation.Lun}.");
         }
 
-        foreach (var target in portals.GroupBy(p => p.TargetIqn!, StringComparer.Ordinal))
+        // Each array port is a target of its own; the LUN is reachable as long as one of them is (the other paths are MPIO's).
+        var failed = new List<string>();
+        var targets = portals.GroupBy(p => p.TargetIqn!, StringComparer.Ordinal).ToList();
+        foreach (var target in targets)
         {
             try
             {
@@ -577,8 +580,18 @@ public sealed class ArraySnapshotService(
             }
             catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException)
             {
-                throw new ArrayPathException($"Proxy {state.Proxy.Name} could not log in to {target.Key} on {Where(system)}: {ex.Message}", "iscsi_login", ex);
+                failed.Add($"{target.Key}: {ex.Message}");
             }
+        }
+
+        if (failed.Count == targets.Count)
+        {
+            throw new ArrayPathException($"Proxy {state.Proxy.Name} could not log in to {Where(system)}: {string.Join("; ", failed)}", "iscsi_login");
+        }
+
+        if (failed.Count > 0)
+        {
+            log.Warning($"Proxy {state.Proxy.Name} reaches {targets.Count - failed.Count} of {targets.Count} iSCSI targets of {Where(system)}; not: {string.Join("; ", failed)}");
         }
 
         foreach (var snapshot in state.Snapshots)
@@ -702,6 +715,12 @@ public sealed class ArraySnapshotService(
         foreach (var snapshot in Enumerable.Reverse(state.Snapshots))
         {
             await RemoveAsync(ledger, snapshot.Uid, () => array.DeleteSnapshotAsync(snapshot, ct), $"snapshot {snapshot.Name}", batch, log).ConfigureAwait(false);
+        }
+
+        // Windows keeps an unpresented disk until its next rescan (Linux deleted the device on release already).
+        if (state.Proxy is { } presentedTo && state.Presentations.Count > 0)
+        {
+            await proxies.RescanAsync(presentedTo.Id, ct).ConfigureAwait(false);
         }
 
         await array.DisposeAsync().ConfigureAwait(false);
