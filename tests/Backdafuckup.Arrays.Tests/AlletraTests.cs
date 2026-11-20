@@ -355,6 +355,72 @@ public sealed class AlletraTests
         Assert.Equal(role, Assert.Single(await session.FindVolumesByWwnAsync(["60002ac0000000000000002600019c45"], Ct)).ReplicationRole);
     }
 
+    [Fact]
+    public async Task A_host_object_for_a_proxy_is_described_first_and_then_created_exactly_so()
+    {
+        const string iqn = "iqn.2004-10.com.ubuntu:01:0a1b2c3d4e5";
+        var array = new FakeAlletra();
+        var (provider, settings) = Connect(array);
+        await using var session = await provider.OpenAsync(settings, Ct);
+        var request = new ArrayHostRequest(ArrayHostRequest.NameFor("proxy01"), iqn, "bdfu-test", "backdafuckup proxy proxy01");
+
+        var change = Assert.Single(session.DescribeHostCreation(request));
+        Assert.Equal("bdfu-proxy01", request.Name);
+        Assert.Equal("POST", change.Method);
+        Assert.Equal("/api/v3/hosts", change.Path);
+        Assert.Equal($"createhost -iscsi -persona 2 -domain bdfu-test -os Linux -comment \"backdafuckup proxy proxy01\" bdfu-proxy01 {iqn}", change.Cli);
+        Assert.Equal("removehost bdfu-proxy01", change.UndoCli);
+        Assert.DoesNotContain(array.Requests, r => !r.StartsWith("GET ", StringComparison.Ordinal)); // describing changes nothing
+
+        var host = await session.CreateHostAsync(request, Ct);
+
+        Assert.Equal(("bdfu-proxy01", "Generic-ALUA", "bdfu-test"), (host.Name, host.Persona, host.Domain));
+        Assert.Equal([iqn], host.IscsiNames);
+        // What was sent is what was shown.
+        var sent = Assert.Single(array.Requests, r => r.StartsWith("POST /api/v3/hosts ", StringComparison.Ordinal));
+        Assert.Equal(JsonNode.Parse(change.Body)!.ToJsonString(), sent["POST /api/v3/hosts ".Length..]);
+
+        // Never twice for one initiator, never a second host object of a name.
+        var again = await Assert.ThrowsAsync<AlletraException>(() => session.CreateHostAsync(request with { Name = "bdfu-proxy01b" }, Ct));
+        Assert.Equal($"Array array01.corp.example: host object bdfu-proxy01 lists the iSCSI initiator {iqn} already; nothing was created.", again.Message);
+        array.AddHost("esx01", "iqn.1998-01.com.vmware:esx01-1234");
+        var taken = await Assert.ThrowsAsync<AlletraException>(() => session.CreateHostAsync(new ArrayHostRequest("esx01", "iqn.2004-10.com.ubuntu:01:other", null, "x"), Ct));
+        Assert.Contains("a host object named esx01 exists already", taken.Message, StringComparison.Ordinal);
+        Assert.Single(array.Requests, r => r.StartsWith("POST /api/v3/hosts", StringComparison.Ordinal));
+
+        // Names the array would not take are refused before anything is sent.
+        Assert.Throws<ArgumentException>(() => session.DescribeHostCreation(request with { Name = "a-name-that-is-longer-than-31-chars" }));
+        Assert.Throws<ArgumentException>(() => session.DescribeHostCreation(request with { IscsiName = "not-an-iqn" }));
+        Assert.Throws<ArgumentException>(() => session.DescribeHostCreation(request with { Comment = "say \"hi\"" }));
+    }
+
+    [Fact]
+    public async Task An_account_that_may_only_look_cannot_create_a_host_object_and_is_told_which_role_it_needs()
+    {
+        var array = new FakeAlletra { Privileges = [new JsonObject { ["domain"] = "all", ["role"] = "browse" }] };
+        var (provider, settings) = Connect(array);
+        await using var session = await provider.OpenAsync(settings, Ct);
+
+        var denied = await Assert.ThrowsAsync<AlletraException>(() => session.CreateHostAsync(
+            new ArrayHostRequest("bdfu-proxy01", "iqn.2004-10.com.ubuntu:01:0a1b2c3d4e5", null, "backdafuckup proxy proxy01"), Ct));
+
+        Assert.True(denied.PermissionDenied);
+        Assert.StartsWith("Array array01.corp.example: creating host object bdfu-proxy01 was refused for lack of rights: the account bdfu-wsapi needs the role edit", denied.Message, StringComparison.Ordinal);
+        Assert.Contains("it has browse in all domains", denied.Message, StringComparison.Ordinal);
+        Assert.Empty(array.Hosts);
+    }
+
+    [Theory]
+    [InlineData("proxy01", "bdfu-proxy01")]
+    [InlineData("SAN proxy (Rack 4)", "bdfu-SAN-proxy--Rack-4")]
+    [InlineData("a-very-long-proxy-name-for-the-datacenter", "bdfu-a-very-long-proxy-name-for")]
+    [InlineData("ä", "bdfu-proxy")]
+    public void A_proxys_host_object_name_is_one_the_array_takes(string proxy, string expected)
+    {
+        Assert.Equal(expected, ArrayHostRequest.NameFor(proxy));
+        Assert.True(AlletraNames.IsObjectName(expected));
+    }
+
     private static ArrayVolume Volume(JsonObject volume) => AlletraSession.Volume(volume);
 
     private sealed class Lines : IOperationLog

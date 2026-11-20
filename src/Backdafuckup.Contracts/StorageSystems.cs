@@ -54,3 +54,32 @@ public sealed record SetStorageVolumeDto(bool Enabled);
 
 /// <summary>An object of this server on the array: a snapshot or a presentation, recorded in the ledger or left over.</summary>
 public sealed record StorageLeftoverDto(string Kind, string NativeId, string Name, string? Detail, bool Recorded);
+
+/// <summary>
+/// How the backup proxies reach a storage system over iSCSI: per proxy, the host object that lists its initiator (the
+/// array presents snapshots only to host objects). <see cref="Portals"/>: the array's iSCSI addresses the proxies log in
+/// to. <see cref="Domain"/>: the domain a new host object goes into (that of the turned-on volumes; null: none).
+/// <see cref="CreateRefusal"/>: why the backup server's account cannot create host objects (null: it can).
+/// </summary>
+public sealed record StorageProxyAccessDto(
+    IReadOnlyList<StorageProxyHostDto> Proxies, IReadOnlyList<string> Portals, string? Domain, string? DomainNote, string? CreateRefusal, bool Replicated, string? Error = null);
+
+/// <summary>A proxy and the host object listing its initiator on the array (<see cref="HostName"/> null: none).</summary>
+public sealed record StorageProxyHostDto(
+    Guid ProxyId, string ProxyName, bool Connected, string? InitiatorName, string? SanProblem, string? HostName, string? HostPersona, string? HostDomain);
+
+/// <summary>A host object for a proxy, as an administrator chose it in the dialog (null: the proposed name or domain).</summary>
+public sealed record StorageHostRequestDto(Guid ProxyId, string? Name = null, string? Domain = null);
+
+/// <summary>
+/// What creating a host object for a proxy does, before anything is done: the checks made on the array, and each change
+/// as the API call the backup server sends and as the array's CLI line. <see cref="Refusal"/>: why it cannot be done
+/// (nothing to do, a name taken, no initiator); <see cref="CanRun"/> also needs an account that may change the array.
+/// </summary>
+public sealed record StorageHostPlanDto(
+    string ProxyName, string? InitiatorName, string Name, string? Domain, IReadOnlyList<string> Checks, IReadOnlyList<StorageArrayChangeDto> Changes, string? Refusal,
+    bool CanRun, string? RunRefusal);
+
+/// <summary>One change on the array: the API call as sent, and the CLI line that does the same (and the one that undoes it).</summary>
+public sealed record StorageArrayChangeDto(string Title, string Method, string Path, string Body, string Cli, string UndoCli);
+

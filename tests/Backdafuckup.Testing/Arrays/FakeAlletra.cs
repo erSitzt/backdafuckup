@@ -148,6 +148,15 @@ public sealed class FakeAlletra
 
             Requests.Add($"{method.Method} {path} {body?.ToJsonString()}".TrimEnd());
             var parts = path.Trim('/').Split('/');
+            // An account that may only look (browse, in every domain it has) is refused every change, as the array does.
+            if (method != HttpMethod.Get && !(method == HttpMethod.Delete && parts[^2] == "credentials") && OnlyBrowse())
+            {
+                return (HttpStatusCode.Forbidden, new JsonObject
+                {
+                    ["message"] = new JsonObject { ["key"] = "INSUFFICIENT_PRIVILEGE", ["default"] = "User does not have the required privilege for this operation." },
+                }, null);
+            }
+
             switch (method.Method, parts.Length > 2 ? parts[2] : parts[^1], parts.Length)
             {
                 case ("DELETE", "credentials", _):
@@ -260,6 +269,8 @@ public sealed class FakeAlletra
                     return (HttpStatusCode.OK, null, null);
                 case ("GET", "hosts", 3):
                     return (HttpStatusCode.OK, List(Hosts), null);
+                case ("POST", "hosts", 3):
+                    return CreateHost(body!);
                 case ("GET", "domainsets", 3):
                     return (HttpStatusCode.OK, List(DomainSets), null);
                 case ("GET", "hostpaths", 3):
@@ -272,6 +283,46 @@ public sealed class FakeAlletra
                     return (HttpStatusCode.NotFound, new JsonObject { ["message"] = $"No such resource {path}" }, null);
             }
         }
+    }
+
+    /// <summary>Whether every privilege of the sign-in is the role browse.</summary>
+    private bool OnlyBrowse() =>
+        Privileges.Count > 0 && Privileges.All(p => (p is JsonObject o ? o["role"]?.GetValue<string>() : p?.GetValue<string>()) == "browse");
+
+    /// <summary>host.CreateHost: a name, iSCSI paths and a persona id; the host is listed with its persona as id and name.</summary>
+    private (HttpStatusCode, JsonNode?, string?) CreateHost(JsonNode body)
+    {
+        var name = body["name"]?.GetValue<string>() ?? string.Empty;
+        if (name.Length is 0 or > 31)
+        {
+            return (HttpStatusCode.BadRequest, new JsonObject { ["message"] = $"Invalid host name {name}" }, null);
+        }
+
+        if (Hosts.Any(h => h["name"]!.GetValue<string>() == name))
+        {
+            return (HttpStatusCode.Conflict, new JsonObject { ["message"] = $"Host {name} already exists" }, null);
+        }
+
+        var paths = (body["iscsiPaths"] as JsonArray ?? []).Select(p => p!.GetValue<string>()).ToList();
+        if (HostPaths.FirstOrDefault(p => paths.Contains(p["address"]!.GetValue<string>())) is { } taken)
+        {
+            return (HttpStatusCode.Conflict, new JsonObject { ["message"] = $"Path {taken["address"]} is used by host {taken["hostName"]}" }, null);
+        }
+
+        var persona = body["persona"]?.GetValue<int>() ?? 0;
+        var uid = $"h{_next++:x8}";
+        Hosts.Add(new JsonObject
+        {
+            ["uid"] = uid, ["name"] = name,
+            ["persona"] = new JsonObject { ["id"] = persona, ["name"] = persona switch { 2 => "Generic-ALUA", 11 => "VMware", 15 => "WindowsServer", _ => "Generic" } },
+            ["domain"] = body["domain"]?.GetValue<string>() ?? "-", ["descriptors"] = body["descriptors"]?.DeepClone(),
+        });
+        foreach (var path in paths)
+        {
+            HostPaths.Add(new JsonObject { ["uid"] = $"hp{_next++:x8}", ["hostName"] = name, ["address"] = path });
+        }
+
+        return Done(HttpStatusCode.Created, uid, $"/api/v3/hosts/{uid}");
     }
 
     private (HttpStatusCode, JsonNode?, string?) Snapshot(string sourceUid, JsonNode body)

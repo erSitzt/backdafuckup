@@ -13,6 +13,7 @@ html, body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helveti
 .session-log.run-lines { max-height: 40vh; margin: 4px 0 0 2px; padding: 2px 0 2px 10px; border-left: 2px solid var(--mud-palette-lines-default); }
 .runs-table tr.run-detail > td { background: var(--mud-palette-background-gray); white-space: normal; padding-top: 8px; }
 .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .8rem; overflow-wrap: anywhere; }
+.code-block { background: var(--mud-palette-background-gray); padding: 6px 10px; border-radius: 4px; white-space: pre-wrap; margin: 2px 0 6px; }
 .data-bar { display: flex; height: 14px; border-radius: 4px; overflow: hidden; background: var(--mud-palette-background-gray); }
 .data-bar > div { height: 100%; }
 .seg-unchanged { background: #90a4ae; }

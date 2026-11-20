@@ -133,6 +133,9 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
                 services.RemoveAll<Backdafuckup.Core.Arrays.IStorageArrayProvider>();
                 services.AddSingleton<Backdafuckup.Core.Arrays.IStorageArrayProvider>(new Backdafuckup.Arrays.Alletra.AlletraProvider(
                     settings => settings.Address == "array02.corp.example" ? Alletra2.CreateHandler() : Alletra.CreateHandler(), TimeSpan.FromSeconds(30)));
+                // The storage systems see the test's SAN proxy (its initiator), as the snapshot service does.
+                services.RemoveAll<Backdafuckup.Server.Arrays.StorageSystems>();
+                services.AddSingleton(sp => ActivatorUtilities.CreateInstance<Backdafuckup.Server.Arrays.StorageSystems>(sp, (Backdafuckup.Core.Proxies.IProxyPool)SanProxies));
                 services.AddSingleton(sp => new Backdafuckup.Server.Arrays.ArraySnapshotService(
                     sp.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>(), sp.GetRequiredService<Backdafuckup.Server.Arrays.StorageSystems>(),
                     sp.GetRequiredService<Backdafuckup.Server.Arrays.ArrayReaderStates>(), SanProxies,

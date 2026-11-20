@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 using Backdafuckup.Contracts;
@@ -118,6 +119,79 @@ public sealed partial class ApiIntegrationTests
 
         Assert.Null(await service.OnVmSnapshotCreatedAsync(Context(connectionId, new ArrayFakeSession(srUuid, leaf, baseVdi, image)), log, Ct));
         Assert.Contains(log.Entries, e => e.Message.Contains("volume xcp-sr1 (storage LUN SR) is not turned on for storage snapshots", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_proxys_host_object_is_shown_with_its_rest_call_and_cli_line_and_created_only_when_asked()
+    {
+        // A turned-on volume in domain bdfu-test, and a host object for another initiator.
+        var (_, array, pool, _, _, systemId) = await ArraySetupAsync();
+        var client = await SignedInAgainAsync();
+        pool.Initiator = "iqn.2004-10.com.ubuntu:01:0a1b2c3d4e5";
+        var system = new { Id = systemId };
+
+        var access = await client.GetFromJsonAsync<StorageProxyAccessDto>($"/api/storage-systems/{system.Id}/proxy-access", Ct);
+        var proxy = Assert.Single(access!.Proxies);
+        Assert.Equal(("proxy01", true, "iqn.2004-10.com.ubuntu:01:0a1b2c3d4e5", (string?)null), (proxy.ProxyName, proxy.Connected, proxy.InitiatorName, proxy.HostName));
+        Assert.Equal(["10.26.101.10:3260"], access.Portals);
+        Assert.Null(access.CreateRefusal);
+
+        // The plan reads the array and changes nothing.
+        var plan = await Read<StorageHostPlanDto>(client.PostAsJsonAsync($"/api/storage-systems/{system.Id}/proxy-access/plan", new StorageHostRequestDto(proxy.ProxyId), Ct));
+        Assert.Equal(("bdfu-proxy01", true, (string?)null), (plan.Name, plan.CanRun, plan.Refusal));
+        var change = Assert.Single(plan.Changes);
+        // The fake's volumes are in domain bdfu-test, so the host object goes there too.
+        Assert.Equal("bdfu-test", plan.Domain);
+        Assert.Equal("createhost -iscsi -persona 2 -domain bdfu-test -os Linux -comment \"backdafuckup proxy proxy01\" bdfu-proxy01 iqn.2004-10.com.ubuntu:01:0a1b2c3d4e5", change.Cli);
+        Assert.Contains("No host object on Alletra lists the initiator iqn.2004-10.com.ubuntu:01:0a1b2c3d4e5 yet.", plan.Checks);
+        Assert.DoesNotContain(array.Requests, r => r.StartsWith("POST /api/v3/hosts", StringComparison.Ordinal));
+
+        var created = await Read<StorageProxyAccessDto>(client.PostAsJsonAsync($"/api/storage-systems/{system.Id}/proxy-access/hosts",
+            new StorageHostRequestDto(proxy.ProxyId, plan.Name, plan.Domain), Ct));
+
+        Assert.Equal("bdfu-proxy01", Assert.Single(created.Proxies).HostName);
+        Assert.Single(array.Requests, r => r.StartsWith("POST /api/v3/hosts", StringComparison.Ordinal));
+        Assert.Equal("bdfu-test", array.Hosts.Single(h => h["name"]!.GetValue<string>() == "bdfu-proxy01")["domain"]!.GetValue<string>());
+        // Asked again, there is nothing to do.
+        var again = await client.PostAsJsonAsync($"/api/storage-systems/{system.Id}/proxy-access/hosts", new StorageHostRequestDto(proxy.ProxyId, "bdfu-proxy01b", "-"), Ct);
+        Assert.Equal(HttpStatusCode.Conflict, again.StatusCode);
+        Assert.Contains("Host object bdfu-proxy01 lists the initiator iqn.2004-10.com.ubuntu:01:0a1b2c3d4e5 already: nothing to do.", await again.Content.ReadAsStringAsync(Ct), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_browse_account_is_shown_the_cli_line_but_cannot_create_the_host_object()
+    {
+        var client = await SignedInClientAsync();
+        var array = Alletra;
+        array.Privileges = [new JsonObject { ["domain"] = "all", ["domainId"] = 0, ["role"] = "browse" }];
+        array.AddVolume("xcp-sr1", SrWwn, 64);
+        var system = await Read<StorageSystemDto>(client.PostAsJsonAsync("/api/storage-systems", new CreateStorageSystemDto
+        {
+            Name = "Alletra", Address = "array01.corp.example", UserName = array.User, Password = array.Password,
+        }, Ct));
+
+        var plan = await Read<StorageHostPlanDto>(client.PostAsJsonAsync($"/api/storage-systems/{system.Id}/proxy-access/plan", new StorageHostRequestDto(SanProxies.ProxyId), Ct));
+
+        Assert.False(plan.CanRun);
+        Assert.Null(plan.Refusal);
+        Assert.StartsWith("createhost -iscsi -persona 2 ", Assert.Single(plan.Changes).Cli, StringComparison.Ordinal);
+        Assert.Equal($"The account {array.User} may not change the array (browse in all domains). Run the CLI line as an array administrator, or give the account the role edit.", plan.RunRefusal);
+        var create = await client.PostAsJsonAsync($"/api/storage-systems/{system.Id}/proxy-access/hosts", new StorageHostRequestDto(SanProxies.ProxyId, plan.Name, "-"), Ct);
+        Assert.Equal(HttpStatusCode.Conflict, create.StatusCode);
+        Assert.DoesNotContain(array.Requests, r => r.StartsWith("POST /api/v3/hosts", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task An_account_that_may_only_look_is_not_used_for_snapshots()
+    {
+        Alletra.Privileges = [new JsonObject { ["domain"] = "all", ["domainId"] = 0, ["role"] = "browse" }];
+        var (service, array, _, srUuid, connectionId, _) = await ArraySetupAsync();
+        var (leaf, baseVdi, image, _) = LvhdImage(srUuid);
+        var log = new RecordingLog();
+
+        Assert.Null(await service.OnVmSnapshotCreatedAsync(Context(connectionId, new ArrayFakeSession(srUuid, leaf, baseVdi, image)), log, Ct));
+        Assert.Contains(log.Entries, e => e.Message.Contains("the account of storage system Alletra may not take snapshots (browse in all domains)", StringComparison.Ordinal));
+        Assert.DoesNotContain(array.Requests, r => r.StartsWith("POST /api/v3/volumes/", StringComparison.Ordinal));
     }
 
     [Fact]

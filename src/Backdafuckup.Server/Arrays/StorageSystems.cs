@@ -5,6 +5,8 @@ using Backdafuckup.Contracts;
 using Backdafuckup.Core.Arrays;
 using Backdafuckup.Core.Hypervisor;
 using Backdafuckup.Core.Operations;
+using Backdafuckup.Core.Proxies;
+using Backdafuckup.Proxy;
 using Backdafuckup.Server.Data;
 using Backdafuckup.Server.Engine;
 using Microsoft.EntityFrameworkCore;
@@ -24,7 +26,7 @@ public sealed class StorageSystemRequestException(string message, int statusCode
 /// </summary>
 public sealed class StorageSystems(
     IDbContextFactory<AppDbContext> dbFactory, CredentialProtector protector, IEnumerable<IStorageArrayProvider> providers, ConnectionManager connections,
-    TimeProvider time, ILogger<StorageSystems> logger)
+    TimeProvider time, ILogger<StorageSystems> logger, IProxyPool proxies)
 {
     private const string ServerIdKey = "arrays.serverId";
 
@@ -381,6 +383,191 @@ public sealed class StorageSystems(
     }
 
     /// <summary>A session to the array, for the engine and the cleanup.</summary>
+    /// <summary>Whether privileges as the array named them ("edit in all domains") allow changes: the role edit or super somewhere.</summary>
+    internal static bool MayChange(IEnumerable<string> privileges) => privileges.Any(p => p.Split(' ', 2)[0].ToLowerInvariant() is "edit" or "super");
+
+    /// <summary>
+    /// Per proxy, the host object on the array that lists its iSCSI initiator, the array's iSCSI addresses and the domain a
+    /// new host object would go into. Reads the array; changes nothing.
+    /// </summary>
+    public async Task<StorageProxyAccessDto> ProxyAccessAsync(Guid id, CancellationToken cancellationToken)
+    {
+        var (system, mappings, known) = await LoadForAccessAsync(id, cancellationToken).ConfigureAwait(false);
+        var connected = proxies.Connected().ToDictionary(p => p.Id);
+        var rows = known.Select(p => (p.Id, p.Name)).Concat(connected.Values.Where(c => known.All(k => k.Id != c.Id)).Select(c => (c.Id, c.Name))).ToList();
+        var replicated = mappings.Any(m => m.ReplicationRole is not null);
+        var refusal = CreateRefusal(system);
+        try
+        {
+            await using var array = await OpenAsync(id, cancellationToken).ConfigureAwait(false);
+            var hosts = await array.ListHostsAsync(cancellationToken).ConfigureAwait(false);
+            var portals = await array.GetIscsiPortalsAsync(cancellationToken).ConfigureAwait(false);
+            var (domain, note) = await DomainAsync(array, mappings, cancellationToken).ConfigureAwait(false);
+            return new StorageProxyAccessDto(
+                [
+                    .. rows.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).Select(r =>
+                    {
+                        var live = connected.GetValueOrDefault(r.Id);
+                        var host = live?.InitiatorName is { Length: > 0 } iqn ? hosts.FirstOrDefault(h => h.IscsiNames.Contains(iqn, StringComparer.OrdinalIgnoreCase)) : null;
+                        return new StorageProxyHostDto(r.Id, r.Name, live is not null, live?.InitiatorName, SanProblem(live), host?.Name, host?.Persona, host?.Domain is "-" ? null : host?.Domain);
+                    }),
+                ],
+                [.. portals.Select(p => $"{p.Address}:3260").Distinct(StringComparer.Ordinal)], domain, note, refusal, replicated);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not StorageSystemRequestException)
+        {
+            return new StorageProxyAccessDto(
+                [.. rows.Select(r => new StorageProxyHostDto(r.Id, r.Name, connected.ContainsKey(r.Id), connected.GetValueOrDefault(r.Id)?.InitiatorName, SanProblem(connected.GetValueOrDefault(r.Id)), null, null, null))],
+                [], null, null, refusal, replicated, $"Storage system {system.Name} ({system.Address}:{system.Port}) could not be read: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// What creating a host object for a proxy would do: the checks on the array, and the change as API call and CLI line.
+    /// Changes nothing.
+    /// </summary>
+    public async Task<StorageHostPlanDto> PlanHostAsync(Guid id, StorageHostRequestDto request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var (system, mappings, known) = await LoadForAccessAsync(id, cancellationToken).ConfigureAwait(false);
+        var live = proxies.Connected().FirstOrDefault(p => p.Id == request.ProxyId);
+        var proxyName = live?.Name ?? known.FirstOrDefault(p => p.Id == request.ProxyId).Name
+            ?? throw new StorageSystemRequestException($"There is no backup proxy {request.ProxyId}.", StatusCodes.Status404NotFound);
+        var name = string.IsNullOrWhiteSpace(request.Name) ? ArrayHostRequest.NameFor(proxyName) : request.Name.Trim();
+        var runRefusal = CreateRefusal(system);
+        if (live?.InitiatorName is not { Length: > 0 } iqn)
+        {
+            var why = live is null
+                ? $"Proxy {proxyName} is not connected: its iSCSI initiator name is known once it is."
+                : $"Proxy {proxyName} has no iSCSI initiator name yet{(SanProblem(live) is { } problem ? $" ({problem.Replace("\n", "; ", StringComparison.Ordinal)})" : string.Empty)}.";
+            return new StorageHostPlanDto(proxyName, null, name, request.Domain, [], [], why, false, runRefusal);
+        }
+
+        try
+        {
+            await using var array = await OpenAsync(id, cancellationToken).ConfigureAwait(false);
+            var (proposed, note) = await DomainAsync(array, mappings, cancellationToken).ConfigureAwait(false);
+            var domain = request.Domain is null ? proposed : request.Domain.Trim() is { Length: > 0 } chosen and not "-" ? chosen : null;
+            var checks = new List<string>();
+            string? refusal = null;
+            var hosts = await array.ListHostsAsync(cancellationToken).ConfigureAwait(false);
+            if (hosts.FirstOrDefault(h => h.IscsiNames.Contains(iqn, StringComparer.OrdinalIgnoreCase)) is { } listing)
+            {
+                refusal = $"Host object {listing.Name} lists the initiator {iqn} already: nothing to do. Backups present snapshots to {listing.Name}.";
+            }
+            else
+            {
+                checks.Add($"No host object on {system.Name} lists the initiator {iqn} yet.");
+                if (hosts.FirstOrDefault(h => string.Equals(h.Name, name, StringComparison.OrdinalIgnoreCase)) is { } taken)
+                {
+                    refusal = $"A host object named {taken.Name} exists already (for {(taken.IscsiNames.Count == 0 ? "no iSCSI initiator" : string.Join(", ", taken.IscsiNames))}): choose another name.";
+                }
+                else
+                {
+                    checks.Add($"No host object is named {name}.");
+                }
+            }
+
+            checks.Add(domain is null ? note ?? "The volumes are in no domain, so the host object goes into none." : $"Domain {domain}: {note ?? "as chosen."}");
+            var hostRequest = new ArrayHostRequest(name, iqn, domain, $"backdafuckup proxy {Comment(proxyName)}");
+            IReadOnlyList<ArrayChange> changes;
+            try
+            {
+                changes = array.DescribeHostCreation(hostRequest);
+            }
+            catch (ArgumentException ex)
+            {
+                return new StorageHostPlanDto(proxyName, iqn, name, domain, checks, [], ex.Message.Split(" (Parameter", 2)[0], false, runRefusal);
+            }
+
+            return new StorageHostPlanDto(proxyName, iqn, name, domain, checks, [.. changes.Select(c => new StorageArrayChangeDto(c.Title, c.Method, c.Path, c.Body, c.Cli, c.UndoCli))],
+                refusal, refusal is null && runRefusal is null, runRefusal);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not StorageSystemRequestException)
+        {
+            throw new StorageSystemRequestException($"Storage system {system.Name} ({system.Address}:{system.Port}) could not be read: {ex.Message}", StatusCodes.Status502BadGateway);
+        }
+    }
+
+    /// <summary>
+    /// Creates the host object for a proxy as <see cref="PlanHostAsync"/> described it (same name and domain), when an
+    /// administrator asks for it. The plan is made again first: anything changed on the array since is refused.
+    /// </summary>
+    public async Task<StorageProxyAccessDto> CreateHostAsync(Guid id, StorageHostRequestDto request, string? requestedBy, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var plan = await PlanHostAsync(id, request, cancellationToken).ConfigureAwait(false);
+        if (!plan.CanRun)
+        {
+            throw new StorageSystemRequestException(plan.Refusal ?? plan.RunRefusal ?? "The host object cannot be created.", StatusCodes.Status409Conflict);
+        }
+
+        var system = (await ListAsync(cancellationToken).ConfigureAwait(false)).Single(s => s.Id == id);
+        try
+        {
+            await using var array = await OpenAsync(id, cancellationToken).ConfigureAwait(false);
+            var host = await array.CreateHostAsync(new ArrayHostRequest(plan.Name, plan.InitiatorName!, plan.Domain, $"backdafuckup proxy {Comment(plan.ProxyName)}"), cancellationToken)
+                .ConfigureAwait(false);
+            logger.LogInformation("Created host object {Host} on storage system {System} ({Address}) for proxy {Proxy} ({Initiator}), domain {Domain}, asked for by {User}",
+                host.Name, system.Name, system.Address, plan.ProxyName, plan.InitiatorName, plan.Domain ?? "none", requestedBy ?? "(unknown)");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not StorageSystemRequestException)
+        {
+            throw new StorageSystemRequestException(
+                $"Host object {plan.Name} was not created on storage system {system.Name} ({system.Address}:{system.Port}): {ex.Message}", StatusCodes.Status502BadGateway);
+        }
+
+        return await ProxyAccessAsync(id, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<(StorageSystemDto System, List<StorageVolumeMapping> Mappings, List<(Guid Id, string Name)> Proxies)> LoadForAccessAsync(Guid id, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var entity = await FindAsync(db, id, cancellationToken).ConfigureAwait(false);
+        var mappings = await db.StorageVolumes.AsNoTracking().Where(v => v.StorageSystemId == id).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var known = (await db.Proxies.AsNoTracking().Where(p => p.EnrolledUtc != null).Select(p => new { p.Id, p.Name }).ToListAsync(cancellationToken).ConfigureAwait(false))
+            .Select(p => (p.Id, p.Name)).ToList();
+        return (ToDto(entity, mappings.Count, mappings.Count(m => m.Enabled)), mappings, known);
+    }
+
+    /// <summary>The domain of the turned-on volumes (else of all mapped ones), with a sentence on how it was chosen.</summary>
+    private static async Task<(string? Domain, string? Note)> DomainAsync(IStorageArraySession array, List<StorageVolumeMapping> mappings, CancellationToken cancellationToken)
+    {
+        var chosen = mappings.Where(m => m.Enabled).ToList() is { Count: > 0 } enabled ? enabled : mappings;
+        if (chosen.Count == 0)
+        {
+            return (null, null);
+        }
+
+        var volumes = await array.FindVolumesByWwnAsync([.. chosen.Select(m => m.Wwn)], cancellationToken).ConfigureAwait(false);
+        var domains = volumes.Select(v => v.Domain is { Length: > 0 } and not "-" ? v.Domain : null).Distinct().ToList();
+        var which = chosen.Any(m => m.Enabled) ? "turned-on" : "mapped";
+        return domains switch
+        {
+            [null] => (null, $"The {which} volumes are in no domain, so the host object goes into none."),
+            [{ } one] => (one, $"the domain of the {which} volumes (a snapshot is presented only to a host object in its domain)."),
+            [] => (null, null),
+            _ => (null, $"The {which} volumes are in several domains ({string.Join(", ", domains.Select(d => d ?? "none"))}): a host object can be in one; choose it, " +
+                        "or make one host object per domain."),
+        };
+    }
+
+    private static string? CreateRefusal(StorageSystemDto system) =>
+        system.Facts is not { } facts
+            ? $"Storage system {system.Name} was not reached yet: test it first."
+            : facts.Privileges.Count == 0 || MayChange(facts.Privileges)
+                ? null // no rights named: the array decides
+                : $"The account {system.UserName} may not change the array ({string.Join(", ", facts.Privileges)}). " +
+                  "Run the CLI line as an array administrator, or give the account the role edit.";
+
+    private static string? SanProblem(ProxyInfo? proxy) =>
+        proxy is null ? null
+        : proxy.Capabilities.Contains(ProxyAgentProtocol.CapabilitySan, StringComparer.Ordinal) ? null
+        : proxy.SanRefusal ?? "no SAN access";
+
+    /// <summary>Text for the host comment: no quotes, backslashes or line breaks.</summary>
+    private static string Comment(string value) => new([.. value.Select(c => c is '"' or '\\' or '\n' or '\r' ? ' ' : c)]);
+
     public async Task<IStorageArraySession> OpenAsync(Guid id, CancellationToken cancellationToken)
     {
         StorageSystemEntity system;

@@ -2,6 +2,7 @@
 @inject ApiClient Api
 @inject ISnackbar Snackbar
 @inject IDialogService Dialogs
+@inject IJSRuntime JS
 
 <PageTitle>Storage systems – backdafuckup</PageTitle>
 <PageHeader Title="Storage Systems" Description="Storage arrays whose snapshots backups read from: the VM snapshot exists only for seconds, the disks are read from a snapshot of the array through a proxy with SAN access.">
@@ -106,7 +107,11 @@ else
                 @system.Address:@system.Port · user @system.UserName
                 @if (system.Facts is { } facts)
                 {
-                    <span> · @facts.Model, serial @facts.Serial, OS @facts.OsVersion, WSAPI @facts.ApiVersion</span>
+                    <span> · @facts.Model, serial @facts.Serial, OS @facts.OsVersion, @facts.ApiVersion</span>
+                    @if (facts.Privileges.Count > 0)
+                    {
+                        <span> · rights: @string.Join(", ", facts.Privileges)</span>
+                    }
                 }
                 · checked @Fmt.Time(system.LastCheckedUtc)
             </MudText>
@@ -118,6 +123,16 @@ else
             {
                 <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">@warning</MudAlert>
             }
+            @if (system.Facts is { } rights && !CanSnapshot(rights))
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true" Class="mt-2">
+                    The account @system.UserName has @(rights.Privileges.Count == 0 ? "no rights the array named" : string.Join(", ", rights.Privileges)): the backup server can read the
+                    array, but not take, present or delete snapshots. For backups from storage snapshots it needs the role edit, in the domain of the volumes (or in all domains).
+                </MudAlert>
+            }
+            <MudAlert Severity="@(Usage(system).Used ? Severity.Success : Severity.Info)" Dense="true" Class="mt-2" Icon="@(Usage(system).Used ? Icons.Material.Filled.PlayCircle : Icons.Material.Filled.PauseCircle)">
+                @Usage(system).Text
+            </MudAlert>
             @foreach (var reader in (system.Readers ?? []).Where(r => r.TrippedUtc is not null))
             {
                 <MudAlert Severity="Severity.Error" Dense="true" Class="mt-2">
@@ -137,7 +152,7 @@ else
             {
                 <MudTable Items="volumes" Dense="true" Hover="true" Elevation="0">
                     <HeaderContent>
-                        <MudTh>Use</MudTh><MudTh>Volume</MudTh><MudTh>Size</MudTh><MudTh>Datastore / SR</MudTh><MudTh>Layout</MudTh><MudTh>WWN</MudTh>
+                        <MudTh><MudTooltip Text="Turned on: backups may take snapshots of this volume (with the experimental readers on, for jobs with 'Backup from storage snapshots')."><span>Use</span></MudTooltip></MudTh><MudTh>Volume</MudTh><MudTh>Size</MudTh><MudTh>Datastore / SR</MudTh><MudTh>Layout</MudTh><MudTh>WWN</MudTh>
                     </HeaderContent>
                     <RowTemplate>
                         <MudTd>
@@ -176,27 +191,122 @@ else
                 </MudTable>
             }
 
+            <MudText Typo="Typo.subtitle2" Class="mt-4">Proxy access (iSCSI)</MudText>
+            <MudText Typo="Typo.caption" Class="help-text d-block">
+                Backups read each array snapshot through a backup proxy with SAN access. The array presents a snapshot only to a host object, so for each proxy
+                it needs one that lists the proxy's iSCSI initiator name (IQN), with the persona Generic-ALUA (Linux). backdafuckup presents each snapshot to that
+                host object during the backup and removes the presentation afterwards; it never changes or removes the host object itself. Create it on the array
+                yourself, or here: every change is shown first, with the CLI line that makes it by hand. The proxy also has to reach the array's iSCSI addresses
+                (TCP port 3260).
+            </MudText>
+            @if (_access.GetValueOrDefault(system.Id) is not { } access)
+            {
+                <MudProgressLinear Indeterminate="true" Class="mt-2" />
+            }
+            else
+            {
+                @if (access.Error is { } accessError)
+                {
+                    <MudAlert Severity="Severity.Error" Dense="true" Class="mt-2">@accessError</MudAlert>
+                }
+                @if (access.Replicated)
+                {
+                    <MudAlert Severity="Severity.Info" Dense="true" Class="mt-2">
+                        Volumes of this array are replicated (Peer Persistence). Snapshots are taken on the array that holds a volume's primary side, and that side
+                        can move: give each proxy a host object on both arrays (add the other array as a storage system too, and create it there as well).
+                    </MudAlert>
+                }
+                @if (access.Proxies.Count == 0)
+                {
+                    <MudText Typo="Typo.body2" Class="mt-2">No backup proxy yet: add one under <MudLink Href="infrastructure/proxies">Backup Proxies</MudLink> (on a machine that reaches the array's iSCSI network).</MudText>
+                }
+                else
+                {
+                    <MudSimpleTable Dense="true" Elevation="0" Class="mt-1">
+                        <thead><tr><th>Proxy</th><th>iSCSI initiator</th><th>Host object on @system.Name</th><th></th></tr></thead>
+                        <tbody>
+                            @foreach (var proxy in access.Proxies)
+                            {
+                                <tr>
+                                    <td>@proxy.ProxyName @if (!proxy.Connected) { <MudChip T="string" Size="Size.Small" Variant="Variant.Text">offline</MudChip> }</td>
+                                    <td>
+                                        @if (proxy.InitiatorName is { } iqn)
+                                        {
+                                            <span class="mono">@iqn</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="caption">@(proxy.Connected ? "none yet" : "known when it is connected")</span>
+                                        }
+                                        @if (proxy.SanProblem is { } san)
+                                        {
+                                            <br /><span class="caption">No SAN access: @san.Replace("\n", "; ")</span>
+                                        }
+                                    </td>
+                                    <td>
+                                        @if (proxy.HostName is { } host)
+                                        {
+                                            <MudIcon Icon="@Icons.Material.Filled.CheckCircle" Color="Color.Success" Size="Size.Small" Class="mr-1" Style="vertical-align: middle" />
+                                            <span>@host</span>
+                                            <span class="caption"> · @(proxy.HostPersona ?? "persona unknown")@(proxy.HostDomain is { } d ? $" · domain {d}" : string.Empty)</span>
+                                        }
+                                        else if (proxy.InitiatorName is not null && access.Error is null)
+                                        {
+                                            <span class="mud-warning-text">none lists its initiator: backups cannot present snapshots to this proxy</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="caption">–</span>
+                                        }
+                                    </td>
+                                    <td class="text-right">
+                                        @if (proxy.HostName is null && proxy.InitiatorName is not null && access.Error is null)
+                                        {
+                                            <MudButton Size="Size.Small" Variant="Variant.Outlined" StartIcon="@Icons.Material.Filled.Add" Disabled="_busy" OnClick="@(() => OpenHostDialogAsync(system, proxy))">Create host object…</MudButton>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                }
+                @if (access.Portals.Count > 0)
+                {
+                    <MudText Typo="Typo.caption" Class="d-block mt-1">iSCSI addresses of @system.Name: <span class="mono">@string.Join(", ", access.Portals)</span></MudText>
+                }
+            }
+
             <MudExpansionPanels Elevation="0" Class="mt-3">
                 <MudExpansionPanel Text="Options">
                     @{ var options = _options[system.Id]; }
                     <div class="field-grid cols-4">
                         <MudNumericField @bind-Value="options.ExpiryHours" Label="Snapshot expiry (hours)" Min="1" Max="72" Variant="Variant.Outlined"
                                          HelperText="The array removes a forgotten snapshot by itself after this time." />
-                        <MudNumericField @bind-Value="options.MaxVmsPerSnapshot" Label="VMs per array snapshot" Min="1" Max="32" Variant="Variant.Outlined" />
+                        <MudNumericField @bind-Value="options.MaxVmsPerSnapshot" Label="VMs per array snapshot" Min="1" Max="32" Variant="Variant.Outlined"
+                                         HelperText="VMs of one job run that share an array snapshot of their volume." />
                         <MudNumericField @bind-Value="options.BatchWindowSeconds" Label="Batch window (s)" Min="0" Max="600" Variant="Variant.Outlined"
                                          HelperText="How long a snapshot waits for more VMs of the job run." />
-                        <MudNumericField @bind-Value="options.ProbationRuns" Label="Verify runs" Min="0" Max="50" Variant="Variant.Outlined" />
+                        <MudNumericField @bind-Value="options.ProbationRuns" Label="Verify runs" Min="0" Max="50" Variant="Variant.Outlined"
+                                         HelperText="The first backups per reader also compare a sample with the VM snapshot." />
                         <MudNumericField @bind-Value="options.MinSecondsAfterVmSnapshot" Label="Gap after VM snapshot (s)" Min="0" Max="60" Variant="Variant.Outlined"
                                          HelperText="The array snapshot waits this long after the last VM snapshot." />
                     </div>
                     <MudSwitch T="bool" @bind-Value="options.ExperimentalReaders" Color="Color.Primary" Class="mt-2"
-                               Label="Experimental readers: read XCP-ng LVM storage (LVHD) and VMFS6 datastores on the snapshot LUN" />
+                               Label="Experimental readers: XCP-ng LVM storage (LVHD) and vSphere VMFS6 datastores" />
+                    <ul class="help-text caption pl-5 mt-1 mb-1">
+                        <li><b>Off:</b> backups do not use this array. Every way to read a snapshot LUN is one of these readers so far, so VMs on its volumes are read
+                            from their VM snapshots as usual (NBD on XCP-ng, HotAdd on vSphere), whatever is turned on above.</li>
+                        <li><b>On:</b> for jobs with <i>Backup from storage snapshots</i>, a VM whose disks all lie on turned-on volumes is backed up like this: VM snapshot
+                            (with guest processing), a read-only array snapshot of the volume, the VM snapshot removed again within seconds, then the disks read from the
+                            array snapshot through a backup proxy with SAN access. Afterwards the array snapshot is deleted; its expiry removes it if a backup is
+                            interrupted.</li>
+                    </ul>
                     <MudText Typo="Typo.caption" Class="help-text">
-                        The layout on the LUN is read by backdafuckup itself, read-only, without activating or mounting anything. Each disk is checked against what
-                        XCP-ng or vCenter reports before the VM snapshot is removed, and every incremental compares regions that change tracking reports unchanged
-                        with the previous restore point.
-                        In verify mode (the first backups per reader, set by "Verify runs", and again after the on-disk format changed) a sample of each disk
-                        is also compared with the VM snapshot before it is removed. Any difference switches the reader off for this storage system.
+                        Experimental, because backdafuckup reads the layout on the LUN itself: read-only, without activating or mounting anything. Each disk is checked
+                        against what XCP-ng or vCenter reports before the VM snapshot is removed, and every incremental compares regions that change tracking reports
+                        unchanged with the previous restore point. In verify mode (the first backups per reader, set by "Verify runs", and again after the on-disk
+                        format changed) a sample of each disk is also compared with the VM snapshot before it is removed. Any difference switches the reader off
+                        for this storage system, and its VMs go the usual way again.
                     </MudText>
                     @foreach (var reader in system.Readers ?? [])
                     {
@@ -235,6 +345,72 @@ else
         </MudPaper>
     }
 }
+
+<MudDialog @bind-Visible="_hostOpen" Options="@(new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true, CloseOnEscapeKey = true })">
+    <TitleContent><MudText Typo="Typo.h6">Host object for proxy @_hostProxy?.ProxyName on @_hostSystem?.Name</MudText></TitleContent>
+    <DialogContent>
+        @if (_hostPlan is not { } plan)
+        {
+            <MudProgressLinear Indeterminate="true" />
+        }
+        else
+        {
+            <MudText Typo="Typo.body2" Class="mb-3">
+                Nothing is changed on the array until you click "Create on the array". This is what would happen, as the call backdafuckup sends to the array's
+                REST API, and as the line for the array's CLI if you would rather make the change yourself (as an array administrator).
+            </MudText>
+            <div class="field-grid cols-2">
+                <MudTextField T="string" @bind-Value="_hostName" Label="Host object name" Variant="Variant.Outlined" Immediate="true" MaxLength="31"
+                              HelperText="Up to 31 letters, digits, '.', '-' or '_'." />
+                <MudTextField T="string" @bind-Value="_hostDomain" Label="Domain" Variant="Variant.Outlined" Immediate="true"
+                              HelperText="The domain of the volumes; empty: none." />
+            </div>
+            @if (HostPlanStale)
+            {
+                <div class="d-flex mt-1"><MudSpacer /><MudButton Size="Size.Small" Variant="Variant.Outlined" Disabled="_planning" OnClick="ReplanHostAsync">Show the changes for this name and domain</MudButton></div>
+            }
+            <MudText Typo="Typo.subtitle2" Class="mt-3">Checked on the array</MudText>
+            <ul class="help-text pl-5 mb-2">
+                <li>Proxy @plan.ProxyName, iSCSI initiator <span class="mono">@(plan.InitiatorName ?? "–")</span></li>
+                @foreach (var check in plan.Checks)
+                {
+                    <li>@check</li>
+                }
+            </ul>
+            @if (plan.Refusal is { } refusal)
+            {
+                <MudAlert Severity="Severity.Warning" Dense="true">@refusal</MudAlert>
+            }
+            else
+            {
+                <MudText Typo="Typo.subtitle2" Class="mt-2">What would be changed</MudText>
+                @foreach (var (change, index) in plan.Changes.Select((c, i) => (c, i + 1)))
+                {
+                    <MudText Typo="Typo.body2" Class="mt-1"><b>@index.</b> @change.Title</MudText>
+                    <MudText Typo="Typo.caption" Class="d-block mt-1">REST API, as backdafuckup sends it:</MudText>
+                    <pre class="code-block mono">@change.Method @change.Path
+@change.Body</pre>
+                    <MudText Typo="Typo.caption" Class="d-block">Or by hand in the array's CLI (the same change):</MudText>
+                    <div class="d-flex align-center gap-1">
+                        <pre class="code-block mono flex-grow-1">@change.Cli</pre>
+                        <MudIconButton Icon="@Icons.Material.Filled.ContentCopy" Size="Size.Small" aria-label="Copy the CLI line" OnClick="@(() => CopyAsync(change.Cli))" />
+                    </div>
+                    <MudText Typo="Typo.caption" Class="d-block">
+                        To remove it later: <span class="mono">@change.UndoCli</span> (after no backup uses it). backdafuckup never changes or removes host objects.
+                    </MudText>
+                }
+                @if (plan.RunRefusal is { } runRefusal)
+                {
+                    <MudAlert Severity="Severity.Info" Dense="true" Class="mt-2">@runRefusal</MudAlert>
+                }
+            }
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="@(() => _hostOpen = false)">Cancel</MudButton>
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" Disabled="@(_hostPlan is not { CanRun: true } || HostPlanStale || _busy || _planning)" OnClick="CreateHostAsync">Create on the array</MudButton>
+    </DialogActions>
+</MudDialog>
 
 @code {
     private enum Step { Address, Trust, Credentials }
@@ -277,6 +453,15 @@ else
         public StorageSystemOptionsDto ToDto() => new(ExpiryHours, MaxVmsPerSnapshot, BatchWindowSeconds, ExperimentalReaders, ProbationRuns, MinSecondsAfterVmSnapshot);
     }
 
+    private readonly Dictionary<Guid, StorageProxyAccessDto> _access = [];
+    private bool _hostOpen;
+    private bool _planning;
+    private StorageSystemDto? _hostSystem;
+    private StorageProxyHostDto? _hostProxy;
+    private StorageHostPlanDto? _hostPlan;
+    private string? _hostName;
+    private string? _hostDomain;
+
     protected override Task OnInitializedAsync() => LoadAsync();
 
     private async Task LoadAsync()
@@ -287,7 +472,90 @@ else
             _options[system.Id] = OptionsModel.From(system.Options);
             _volumes[system.Id] = await Api.GetAsync<List<StorageVolumeDto>>($"api/storage-systems/{system.Id}/volumes");
         }
+
+        // Reading the host objects signs in to each array: after the page shows.
+        foreach (var system in _systems)
+        {
+            _ = LoadAccessAsync(system);
+        }
     }
+
+    private async Task LoadAccessAsync(StorageSystemDto system)
+    {
+        _access.Remove(system.Id);
+        try
+        {
+            _access[system.Id] = await Api.GetAsync<StorageProxyAccessDto>($"api/storage-systems/{system.Id}/proxy-access");
+        }
+        catch (ApiException ex)
+        {
+            _access[system.Id] = new StorageProxyAccessDto([], [], null, null, null, false, ex.Message);
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    /// <summary>The name or domain was edited since the changes were shown: they have to be shown again before anything is created.</summary>
+    private bool HostPlanStale =>
+        _hostPlan is { } plan && (!string.Equals((_hostName ?? string.Empty).Trim(), plan.Name, StringComparison.Ordinal)
+                                  || !string.Equals((_hostDomain ?? string.Empty).Trim(), plan.Domain ?? string.Empty, StringComparison.Ordinal));
+
+    private async Task OpenHostDialogAsync(StorageSystemDto system, StorageProxyHostDto proxy)
+    {
+        (_hostSystem, _hostProxy, _hostPlan, _hostOpen) = (system, proxy, null, true);
+        await PlanHostAsync(new StorageHostRequestDto(proxy.ProxyId));
+    }
+
+    private Task ReplanHostAsync() =>
+        PlanHostAsync(new StorageHostRequestDto(_hostProxy!.ProxyId, _hostName, string.IsNullOrWhiteSpace(_hostDomain) ? "-" : _hostDomain));
+
+    private async Task PlanHostAsync(StorageHostRequestDto request)
+    {
+        _planning = true;
+        try
+        {
+            _hostPlan = await Api.PostAsync<StorageHostPlanDto>($"api/storage-systems/{_hostSystem!.Id}/proxy-access/plan", request);
+            (_hostName, _hostDomain) = (_hostPlan.Name, _hostPlan.Domain ?? string.Empty);
+        }
+        catch (ApiException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Error);
+            _hostOpen = false;
+        }
+        finally
+        {
+            _planning = false;
+        }
+    }
+
+    private Task CreateHostAsync() => RunAsync(async () =>
+    {
+        var plan = _hostPlan!;
+        _access[_hostSystem!.Id] = await Api.PostAsync<StorageProxyAccessDto>($"api/storage-systems/{_hostSystem.Id}/proxy-access/hosts",
+            new StorageHostRequestDto(_hostProxy!.ProxyId, plan.Name, plan.Domain ?? "-"));
+        Snackbar.Add($"Host object {plan.Name} created on {_hostSystem.Name}.", Severity.Success);
+        _hostOpen = false;
+    });
+
+    private async Task CopyAsync(string text)
+    {
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", text);
+        Snackbar.Add("Copied.", Severity.Info);
+    }
+
+    /// <summary>Whether the account may take, present and delete snapshots: the role edit (or super) somewhere.</summary>
+    private static bool CanSnapshot(StorageSystemFactsDto facts) =>
+        facts.Privileges.Any(p => p.Split(' ', 2)[0].ToLowerInvariant() is "edit" or "super");
+
+    /// <summary>Whether backups use this storage system now, and why (not).</summary>
+    private static (bool Used, string Text) Usage(StorageSystemDto system) =>
+        !system.Options.ExperimentalReaders
+            ? (false, "Not used by backups: the experimental readers are off (Options), so VMs on these volumes are read from their VM snapshots as usual. Turning volumes on only prepares them.")
+        : system.VolumesEnabled == 0
+            ? (false, "Not used by backups: no volume is turned on.")
+        : system.Facts is { } facts && !CanSnapshot(facts)
+            ? (false, $"Not used by backups: the account {system.UserName} may not take snapshots (see above); its VMs are read from their VM snapshots.")
+            : (true, $"Used by backups: jobs with 'Backup from storage snapshots' read VMs whose disks all lie on the {system.VolumesEnabled} turned-on volume(s) from array snapshots taken here.");
 
     private static string Layout(string layout) => layout switch
     {

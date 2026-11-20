@@ -56,6 +56,28 @@ public static class ArrayVolumeTypes
 /// <summary>A host object of the array with its iSCSI initiator names.</summary>
 public sealed record ArrayHost(string Uid, string Name, IReadOnlyList<string> IscsiNames, string? Persona, string? Domain);
 
+/// <summary>
+/// A host object to create for one iSCSI initiator (a backup proxy), see <see cref="IStorageArraySession.CreateHostAsync"/>.
+/// <paramref name="Domain"/> null: in no domain.
+/// </summary>
+public sealed record ArrayHostRequest(string Name, string IscsiName, string? Domain, string Comment)
+{
+    /// <summary>A host object name for a proxy: "bdfu-" and the proxy's name, other characters than letters, digits, '.', '-' and '_' as '-', at most 31.</summary>
+    public static string NameFor(string proxyName)
+    {
+        ArgumentNullException.ThrowIfNull(proxyName);
+        var cleaned = new string([.. proxyName.Select(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '-')]).Trim('-', '.', '_');
+        var name = "bdfu-" + (cleaned.Length == 0 ? "proxy" : cleaned);
+        return name.Length <= 31 ? name : name[..31].TrimEnd('-', '.', '_');
+    }
+}
+
+/// <summary>
+/// One change on the array, described before it is made: the API call exactly as it is sent, and the line of the array's
+/// own CLI that does the same (for an administrator who would rather make the change by hand).
+/// </summary>
+public sealed record ArrayChange(string Title, string Method, string Path, string Body, string Cli, string UndoCli);
+
 /// <summary>An iSCSI port of the array: where initiators log in.</summary>
 public sealed record ArrayIscsiPortal(string Address, string? TargetIqn, string Port);
 
@@ -98,6 +120,16 @@ public interface IStorageArraySession : IAsyncDisposable
     Task<IReadOnlyList<ArrayHost>> ListHostsAsync(CancellationToken cancellationToken);
 
     Task<IReadOnlyList<ArrayIscsiPortal>> GetIscsiPortalsAsync(CancellationToken cancellationToken);
+
+    /// <summary>What <see cref="CreateHostAsync"/> would change for <paramref name="request"/>, without changing anything.</summary>
+    IReadOnlyList<ArrayChange> DescribeHostCreation(ArrayHostRequest request);
+
+    /// <summary>
+    /// Creates a host object for one iSCSI initiator, exactly as <see cref="DescribeHostCreation"/> describes it, and only
+    /// when an administrator asks for it. Refuses, changing nothing, when a host object lists the initiator already or has
+    /// the name. Host objects are never changed or deleted by the backup server afterwards.
+    /// </summary>
+    Task<ArrayHost> CreateHostAsync(ArrayHostRequest request, CancellationToken cancellationToken);
 
     /// <summary>One snapshot per volume of the request, each recorded in the ledger before it is taken.</summary>
     Task<IReadOnlyList<ArraySnapshot>> CreateSnapshotsAsync(ArraySnapshotRequest request, IArtifactLedger ledger, IOperationLog log, CancellationToken cancellationToken);

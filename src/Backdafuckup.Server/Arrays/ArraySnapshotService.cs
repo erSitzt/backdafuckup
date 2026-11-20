@@ -392,6 +392,12 @@ public sealed class ArraySnapshotService(
             return Plan.Refused($"reading {ArrayReaderStates.DisplayName(reader)} from array snapshots is experimental; turn on 'Experimental readers' for storage system {system.Name}");
         }
 
+        // The rights the array named at the last check: an account that may only look (browse) would be refused at the first snapshot.
+        if (system.Facts is { Privileges.Count: > 0 } facts && !StorageSystems.MayChange(facts.Privileges))
+        {
+            return Plan.Refused($"the account of storage system {system.Name} may not take snapshots ({string.Join(", ", facts.Privileges)}); it needs the role edit in the domain of the volumes");
+        }
+
         var readerState = ArrayReaderStates.Find(system, reader);
         if (readerState.Tripped)
         {

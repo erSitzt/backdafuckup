@@ -46,6 +46,92 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
         ];
     }
 
+    /// <summary>
+    /// The host persona of a backup proxy: Generic-ALUA (2), what HPE names for Linux hosts, also with Peer Persistence.
+    /// The B10000 lists it as <c>{"id": 2, "name": "Generic-ALUA"}</c>.
+    /// </summary>
+    internal const int ProxyPersona = 2;
+
+    public IReadOnlyList<ArrayChange> DescribeHostCreation(ArrayHostRequest request)
+    {
+        Check(request);
+        var domain = Domain(request.Domain);
+        return
+        [
+            new ArrayChange(
+                $"Create host object {request.Name} for the iSCSI initiator {request.IscsiName}: persona Generic-ALUA (Linux), " +
+                $"{(domain is null ? "in no domain" : $"in domain {domain}")}",
+                "POST", "/api/v3/hosts", HostBody(request).ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
+                $"createhost -iscsi -persona {ProxyPersona}{(domain is null ? string.Empty : $" -domain {domain}")} -os Linux -comment \"{request.Comment}\" {request.Name} {request.IscsiName}",
+                $"removehost {request.Name}"),
+        ];
+    }
+
+    public async Task<ArrayHost> CreateHostAsync(ArrayHostRequest request, CancellationToken cancellationToken)
+    {
+        Check(request);
+        var hosts = await ListHostsAsync(cancellationToken).ConfigureAwait(false);
+        if (hosts.FirstOrDefault(h => h.IscsiNames.Contains(request.IscsiName, StringComparer.OrdinalIgnoreCase)) is { } listing)
+        {
+            throw new AlletraException($"Array {client.Endpoint}: host object {listing.Name} lists the iSCSI initiator {request.IscsiName} already; nothing was created.");
+        }
+
+        if (hosts.Any(h => string.Equals(h.Name, request.Name, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new AlletraException($"Array {client.Endpoint}: a host object named {request.Name} exists already (without {request.IscsiName}); choose another name. Nothing was changed.");
+        }
+
+        try
+        {
+            await client.ChangeAsync(HttpMethod.Post, "api/v3/hosts", HostBody(request), cancellationToken).ConfigureAwait(false);
+        }
+        catch (AlletraException ex) when (ex.PermissionDenied)
+        {
+            throw Refused(ex, $"creating host object {request.Name}", request.Domain);
+        }
+
+        return (await ListHostsAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault(h => string.Equals(h.Name, request.Name, StringComparison.OrdinalIgnoreCase))
+            ?? throw new AlletraException($"Array {client.Endpoint}: host object {request.Name} was created, but the array does not list it.");
+    }
+
+    /// <summary>The body of <c>POST /api/v3/hosts</c> (host.CreateHost), shown before it is sent.</summary>
+    private static JsonObject HostBody(ArrayHostRequest request)
+    {
+        var body = new JsonObject { ["name"] = request.Name, ["iscsiPaths"] = new JsonArray(request.IscsiName), ["persona"] = ProxyPersona };
+        if (Domain(request.Domain) is { } domain)
+        {
+            body["domain"] = domain;
+        }
+
+        body["descriptors"] = new JsonObject { ["os"] = "Linux", ["comment"] = request.Comment };
+        return body;
+    }
+
+    /// <summary>Names as the array takes them (31 characters), an initiator name, and a comment that fits between double quotes.</summary>
+    private static void Check(ArrayHostRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!AlletraNames.IsObjectName(request.Name))
+        {
+            throw new ArgumentException($"'{request.Name}' is no host name the array takes: 1 to 31 letters, digits, '.', '-' or '_', starting with a letter or digit.", nameof(request));
+        }
+
+        if (Domain(request.Domain) is { } domain && !AlletraNames.IsObjectName(domain))
+        {
+            throw new ArgumentException($"'{domain}' is no domain name the array takes.", nameof(request));
+        }
+
+        if (!AlletraNames.IsIscsiName(request.IscsiName))
+        {
+            throw new ArgumentException($"'{request.IscsiName}' is no iSCSI initiator name (iqn.yyyy-mm.… or eui.<16 hex digits>).", nameof(request));
+        }
+
+        if (request.Comment.IndexOfAny(['"', '\\', '\n', '\r']) >= 0 || request.Comment.Length > 255)
+        {
+            throw new ArgumentException("The host comment has a quote, a backslash or a line break, or is longer than 255 characters.", nameof(request));
+        }
+    }
+
     public async Task<IReadOnlyList<ArrayIscsiPortal>> GetIscsiPortalsAsync(CancellationToken cancellationToken) =>
     [
         .. (await client.ListAsync("api/v3/ports", cancellationToken).ConfigureAwait(false))
