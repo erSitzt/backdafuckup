@@ -125,7 +125,7 @@ public sealed class BackupSessionRunner(
                 {
                     var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, metrics, engineOptions.Value.CheckpointWithVss, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1,
                         new ChainTargets(scope, placement, chainLocks, repositories), hypervisor, job.FromStorageSnapshots ? arraySnapshots : null,
-                        Math.Max(1, Math.Min(job.MaxParallelVms, pending.Count)));
+                        Math.Max(1, Math.Min(job.MaxParallelVms, pending.Count)), pending.Count);
                     return (item, State: await task.RunAsync(cancellationToken).ConfigureAwait(false));
                 }
                 finally
@@ -311,7 +311,8 @@ internal sealed class VmBackupTask(
     ChainTargets targets,
     IHypervisorSession hypervisor,
     ISnapshotLifecycleHook? arrayHook = null,
-    int maxPeers = 1)
+    int maxPeers = 1,
+    int runVms = 0)
 {
     private readonly IOperationLog _log = events.CreateLog(session.Id, taskId, vm.CachedName);
 
@@ -445,7 +446,7 @@ internal sealed class VmBackupTask(
                     d => baseline?.Disks.FirstOrDefault(b => b.SourceDiskId == d.SourceDiskId) is { ChangeTokenValue: not null } b ? new ChangeToken(b.ChangeTokenKind!, b.ChangeTokenValue) : null,
                     StringComparer.Ordinal);
                 _arrayLease = await arrayHook.OnVmSnapshotCreatedAsync(
-                    new VmSnapshotContext(session.Id, job.Id, job.ConnectionId, hypervisor, backup, previous, maxPeers), _log, cancellationToken).ConfigureAwait(false);
+                    new VmSnapshotContext(session.Id, job.Id, job.ConnectionId, hypervisor, backup, previous, maxPeers, runVms, attempt), _log, cancellationToken).ConfigureAwait(false);
             }
 
             await using var arrayLease = _arrayLease;

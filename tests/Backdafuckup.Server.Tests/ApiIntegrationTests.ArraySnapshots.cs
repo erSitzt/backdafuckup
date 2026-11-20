@@ -114,6 +114,35 @@ public sealed partial class ApiIntegrationTests
     }
 
     [Fact]
+    public async Task A_batch_stops_waiting_once_every_vm_of_the_run_came_even_when_it_went_elsewhere()
+    {
+        var (service, _, pool, srUuid, connectionId, systemId) = await ArraySetupAsync();
+        await using (var db = await _factory!.Services.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContextAsync(Ct))
+        {
+            var entity = await db.StorageSystems.SingleAsync(s => s.Id == systemId, Ct);
+            entity.Options = new StorageSystemOptions { ExperimentalReaders = true, BatchWindowSeconds = 600, ProbationRuns = 0, MinSecondsAfterVmSnapshot = 0 };
+            await db.SaveChangesAsync(Ct);
+        }
+
+        var (leaf, baseVdi, image, _) = LvhdImage(srUuid);
+        pool.Luns[SrWwn.ToLowerInvariant()] = image;
+        var (run, job) = (Guid.CreateVersion7(), Guid.CreateVersion7());
+        VmSnapshotContext InRun(ArrayFakeSession backup) =>
+            new(run, job, connectionId, null!, backup, new Dictionary<string, ChangeToken?> { ["0"] = new ChangeToken("xen-cbt", "previous") }, MaxPeers: 2, RunVms: 2);
+        var log = new RecordingLog();
+
+        // Two VMs of a run could share the snapshot: the first waits for the second (window: 10 minutes).
+        var first = service.OnVmSnapshotCreatedAsync(InRun(new ArrayFakeSession(srUuid, leaf, baseVdi, image)), log, Ct);
+        await Task.Delay(1000, Ct);
+        Assert.False(first.IsCompleted);
+
+        // The second lies on storage of no array: it goes its usual way, and the first stops waiting.
+        Assert.Null(await service.OnVmSnapshotCreatedAsync(InRun(new ArrayFakeSession(Guid.NewGuid().ToString(), leaf, baseVdi, image)), log, Ct));
+        await using var lease = await first.WaitAsync(TimeSpan.FromSeconds(30), Ct);
+        Assert.NotNull(lease);
+    }
+
+    [Fact]
     public async Task A_proxy_that_reaches_no_iscsi_address_is_not_chosen_and_says_why()
     {
         var (service, array, pool, srUuid, connectionId, _) = await ArraySetupAsync();

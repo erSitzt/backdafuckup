@@ -82,8 +82,12 @@ public interface ISnapshotLifecycleHook
 /// <summary>What the hook needs of a VM's backup: its job run, connection, session and the previous change tokens.</summary>
 /// <param name="Previous">The change token of each disk's previous restore point (null: none).</param>
 /// <param name="MaxPeers">How many VMs of the job run can be at this point at once (a batch waits for no more).</param>
+/// <param name="RunVms">How many VMs this attempt of the job run backs up (0: unknown): once all have come to this point, wherever their
+/// disks are read from, a batch waits for no more.</param>
+/// <param name="Attempt">The attempt of the job run (retries come later and are counted on their own).</param>
 public sealed record VmSnapshotContext(
-    Guid SessionId, Guid JobId, Guid ConnectionId, IHypervisorSession Hypervisor, IVmBackupSession Session, IReadOnlyDictionary<string, ChangeToken?> Previous, int MaxPeers = 1);
+    Guid SessionId, Guid JobId, Guid ConnectionId, IHypervisorSession Hypervisor, IVmBackupSession Session, IReadOnlyDictionary<string, ChangeToken?> Previous, int MaxPeers = 1,
+    int RunVms = 0, int Attempt = 1);
 
 /// <summary>
 /// The disks of one VM read from an array snapshot instead of from the VM snapshot: their changed extents (asked while the

@@ -41,10 +41,17 @@ public sealed class ArraySnapshotService(
     private readonly Lock _lock = new();
     private readonly List<Batch> _open = [];
 
+    /// <summary>
+    /// The VMs of each job run (attempt) that came to this hook, wherever their disks are then read from: once all of the
+    /// run did, an open batch waits for no more (one on another array or refused would never join it).
+    /// </summary>
+    private readonly Dictionary<(Guid Session, int Attempt), (int Count, DateTimeOffset Last)> _arrivals = [];
+
     public async Task<ArrayReadLease?> OnVmSnapshotCreatedAsync(VmSnapshotContext context, IOperationLog log, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(log);
+        Arrived(context);
         var started = Stopwatch.GetTimestamp();
         var snapshotAt = time.GetUtcNow();
         var backup = context.Session;
@@ -409,6 +416,34 @@ public sealed class ArraySnapshotService(
         return new Plan(null, system, volumes, disks, reader, readerState);
     }
 
+    /// <summary>Counts a VM of the run; when all have come, the run's open batches stop waiting.</summary>
+    private void Arrived(VmSnapshotContext context)
+    {
+        lock (_lock)
+        {
+            var now = time.GetUtcNow();
+            foreach (var old in _arrivals.Where(a => now - a.Value.Last > TimeSpan.FromHours(6)).Select(a => a.Key).ToList())
+            {
+                _arrivals.Remove(old);
+            }
+
+            var key = (context.SessionId, context.Attempt);
+            var count = _arrivals.GetValueOrDefault(key).Count + 1;
+            _arrivals[key] = (count, now);
+            if (context.RunVms > 0 && count >= context.RunVms)
+            {
+                foreach (var batch in _open.Where(b => b.SessionId == context.SessionId))
+                {
+                    batch.Full.TrySetResult();
+                }
+            }
+        }
+    }
+
+    /// <summary>Whether every VM of the run came to the hook (a batch opened now waits for no one).</summary>
+    private bool AllArrived(VmSnapshotContext context) =>
+        context.RunVms > 0 && _arrivals.GetValueOrDefault((context.SessionId, context.Attempt)).Count >= context.RunVms;
+
     /// <summary>Joins the open batch of this job run on this storage system, or opens one (which then waits for others).</summary>
     private Batch Join(VmSnapshotContext context, Plan plan, IOperationLog log, DateTimeOffset snapshotAt)
     {
@@ -427,7 +462,7 @@ public sealed class ArraySnapshotService(
 
             batch.Members.Add(new Member(context, plan, log, snapshotAt));
             batch.Users++;
-            if (batch.Members.Count >= batch.Capacity)
+            if (batch.Members.Count >= batch.Capacity || AllArrived(context))
             {
                 batch.Full.TrySetResult();
             }
