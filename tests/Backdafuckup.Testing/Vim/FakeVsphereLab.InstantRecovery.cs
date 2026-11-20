@@ -209,9 +209,12 @@ public sealed partial class FakeVsphereLab
         static XElement Choice(string key, string label) => Val.Obj("choiceInfo", "ElementDescription", Val.F("label", label), Val.F("summary", label), Val.F("key", key));
     }
 
-    private XElement MountedOn((string Type, string Value) host) =>
-        Val.Array("ArrayOfDatastoreHostMount", [Val.Obj("DatastoreHostMount", "DatastoreHostMount", Val.Mor("key", host),
-            Val.F("mountInfo", new[] { Val.F("accessMode", "readWrite"), Val.F("mounted", "true"), Val.F("accessible", "true") }))]);
+    /// <summary>The datastore mounted on these hosts (its <c>host</c> property).</summary>
+    public void Mount((string Type, string Value) datastore, params (string Type, string Value)[] hosts) => Vcenter.Set(datastore, "host", MountedOn(hosts));
+
+    private static XElement MountedOn(params (string Type, string Value)[] hosts) =>
+        Val.Array("ArrayOfDatastoreHostMount", hosts.Select(host => Val.Obj("DatastoreHostMount", "DatastoreHostMount", Val.Mor("key", host),
+            Val.F("mountInfo", new[] { Val.F("accessMode", "readWrite"), Val.F("mounted", "true"), Val.F("accessible", "true") }))));
 
     private void SetHostDatastores()
     {

@@ -779,6 +779,10 @@ else
         (reader.TrippedUtc is not null ? "switched off"
             : reader.VerifiedRuns < reader.ProbationRuns ? $"verify mode, {reader.VerifiedRuns} of {reader.ProbationRuns} backups compared"
             : $"verified ({reader.VerifiedRuns} backups compared)")
+        + (reader.WriterRuns is { Count: > 0 } writers
+            ? "; " + string.Join(", ", writers.OrderBy(w => w.Key, StringComparer.Ordinal)
+                .Select(w => w.Value < reader.ProbationRuns ? $"{w.Key} {w.Value} of {reader.ProbationRuns}" : $"{w.Key} verified"))
+            : string.Empty)
         + (reader.FormatVersion is { } version ? $", format {version}" : string.Empty);
 
     private Task ResetReaderAsync(StorageSystemDto system, StorageReaderDto reader) => RunAsync(async () =>

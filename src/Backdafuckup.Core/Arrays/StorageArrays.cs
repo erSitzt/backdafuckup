@@ -234,7 +234,11 @@ public static class Wwns
 public sealed record ArrayChainMember(string Id, long VirtualSize, long PhysicalUtilisation);
 
 /// <summary>Where one disk of a VM snapshot lies: its storage, the layout there, and its chain on it.</summary>
-public sealed record ArrayDiskFacts(string StorageId, StorageLayout Layout, IReadOnlyList<ArrayChainMember> Chain);
+/// <param name="Writer">
+/// The platform version that writes the storage, when it matters to a reader (vSphere: the highest ESXi version among the
+/// hosts that mount the datastore, e.g. "ESXi 7.0.3"). Verify mode is kept per writer: a new one is verified on its own.
+/// </param>
+public sealed record ArrayDiskFacts(string StorageId, StorageLayout Layout, IReadOnlyList<ArrayChainMember> Chain, string? Writer = null);
 
 /// <summary>
 /// Optional on a VM backup session: what is needed to read its disks from an array snapshot of their storage instead of

@@ -132,6 +132,41 @@ public sealed partial class ApiIntegrationTests
     }
 
     [Fact]
+    public async Task Verify_mode_is_kept_per_esxi_version_so_mixed_clusters_do_not_start_it_over()
+    {
+        var (service, connectionId, systemId, datastoreId, disk) = await VmfsSetupAsync(probation: 1);
+        async Task<(bool Verified, RecordingLog Log)> RunAsync(string? writer)
+        {
+            var backup = new VmfsFakeSession(datastoreId, $"[ds-test] {VmfsDescriptor}") { Normal = disk, Writer = writer };
+            var log = new RecordingLog();
+            await using var lease = await service.OnVmSnapshotCreatedAsync(VmfsContext(connectionId, backup), log, Ct);
+            Assert.NotNull(lease);
+            return (lease.GetVerification(backup.Disks[0]) is not null, log);
+        }
+
+        var seven = await RunAsync("ESXi 7.0.3");
+        Assert.True(seven.Verified);
+        Assert.Contains(seven.Log.Entries, e => e.Message.Contains(", ESXi 7.0.3, backup 1 of 1)", StringComparison.Ordinal));
+        Assert.False((await RunAsync("ESXi 7.0.3")).Verified);
+
+        // A datastore written by ESXi 8 on the same storage system is verified on its own, and the log says why.
+        var eight = await RunAsync("ESXi 8.0.3");
+        Assert.True(eight.Verified);
+        Assert.Contains(eight.Log.Entries, e => e.Message.Contains("ESXi 8.0.3 is new to the VMFS6 (vSphere datastores) reader on ", StringComparison.Ordinal));
+
+        // Jobs of both clusters taking turns do not start verify mode over.
+        Assert.False((await RunAsync("ESXi 7.0.3")).Verified);
+        Assert.False((await RunAsync("ESXi 8.0.3")).Verified);
+
+        await using var db = await _factory!.Services.GetRequiredService<IDbContextFactory<AppDbContext>>().CreateDbContextAsync(Ct);
+        var reader = ArrayReaderStates.ToDto(ArrayReaderStates.Find(await db.StorageSystems.SingleAsync(s => s.Id == systemId, Ct), ArrayReaderStates.Vmfs6), new StorageSystemOptions { ProbationRuns = 1 });
+        Assert.Equal(2, reader.VerifiedRuns);
+        Assert.Equal(1, reader.WriterRuns!["ESXi 7.0.3"]);
+        Assert.Equal(1, reader.WriterRuns!["ESXi 8.0.3"]);
+        Assert.Equal("ESXi 10.0.0", ArrayReaderStates.Highest(["ESXi 8.0.3", null, "ESXi 10.0.0", "ESXi 7.0.3"]));
+    }
+
+    [Fact]
     public async Task The_array_snapshot_waits_the_gap_after_the_last_vm_snapshot()
     {
         var (service, connectionId, systemId, datastoreId, disk) = await VmfsSetupAsync();
@@ -173,6 +208,7 @@ public sealed partial class ApiIntegrationTests
         array.AddHost("proxy01", ProxyIqn);
         array.AddIscsiPort("0:2:1", "10.26.101.10", "iqn.2000-05.com.3pardata:20210002ac000001");
         lab.Vcenter.SetVmfs(lab.Datastore, 6, "naa." + DatastoreWwn.ToLowerInvariant());
+        lab.Mount(lab.Datastore, lab.Host); // its writer: the host's ESXi 7.0.3
         var (vmRef, vmId, disks) = lab.AddVm("app03", 8L << 20);
         lab.Write(disks[0], 1L << 20, RandomNumberGenerator.GetBytes(2 << 20));
         var path = Backdafuckup.VSphere.VSphereDatastorePaths.DescriptorPath(lab.VmDisks(vmRef)[0].FileName)!;
@@ -214,7 +250,7 @@ public sealed partial class ApiIntegrationTests
             // Incremental: verify mode compares with the VM snapshot (through HotAdd), which then goes before the disk is read from the LUN.
             lab.Write(disks[0], 6L << 20, RandomNumberGenerator.GetBytes(128 << 10));
             var incremental = await RunVsphereJobAsync(client, job.Id);
-            Assert.Contains(incremental.Log, l => l.Contains("Verify mode (VMFS6 (vSphere datastores) reader on Alletra, backup 1 of 1)", StringComparison.Ordinal));
+            Assert.Contains(incremental.Log, l => l.Contains("Verify mode (VMFS6 (vSphere datastores) reader on Alletra, ESXi 7.0.3, backup 1 of 1)", StringComparison.Ordinal));
             Assert.Contains(incremental.Log, l => l.Contains("removed before its disks are read", StringComparison.Ordinal));
             Assert.Contains(incremental.Log, l => l.Contains("are read from array snapshot bdfu-", StringComparison.Ordinal));
             Assert.Contains(incremental.Log, l => l.Contains("via array-vmfs", StringComparison.Ordinal));
@@ -258,6 +294,9 @@ public sealed partial class ApiIntegrationTests
         /// <summary>Change tracking answers "everything" (it was reset).</summary>
         public bool ReadEverything { get; init; }
 
+        /// <summary>The ESXi version that writes the datastore (null: none named).</summary>
+        public string? Writer { get; init; }
+
         public VmDescriptor Vm { get; } = new() { VmId = "vm-2", Name = "app02" };
 
         public IReadOnlyList<SnapshotDisk> Disks { get; } =
@@ -274,7 +313,7 @@ public sealed partial class ApiIntegrationTests
         public Task<IReadOnlyDictionary<string, ArrayDiskFacts>> GetArrayDisksAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyDictionary<string, ArrayDiskFacts>>(new Dictionary<string, ArrayDiskFacts>
             {
-                ["scsi0:0"] = new(datastoreId, StorageLayout.Vmfs6, [new ArrayChainMember(Backdafuckup.VSphere.VSphereDatastorePaths.DescriptorPath(fileName)!, VmfsDiskBytes, 0)]),
+                ["scsi0:0"] = new(datastoreId, StorageLayout.Vmfs6, [new ArrayChainMember(Backdafuckup.VSphere.VSphereDatastorePaths.DescriptorPath(fileName)!, VmfsDiskBytes, 0)], Writer),
             });
 
         public Task ReleaseSnapshotAsync(IOperationLog log, CancellationToken cancellationToken)

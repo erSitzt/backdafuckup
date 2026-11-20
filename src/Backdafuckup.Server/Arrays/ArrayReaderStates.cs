@@ -27,7 +27,24 @@ public sealed class ArrayReaderStates(IDbContextFactory<AppDbContext> dbFactory,
     };
 
     public static StorageReaderDto ToDto(StorageReaderState state, StorageSystemOptions options) =>
-        new(state.Reader, DisplayName(state.Reader), state.VerifiedRuns, options.ProbationRuns, state.FormatVersion, state.TrippedUtc, state.TripReason);
+        new(state.Reader, DisplayName(state.Reader), state.VerifiedRuns, options.ProbationRuns, state.FormatVersion, state.TrippedUtc, state.TripReason,
+            state.WriterRuns is { Count: > 0 } runs ? new Dictionary<string, int>(runs, StringComparer.Ordinal) : null);
+
+    /// <summary>
+    /// The verify runs that count for a backup: those of its writer (an ESXi version), or all of them when its disks name
+    /// none. Datastores written by different ESXi versions on one storage system are verified each on their own, without
+    /// one starting verify mode over for the other.
+    /// </summary>
+    public static int RunsFor(StorageReaderState state, string? writer)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        return writer is null ? state.VerifiedRuns : state.WriterRuns?.GetValueOrDefault(writer) ?? 0;
+    }
+
+    /// <summary>The highest of the writers named (versions compared numerically, "ESXi 8.0.3" over "ESXi 7.0.3").</summary>
+    public static string? Highest(IEnumerable<string?> writers) =>
+        writers.OfType<string>().Distinct(StringComparer.Ordinal)
+            .OrderBy(w => Version.TryParse(w.Split(' ')[^1], out var v) ? v : new Version(0, 0)).ThenBy(w => w, StringComparer.Ordinal).LastOrDefault();
 
     public static StorageReaderState Find(StorageSystemEntity system, string reader)
     {
@@ -35,9 +52,13 @@ public sealed class ArrayReaderStates(IDbContextFactory<AppDbContext> dbFactory,
         return system.Readers?.FirstOrDefault(r => r.Reader == reader) ?? new StorageReaderState(reader);
     }
 
-    /// <summary>One more backup passed verify mode.</summary>
-    public async Task<StorageReaderState> RecordVerifiedAsync(Guid systemId, string reader, CancellationToken cancellationToken) =>
-        (await UpdateAsync(systemId, reader, r => r with { VerifiedRuns = r.VerifiedRuns + 1 }, cancellationToken).ConfigureAwait(false)).State;
+    /// <summary>One more backup passed verify mode, counted also for its writer when it has one.</summary>
+    public async Task<StorageReaderState> RecordVerifiedAsync(Guid systemId, string reader, string? writer, CancellationToken cancellationToken) =>
+        (await UpdateAsync(systemId, reader, r => r with
+        {
+            VerifiedRuns = r.VerifiedRuns + 1,
+            WriterRuns = writer is null ? r.WriterRuns : new Dictionary<string, int>(r.WriterRuns ?? new Dictionary<string, int>(), StringComparer.Ordinal) { [writer] = RunsFor(r, writer) + 1 },
+        }, cancellationToken).ConfigureAwait(false)).State;
 
     /// <summary>
     /// Records the on-disk format version the reader found (e.g. "VMFS 6.82"). A version other than the one seen before starts
@@ -59,7 +80,7 @@ public sealed class ArrayReaderStates(IDbContextFactory<AppDbContext> dbFactory,
             }
 
             previous = r.FormatVersion;
-            return r with { FormatVersion = version, VerifiedRuns = r.FormatVersion is null ? r.VerifiedRuns : 0 };
+            return r.FormatVersion is null ? r with { FormatVersion = version } : r with { FormatVersion = version, VerifiedRuns = 0, WriterRuns = null };
         }, cancellationToken).ConfigureAwait(false);
         return previous;
     }
@@ -74,7 +95,7 @@ public sealed class ArrayReaderStates(IDbContextFactory<AppDbContext> dbFactory,
     /// <summary>Turns the reader back on after a trip; verify mode starts again.</summary>
     public async Task<StorageReaderDto> ResetAsync(Guid systemId, string reader, CancellationToken cancellationToken)
     {
-        var (state, options) = await UpdateAsync(systemId, reader, r => r with { TrippedUtc = null, TripReason = null, VerifiedRuns = 0 }, cancellationToken).ConfigureAwait(false);
+        var (state, options) = await UpdateAsync(systemId, reader, r => r with { TrippedUtc = null, TripReason = null, VerifiedRuns = 0, WriterRuns = null }, cancellationToken).ConfigureAwait(false);
         logger.LogInformation("The {Reader} reader is turned back on for storage system {SystemId}; verify mode starts again", reader, systemId);
         return ToDto(state, options);
     }

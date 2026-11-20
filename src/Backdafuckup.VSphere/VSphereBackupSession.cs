@@ -154,13 +154,14 @@ internal sealed class VSphereBackupSession : IVmBackupSession, IArraySnapshotFac
     {
         var datastores = _disks.Values.Select(d => d.DatastoreId).OfType<string>().Distinct(StringComparer.Ordinal).ToList();
         var backings = await _owner.GetStorageBackingAsync(datastores, cancellationToken).ConfigureAwait(false);
+        var writers = await _owner.GetDatastoreWritersAsync(datastores, cancellationToken).ConfigureAwait(false);
         var result = new Dictionary<string, ArrayDiskFacts>(StringComparer.Ordinal);
         foreach (var info in _disks.Values)
         {
             if (info.DatastoreId is { } datastore && backings.FirstOrDefault(b => b.StorageId == datastore) is { Refusal: null } backing
                 && backing.Layout is StorageLayout.Vmfs6 or StorageLayout.Vmfs5 && VSphereDatastorePaths.DescriptorPath(info.FileName) is { } path)
             {
-                result[info.Key] = new ArrayDiskFacts(datastore, backing.Layout, [new ArrayChainMember(path, info.CapacityBytes, 0)]);
+                result[info.Key] = new ArrayDiskFacts(datastore, backing.Layout, [new ArrayChainMember(path, info.CapacityBytes, 0)], writers.GetValueOrDefault(datastore));
             }
         }
 

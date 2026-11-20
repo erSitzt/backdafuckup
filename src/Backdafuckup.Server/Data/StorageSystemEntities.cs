@@ -49,7 +49,10 @@ public sealed class StorageSystemEntity
 /// An experimental reader (LVHD, VMFS6) on one storage system: how many backups it passed in verify mode, the on-disk format
 /// version it last saw (a new version starts verify mode again), and whether it was switched off after a mismatch.
 /// </summary>
-public sealed record StorageReaderState(string Reader, int VerifiedRuns = 0, string? FormatVersion = null, DateTimeOffset? TrippedUtc = null, string? TripReason = null)
+/// <param name="WriterRuns">Verify runs passed per writer of the storage (e.g. "ESXi 7.0.3"), for readers whose disks name one.</param>
+public sealed record StorageReaderState(
+    string Reader, int VerifiedRuns = 0, string? FormatVersion = null, DateTimeOffset? TrippedUtc = null, string? TripReason = null,
+    IReadOnlyDictionary<string, int>? WriterRuns = null)
 {
     public bool Tripped => TrippedUtc is not null;
 }

@@ -45,4 +45,39 @@ internal sealed partial class VSphereHypervisorSession : IStorageBackingSource
 
         return result;
     }
+
+    /// <summary>
+    /// Per datastore, the highest ESXi version among the hosts that mount it ("ESXi 8.0.3"): the writer of its VMFS, for which
+    /// the VMFS reader keeps verify mode. Missing for a datastore vCenter names no host for.
+    /// </summary>
+    internal async Task<IReadOnlyDictionary<string, string>> GetDatastoreWritersAsync(IReadOnlyCollection<string> datastoreIds, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (datastoreIds.Count == 0)
+        {
+            return result;
+        }
+
+        var rows = await Vim.RetrievePropertiesAsync([.. datastoreIds.Select(id => new ManagedObjectReference("Datastore", id))], ["host"], cancellationToken).ConfigureAwait(false);
+        var mounts = rows.ToDictionary(
+            r => r.Obj.Value, r => (r["host"]?.Items ?? []).Select(m => m.Ref("key")).OfType<ManagedObjectReference>().ToList(), StringComparer.Ordinal);
+        var hosts = mounts.Values.SelectMany(h => h).DistinctBy(h => h.Value).ToList();
+        if (hosts.Count == 0)
+        {
+            return result;
+        }
+
+        var versions = (await Vim.RetrievePropertiesAsync(hosts, ["config.product.version"], cancellationToken).ConfigureAwait(false))
+            .Where(r => Version.TryParse(r.Str("config.product.version"), out _))
+            .ToDictionary(r => r.Obj.Value, r => Version.Parse(r.Str("config.product.version")!), StringComparer.Ordinal);
+        foreach (var (datastore, mountedOn) in mounts)
+        {
+            if (mountedOn.Select(h => versions.GetValueOrDefault(h.Value)).OfType<Version>().Max() is { } highest)
+            {
+                result[datastore] = $"ESXi {highest}";
+            }
+        }
+
+        return result;
+    }
 }

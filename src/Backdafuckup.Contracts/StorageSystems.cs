@@ -12,8 +12,10 @@ public sealed record StorageSystemDto(
 /// An experimental reader on a storage system. While <see cref="VerifiedRuns"/> is below <see cref="ProbationRuns"/>, backups
 /// run in verify mode. <see cref="TrippedUtc"/> set: switched off after a mismatch until turned back on.
 /// </summary>
+/// <param name="WriterRuns">Verify runs passed per writer of the storage (e.g. "ESXi 7.0.3"); verify mode is kept per writer.</param>
 public sealed record StorageReaderDto(
-    string Reader, string Name, int VerifiedRuns, int ProbationRuns, string? FormatVersion, DateTimeOffset? TrippedUtc, string? TripReason);
+    string Reader, string Name, int VerifiedRuns, int ProbationRuns, string? FormatVersion, DateTimeOffset? TrippedUtc, string? TripReason,
+    IReadOnlyDictionary<string, int>? WriterRuns = null);
 
 /// <param name="LicenseWarning">Set when no snapshot feature is licensed or it has expired (a warning, nothing is blocked).</param>
 public sealed record StorageSystemFactsDto(

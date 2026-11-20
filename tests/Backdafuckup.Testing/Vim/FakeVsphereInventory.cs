@@ -24,13 +24,14 @@ public static class FakeVsphereInventory
         return vcenter.Add("ClusterComputeResource", vcenter.NewId("domain-c"), ("name", Val.Str(name)), ("parent", Val.Mor(datacenter.Type, datacenter.Value)));
     }
 
-    public static (string Type, string Value) AddHost(this FakeVcenter vcenter, (string Type, string Value) cluster, string name, string? certificatePem = null)
+    public static (string Type, string Value) AddHost(this FakeVcenter vcenter, (string Type, string Value) cluster, string name, string? certificatePem = null, string version = "7.0.3")
     {
         ArgumentNullException.ThrowIfNull(vcenter);
         return vcenter.Add(
             "HostSystem", vcenter.NewId("host"),
             [("name", Val.Str(name)), ("parent", Val.Mor(cluster.Type, cluster.Value)), ("runtime.connectionState", Val.Str("connected")),
-                ("runtime.inMaintenanceMode", Val.Bool(false)), ("config.product.fullName", Val.Str("VMware ESXi 7.0.3 build-24784741")),
+                ("runtime.inMaintenanceMode", Val.Bool(false)), ("config.product.fullName", Val.Str($"VMware ESXi {version} build-24784741")),
+                ("config.product.version", Val.Str(version)),
                 .. certificatePem is null ? Array.Empty<(string, XElement)>() : [("config.certificate", Bytes(System.Text.Encoding.ASCII.GetBytes(certificatePem)))]]);
     }
 

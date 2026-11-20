@@ -101,7 +101,8 @@ public sealed class ArraySnapshotService(
 
         // Each disk found on the LUN and checked against what the platform reported, before the VM snapshot is given up.
         var readers = new Dictionary<string, OpenedDisk>(StringComparer.Ordinal);
-        var verifiedRuns = plan.ReaderState.VerifiedRuns;
+        var writer = ArrayReaderStates.Highest(plan.Disks.Values.Select(d => d.Writer));
+        var verifiedRuns = ArrayReaderStates.RunsFor(plan.ReaderState, writer);
         try
         {
             foreach (var disk in backup.Disks)
@@ -159,6 +160,11 @@ public sealed class ArraySnapshotService(
         var readerName = ArrayReaderStates.DisplayName(plan.Reader);
         if (verifiedRuns < plan.System.Options.ProbationRuns)
         {
+            if (verifiedRuns == 0 && writer is not null && plan.ReaderState.WriterRuns?.Keys.FirstOrDefault(w => w != writer) is not null)
+            {
+                log.Info($"{writer} is new to the {readerName} reader on {plan.System.Name}: datastores it writes are verified on their own ({plan.System.Options.ProbationRuns} backups).");
+            }
+
             try
             {
                 foreach (var disk in backup.Disks)
@@ -211,8 +217,9 @@ public sealed class ArraySnapshotService(
                 return null;
             }
 
-            var verified = await readerStates.RecordVerifiedAsync(plan.System.Id, plan.Reader, cancellationToken).ConfigureAwait(false);
-            log.Info($"Verify mode ({readerName} reader on {plan.System.Name}, backup {verified.VerifiedRuns} of {plan.System.Options.ProbationRuns}): " +
+            var verified = await readerStates.RecordVerifiedAsync(plan.System.Id, plan.Reader, writer, cancellationToken).ConfigureAwait(false);
+            log.Info($"Verify mode ({readerName} reader on {plan.System.Name}{(writer is null ? string.Empty : $", {writer}")}, " +
+                     $"backup {ArrayReaderStates.RunsFor(verified, writer)} of {plan.System.Options.ProbationRuns}): " +
                      $"{verifications.Values.Sum(v => v.Regions)} region(s) of {backup.Vm.Name} read the same from the array snapshot and from the VM snapshot.");
         }
 
