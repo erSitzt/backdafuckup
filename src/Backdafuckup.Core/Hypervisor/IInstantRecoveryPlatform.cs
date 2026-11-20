@@ -37,8 +37,10 @@ public interface IInstantRecoveryPlatform
     Task<InstantRecoveryTask> GetTaskAsync(string taskId, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Powers the VM off and unregisters it (its files stay; they are in the overlay that the server deletes). Refused with
-    /// <see cref="InstantRecoveryRefusedException"/> while any of its files is on another datastore. A VM that is gone is fine.
+    /// Powers the VM off and unregisters it (its files stay; they are in the overlay that the server deletes). A question the
+    /// VM waits on is answered with Cancel first (vCenter powers nothing off while one is pending; stopping discards what
+    /// the VM wrote anyway). Refused with <see cref="InstantRecoveryRefusedException"/> while any of its files is on another
+    /// datastore, or for a question without a Cancel. A VM that is gone is fine.
     /// </summary>
     Task RemoveVmAsync(string vmId, string datastoreName, IOperationLog log, CancellationToken cancellationToken);
 
@@ -113,8 +115,13 @@ public sealed record InstantRecoveryVm(string Id, string InstanceUuid, string Na
 /// <summary>Where an instant recovery VM is now.</summary>
 /// <param name="FilesOnDatastore">Its files on the instant recovery datastore (swap files not counted).</param>
 /// <param name="FilesElsewhere">Its files on other datastores (swap files not counted): after a migration, or a disk added by hand.</param>
+/// <param name="Question">
+/// A question the VM waits on in vCenter (e.g. "There is no more space for virtual disk …" when its writes passed the
+/// write limit): the VM is paused until someone answers it.
+/// </param>
 public sealed record InstantRecoveryVmState(
-    bool Exists, string? Name, string? PowerState, string? HostId, IReadOnlyList<string> FilesOnDatastore, IReadOnlyList<string> FilesElsewhere)
+    bool Exists, string? Name, string? PowerState, string? HostId, IReadOnlyList<string> FilesOnDatastore, IReadOnlyList<string> FilesElsewhere,
+    string? Question = null)
 {
     public static InstantRecoveryVmState Gone { get; } = new(false, null, null, null, [], []);
 }

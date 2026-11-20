@@ -450,6 +450,13 @@ public sealed partial class FakeVsphereLab
         var vm = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
         return Vcenter.StartTask(vm, state == "poweredOn" ? "VirtualMachine.powerOn" : "VirtualMachine.powerOff", () =>
         {
+            // As vCenter 7: nothing changes the power of a VM that waits on a question.
+            if (Vcenter.Get(vm, "runtime.question") is { } question)
+            {
+                throw new VimFault("InvalidState",
+                    $"The operation cannot be allowed at the current time because the virtual machine has a question pending: '{question.Element(FakeVcenter.Ns + "text")?.Value}'");
+            }
+
             Vcenter.Set(vm, "runtime.powerState", Val.Str(state));
             lock (_lock)
             {

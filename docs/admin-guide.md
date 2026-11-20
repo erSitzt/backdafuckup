@@ -788,6 +788,8 @@ When you choose the host, the start form checks it: its VMkernel addresses, how 
 
 **Swap files and the write limit:** a host without a swap datastore of its own puts each VM's swap file, as big as its memory, into the instant recovery's datastore, and powers the VM on only if that much is free there. The write limit and the free space of the overlay volume must leave room for it: the start refuses a limit below the VMs' memory plus 1 GiB and names the minimum (the host check in the start form shows whether the host has a swap datastore).
 
+**When the write limit is reached:** the datastore reports no free space, and ESXi pauses the VM with the question *"There is no more space for virtual disk …"* (Retry or Cancel); vSphere HA stops protecting it. The session log says so once, naming the question. The VM cannot go on with that instant recovery: stop it (what it wrote is lost) and start again with a higher limit, or none. Stopping answers the question with Cancel itself, since vCenter powers off no VM that waits on a question.
+
 **Limits:** vCenter only, one host per instant recovery (Migrate can change the host); disks that were encrypted are refused; a virtual TPM is not carried over (Windows boots, BitLocker with a TPM protector asks for its recovery key); disks left out of the backup start empty; physical RDMs are not in backups, so the VM runs without them.
 
 **When the host cannot mount:** the session fails and names the host, the server address and export, and what the NFS server saw of each of the host's addresses, e.g. "192.0.2.21 has not reached this server on any of 111/tcp (portmapper), 20048/tcp (MOUNT), 2049/tcp (NFS): a firewall between them, or the host uses another of its addresses". Everything the start made is removed again.

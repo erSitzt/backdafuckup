@@ -523,6 +523,18 @@ public sealed class InstantRecoverySessionRunner(
                         log.Info($"VM {vm.Name} was migrated off datastore {recovery.DatastoreName} in vCenter: it now runs from {Datastores(state.FilesElsewhere)}.");
                     }
                 }
+
+                // A VM paused on a question (above all "no more space" once its writes passed the write limit): say so once.
+                if (state.Question is { } question && watch.Asked.Add((vm.Id, question)))
+                {
+                    var limit = recovery.OverlayLimitBytes;
+                    var full = limit is { } l && (served.FileSystem?.OverlayBytes ?? 0) >= l - (64L << 20);
+                    log.Warning($"VM {vm.Name} is paused: it waits on a question in vCenter: \"{question.Trim()}\"" +
+                                (full
+                                    ? $" Its writes reached the write limit of {Bytes(limit!.Value)}, so it cannot go on with this instant recovery: stop it (what the VM wrote " +
+                                      "is lost) and start again with a higher limit, or none."
+                                    : " Answer it in vCenter, or stop the instant recovery."));
+                }
             }
 
             if (watch.Unreachable is not null)
@@ -905,6 +917,9 @@ public sealed class InstantRecoverySessionRunner(
         public HashSet<Guid> Gone { get; } = [];
 
         public HashSet<Guid> Moved { get; } = [];
+
+        /// <summary>The questions a VM waited on that were logged already.</summary>
+        public HashSet<(Guid Vm, string Question)> Asked { get; } = [];
 
         public bool AgeWarned { get; set; }
 

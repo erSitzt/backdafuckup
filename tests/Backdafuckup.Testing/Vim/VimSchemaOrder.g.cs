@@ -10,6 +10,7 @@ internal static class VimSchemaOrder
 {
     public static readonly IReadOnlyDictionary<string, string> Methods = new Dictionary<string, string>(StringComparer.Ordinal)
     {
+        ["AnswerVM"] = "AnswerVMRequestType",
         ["ConsolidateVMDisks_Task"] = "ConsolidateVMDisksRequestType",
         ["ContinueRetrievePropertiesEx"] = "ContinueRetrievePropertiesExRequestType",
         ["CreateContainerView"] = "CreateContainerViewRequestType",
@@ -52,6 +53,7 @@ internal static class VimSchemaOrder
     public static readonly IReadOnlyDictionary<string, (string? Base, (string Name, string Type)[] Elements)> Types =
         new Dictionary<string, (string? Base, (string Name, string Type)[] Elements)>(StringComparer.Ordinal)
         {
+            ["AnswerVMRequestType"] = (null, [("_this", "ManagedObjectReference"), ("questionId", "string"), ("answerChoice", "string")]),
             ["BoolOption"] = ("OptionType", [("supported", "boolean"), ("defaultValue", "boolean")]),
             ["ChoiceOption"] = ("OptionType", [("choiceInfo", "ElementDescription"), ("defaultIndex", "int")]),
             ["ConsolidateVMDisksRequestType"] = (null, [("_this", "ManagedObjectReference")]),

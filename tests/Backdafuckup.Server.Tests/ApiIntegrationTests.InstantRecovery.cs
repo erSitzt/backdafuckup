@@ -188,6 +188,51 @@ public sealed partial class ApiIntegrationTests
     }
 
     [Fact]
+    public async Task A_vm_paused_on_a_question_is_named_in_the_log_and_stop_answers_cancel()
+    {
+        var client = await SignedInClientAsync();
+        await _factory!.Services.GetRequiredService<AgentSettingsStore>().SetServerUrlAsync("https://localhost/", Ct);
+        var lab = Vsphere;
+        lab.AddVm("app06", 16L << 20);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        var (vcenter, repository, running) = await StartVsphereAsync(client, stop.Token);
+        try
+        {
+            var point = await BackUpVsphereAsync(client, vcenter, repository, "app06");
+            var control = _factory!.Services.GetRequiredService<InstantRecoveryControl>();
+            var sessionId = await control.StartAsync(
+                new InstantRecoveryRequest(vcenter.Id, lab.Host.Value, [new InstantRecoveryVmRequest(point.Id, "app06 (instant)")]) { FolderId = lab.TestFolder.Value }, "test", Ct);
+            await WaitForRecoveryAsync(sessionId, InstantRecoveryState.Running);
+            var vm = lab.FindVm("app06 (instant)")!.Value;
+
+            // ESXi paused it (its datastore reported no space): the watch says so once, with the question.
+            lab.AskOutOfSpace(vm.Value);
+            List<string> log = [];
+            for (var i = 0; i < 100 && !log.Any(l => l.Contains("is paused: it waits on a question in vCenter", StringComparison.Ordinal)); i++)
+            {
+                await Task.Delay(100, Ct);
+                log = await SessionLogAsync(client, sessionId);
+            }
+
+            Assert.Single(log, l => l.StartsWith("Warning: VM app06 (instant) is paused: it waits on a question in vCenter: \"msg.hbacommon.outofspace:There is no more space", StringComparison.Ordinal));
+
+            // Stopping answers Cancel first (vCenter would refuse the power-off), then removes the VM and the datastore.
+            await Ok(client.PostAsync($"/api/sessions/{sessionId}/stop", null, Ct));
+            var detail = await WaitForSessionAsync(client, sessionId);
+            log = await SessionLogAsync(client, sessionId);
+            Assert.True(detail.Session.State == "Stopped", $"{detail.Session.State}: {string.Join(" | ", log)}");
+            Assert.Contains(log, l => l.Contains("answered \"Cancel\", which ends its session", StringComparison.Ordinal));
+            Assert.Equal(["answer app06 (instant) Cancel", "unregister app06 (instant)"], lab.Events.SkipWhile(e => !e.StartsWith("answer", StringComparison.Ordinal)).Take(2));
+            Assert.Null(lab.FindVm("app06 (instant)"));
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            await running;
+        }
+    }
+
+    [Fact]
     public async Task A_refused_stop_keeps_the_vm_running_and_a_vm_removed_by_hand_ends_the_instant_recovery()
     {
         var client = await SignedInClientAsync();

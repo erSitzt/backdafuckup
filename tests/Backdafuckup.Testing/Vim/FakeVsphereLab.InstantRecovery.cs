@@ -137,6 +137,30 @@ public sealed partial class FakeVsphereLab
             SetHostDatastores();
             return null;
         });
+        Vcenter.On("AnswerVM", request =>
+        {
+            var vm = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
+            var id = request.Element(FakeVcenter.Ns + "questionId")!.Value;
+            var choice = request.Element(FakeVcenter.Ns + "answerChoice")!.Value;
+            if (Vcenter.Get(vm, "runtime.question")?.Element(FakeVcenter.Ns + "id")?.Value != id)
+            {
+                throw new VimFault("InvalidArgument", $"A specified parameter was not correct: questionId {id}");
+            }
+
+            Vcenter.Set(vm, "runtime.question", null);
+            if (choice == "1")
+            {
+                // Cancel ends the VM's session.
+                Vcenter.Set(vm, "runtime.powerState", Val.Str("poweredOff"));
+            }
+
+            lock (_lock)
+            {
+                Events.Add($"answer {Vcenter.Name(vm)} {(choice == "1" ? "Cancel" : "Retry")}");
+            }
+
+            return null;
+        });
         Vcenter.On("UnregisterVM", request =>
         {
             var vm = FakeVcenter.Ref(request.Element(FakeVcenter.Ns + "_this")!);
@@ -165,6 +189,24 @@ public sealed partial class FakeVsphereLab
                 return null;
             });
         });
+    }
+
+    /// <summary>
+    /// The VM waits on vCenter's out-of-space question (its datastore reported no free space): Retry (0) or Cancel (1),
+    /// as ESXi 7 asks it; <paramref name="withCancel"/> false leaves Cancel out.
+    /// </summary>
+    public void AskOutOfSpace(string vmId, bool withCancel = true)
+    {
+        IEnumerable<XElement> choices = withCancel
+            ? [Choice("0", "Retry"), Choice("1", "Cancel")]
+            : [Choice("0", "Retry")];
+        Vcenter.Set(("VirtualMachine", vmId), "runtime.question", Val.Obj("val", "VirtualMachineQuestionInfo",
+            Val.F("id", "1"),
+            Val.F("text", "msg.hbacommon.outofspace:There is no more space for virtual disk 'disk0.vmdk'. You might be able to continue this session by freeing disk space " +
+                          "on the relevant volume, and clicking Retry. Click Cancel to terminate this session."),
+            Val.Obj("choice", "ChoiceOption", choices, Val.F("defaultIndex", "0"))));
+
+        static XElement Choice(string key, string label) => Val.Obj("choiceInfo", "ElementDescription", Val.F("label", label), Val.F("summary", label), Val.F("key", key));
     }
 
     private XElement MountedOn((string Type, string Value) host) =>

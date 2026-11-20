@@ -174,6 +174,45 @@ public sealed class VSphereInstantRecoveryTests : IDisposable
     }
 
     [Fact]
+    public async Task A_vm_paused_on_the_out_of_space_question_shows_it_and_stop_answers_cancel_first()
+    {
+        await using var session = await OpenAsync();
+        var (manifest, metadata, _) = Backup("app01", 8 * Gib);
+        var layout = session.PlanVm(manifest, metadata, keepDiskIdentity: false);
+        var datastoreId = await session.MountDatastoreAsync(_lab.Host.Value, Export, _ledger, _log, Ct);
+        var vm = await session.CreateVmAsync(Spec(manifest, metadata, layout, datastoreId), _ledger, _log, Ct);
+        await session.PowerOnAsync(vm.Id, Ct);
+
+        // Its writes passed the write limit: ESXi pauses it with a question; nothing powers it off while that is pending.
+        _lab.AskOutOfSpace(vm.Id);
+        var state = await session.GetVmStateAsync(vm.Id, Export.Name, Ct);
+        Assert.StartsWith("msg.hbacommon.outofspace:There is no more space for virtual disk 'disk0.vmdk'.", state.Question, StringComparison.Ordinal);
+
+        // Stop answers Cancel (which ends the session), then unregisters it.
+        await session.RemoveVmAsync(vm.Id, Export.Name, _log, Ct);
+        Assert.Equal(["answer app01 (instant) Cancel", "unregister app01 (instant)"], _lab.Events.SkipWhile(e => !e.StartsWith("answer", StringComparison.Ordinal)));
+        Assert.Contains(_log.Lines, l => l.Contains("waited on a question in vCenter (\"msg.hbacommon.outofspace:There is no more space", StringComparison.Ordinal)
+                                         && l.Contains("answered \"Cancel\", which ends its session", StringComparison.Ordinal));
+        Assert.False(_lab.Vcenter.Exists(("VirtualMachine", vm.Id)));
+    }
+
+    [Fact]
+    public async Task A_question_without_cancel_is_left_to_the_administrator()
+    {
+        await using var session = await OpenAsync();
+        var (manifest, metadata, _) = Backup("app01", 8 * Gib);
+        var layout = session.PlanVm(manifest, metadata, keepDiskIdentity: false);
+        var datastoreId = await session.MountDatastoreAsync(_lab.Host.Value, Export, _ledger, _log, Ct);
+        var vm = await session.CreateVmAsync(Spec(manifest, metadata, layout, datastoreId), _ledger, _log, Ct);
+        await session.PowerOnAsync(vm.Id, Ct);
+        _lab.AskOutOfSpace(vm.Id, withCancel: false);
+
+        var refused = await Assert.ThrowsAsync<InstantRecoveryRefusedException>(() => session.RemoveVmAsync(vm.Id, Export.Name, _log, Ct));
+        Assert.Contains("waits on a question in vCenter that offers no Cancel", refused.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(_lab.Events, e => e.StartsWith("unregister", StringComparison.Ordinal) || e.StartsWith("answer", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Stop_refuses_a_vm_with_files_on_production_storage_and_unmount_refuses_what_is_not_our_export()
     {
         await using var session = await OpenAsync();

@@ -241,7 +241,8 @@ internal sealed class VSphereInstantRecovery(VSphereHypervisorSession owner)
     public async Task<InstantRecoveryVmState> GetVmStateAsync(string vmId, string datastoreName, CancellationToken cancellationToken)
     {
         var vm = new ManagedObjectReference("VirtualMachine", vmId);
-        var row = await PropertiesAsync(vm, ["name", "runtime.powerState", "runtime.host", "config.files", "config.hardware.device", "layoutEx.file"], cancellationToken).ConfigureAwait(false);
+        var row = await PropertiesAsync(vm, ["name", "runtime.powerState", "runtime.host", "runtime.question", "config.files", "config.hardware.device", "layoutEx.file"], cancellationToken)
+            .ConfigureAwait(false);
         if (row is null)
         {
             return InstantRecoveryVmState.Gone;
@@ -270,7 +271,8 @@ internal sealed class VSphereInstantRecovery(VSphereHypervisorSession owner)
         return new InstantRecoveryVmState(
             true, row.Str("name"), row.Str("runtime.powerState"), row["runtime.host"]?.AsRef().Value,
             [.. distinct.Where(f => f.StartsWith(prefix, StringComparison.Ordinal))],
-            [.. distinct.Where(f => !f.StartsWith(prefix, StringComparison.Ordinal))]);
+            [.. distinct.Where(f => !f.StartsWith(prefix, StringComparison.Ordinal))],
+            row["runtime.question"]?.Str("text"));
     }
 
     public async Task<string> StartMigrationAsync(string vmId, InstantRecoveryMigration target, IOperationLog log, CancellationToken cancellationToken)
@@ -340,6 +342,15 @@ internal sealed class VSphereInstantRecovery(VSphereHypervisorSession owner)
         }
 
         Guard(state, vmId, datastoreName);
+        if (state.Question is not null)
+        {
+            state = await AnswerCancelAsync(vm, state, datastoreName, log, cancellationToken).ConfigureAwait(false);
+            if (!state.Exists)
+            {
+                return;
+            }
+        }
+
         if (state.PowerState != "poweredOff")
         {
             try
@@ -372,6 +383,39 @@ internal sealed class VSphereInstantRecovery(VSphereHypervisorSession owner)
                     "Migrate it to production storage, or remove those disks from it in vCenter first.");
             }
         }
+    }
+
+    /// <summary>
+    /// Answers the question the VM waits on with its Cancel choice (vCenter powers nothing off while a question is pending;
+    /// for "no more space" Cancel ends the VM's session), then waits up to a minute for it to be off.
+    /// </summary>
+    private async Task<InstantRecoveryVmState> AnswerCancelAsync(ManagedObjectReference vm, InstantRecoveryVmState state, string datastoreName, IOperationLog log, CancellationToken cancellationToken)
+    {
+        var question = (await PropertiesAsync(vm, ["runtime.question"], cancellationToken).ConfigureAwait(false))?["runtime.question"];
+        if (question?.Str("id") is not { } id)
+        {
+            return state;
+        }
+
+        var choices = question.Child("choice")?.Children("choiceInfo").ToList() ?? [];
+        var cancel = choices.FirstOrDefault(c => new[] { c.Str("key"), c.Str("label"), c.Str("summary") }.Any(t => t?.Contains("cancel", StringComparison.OrdinalIgnoreCase) == true))
+            ?? throw new InstantRecoveryRefusedException(
+                $"VM {state.Name} ({vm.Value}) waits on a question in vCenter that offers no Cancel: \"{question.Str("text")}\" Answer it in vCenter, then stop again.");
+        await Vim.InvokeAsync("AnswerVM", vm, cancellationToken, VimXml.E("questionId", id), VimXml.E("answerChoice", cancel.Str("key"))).ConfigureAwait(false);
+        log.Info($"VM {state.Name} waited on a question in vCenter (\"{question.Str("text")?.Trim()}\"); answered \"{cancel.Str("label") ?? cancel.Str("key")}\", " +
+                 "which ends its session: stopping discards what it wrote anyway.");
+        for (var i = 0; i < 60; i++)
+        {
+            state = await GetVmStateAsync(vm.Value, datastoreName, cancellationToken).ConfigureAwait(false);
+            if (!state.Exists || (state.PowerState == "poweredOff" && state.Question is null))
+            {
+                break;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+        }
+
+        return state;
     }
 
     public async Task UnmountDatastoreAsync(string datastoreId, InstantRecoveryDatastore datastore, IOperationLog log, CancellationToken cancellationToken)
