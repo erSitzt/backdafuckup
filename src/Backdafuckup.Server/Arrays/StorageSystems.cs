@@ -490,13 +490,21 @@ public sealed class StorageSystems(
             var hosts = await array.ListHostsAsync(cancellationToken).ConfigureAwait(false);
             var portals = await array.GetIscsiPortalsAsync(cancellationToken).ConfigureAwait(false);
             var (domain, note) = await DomainAsync(array, mappings, cancellationToken).ConfigureAwait(false);
+
+            // Each connected proxy with SAN access tries a TCP connection to the iSCSI addresses (seconds, no login).
+            var addresses = portals.Select(p => p.Address).Distinct(StringComparer.Ordinal).ToList();
+            var probes = await Task.WhenAll(connected.Values.Where(p => SanProblem(p) is null && addresses.Count > 0)
+                .Select(async p => (p.Id, Reach: await proxies.ProbeIscsiAsync(p.Id, addresses, cancellationToken).ConfigureAwait(false)))).ConfigureAwait(false);
+            var reach = probes.ToDictionary(p => p.Id, p => p.Reach);
             return new StorageProxyAccessDto(
                 [
                     .. rows.OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).Select(r =>
                     {
                         var live = connected.GetValueOrDefault(r.Id);
                         var host = live?.InitiatorName is { Length: > 0 } iqn ? hosts.FirstOrDefault(h => h.IscsiNames.Contains(iqn, StringComparer.OrdinalIgnoreCase)) : null;
-                        return new StorageProxyHostDto(r.Id, r.Name, live is not null, live?.InitiatorName, SanProblem(live), host?.Name, host?.Persona, host?.Domain is "-" ? null : host?.Domain);
+                        var probe = reach.GetValueOrDefault(r.Id);
+                        return new StorageProxyHostDto(r.Id, r.Name, live is not null, live?.InitiatorName, SanProblem(live), host?.Name, host?.Persona, host?.Domain is "-" ? null : host?.Domain,
+                            probe?.Reached, probe?.Unreached, probe?.Addresses);
                     }),
                 ],
                 [.. portals.Select(p => $"{p.Address}:3260").Distinct(StringComparer.Ordinal)], domain, note, refusal, replicated);

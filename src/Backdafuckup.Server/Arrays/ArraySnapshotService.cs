@@ -16,7 +16,7 @@ namespace Backdafuckup.Server.Arrays;
 /// <summary>A step of the array path failed; the VM's disks are read from its VM snapshot instead.</summary>
 public sealed class ArrayPathException(string message, string reason, Exception? inner = null) : Exception(message, inner)
 {
-    /// <summary>The reason as a metric label: array_error, no_proxy, not_found, lun_error.</summary>
+    /// <summary>The reason as a metric label: array_error, no_proxy, iscsi_login, not_found, lun_error.</summary>
     public string Reason { get; } = reason;
 }
 
@@ -467,7 +467,7 @@ public sealed class ArraySnapshotService(
         }
         catch (Exception ex)
         {
-            var failure = ex as ArrayPathException ?? new ArrayPathException($"{ex.Message} (storage system {batch.System.Name}, {batch.System.Address}).", "array_error", ex);
+            var failure = ex as ArrayPathException ?? new ArrayPathException($"{ex.Message} (storage system {Where(batch.System)}).", "array_error", ex);
             batch.Ready.TrySetException(failure);
         }
 
@@ -564,7 +564,9 @@ public sealed class ArraySnapshotService(
         // Presented to the proxy's host object, logged in, opened read-only on the proxy.
         foreach (var snapshot in state.Snapshots)
         {
-            state.Presentations.Add(await state.Array.PresentAsync(snapshot, state.HostName, state.Ledger, ct).ConfigureAwait(false));
+            var presentation = await state.Array.PresentAsync(snapshot, state.HostName, state.Ledger, ct).ConfigureAwait(false);
+            state.Presentations.Add(presentation);
+            log.Info($"Array snapshot {snapshot.Name} presented to host object {state.HostName} (proxy {state.Proxy.Name}) as LUN {presentation.Lun}.");
         }
 
         foreach (var target in portals.GroupBy(p => p.TargetIqn!, StringComparer.Ordinal))
@@ -573,9 +575,9 @@ public sealed class ArraySnapshotService(
             {
                 await proxies.LoginIscsiAsync(state.Proxy.Id, [.. target.Select(p => p.Address)], target.Key, ct).ConfigureAwait(false);
             }
-            catch (InvalidOperationException ex)
+            catch (Exception ex) when (ex is InvalidOperationException or IOException or TimeoutException)
             {
-                throw new ArrayPathException($"Proxy {state.Proxy.Name}: {ex.Message}", "no_proxy", ex);
+                throw new ArrayPathException($"Proxy {state.Proxy.Name} could not log in to {target.Key} on {Where(system)}: {ex.Message}", "iscsi_login", ex);
             }
         }
 
@@ -597,6 +599,10 @@ public sealed class ArraySnapshotService(
             lun.Reader = await disk.OpenReaderAsync(4, 8, ct).ConfigureAwait(false);
         }
     }
+
+    /// <summary>"name (address)", or the address alone when the system is named after it.</summary>
+    private static string Where(StorageSystemEntity system) =>
+        string.Equals(system.Name, system.Address, StringComparison.OrdinalIgnoreCase) ? system.Name : $"{system.Name} ({system.Address})";
 
     /// <summary>A connected proxy with SAN access whose iSCSI initiator a host object of the array lists.</summary>
     private async Task<(ProxyInfo Proxy, string HostName)> ChooseProxyAsync(IStorageArraySession array, StorageSystemEntity system, CancellationToken ct)
@@ -714,10 +720,11 @@ public sealed class ArraySnapshotService(
         {
             await remove().ConfigureAwait(false);
             await ledger.DoneAsync(uid).ConfigureAwait(false);
+            log.Info($"Storage system {Where(batch.System)}: {what} removed.");
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            log.Warning($"Storage system {batch.System.Name} ({batch.System.Address}): {what} could not be removed ({ex.Message}); it is removed in the background.");
+            log.Warning($"Storage system {Where(batch.System)}: {what} could not be removed ({ex.Message}); it is removed in the background.");
             await ledger.PendingAsync(uid).ConfigureAwait(false);
         }
     }

@@ -64,7 +64,9 @@ public sealed class StorageSystemsPageTests : BunitContext
         };
         _api.Answers[$"api/storage-systems/{SystemId}/volumes"] = new List<StorageVolumeDto>();
         _api.Answers[$"api/storage-systems/{SystemId}/proxy-access"] = new StorageProxyAccessDto(
-            [new StorageProxyHostDto(proxyId, "proxy01", true, iqn, null, null, null, null)], ["192.0.2.10:3260", "192.0.2.11:3260"], null, null, null, Replicated: true);
+            [new StorageProxyHostDto(proxyId, "proxy01", true, iqn, null, null, null, null, [], ["192.0.2.10:3260 (no TCP connection within 3 s)", "192.0.2.11:3260 (no TCP connection within 3 s)"],
+                ["198.51.100.91/24 (ens192)"])],
+            ["192.0.2.10:3260", "192.0.2.11:3260"], null, null, null, Replicated: true);
         const string cli = $"createhost -iscsi -persona 2 -os Linux -comment \"backdafuckup proxy proxy01\" bdfu-proxy01 {iqn}";
         _api.Answers[$"api/storage-systems/{SystemId}/proxy-access/plan"] = new StorageHostPlanDto(
             "proxy01", iqn, "bdfu-proxy01", null, [$"No host object on array01 lists the initiator {iqn} yet.", "No host object is named bdfu-proxy01."],
@@ -79,6 +81,8 @@ public sealed class StorageSystemsPageTests : BunitContext
         Assert.Contains("none lists its initiator: backups cannot present snapshots to this proxy", cut.Markup, StringComparison.Ordinal);
         Assert.Contains("192.0.2.10:3260, 192.0.2.11:3260", cut.Markup, StringComparison.Ordinal);
         Assert.Contains("give each proxy a host object on both arrays", cut.Markup, StringComparison.Ordinal);
+        Assert.Contains("Reaches none of the 2 iSCSI addresses", cut.Markup, StringComparison.Ordinal);
+        Assert.Contains("Its own addresses: 198.51.100.91/24 (ens192).", cut.Markup, StringComparison.Ordinal);
 
         cut.FindAll("button").First(b => b.TextContent.Contains("Create host object", StringComparison.Ordinal)).Click();
         dialogs.WaitForAssertion(() => Assert.Contains("removehost bdfu-proxy01", dialogs.Markup, StringComparison.Ordinal));

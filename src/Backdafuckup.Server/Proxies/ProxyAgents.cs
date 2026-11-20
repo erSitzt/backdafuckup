@@ -285,8 +285,33 @@ public sealed class ProxyAgents(
             throw new InvalidOperationException($"Proxy {connection.Name} has no SAN access: {connection.Hello.SanRefusal?.Replace("\n", "; ", StringComparison.Ordinal) ?? "its agent does not offer it"}.");
         }
 
-        await connection.CommandAsync(new ProxyAgentMessage { Type = ProxyMessageTypes.IscsiLogin, Portals = portals, TargetIqn = targetIqn }, TimeSpan.FromMinutes(2), cancellationToken)
+        // The agent tests each portal in seconds, then gives each that answers a bounded discovery and login.
+        var limit = TimeSpan.FromSeconds(30) + (IscsiadmInitiator.DiscoveryTimeout + IscsiadmInitiator.LoginTimeout + TimeSpan.FromSeconds(10)) * Math.Max(1, portals.Count);
+        await connection.CommandAsync(new ProxyAgentMessage { Type = ProxyMessageTypes.IscsiLogin, Portals = portals, TargetIqn = targetIqn }, limit, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task<ProxyIscsiReach?> ProbeIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, CancellationToken cancellationToken)
+    {
+        if (_connections.GetValueOrDefault(proxyId) is not { } connection || connection.Hello.Capabilities?.Contains(ProxyAgentProtocol.CapabilitySan) != true)
+        {
+            return null;
+        }
+
+        try
+        {
+            var reply = await connection.CommandAsync(new ProxyAgentMessage { Type = ProxyMessageTypes.IscsiProbe, Portals = portals },
+                IscsiadmInitiator.ConnectTimeout + TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+            return reply.PortalReach is { } reach
+                ? new ProxyIscsiReach([.. reach.Where(r => r.Reachable).Select(r => r.Portal)], [.. reach.Where(r => !r.Reachable).Select(r => $"{r.Portal} ({r.Error})")], reply.Addresses ?? [])
+                : null;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or IOException)
+        {
+            // An agent from before the probe answers "unknown command"; it updates itself to this server's package.
+            logger.LogDebug("Proxy {Proxy} did not answer the iSCSI probe: {Error}", connection.Name, ex.Message);
+            return null;
+        }
     }
 
     public async Task<IProxyDisk> AttachAsync(Guid proxyId, string serial, long sizeBytes, bool writable, CancellationToken cancellationToken)

@@ -84,9 +84,14 @@ public sealed record StorageLeftoverDto(string Kind, string NativeId, string Nam
 public sealed record StorageProxyAccessDto(
     IReadOnlyList<StorageProxyHostDto> Proxies, IReadOnlyList<string> Portals, string? Domain, string? DomainNote, string? CreateRefusal, bool Replicated, string? Error = null);
 
-/// <summary>A proxy and the host object listing its initiator on the array (<see cref="HostName"/> null: none).</summary>
+/// <summary>
+/// A proxy and the host object listing its initiator on the array (<see cref="HostName"/> null: none). The proxy's test of
+/// the array's iSCSI addresses: <see cref="PortalsReached"/> answered a TCP connection, <see cref="PortalsUnreached"/> did not
+/// ("address:port (why)"), <see cref="ProxyAddresses"/> are its own; all null when it was not tested (offline, older agent).
+/// </summary>
 public sealed record StorageProxyHostDto(
-    Guid ProxyId, string ProxyName, bool Connected, string? InitiatorName, string? SanProblem, string? HostName, string? HostPersona, string? HostDomain);
+    Guid ProxyId, string ProxyName, bool Connected, string? InitiatorName, string? SanProblem, string? HostName, string? HostPersona, string? HostDomain,
+    IReadOnlyList<string>? PortalsReached = null, IReadOnlyList<string>? PortalsUnreached = null, IReadOnlyList<string>? ProxyAddresses = null);
 
 /// <summary>A host object for a proxy, as an administrator chose it in the dialog (null: the proposed name or domain).</summary>
 public sealed record StorageHostRequestDto(Guid ProxyId, string? Name = null, string? Domain = null);

@@ -219,6 +219,9 @@ public sealed class ProxyAgentClient(
                 ProxyMessageTypes.Tunnel => await TunnelAsync(command, cancellationToken).ConfigureAwait(false),
                 ProxyMessageTypes.Release => await ReleaseAsync(command, cancellationToken).ConfigureAwait(false),
                 ProxyMessageTypes.IscsiLogin => await IscsiLoginAsync(command, cancellationToken).ConfigureAwait(false),
+                ProxyMessageTypes.IscsiProbe => iscsi is null
+                    ? Error(command, $"{host.HostName} has no iSCSI initiator")
+                    : Reply(command) with { PortalReach = await iscsi.ProbeAsync(command.Portals ?? [], cancellationToken).ConfigureAwait(false), Addresses = NetworkAddresses.Ipv4() },
                 ProxyMessageTypes.Update => Update(command),
                 _ => Error(command, $"unknown command '{command.Type}'"),
             };

@@ -31,7 +31,7 @@ public sealed class SanTests
             ["iscsiadm -m discovery -t sendtargets -p 10.26.102.10"] = (0, $"10.26.102.10:3260,22 {Target}\n"),
             ["iscsiadm -m node -T " + Target + " -p 10.26.102.10 --login"] = (15, "iscsiadm: default: 1 session requested, but 1 already present."),
         });
-        var initiator = new IscsiadmInitiator(commands.RunAsync);
+        var initiator = new IscsiadmInitiator(commands.RunAsync, connect: Reachable);
 
         await initiator.LoginAsync(["10.26.101.10", "10.26.102.10"], Target, Ct);
 
@@ -48,8 +48,46 @@ public sealed class SanTests
             ["iscsiadm -m discovery -t sendtargets -p 10.26.101.10"] = (4, "iscsiadm: connect to 10.26.101.10 timed out"),
             ["iscsiadm -m discovery -t sendtargets -p 10.26.102.10"] = (0, "10.26.102.10:3260,22 iqn.other:target\n"),
         });
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => new IscsiadmInitiator(commands.RunAsync).LoginAsync(["10.26.101.10", "10.26.102.10"], Target, Ct));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => new IscsiadmInitiator(commands.RunAsync, connect: Reachable).LoginAsync(["10.26.101.10", "10.26.102.10"], Target, Ct));
         Assert.Equal($"No iSCSI login to {Target}: 10.26.101.10: discovery failed (4): iscsiadm: connect to 10.26.101.10 timed out; 10.26.102.10: discovery did not list {Target}", ex.Message);
+    }
+
+    private static Task Reachable(string host, int port, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    [Fact]
+    public async Task A_proxy_outside_the_iscsi_networks_is_told_so_in_seconds_with_its_own_addresses_and_iscsiadm_is_not_run()
+    {
+        var commands = new FakeCommands([]);
+        // An address outside the proxy's networks: the connection never opens.
+        var initiator = new IscsiadmInitiator(commands.RunAsync, connect: (_, _, ct) => Task.Delay(Timeout.Infinite, ct), ownAddresses: () => ["192.0.2.91/24 (ens192)"]);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => initiator.LoginAsync(["10.26.101.10", "10.26.102.10:3261"], Target, Ct));
+
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"took {watch.Elapsed}");
+        Assert.Equal("none of the array's iSCSI addresses answers: 10.26.101.10:3260 (no TCP connection within 3 s); 10.26.102.10:3261 (no TCP connection within 3 s). " +
+                     "This proxy's addresses: 192.0.2.91/24 (ens192). It needs a network interface in the array's iSCSI network(s), or a route to them.", ex.Message);
+        Assert.Empty(commands.Calls);
+    }
+
+    [Fact]
+    public async Task Only_the_portals_that_answer_are_logged_in_to_and_the_others_are_named()
+    {
+        var commands = new FakeCommands(new()
+        {
+            ["iscsiadm -m discovery -t sendtargets -p 10.26.101.10"] = (0, $"10.26.101.10:3260,21 {Target}\n"),
+        });
+        var initiator = new IscsiadmInitiator(commands.RunAsync,
+            connect: (host, _, ct) => host == "10.26.101.10" ? Task.CompletedTask : Task.FromException(new System.Net.Sockets.SocketException(113)));
+
+        await initiator.LoginAsync(["10.26.101.10", "10.26.102.10"], Target, Ct);
+        var reach = await initiator.ProbeAsync(["10.26.101.10", "10.26.102.10"], Ct);
+
+        Assert.Contains($"iscsiadm -m node -T {Target} -p 10.26.101.10 --login", commands.Calls);
+        Assert.DoesNotContain(commands.Calls, c => c.Contains("10.26.102.10", StringComparison.Ordinal));
+        Assert.Equal([true, false], reach.Select(r => r.Reachable));
+        Assert.Equal("10.26.102.10:3260", reach[1].Portal);
+        Assert.NotNull(reach[1].Error);
     }
 
     [Fact]

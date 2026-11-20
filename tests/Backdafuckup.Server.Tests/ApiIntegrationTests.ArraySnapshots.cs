@@ -89,6 +89,29 @@ public sealed partial class ApiIntegrationTests
     }
 
     [Fact]
+    public async Task A_proxy_that_cannot_reach_the_arrays_iscsi_addresses_is_named_and_the_snapshot_is_removed_again()
+    {
+        var (service, array, pool, srUuid, connectionId, _) = await ArraySetupAsync();
+        var (leaf, baseVdi, image, _) = LvhdImage(srUuid);
+        pool.LoginFailure = new IOException("proxy01 (host proxy01): iscsi-login failed: none of the array's iSCSI addresses answers: 10.26.101.10:3260 (no TCP connection within 3 s). " +
+                                            "This proxy's addresses: 192.0.2.91/24 (ens192). It needs a network interface in the array's iSCSI network(s), or a route to them.");
+        var backup = new ArrayFakeSession(srUuid, leaf, baseVdi, image);
+        var log = new RecordingLog();
+
+        Assert.Null(await service.OnVmSnapshotCreatedAsync(Context(connectionId, backup), log, Ct));
+
+        Assert.False(backup.Released);
+        Assert.Contains(log.Entries, e => e.Message.StartsWith("Array snapshot bdfu-", StringComparison.Ordinal) && e.Message.Contains(" presented to host object proxy01 (proxy proxy01) as LUN ", StringComparison.Ordinal));
+        Assert.Contains(log.Entries, e => e.Severity == LogSeverity.Warning &&
+            e.Message.Contains("Proxy proxy01 could not log in to iqn.2000-05.com.3pardata:20210002ac000001 on Alletra (array01.corp.example): proxy01 (host proxy01): iscsi-login failed: " +
+                               "none of the array's iSCSI addresses answers", StringComparison.Ordinal) &&
+            e.Message.Contains("Its disks are read from the VM snapshot.", StringComparison.Ordinal));
+        await WaitUntilAsync(() => array.Vluns.Count == 0 && !array.Volumes.Values.Any(v => v["copyOfID"] is not null));
+        await WaitUntilAsync(() => log.Entries.Any(e => e.Message.Contains("Storage system Alletra (array01.corp.example): snapshot bdfu-", StringComparison.Ordinal) && e.Message.EndsWith(" removed.", StringComparison.Ordinal)));
+        Assert.Contains(log.Entries, e => e.Message.Contains("presentation of bdfu-", StringComparison.Ordinal) && e.Message.Contains("to proxy01 removed.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Without_a_proxy_whose_initiator_the_array_knows_the_vm_is_read_normally()
     {
         var (service, array, pool, srUuid, connectionId, _) = await ArraySetupAsync();
@@ -134,6 +157,11 @@ public sealed partial class ApiIntegrationTests
         var proxy = Assert.Single(access!.Proxies);
         Assert.Equal(("proxy01", true, "iqn.2004-10.com.ubuntu:01:0a1b2c3d4e5", (string?)null), (proxy.ProxyName, proxy.Connected, proxy.InitiatorName, proxy.HostName));
         Assert.Equal(["10.26.101.10:3260"], access.Portals);
+        Assert.Null(proxy.PortalsReached); // the fake proxy cannot say yet
+        pool.Reach = new ProxyIscsiReach([], ["10.26.101.10:3260 (no TCP connection within 3 s)"], ["192.0.2.91/24 (ens192)"]);
+        var probed = Assert.Single((await client.GetFromJsonAsync<StorageProxyAccessDto>($"/api/storage-systems/{system.Id}/proxy-access", Ct))!.Proxies);
+        Assert.Equal((0, "10.26.101.10:3260 (no TCP connection within 3 s)", "192.0.2.91/24 (ens192)"),
+            (probed.PortalsReached!.Count, Assert.Single(probed.PortalsUnreached!), Assert.Single(probed.ProxyAddresses!)));
         Assert.Null(access.CreateRefusal);
 
         // The plan reads the array and changes nothing.
@@ -687,11 +715,19 @@ public sealed partial class ApiIntegrationTests
         public IReadOnlyList<ProxyInfo> Connected() =>
             [new ProxyInfo(ProxyId, "proxy01", "proxy01", null, null, [ProxyAgentProtocol.CapabilityHotAdd, ProxyAgentProtocol.CapabilitySan], Initiator)];
 
+        /// <summary>Thrown by the login (the agent's error reply), if set.</summary>
+        public Exception? LoginFailure { get; set; }
+
+        /// <summary>The answer to the iSCSI probe (null: the proxy cannot say).</summary>
+        public ProxyIscsiReach? Reach { get; set; }
+
         public Task LoginIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, string targetIqn, CancellationToken cancellationToken)
         {
             Logins.AddRange(portals.Select(p => (p, targetIqn)));
-            return Task.CompletedTask;
+            return LoginFailure is { } failure ? Task.FromException(failure) : Task.CompletedTask;
         }
+
+        public Task<ProxyIscsiReach?> ProbeIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, CancellationToken cancellationToken) => Task.FromResult(Reach);
 
         public Task<IProxyDisk> AttachAsync(Guid proxyId, string serial, long sizeBytes, bool writable, CancellationToken cancellationToken)
         {

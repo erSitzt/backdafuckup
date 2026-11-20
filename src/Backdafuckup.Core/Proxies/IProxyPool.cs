@@ -28,7 +28,20 @@ public interface IProxyPool
     /// </summary>
     Task LoginIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, string targetIqn, CancellationToken cancellationToken) =>
         throw new NotSupportedException("This proxy pool has no SAN access.");
+
+    /// <summary>
+    /// Whether the proxy opens a TCP connection to each iSCSI portal, within seconds, without logging in; null when the
+    /// proxy cannot say (not connected, an older agent).
+    /// </summary>
+    Task<ProxyIscsiReach?> ProbeIscsiAsync(Guid proxyId, IReadOnlyList<string> portals, CancellationToken cancellationToken) =>
+        Task.FromResult<ProxyIscsiReach?>(null);
 }
+
+/// <summary>
+/// The answer of <see cref="IProxyPool.ProbeIscsiAsync"/>: the portals that answered, the ones that did not (with why),
+/// and the proxy's own IPv4 addresses ("192.0.2.91/24 (ens192)").
+/// </summary>
+public sealed record ProxyIscsiReach(IReadOnlyList<string> Reached, IReadOnlyList<string> Unreached, IReadOnlyList<string> Addresses);
 
 /// <summary>
 /// A disk opened on a proxy. Disposing closes it and removes it from the proxy's kernel, which must happen before the

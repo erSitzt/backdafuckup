@@ -236,6 +236,22 @@ else
                                         {
                                             <br /><span class="caption">No SAN access: @san.Replace("\n", "; ")</span>
                                         }
+                                        @if (proxy.PortalsReached is { } reached && proxy.PortalsUnreached is { } unreached)
+                                        {
+                                            <br />
+                                            @if (unreached.Count == 0)
+                                            {
+                                                <span class="caption">Reaches all @reached.Count iSCSI addresses.</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="@(reached.Count == 0 ? "mud-error-text" : "mud-warning-text") caption">
+                                                    @(reached.Count == 0 ? "Reaches none" : $"Reaches {reached.Count}") of the @(reached.Count + unreached.Count) iSCSI addresses
+                                                    (not: @string.Join(", ", unreached)). Its own addresses: @string.Join(", ", proxy.ProxyAddresses ?? []).
+                                                    @(reached.Count == 0 ? "It needs a network interface in the array's iSCSI network(s), or a route to them." : string.Empty)
+                                                </span>
+                                            }
+                                        }
                                     </td>
                                     <td>
                                         @if (proxy.HostName is { } host)

@@ -1548,7 +1548,7 @@ What is measured (prefix `bdfu_`; `pool` is the connection name of a pool or vCe
 | `bdfu_array_snapshot_seconds` {storage_system} | histogram | Backup from storage snapshots: taking the array snapshot of a batch |
 | `bdfu_array_batch_vms` {storage_system} | histogram | VMs served by one array snapshot |
 | `bdfu_vm_snapshot_lifetime_seconds` {storage_system, path} | histogram | How long a VM snapshot existed when it was released before its disks were read (path `array`) |
-| `bdfu_array_fallback_total` {storage_system, reason} | counter | VMs meant for an array snapshot that were read from their VM snapshot (`no_proxy`, `lvhd_refused`, `vmfs_in_use`, `vmfs_unsupported`, `vmfs_not_found`, `vmfs_corrupt`, `lun_error`, `array_error`, `not_found`, `release_failed`, `verify_mismatch`, `verify_unavailable`) |
+| `bdfu_array_fallback_total` {storage_system, reason} | counter | VMs meant for an array snapshot that were read from their VM snapshot (`no_proxy`, `iscsi_login`, `replication_secondary`, `lvhd_refused`, `vmfs_in_use`, `vmfs_unsupported`, `vmfs_not_found`, `vmfs_corrupt`, `lun_error`, `array_error`, `not_found`, `release_failed`, `verify_mismatch`, `verify_unavailable`) |
 | `bdfu_array_verify_total` {storage_system, method, result} | counter | Checks of disks read from array snapshots (`passed`, `mismatch`): method `verify` against the VM snapshot (verify mode), `cbt-unchanged` against the previous restore point |
 | `bdfu_array_leftovers` {storage_system} | gauge | Snapshots and presentations of this server on a storage system that no running session uses |
 | `bdfu_array_reader_tripped` {storage_system, reader} | gauge | 1 while an experimental reader (`lvhd`, `vmfs6`) is switched off for a storage system after a difference |

@@ -75,6 +75,12 @@ public static class ProxyMessageTypes
     /// <summary>Server → agent: log in to an array's iSCSI target at these portals (once), then rescan its sessions.</summary>
     public const string IscsiLogin = "iscsi-login";
 
+    /// <summary>
+    /// Server → agent: whether a TCP connection to each portal opens (nothing is logged in to); the reply has
+    /// <see cref="ProxyAgentMessage.PortalReach"/> and the agent's own addresses in <see cref="ProxyAgentMessage.Addresses"/>.
+    /// </summary>
+    public const string IscsiProbe = "iscsi-probe";
+
     /// <summary>Agent → server: the answer to a command (same id); <see cref="ProxyAgentMessage.Error"/> when it failed.</summary>
     public const string Reply = "reply";
 }
@@ -125,6 +131,9 @@ public sealed record ProxyAgentMessage
     // iscsi-login
     public IReadOnlyList<string>? Portals { get; init; }
 
+    /// <summary>The answer to <see cref="ProxyMessageTypes.IscsiProbe"/>: per portal, whether it answered.</summary>
+    public IReadOnlyList<ProxyPortalReach>? PortalReach { get; init; }
+
     public string? TargetIqn { get; init; }
 
     // wait-device
@@ -151,3 +160,6 @@ public sealed record ProxyAgentMessage
     // reply
     public ProxyDevice? Device { get; init; }
 }
+
+/// <summary>Whether a TCP connection to an iSCSI portal ("address:port") opened; <see cref="Error"/> says why not.</summary>
+public sealed record ProxyPortalReach(string Portal, bool Reachable, string? Error);
