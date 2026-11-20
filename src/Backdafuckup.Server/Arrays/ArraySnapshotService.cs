@@ -51,22 +51,33 @@ public sealed class ArraySnapshotService(
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(log);
-        Arrived(context);
         var started = Stopwatch.GetTimestamp();
         var snapshotAt = time.GetUtcNow();
         var backup = context.Session;
-        var plan = await PlanAsync(context, cancellationToken).ConfigureAwait(false);
-        if (plan.Refusal is { } refusal)
-        {
-            log.Info($"Backup from storage snapshots: not for {backup.Vm.Name}, {refusal}. Its disks are read from the VM snapshot.");
-            return null;
-        }
-
-        // What changed is asked while the VM snapshot still exists.
+        Plan plan;
         var changes = new Dictionary<string, ChangedExtents>(StringComparer.Ordinal);
-        foreach (var disk in backup.Disks)
+        try
         {
-            changes[disk.Key] = await backup.GetChangedExtentsAsync(disk, context.Previous.GetValueOrDefault(disk.Key), log, cancellationToken).ConfigureAwait(false);
+            plan = await PlanAsync(context, cancellationToken).ConfigureAwait(false);
+            if (plan.Refusal is { } refusal)
+            {
+                log.Info($"Backup from storage snapshots: not for {backup.Vm.Name}, {refusal}. Its disks are read from the VM snapshot.");
+                WithdrawFromGroup(context);
+                Arrived(context);
+                return null;
+            }
+
+            // What changed is asked while the VM snapshot still exists.
+            foreach (var disk in backup.Disks)
+            {
+                changes[disk.Key] = await backup.GetChangedExtentsAsync(disk, context.Previous.GetValueOrDefault(disk.Key), log, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            WithdrawFromGroup(context);
+            Arrived(context);
+            throw;
         }
 
         var batch = Join(context, plan, log, snapshotAt);
@@ -416,27 +427,67 @@ public sealed class ArraySnapshotService(
         return new Plan(null, system, volumes, disks, reader, readerState);
     }
 
-    /// <summary>Counts a VM of the run; when all have come, the run's open batches stop waiting.</summary>
+    /// <summary>Counts a VM of the run that joined a batch or goes its usual way.</summary>
     private void Arrived(VmSnapshotContext context)
     {
         lock (_lock)
         {
-            var now = time.GetUtcNow();
-            foreach (var old in _arrivals.Where(a => now - a.Value.Last > TimeSpan.FromHours(6)).Select(a => a.Key).ToList())
-            {
-                _arrivals.Remove(old);
-            }
+            CountArrival(context);
+        }
+    }
 
-            var key = (context.SessionId, context.Attempt);
-            var count = _arrivals.GetValueOrDefault(key).Count + 1;
-            _arrivals[key] = (count, now);
-            if (context.RunVms > 0 && count >= context.RunVms)
+    /// <summary>
+    /// Counts a VM of the run (under the lock), once it joined a batch or was refused, never before: counted at the entry,
+    /// the last VM would close a batch it is about to join. When all came, the run's open batches outside a planned group
+    /// stop waiting (a group's batch knows its own VMs).
+    /// </summary>
+    private void CountArrival(VmSnapshotContext context)
+    {
+        var now = time.GetUtcNow();
+        foreach (var old in _arrivals.Where(a => now - a.Value.Last > TimeSpan.FromHours(6)).Select(a => a.Key).ToList())
+        {
+            _arrivals.Remove(old);
+        }
+
+        var key = (context.SessionId, context.Attempt);
+        var count = _arrivals.GetValueOrDefault(key).Count + 1;
+        _arrivals[key] = (count, now);
+        if (context.RunVms > 0 && count >= context.RunVms)
+        {
+            foreach (var batch in _open.Where(b => b.SessionId == context.SessionId && b.GroupId is null))
             {
-                foreach (var batch in _open.Where(b => b.SessionId == context.SessionId))
+                batch.Full.TrySetResult();
+            }
+        }
+    }
+
+    /// <summary>VMs of planned groups that dropped out before their group's batch was opened, per (group, attempt).</summary>
+    private readonly Dictionary<(Guid Group, int Attempt), int> _withdrawn = [];
+
+    public void Withdraw(Guid sessionId, int attempt, Guid groupId)
+    {
+        lock (_lock)
+        {
+            if (_open.FirstOrDefault(b => !b.Closed && b.GroupId == groupId && b.Attempt == attempt) is { } batch)
+            {
+                batch.Withdrawn++;
+                if (batch.Members.Count + batch.Withdrawn >= batch.Capacity)
                 {
                     batch.Full.TrySetResult();
                 }
             }
+            else
+            {
+                _withdrawn[(groupId, attempt)] = _withdrawn.GetValueOrDefault((groupId, attempt)) + 1;
+            }
+        }
+    }
+
+    private void WithdrawFromGroup(VmSnapshotContext context)
+    {
+        if (context.GroupId is { } group)
+        {
+            Withdraw(context.SessionId, context.Attempt, group);
         }
     }
 
@@ -451,18 +502,28 @@ public sealed class ArraySnapshotService(
         var start = false;
         lock (_lock)
         {
-            batch = _open.FirstOrDefault(b => !b.Closed && b.SessionId == context.SessionId && b.System.Id == plan.System.Id && b.Members.Count < b.Capacity);
+            // A planned group: its own batch, which waits for every VM of the group; else whatever batch of the run is open.
+            batch = context.GroupId is { } group
+                ? _open.FirstOrDefault(b => !b.Closed && b.GroupId == group && b.Attempt == context.Attempt && b.System.Id == plan.System.Id)
+                : _open.FirstOrDefault(b => !b.Closed && b.GroupId is null && b.SessionId == context.SessionId && b.System.Id == plan.System.Id && b.Members.Count < b.Capacity);
             if (batch is null)
             {
-                var capacity = Math.Clamp(Math.Min(plan.System.Options.MaxVmsPerSnapshot, context.MaxPeers), 1, 64);
-                batch = new Batch(Guid.CreateVersion7(), context.SessionId, plan.System, capacity, context.Hypervisor);
+                var capacity = context.GroupId is not null
+                    ? Math.Max(1, context.GroupSize)
+                    : Math.Clamp(Math.Min(plan.System.Options.MaxVmsPerSnapshot, context.MaxPeers), 1, 64);
+                batch = new Batch(Guid.CreateVersion7(), context.SessionId, plan.System, capacity, context.Hypervisor, context.GroupId, context.Attempt)
+                {
+                    Withdrawn = context.GroupId is { } g && _withdrawn.Remove((g, context.Attempt), out var gone) ? gone : 0,
+                };
                 _open.Add(batch);
                 start = true;
             }
 
             batch.Members.Add(new Member(context, plan, log, snapshotAt));
             batch.Users++;
-            if (batch.Members.Count >= batch.Capacity || AllArrived(context))
+            batch.LastJoin = time.GetUtcNow();
+            CountArrival(context);
+            if (batch.Members.Count + batch.Withdrawn >= batch.Capacity || (batch.GroupId is null && AllArrived(context)))
             {
                 batch.Full.TrySetResult();
             }
@@ -476,13 +537,32 @@ public sealed class ArraySnapshotService(
         return batch;
     }
 
-    /// <summary>Waits for the batch to fill (or its window to pass), then takes the snapshot and presents it to a proxy.</summary>
+    /// <summary>
+    /// Waits for the batch to fill, then takes the snapshot and presents it to a proxy. The window is how long it waits for
+    /// its next VM: the VM snapshots of a group on one storage come one after another, so a big group takes longer than
+    /// one window and keeps waiting while its VMs keep coming.
+    /// </summary>
     private async Task RunBatchAsync(Batch batch)
     {
         var window = TimeSpan.FromSeconds(Math.Max(0, batch.System.Options.BatchWindowSeconds));
         if (batch.Capacity > 1 && window > TimeSpan.Zero)
         {
-            await Task.WhenAny(batch.Full.Task, Task.Delay(window, time)).ConfigureAwait(false);
+            while (!batch.Full.Task.IsCompleted)
+            {
+                DateTimeOffset last;
+                lock (_lock)
+                {
+                    last = batch.LastJoin;
+                }
+
+                var left = last + window - time.GetUtcNow();
+                if (left <= TimeSpan.Zero)
+                {
+                    break;
+                }
+
+                await Task.WhenAny(batch.Full.Task, Task.Delay(left, time)).ConfigureAwait(false);
+            }
         }
 
         List<Member> members;
@@ -593,8 +673,11 @@ public sealed class ArraySnapshotService(
 
         state.TakenUtc = time.GetUtcNow();
         metrics.RecordArraySnapshot(system.Name, watch.Elapsed, members.Count);
+        var oldest = time.GetUtcNow() - members.Min(m => m.SnapshotAt);
         log.Info($"Array snapshot {state.Names} of {string.Join(", ", volumes.Select(v => v.Name))} on {system.Name} taken in " +
-                 $"{watch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s for {members.Count} VM(s).");
+                 $"{watch.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s for {members.Count} VM(s)" +
+                 (members.Count > 1 ? $" ({string.Join(", ", members.Select(m => m.Context.Session.Vm.Name).Order(StringComparer.OrdinalIgnoreCase))}; the oldest VM snapshot had waited {oldest.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} s)" : string.Empty) +
+                 (batch.Withdrawn > 0 ? $"; {batch.Withdrawn} VM(s) of the group dropped out before" : string.Empty) + ".");
         state.StartExtending(time, TimeSpan.FromHours(Math.Max(1, system.Options.ExpiryHours)), logger);
 
         // Presented to the proxy's host object, logged in, opened read-only on the proxy.
@@ -838,9 +921,20 @@ public sealed class ArraySnapshotService(
     /// <param name="SnapshotAt">When the VM snapshot was there (the hook was called right after it).</param>
     private sealed record Member(VmSnapshotContext Context, Plan Plan, IOperationLog Log, DateTimeOffset SnapshotAt);
 
-    private sealed class Batch(Guid id, Guid sessionId, StorageSystemEntity system, int capacity, IHypervisorSession hypervisor)
+    private sealed class Batch(Guid id, Guid sessionId, StorageSystemEntity system, int capacity, IHypervisorSession hypervisor, Guid? groupId = null, int attempt = 1)
     {
         public Guid Id { get; } = id;
+
+        /// <summary>The planned group of VMs on the same volumes (null: whatever VMs of the run come within the window).</summary>
+        public Guid? GroupId { get; } = groupId;
+
+        public int Attempt { get; } = attempt;
+
+        /// <summary>VMs of the group that will not come.</summary>
+        public int Withdrawn { get; set; }
+
+        /// <summary>When the last VM joined (the window counts from it).</summary>
+        public DateTimeOffset LastJoin { get; set; }
 
         public Guid SessionId { get; } = sessionId;
 

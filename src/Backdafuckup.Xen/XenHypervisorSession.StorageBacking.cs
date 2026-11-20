@@ -8,8 +8,45 @@ namespace Backdafuckup.Xen;
 /// gate of the SRs while an array snapshot of their LUNs is taken: the same per-SR gate our VM snapshots take, so no
 /// VM snapshot of ours is half done in the volume group when the array copies it.
 /// </summary>
-internal sealed partial class XenHypervisorSession : IStorageBackingSource, IStorageSnapshotGate
+internal sealed partial class XenHypervisorSession : IStorageBackingSource, IStorageSnapshotGate, Core.Hypervisor.IVmStorageLocator
 {
+    /// <summary>The SRs of the VM's disks as its backup snapshots them (VBDs of type Disk; [NOBAK] disks left out).</summary>
+    public async Task<IReadOnlyList<string>?> GetVmStorageIdsAsync(string vmNativeId, CancellationToken cancellationToken)
+    {
+        var vmRef = await Xapi.TryGetByUuidAsync("VM", vmNativeId, cancellationToken).ConfigureAwait(false);
+        if (vmRef is null)
+        {
+            return null;
+        }
+
+        var vm = await Xapi.GetRecordAsync("VM", vmRef, cancellationToken).ConfigureAwait(false);
+        var srUuids = new Dictionary<string, string>(StringComparer.Ordinal);
+        var ids = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var vbdRef in vm.Set("VBDs"))
+        {
+            var vbd = await Xapi.GetRecordAsync("VBD", vbdRef, cancellationToken).ConfigureAwait(false);
+            if (vbd.Str("type") != "Disk" || XapiRecord.IsNullRef(vbd.Str("VDI")))
+            {
+                continue;
+            }
+
+            var vdi = await Xapi.GetRecordAsync("VDI", vbd.Str("VDI"), cancellationToken).ConfigureAwait(false);
+            if (vdi.Str("name_label").Contains(XenTags.ExcludeDiskMarker, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!srUuids.TryGetValue(vdi.Str("SR"), out var srUuid))
+            {
+                srUuids[vdi.Str("SR")] = srUuid = (await Xapi.GetRecordAsync("SR", vdi.Str("SR"), cancellationToken).ConfigureAwait(false)).Str("uuid");
+            }
+
+            ids.Add(srUuid);
+        }
+
+        return [.. ids];
+    }
+
     public async Task<IAsyncDisposable> HoldAsync(IReadOnlyCollection<string> storageIds, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(storageIds);

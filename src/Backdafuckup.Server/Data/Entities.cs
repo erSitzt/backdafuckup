@@ -452,6 +452,12 @@ public sealed class BackupJob
     /// </summary>
     public bool FromStorageSnapshots { get; set; }
 
+    /// <summary>
+    /// The most VMs that share one array snapshot (the VMs of a volume beyond it get another one); null: all VMs of the
+    /// job on a volume share one, as the other backup product does by default.
+    /// </summary>
+    public int? MaxVmsPerArraySnapshot { get; set; }
+
     public GuestFailurePolicy GuestFailurePolicy { get; set; } = GuestFailurePolicy.CrashConsistentWithWarning;
 
     /// <summary>Windows credentials to install the agent automatically where it is missing (optional).</summary>

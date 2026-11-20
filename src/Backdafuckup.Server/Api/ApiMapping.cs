@@ -67,7 +67,7 @@ internal static class ApiMapping
         j.Objects.OrderBy(o => o.Order).Select(o => new JobObjectDto(o.NativeId, o.CachedName, o.WithMemory)).ToList(),
         j.NextRunUtc, j.LastRunUtc, j.LastResult?.ToString(), running, j.MaxParallelVms, j.NbdConnectionsPerDisk, j.RetryCount, j.TransportMode.ToString(), j.MaxParallelDisks,
         j.GuestProcessing, j.GuestFailurePolicy.ToString(), j.GuestCredentialId, j.GuestProcessingMode.ToString(), j.SqlCredentialId, j.SqlSnapshotCopyOnly,
-        j.SqlBackup.ToDto(), j.KubernetesPodVolumes, j.SqlBackup.Enabled ? sqlNext : null, j.FromStorageSnapshots);
+        j.SqlBackup.ToDto(), j.KubernetesPodVolumes, j.SqlBackup.Enabled ? sqlNext : null, j.FromStorageSnapshots, j.MaxVmsPerArraySnapshot);
 
     public static SqlBackupSettingsDto ToDto(this SqlBackupSettings s) => new(
         s.Enabled, s.LogIntervalMinutes, s.FullSchedule.ToDto(), s.SystemSchedule.ToDto(), s.FullForAllDatabases, s.FullOnChainBreak, [.. s.ExcludedDatabases], s.StagingFolder);

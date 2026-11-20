@@ -352,6 +352,10 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("max_parallel_vms");
 
+                    b.Property<int?>("MaxVmsPerArraySnapshot")
+                        .HasColumnType("integer")
+                        .HasColumnName("max_vms_per_array_snapshot");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("text")

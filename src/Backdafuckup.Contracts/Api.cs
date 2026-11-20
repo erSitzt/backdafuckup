@@ -248,7 +248,8 @@ public sealed record JobDto(
     SqlBackupSettingsDto? SqlBackup = null,
     bool KubernetesPodVolumes = false,
     DateTimeOffset? SqlNextRunUtc = null,
-    bool FromStorageSnapshots = false);
+    bool FromStorageSnapshots = false,
+    int? MaxVmsPerArraySnapshot = null);
 
 /// <summary>
 /// SQL Server backups the agent runs in the job's VMs (the log chain): transaction log backups every
@@ -325,6 +326,9 @@ public sealed record SaveJobDto
 
     /// <summary>Backup from storage snapshots where the disks lie on turned-on volumes of a storage system (off: the normal path).</summary>
     public bool FromStorageSnapshots { get; init; }
+
+    /// <summary>The most VMs per array snapshot (1–1000); null: all VMs of the job on a volume share one.</summary>
+    public int? MaxVmsPerArraySnapshot { get; init; }
 
     public int RetryCount { get; init; } = 2;
 

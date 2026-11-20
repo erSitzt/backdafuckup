@@ -898,15 +898,15 @@ For VMs on an **HPE Alletra MP** (B10000), the disks can be read from a snapshot
 
 ### How a backup runs
 
-Turn on *Backup from storage snapshots* in the job (Transport). For each VM whose disks all lie on turned-on volumes of one storage system:
+Turn on *Backup from storage snapshots* in the job (Transport). **Groups:** before its first VM snapshot the job finds out where each VM's disks lie and puts the VMs whose disks lie on the same turned-on volumes of one storage system into a group (the session log lists the groups, and each other VM with the reason it is read from its VM snapshot). A group's VM snapshots are taken together (on XCP-ng one after another per SR, as always), then **one array snapshot per volume serves the whole group**, all their VM snapshots are removed, and the VMs are read in the job's *VMs in parallel*: however few VMs are read at once, the VMs of a volume share one array snapshot. While one group is read, the next group's VM snapshots are taken. *Limit VMs per array snapshot to N* in the job splits the VMs of a volume into groups of N, each with its own array snapshot (by default there is no limit: the more VMs share one, the longer the first VM snapshot waits for the last). The storage system's *Batch window* is how long a group waits for the snapshot of its next VM. For each VM of a group:
 
 1. VM snapshot (guest processing as usual), the changed blocks since the previous backup are asked for.
-2. Array snapshot of the volume, read-only, named `bdfu-…-01`, with this server's id in its comment and an expiry (6 hours by default, moved forward while it is read). VMs of the same job run that reach this point within the batch window (60 s) share one array snapshot (up to 8 by default).
+2. Array snapshot of the volume, read-only, named `bdfu-…-01`, with this server's id in its comment and an expiry (6 hours by default, moved forward while it is read). It is taken once every VM of the group has its VM snapshot (or dropped out) and covers the whole group.
 3. The snapshot is presented to the proxy's host object, the proxy logs in and opens the LUN read-only.
 4. Each disk's chain is found on the LUN and compared with what XAPI reported (volume group of the SR, logical volumes and their sizes, the VHD chain and its links). Any difference, or the storage manager working on the chain (coalesce, clone), keeps the VM on the normal path.
 5. **Verify mode** (the first backups per reader and storage system, *Verify runs*, 5 by default): 16 regions of up to 1 MiB of each disk, spread over the blocks this backup reads, are read from the array snapshot and from the VM snapshot (NBD) and compared.
 6. The VM snapshot is removed (its change tracking data is kept for the next incremental), and the disks are read from the array snapshot.
-7. When the last VM of the batch is done, the LUN is closed on the proxy, the presentation removed and the snapshot deleted.
+7. When the last VM of the group is done, the LUN is closed on the proxy, the presentation removed and the snapshot deleted.
 
 **On vSphere** (with the VMFS reader): the disk read is the one *under* the VM snapshot, which the host closed for writing when it took the snapshot; the array snapshot waits at least 2 s after the last VM snapshot of its batch (*Gap after VM snapshot*), so that the host has written the disk's block map. A disk a host still had open for writing (an independent disk, say) is refused and the VM read through HotAdd. The VMFS reader is used only from a disk's second backup on, so that every run is checked against the previous restore point; VMs that already had snapshots are fine, datastores on several LUNs are not.
 

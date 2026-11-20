@@ -146,6 +146,12 @@ Existing physical Windows servers (FC HBAs or iSCSI) are to read array snapshots
 - `ReleaseSnapshotAsync(log, ct)`: afterwards `OpenReaderAsync` throws, and `CommitAsync` only completes ledger rows;
 - `SnapshotFacts.Lifetime`: the time from snapshot to removal, this feature's key metric.
 
+**Built (2026-11-20) as planned groups, as the other product does it by default:**
+- At the start of a job run the VMs are grouped by the volumes their disks lie on (`ArrayGroupPlanner`, through `IVmStorageLocator`: XCP-ng VBD → VDI → SR, vSphere disks' datastores).
+- A group takes its VM snapshots together, one array snapshot per volume serves the whole group, then the VMs are read in `MaxParallelVms` slots (`VmPhases`): a batch is no longer capped by `MaxParallelVms`.
+- There is no limit by default. The job's *Limit VMs per array snapshot to N* splits a volume's VMs into groups of N.
+- A group's batch takes its snapshot once every VM of the group joined or dropped out (`Withdraw`). The batch window is how long a group waits for its next VM.
+
 **Batching** (`ArraySnapshotService`, a server singleton keeping batches per job session and storage system)
 1. **Two phases:** the `MaxParallelVms` semaphore is split. A snapshot-phase semaphore of size `MaxVmsPerArraySnapshot` (default 8) runs VMs up to the array snapshot; `MaxParallelVms` then limits only reading.
 2. **A batch closes** when every eligible VM of the run has joined or failed, when the size limit is reached, or 60 s after the first VM joined.

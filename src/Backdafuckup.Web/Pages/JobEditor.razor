@@ -264,6 +264,19 @@ else
                                             removed before. Needs a backup proxy with SAN access and 'Experimental readers' on the storage system. Every other VM, and every VM
                                             where a step fails, is read through HotAdd as usual (the log says why).
                                         </MudText>
+                                        @if (_fromStorageSnapshots)
+                                        {
+                                            <div class="d-flex align-center gap-3 mt-1">
+                                                <MudCheckBox T="bool" @bind-Value="_limitArraySnapshot" Color="Color.Primary" Label="Limit VMs per array snapshot to" Dense="true" />
+                                                <MudNumericField T="int" @bind-Value="_maxVmsPerArraySnapshot" Min="1" Max="1000" Variant="Variant.Outlined" Margin="Margin.Dense" Disabled="@(!_limitArraySnapshot)"
+                                                                 Style="max-width:120px" />
+                                            </div>
+                                            <MudText Typo="Typo.caption" Class="help-text">
+                                                By default all VMs of the job that lie on the same volume share one array snapshot: their VM snapshots are taken one after another, then
+                                                the array snapshot, then they are all removed. With a limit, the VMs of a volume are split into groups of that size, each with its own
+                                                array snapshot: fewer VMs wait with their VM snapshot for the others.
+                                            </MudText>
+                                        }
                                     }
                                     else
                                     {
@@ -292,6 +305,19 @@ else
                                         snapshot; the VM snapshot is removed before the disks are read, so it exists only seconds. Needs a backup proxy with SAN access.
                                         Every other VM, and every VM where a step fails, is read from its VM snapshot as usual (the log says why).
                                     </MudText>
+                                    @if (_fromStorageSnapshots)
+                                    {
+                                        <div class="d-flex align-center gap-3 mt-1">
+                                            <MudCheckBox T="bool" @bind-Value="_limitArraySnapshot" Color="Color.Primary" Label="Limit VMs per array snapshot to" Dense="true" />
+                                            <MudNumericField T="int" @bind-Value="_maxVmsPerArraySnapshot" Min="1" Max="1000" Variant="Variant.Outlined" Margin="Margin.Dense" Disabled="@(!_limitArraySnapshot)"
+                                                             Style="max-width:120px" />
+                                        </div>
+                                        <MudText Typo="Typo.caption" Class="help-text">
+                                            By default all VMs of the job that lie on the same volume share one array snapshot: their VM snapshots are taken one after another, then
+                                            the array snapshot, then they are all removed. With a limit, the VMs of a volume are split into groups of that size, each with its own
+                                            array snapshot: fewer VMs wait with their VM snapshot for the others.
+                                        </MudText>
+                                    }
                                     }
                                 </div>
                             </ChildContent>
@@ -594,7 +620,7 @@ else
                                     <dt>In parallel</dt><dd>@_parallelVms VM(s), @_parallelDisks disk(s) per VM, @_nbdConnections NBD connection(s) per disk</dd>
                                     @if (_fromStorageSnapshots)
                                     {
-                                        <dt>Storage snapshots</dt><dd>automatic: VMs on turned-on volumes are read from array snapshots</dd>
+                                        <dt>Storage snapshots</dt><dd>automatic: VMs on turned-on volumes are read from array snapshots, @(_limitArraySnapshot ? $"at most {_maxVmsPerArraySnapshot} VMs per array snapshot" : "all VMs of a volume from one")</dd>
                                     }
                                 }
                                 <dt>Retries</dt><dd>@_retries</dd>
@@ -803,6 +829,8 @@ else
     /// <summary>Kubernetes: every pod volume that is not a PVC, not only the annotated ones.</summary>
     private bool _podVolumes;
     private bool _fromStorageSnapshots;
+    private bool _limitArraySnapshot;
+    private int _maxVmsPerArraySnapshot = 10;
     private string _guestPolicy = GuestFailurePolicies.CrashConsistentWithWarning;
     private Guid? _guestCredentialId;
     private List<WindowsCredentialDto> _credentials = [];
@@ -856,6 +884,8 @@ else
             _guest = job.GuestProcessing;
             _podVolumes = job.KubernetesPodVolumes;
             _fromStorageSnapshots = job.FromStorageSnapshots;
+            _limitArraySnapshot = job.MaxVmsPerArraySnapshot is not null;
+            _maxVmsPerArraySnapshot = job.MaxVmsPerArraySnapshot ?? 10;
             _guestPolicy = job.GuestFailurePolicy;
             _guestCredentialId = job.GuestCredentialId;
             _guestMode = job.GuestProcessingMode;
@@ -1027,6 +1057,7 @@ else
             GuestProcessing = _guest && !IsCluster,
             KubernetesPodVolumes = IsCluster && _podVolumes,
             FromStorageSnapshots = !IsCluster && _fromStorageSnapshots,
+            MaxVmsPerArraySnapshot = !IsCluster && _fromStorageSnapshots && _limitArraySnapshot ? _maxVmsPerArraySnapshot : null,
             GuestFailurePolicy = _guestPolicy,
             GuestCredentialId = _guest ? _guestCredentialId : null,
             GuestProcessingMode = _guestMode,

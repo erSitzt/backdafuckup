@@ -77,6 +77,14 @@ public interface IDiskTransport
 public interface ISnapshotLifecycleHook
 {
     Task<ArrayReadLease?> OnVmSnapshotCreatedAsync(VmSnapshotContext context, IOperationLog log, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// A VM of a planned group will not come (its snapshot failed, it was skipped): the group's array snapshot waits for
+    /// one VM less.
+    /// </summary>
+    void Withdraw(Guid sessionId, int attempt, Guid groupId)
+    {
+    }
 }
 
 /// <summary>What the hook needs of a VM's backup: its job run, connection, session and the previous change tokens.</summary>
@@ -85,9 +93,11 @@ public interface ISnapshotLifecycleHook
 /// <param name="RunVms">How many VMs this attempt of the job run backs up (0: unknown): once all have come to this point, wherever their
 /// disks are read from, a batch waits for no more.</param>
 /// <param name="Attempt">The attempt of the job run (retries come later and are counted on their own).</param>
+/// <param name="GroupId">The planned group of VMs on the same volumes the VM belongs to (null: none; it joins whatever batch is open).</param>
+/// <param name="GroupSize">How many VMs the group has: its array snapshot is taken once all of them came or dropped out.</param>
 public sealed record VmSnapshotContext(
     Guid SessionId, Guid JobId, Guid ConnectionId, IHypervisorSession Hypervisor, IVmBackupSession Session, IReadOnlyDictionary<string, ChangeToken?> Previous, int MaxPeers = 1,
-    int RunVms = 0, int Attempt = 1);
+    int RunVms = 0, int Attempt = 1, Guid? GroupId = null, int GroupSize = 0);
 
 /// <summary>
 /// The disks of one VM read from an array snapshot instead of from the VM snapshot: their changed extents (asked while the

@@ -292,10 +292,8 @@ else
                     <div class="field-grid cols-4">
                         <MudNumericField @bind-Value="options.ExpiryHours" Label="Snapshot expiry (hours)" Min="1" Max="72" Variant="Variant.Outlined"
                                          HelperText="The array removes a forgotten snapshot by itself after this time." />
-                        <MudNumericField @bind-Value="options.MaxVmsPerSnapshot" Label="VMs per array snapshot" Min="1" Max="32" Variant="Variant.Outlined"
-                                         HelperText="VMs of one job run that share an array snapshot of their volume." />
                         <MudNumericField @bind-Value="options.BatchWindowSeconds" Label="Batch window (s)" Min="0" Max="600" Variant="Variant.Outlined"
-                                         HelperText="How long a snapshot waits for more VMs of the job run." />
+                                         HelperText="How long a group of VMs waits for the snapshot of its next VM (0: each VM its own array snapshot)." />
                         <MudNumericField @bind-Value="options.ProbationRuns" Label="Verify runs" Min="0" Max="50" Variant="Variant.Outlined"
                                          HelperText="The first backups per reader also compare a sample with the VM snapshot." />
                         <MudNumericField @bind-Value="options.MinSecondsAfterVmSnapshot" Label="Gap after VM snapshot (s)" Min="0" Max="60" Variant="Variant.Outlined"

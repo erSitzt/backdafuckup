@@ -707,6 +707,7 @@ public static class EngineServiceCollectionExtensions
         services.AddSingleton<Proxies.ProxyAgents>();
         services.AddSingleton<Core.Arrays.IStorageArrayProvider>(new Backdafuckup.Arrays.Alletra.AlletraProvider());
         services.AddSingleton<Arrays.StorageSystems>();
+        services.AddSingleton<Arrays.ArrayGroupPlanner>();
         services.AddSingleton<Backdafuckup.Core.Proxies.IProxyPool>(sp => sp.GetRequiredService<Proxies.ProxyAgents>());
         services.AddSingleton<Tape.TapeHosts>();
         services.AddSingleton<Tape.TapeLocks>();

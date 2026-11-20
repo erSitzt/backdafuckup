@@ -29,7 +29,8 @@ public sealed class BackupSessionRunner(
     ILogger<BackupSessionRunner> logger,
     ScaleOut.RepositoryPlacement placement,
     ScaleOut.ChainLocks chainLocks,
-    Arrays.ArraySnapshotService arraySnapshots)
+    Arrays.ArraySnapshotService arraySnapshots,
+    Arrays.ArrayGroupPlanner groupPlanner)
 {
     public async Task<(SessionState State, string Summary)> RunAsync(SessionEntity session, CancellationToken cancellationToken)
     {
@@ -118,20 +119,31 @@ public sealed class BackupSessionRunner(
             }
 
             using var gate = new SemaphoreSlim(Math.Max(1, job.MaxParallelVms));
+
+            // Backup from storage snapshots: the VMs on the same array volumes go together, one array snapshot per volume for all.
+            var groups = job.FromStorageSnapshots && job.Connection.Kind != HypervisorKind.Kubernetes
+                ? await groupPlanner.PlanAsync([.. pending.Select(p => p.Vm)], hypervisor, job.ConnectionId, job.MaxVmsPerArraySnapshot, cancellationToken).ConfigureAwait(false)
+                : null;
+            var turns = new Dictionary<Guid, GroupTurn>();
+            if (groups is not null)
+            {
+                LogGroups(log, groups);
+                GroupTurn? previous = null;
+                foreach (var group in groups.Groups)
+                {
+                    turns[group.Id] = previous = new GroupTurn(group, previous);
+                }
+            }
+
             var results = await Task.WhenAll(pending.Select(async item =>
             {
-                await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                try
-                {
-                    var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, metrics, engineOptions.Value.CheckpointWithVss, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1,
-                        new ChainTargets(scope, placement, chainLocks, repositories), hypervisor, job.FromStorageSnapshots ? arraySnapshots : null,
-                        Math.Max(1, Math.Min(job.MaxParallelVms, pending.Count)), pending.Count);
-                    return (item, State: await task.RunAsync(cancellationToken).ConfigureAwait(false));
-                }
-                finally
-                {
-                    gate.Release();
-                }
+                using VmPhases phases = groups?.GroupOf(item.Vm) is { } group
+                    ? new GroupedVmPhases(turns[group.Id], gate, arraySnapshots, session.Id, attempt + 1)
+                    : new WholeVmPhases(gate);
+                var task = new VmBackupTask(dbFactory, events, tracker, guestProcessing, metrics, engineOptions.Value.CheckpointWithVss, time, logger, job, session, item.Vm, item.Task.Id, attempt + 1,
+                    new ChainTargets(scope, placement, chainLocks, repositories), hypervisor, job.FromStorageSnapshots ? arraySnapshots : null,
+                    Math.Max(1, Math.Min(job.MaxParallelVms, pending.Count)), pending.Count, phases);
+                return (item, State: await task.RunAsync(cancellationToken).ConfigureAwait(false));
             })).ConfigureAwait(false);
 
             foreach (var (item, outcome) in results)
@@ -153,6 +165,25 @@ public sealed class BackupSessionRunner(
         var succeeded = outcomes.Count - failed - warnings;
         var state = failed > 0 ? SessionState.Failed : warnings > 0 ? SessionState.Warning : SessionState.Succeeded;
         return (state, $"{succeeded} succeeded, {warnings} warning(s), {failed} failed.");
+    }
+
+    /// <summary>The run's groups for backup from storage snapshots, and the VMs read from their VM snapshots (with why).</summary>
+    private static void LogGroups(IOperationLog log, Arrays.ArrayGroupPlan plan)
+    {
+        if (plan.Groups.Count > 0)
+        {
+            log.Info($"Backup from storage snapshots: {plan.Groups.Sum(g => g.Vms.Count)} VM(s) in {plan.Groups.Count} group(s); the VM snapshots of a group are taken together, " +
+                     "then one array snapshot per volume serves the whole group.");
+            for (var i = 0; i < plan.Groups.Count; i++)
+            {
+                log.Info($"Group {i + 1}: {plan.Groups[i].Describe()}.");
+            }
+        }
+
+        foreach (var (vm, reason) in plan.Ungrouped)
+        {
+            log.Info($"{vm.CachedName}: read from its VM snapshot as usual ({reason}).");
+        }
     }
 
     /// <summary>
@@ -312,8 +343,12 @@ internal sealed class VmBackupTask(
     IHypervisorSession hypervisor,
     ISnapshotLifecycleHook? arrayHook = null,
     int maxPeers = 1,
-    int runVms = 0)
+    int runVms = 0,
+    VmPhases? phases = null)
 {
+    /// <summary>When this VM may go on (its group's turn, a slot of the job); none: right away.</summary>
+    private readonly VmPhases _phases = phases ?? new NoPhases();
+
     private readonly IOperationLog _log = events.CreateLog(session.Id, taskId, vm.CachedName);
 
     /// <summary>The disks are read from an array snapshot (backup from storage snapshots); null: from the VM snapshot.</summary>
@@ -347,6 +382,7 @@ internal sealed class VmBackupTask(
 
     private async Task<SessionState> RunCoreAsync(CancellationToken cancellationToken)
     {
+        await _phases.EnterAsync(cancellationToken).ConfigureAwait(false);
         var restorePointId = Guid.CreateVersion7();
         await tracker.UpdateTaskAsync(taskId, t =>
         {
@@ -415,15 +451,20 @@ internal sealed class VmBackupTask(
             IVmBackupSession started;
             try
             {
-                started = await hypervisor.BeginBackupAsync(
-                    new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer, metrics.ForPool(Pool), vm.WithMemory, job.KubernetesPodVolumes,
-                        guest is { Quiescer: null, PlatformQuiesce: true }), _log, ledger, cancellationToken).ConfigureAwait(false);
+                using (await _phases.SnapshotSlotAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    started = await hypervisor.BeginBackupAsync(
+                        new VmBackupRequest(vm.NativeId, job.Id, session.Id, restorePointId, snapshotName, guest?.Quiescer, metrics.ForPool(Pool), vm.WithMemory, job.KubernetesPodVolumes,
+                            guest is { Quiescer: null, PlatformQuiesce: true }), _log, ledger, cancellationToken).ConfigureAwait(false);
+                }
             }
             finally
             {
                 // The snapshot holds what the guest prepared for it (a domain controller's directory copy): it goes from the guest.
                 guest?.Quiescer?.CleanupAfterSnapshot();
             }
+
+            _phases.SnapshotTaken();
 
             await using var backup = started;
             var (consistency, consistencyReason, consistencyWarning) = CheckConsistency(guest, backup.GuestFreeze);
@@ -445,11 +486,16 @@ internal sealed class VmBackupTask(
                     d => d.Key,
                     d => baseline?.Disks.FirstOrDefault(b => b.SourceDiskId == d.SourceDiskId) is { ChangeTokenValue: not null } b ? new ChangeToken(b.ChangeTokenKind!, b.ChangeTokenValue) : null,
                     StringComparer.Ordinal);
+                _phases.AtHook();
                 _arrayLease = await arrayHook.OnVmSnapshotCreatedAsync(
-                    new VmSnapshotContext(session.Id, job.Id, job.ConnectionId, hypervisor, backup, previous, maxPeers, runVms, attempt), _log, cancellationToken).ConfigureAwait(false);
+                    new VmSnapshotContext(session.Id, job.Id, job.ConnectionId, hypervisor, backup, previous, maxPeers, runVms, attempt, _phases.GroupId, _phases.GroupSize),
+                    _log, cancellationToken).ConfigureAwait(false);
             }
 
             await using var arrayLease = _arrayLease;
+
+            // A VM of a group reads in one of the job's slots once its VM snapshot is gone (one from the VM snapshot reads at once).
+            await _phases.ReadAsync(_arrayLease is not null, _log, cancellationToken).ConfigureAwait(false);
             var images = backup.Memory is { } ram ? backup.Disks.Append(ram).ToList() : backup.Disks.ToList();
 
             // Volumes read file by file count with what the previous run found in them, else with their size.
@@ -1441,3 +1487,14 @@ internal sealed class ChainTarget(ScaleOut.PlacementTarget target, IBackupReposi
         await lease.DisposeAsync().ConfigureAwait(false);
     }
 }
+
+/// <summary>A VM that waits for nothing (tests that run one VM task on its own).</summary>
+internal sealed class NoPhases : VmPhases
+{
+    public override Task EnterAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    public override void Dispose()
+    {
+    }
+}
+
