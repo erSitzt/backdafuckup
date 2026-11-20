@@ -216,7 +216,14 @@ public sealed partial class ApiIntegrationTests
         var failed = await WaitForExploreAsync(client, opened.Id);
         Assert.Equal(AdExploreStates.Failed, failed.State);
         Assert.Contains("ended with 1 before it served the backup: Database version mismatch.", failed.Error, StringComparison.Ordinal);
-        Assert.False(Directory.Exists(Path.Combine(sandbox, "C", "ProgramData", "backdafuckup", "ad", opened.Id.ToString("D"))));
+        // The agent reports the failure, then removes its work folder: a moment later it is gone.
+        var workFolder = Path.Combine(sandbox, "C", "ProgramData", "backdafuckup", "ad", opened.Id.ToString("D"));
+        for (var i = 0; i < 100 && Directory.Exists(workFolder); i++)
+        {
+            await Task.Delay(100, Ct);
+        }
+
+        Assert.False(Directory.Exists(workFolder));
         Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/ad/explores/{opened.Id}/search", new AdSearchDto(), Ct)).StatusCode);
         await Ok(client.DeleteAsync($"/api/ad/explores/{opened.Id}", Ct));
         Assert.Equal("Failed", (await WaitForSessionAsync(client, opened.SessionId)).Session.State);

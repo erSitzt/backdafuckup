@@ -146,7 +146,12 @@ else
             </MudTd>
             <MudTd>@(context.Agent is null ? "" : $"{context.Agent.Build} {context.Agent.Version}")</MudTd>
             <MudTd>@context.Agent?.VssProvider</MudTd>
-            <MudTd><span class="mono">@(context.Agent?.IpAddresses ?? context.Agent?.RemoteAddress)</span></MudTd>
+            <MudTd>
+                @foreach (var address in (context.Agent?.IpAddresses ?? context.Agent?.RemoteAddress ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    <div class="mono nowrap">@address</div>
+                }
+            </MudTd>
             <MudTd>@(context.Agent is null ? "" : Fmt.Time(context.Agent.LastContactUtc))</MudTd>
             <MudTd Style="text-align:right">
                 @if (context.Agent is { Online: true })

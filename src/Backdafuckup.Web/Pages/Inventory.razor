@@ -61,14 +61,14 @@ else
                                         @context.Name
                                         @if (Sub(context) is { Length: > 0 } sub)
                                         {
-                                            <span class="cell-sub">@sub</span>
+                                            <span class="cell-sub one-line" title="@sub">@sub</span>
                                         }
                                     </MudTd>
                                     <MudTd Class="nowrap">
                                         <MudIcon Icon="@Icons.Material.Filled.Circle" Style="font-size:.7rem; vertical-align:middle" Color="@PowerColor(context)" />
                                         <span class="ml-1">@Power(context)</span>
                                     </MudTd>
-                                    <MudTd Class="c-1100">@HostOf(context, items)</MudTd>
+                                    <MudTd Class="c-1100 nowrap"><span title="@HostOf(context, items)">@ShortHost(HostOf(context, items))</span></MudTd>
                                     <MudTd Class="c-760 num">@context.Properties.GetValueOrDefault("vcpus")</MudTd>
                                     <MudTd Class="c-760 num">@Fmt.Bytes(Long(context, "memoryBytes"))</MudTd>
                                     <MudTd Class="c-560 num">
@@ -251,6 +251,10 @@ else
         vm.Properties.GetValueOrDefault("host") is { Length: > 0 } host ? host
         : vm.ParentNativeId is { } parent ? items.FirstOrDefault(i => i.Kind == "Host" && i.NativeId == parent)?.Name
         : null;
+
+    /// <summary>"esx01" for "esx01.corp.example"; an IP address stays whole.</summary>
+    private static string? ShortHost(string? host) =>
+        host is null || System.Net.IPAddress.TryParse(host, out _) ? host : host.Split('.')[0];
 
     private static string Disks(InventoryItemDto vm) => Long(vm, "diskCount") is { } count ? count == 1 ? "1 disk" : $"{count} disks" : string.Empty;
 

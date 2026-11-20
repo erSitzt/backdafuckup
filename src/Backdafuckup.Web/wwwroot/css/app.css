@@ -34,6 +34,8 @@ html, body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helveti
 .nowrap { white-space: nowrap; }
 .num { white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
 .cell-sub { display: block; font-size: .75rem; line-height: 1.2; color: var(--mud-palette-text-secondary); }
+/* A second line that stays one line (a long description); the whole text is its title. */
+.one-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 420px; }
 .mud-table-root th { white-space: nowrap; }
 .mud-table-root td, .mud-table-root th { vertical-align: middle; }
 
