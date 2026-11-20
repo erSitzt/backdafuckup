@@ -277,8 +277,14 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
             entries.Insert(0, presentation.Uid);
         }
 
-        foreach (var uid in entries)
+        for (var i = 0; i < entries.Count; i++)
         {
+            var uid = entries[i];
+            if (i > 0 && !await VlunExistsAsync(uid, cancellationToken).ConfigureAwait(false))
+            {
+                continue; // gone with its template
+            }
+
             try
             {
                 await client.ChangeAsync(HttpMethod.Delete, $"api/v3/vluns/{Uri.EscapeDataString(uid)}", null, cancellationToken).ConfigureAwait(false);
@@ -289,10 +295,18 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
             }
             catch (AlletraException ex) when (ex.PermissionDenied)
             {
-                throw Refused(ex, $"removing the presentation of {presentation.VolumeName} to {presentation.HostName}", domain: null);
+                // A B10000 answers 403 "Resource is forbidden" for a port entry its template took along (seen 2026-11-20):
+                // only one that is still there is a refusal.
+                if (await VlunExistsAsync(uid, cancellationToken).ConfigureAwait(false))
+                {
+                    throw Refused(ex, $"removing the presentation of {presentation.VolumeName} to {presentation.HostName}", domain: null);
+                }
             }
         }
     }
+
+    private async Task<bool> VlunExistsAsync(string uid, CancellationToken cancellationToken) =>
+        (await client.ListAsync("api/v3/vluns", cancellationToken).ConfigureAwait(false)).Any(v => v["uid"]?.GetValue<string>() == uid);
 
     public async Task DeleteSnapshotAsync(ArraySnapshot snapshot, CancellationToken cancellationToken)
     {

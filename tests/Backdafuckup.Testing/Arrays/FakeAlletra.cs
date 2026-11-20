@@ -256,7 +256,8 @@ public sealed class FakeAlletra
                 case ("DELETE", "vluns", 4):
                     if (!Vluns.Remove(parts[3], out var removed))
                     {
-                        return (HttpStatusCode.NotFound, null, null);
+                        // As a B10000 answers for a port entry its template took along.
+                        return (HttpStatusCode.Forbidden, new JsonObject { ["message"] = new JsonObject { ["key"] = "FORBIDDEN", ["default"] = "Resource is forbidden." } }, null);
                     }
 
                     // The template takes its port entries along.

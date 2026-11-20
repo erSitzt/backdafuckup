@@ -331,6 +331,8 @@ public sealed class AlletraTests
         Assert.Single(await session.FindTaggedAsync(Ct), a => a.Kind == ArrayArtifactKinds.Presentation);
         await session.UnpresentAsync(presented, Ct);
         Assert.Empty(array.Vluns);
+        // The template took its port entries along: they are not deleted again (a B10000 answers 403 for them, which is no refusal).
+        Assert.Single(array.Requests, r => r.StartsWith("DELETE /api/v3/vluns/", StringComparison.Ordinal));
 
         // Left over without its template (port entries only): one presentation, and its cleanup removes them all.
         await session.PresentAsync(snapshot, "bdfu-proxy-01", ledger, Ct);
