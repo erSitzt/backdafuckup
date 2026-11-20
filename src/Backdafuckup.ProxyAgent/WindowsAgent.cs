@@ -82,16 +82,17 @@ internal static class WindowsAgent
 
     private static WindowsSetup Setup() => new(Commands.RunAsync, Console.WriteLine, AgentPaths.ProgramDirectory, AgentPaths.DataDirectory, ProtectDirectory);
 
-    /// <summary>The program folder of the running uninstall: removed by a command prompt once this process has ended.</summary>
+    /// <summary>
+    /// The program folder of the running uninstall: removed by a command prompt once this process has ended. cmd.exe reads
+    /// its command line itself (no \" escapes), so it is passed as it is, not as an argument list.
+    /// </summary>
     private static void RemoveLater(string directory)
     {
-        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"))
+        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), $"/c ping -n 4 127.0.0.1 >nul & rmdir /s /q \"{directory}\"")
         {
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        start.ArgumentList.Add("/c");
-        start.ArgumentList.Add($"ping -n 4 127.0.0.1 >nul & rmdir /s /q \"{directory}\"");
         using var process = Process.Start(start);
     }
 
