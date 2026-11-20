@@ -261,6 +261,10 @@ public static class FileRestoreEndpoints
         {
             return Results.Problem(ex.Message, statusCode: StatusCodes.Status404NotFound);
         }
+        catch (DirectoryNotFoundException ex)
+        {
+            return Results.Problem(ex.Message, statusCode: StatusCodes.Status404NotFound);
+        }
         catch (GuestFileUnsupportedException ex)
         {
             return Results.Problem($"{ex.Path} cannot be restored: {ex.Reason}.", statusCode: StatusCodes.Status409Conflict);

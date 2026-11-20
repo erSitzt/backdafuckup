@@ -45,6 +45,11 @@ internal sealed class FatGuestFileSystem(DiscFileSystem fs) : IGuestFileSystem, 
 
     public IReadOnlyList<GuestEntry> List(GuestPath directory)
     {
+        if (Stat(directory).Kind != GuestEntryKind.Directory)
+        {
+            throw new IOException($"{directory} is not a folder.");
+        }
+
         var p = string.Join('\\', directory.Components);
         return [.. fs.GetFileSystemEntries(p).Select(full => Stat(directory.Append(full.TrimEnd('\\', '/').Split('\\', '/')[^1])))];
     }
