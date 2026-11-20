@@ -42,7 +42,7 @@ public sealed partial class ApiIntegrationTests
         Assert.False(created.Proxy.Enrolled);
 
         // The one-liner and the same installer as a file: the token in a header, the agent's SHA-256 and the unit in the script.
-        Assert.StartsWith("curl -fsSL ", created.InstallCommand, StringComparison.Ordinal);
+        Assert.StartsWith("curl -sSL ", created.InstallCommand, StringComparison.Ordinal);
         Assert.Contains($"-H 'Authorization: Bearer {created.InstallToken}' https://localhost/api/agent/proxies/{created.Proxy.Id:D}/install.sh | sudo bash", created.InstallCommand, StringComparison.Ordinal);
         var script = created.InstallScript!;
         Assert.Contains($"local proxy_id='{created.Proxy.Id:D}'", script, StringComparison.Ordinal);
@@ -50,6 +50,7 @@ public sealed partial class ApiIntegrationTests
         Assert.Contains($"local program_sha256='{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData([0x7f, (byte)'E', (byte)'L', (byte)'F']))}'", script, StringComparison.Ordinal);
         Assert.Contains("\n[Unit]\nDescription=backdafuckup backup proxy\n", script, StringComparison.Ordinal);
         Assert.Contains("\nBACKDAFUCKUP_UNIT\n", script, StringComparison.Ordinal);
+        Assert.Contains("trap \"rm -rf '$work'\" EXIT", script, StringComparison.Ordinal);
         if (OperatingSystem.IsLinux())
         {
             var file = Path.Combine(_root, "install.sh");
@@ -74,7 +75,22 @@ public sealed partial class ApiIntegrationTests
         }
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.SendAsync(Install("install.sh", null), Ct)).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.SendAsync(Install("install.sh", "bdfupi_wrong"), Ct)).StatusCode);
+        var refused = await anonymous.SendAsync(Install("install.sh", "bdfupi_wrong"), Ct);
+        Assert.Equal(HttpStatusCode.Unauthorized, refused.StatusCode);
+        // The refusal is a script too (the one-liner pipes it into bash): it says why and ends with 1.
+        var refusal = await refused.Content.ReadAsStringAsync(Ct);
+        Assert.Contains("backdafuckup proxy install: Unknown proxy or wrong install token", refusal, StringComparison.Ordinal);
+        if (OperatingSystem.IsLinux())
+        {
+            using var bash = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("bash") { RedirectStandardInput = true, RedirectStandardError = true })!;
+            await bash.StandardInput.WriteAsync(refusal);
+            bash.StandardInput.Close();
+            var said = await bash.StandardError.ReadToEndAsync(Ct);
+            await bash.WaitForExitAsync(Ct);
+            Assert.Equal(1, bash.ExitCode);
+            Assert.StartsWith("backdafuckup proxy install: Unknown proxy or wrong install token", said, StringComparison.Ordinal);
+        }
+
         Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.SendAsync(Install("install/backdafuckup-proxy", null), Ct)).StatusCode);
         var served = await anonymous.SendAsync(Install("install.sh", created.InstallToken), Ct);
         Assert.Equal(HttpStatusCode.OK, served.StatusCode);

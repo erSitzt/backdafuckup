@@ -21,7 +21,15 @@ internal static partial class ProxyInstallScript
 
     /// <summary>The line to paste on the proxy machine.</summary>
     public static string OneLiner(string url, Guid proxyId, string token, IReadOnlyList<string> pins) =>
-        $"curl -fsSL {CurlTls(pins)}-H 'Authorization: Bearer {Safe(token)}' {Safe(url)}{ScriptPath(proxyId)} | sudo bash";
+        $"curl -sSL {CurlTls(pins)}-H 'Authorization: Bearer {Safe(token)}' {Safe(url)}{ScriptPath(proxyId)} | sudo bash";
+
+    /// <summary>
+    /// The answer to a refused request for the installer (a spent, wrong or expired token; no package): a script that says
+    /// why and ends with exit 1. The one-liner pipes whatever comes into bash, so the reason reaches the admin (curl -f
+    /// would print only "error: 401", and bash would end with 0).
+    /// </summary>
+    public static string Refusal(string message) =>
+        $"#!/usr/bin/env bash\necho 'backdafuckup proxy install: {message.Replace("'", "'\\''", StringComparison.Ordinal).Replace('\n', ' ').Replace('\r', ' ')}' >&2\nexit 1\n";
 
     /// <summary>The script, for <see cref="OneLiner"/> and as a file.</summary>
     public static string Build(
@@ -64,7 +72,8 @@ internal static partial class ProxyInstallScript
 
                 local work
                 work=$(mktemp -d)
-                trap 'rm -rf "$work"' EXIT
+                # The path goes into the trap now: it runs after main has returned, when "work" is gone (set -u).
+                trap "rm -rf '$work'" EXIT
                 echo "Downloading the agent from $server ..."
                 curl -fsS "${curl_tls[@]}" -H "Authorization: Bearer $token" -o "$work/backdafuckup-proxy" "${server}api/agent/proxies/${proxy_id}/install/backdafuckup-proxy" </dev/null \
                     || fail "could not download the agent from $server (port reachable from here? install token still valid?)."
@@ -83,7 +92,7 @@ internal static partial class ProxyInstallScript
                 chmod 644 /etc/systemd/system/backdafuckup-proxy.service
 
                 echo "Enrolling proxy $proxy_id ..."
-                /opt/backdafuckup-proxy/backdafuckup-proxy enroll --server "$server" --proxy "$proxy_id" --token "$token" --pins "$pins" </dev/null
+                /opt/backdafuckup-proxy/backdafuckup-proxy enroll --server "$server" --proxy "$proxy_id" --token "$token" --pins "$pins" </dev/null >/dev/null
                 systemctl daemon-reload
                 systemctl enable --now backdafuckup-proxy </dev/null
                 echo "Installed and started. The proxy shows as online in the console within seconds; its log: journalctl -u backdafuckup-proxy"

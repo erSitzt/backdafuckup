@@ -54,8 +54,18 @@ public static class ProxyEndpoints
         }).AllowAnonymous().ExcludeFromDescription();
 
         // The installer (curl … | sudo bash) and the program it downloads, for the install token in the Authorization header.
-        app.MapGet("/api/agent/proxies/{id:guid}/" + ProxyInstallScript.ScriptName, (Guid id, ProxyAgents agents, HttpContext http, CancellationToken ct) => Run(async () =>
-            Results.Text(await agents.InstallScriptAsync(id, http.Request.Headers.Authorization, ct), "text/x-shellscript; charset=utf-8"))).AllowAnonymous().ExcludeFromDescription();
+        app.MapGet("/api/agent/proxies/{id:guid}/" + ProxyInstallScript.ScriptName, async (Guid id, ProxyAgents agents, HttpContext http, CancellationToken ct) =>
+        {
+            try
+            {
+                return Results.Text(await agents.InstallScriptAsync(id, http.Request.Headers.Authorization, ct), "text/x-shellscript; charset=utf-8");
+            }
+            catch (ProxyRequestException ex)
+            {
+                // A script that says why: the one-liner pipes the answer into bash, whatever its status.
+                return Results.Text(ProxyInstallScript.Refusal(ex.Message), "text/x-shellscript; charset=utf-8", statusCode: ex.StatusCode);
+            }
+        }).AllowAnonymous().ExcludeFromDescription();
         app.MapGet("/api/agent/proxies/{id:guid}/install/" + Proxy.ProxySelfUpdate.ProgramName, (Guid id, ProxyAgents agents, ProxyPackage package, HttpContext http, CancellationToken ct) => Run(async () =>
         {
             await agents.CheckInstallTokenAsync(id, http.Request.Headers.Authorization, ct);
