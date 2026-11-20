@@ -520,13 +520,14 @@ public sealed class ArraySnapshotService(
                 "switched sides since the mapping was refreshed. Nothing was snapshotted; refresh the mappings and turn the volume on where it is primary.", "replication_secondary");
         }
 
-        (state.Proxy, state.HostName) = await ChooseProxyAsync(state.Array, system, ct).ConfigureAwait(false);
-        MarkBusy(state.Proxy.Id);
         var portals = (await state.Array.GetIscsiPortalsAsync(ct).ConfigureAwait(false)).Where(p => p.TargetIqn is { Length: > 0 }).ToList();
         if (portals.Count == 0)
         {
             throw new ArrayPathException($"Storage system {system.Name} ({system.Address}) reports no iSCSI port with a target name.", "array_error");
         }
+
+        (state.Proxy, state.HostName) = await ChooseProxyAsync(state.Array, system, [.. portals.Select(p => p.Address).Distinct(StringComparer.Ordinal)], log, ct).ConfigureAwait(false);
+        MarkBusy(state.Proxy.Id);
 
         // Not sooner than the gap after the last VM snapshot: measured on VMFS, a disk's block map is in place on the LUN within
         // 0.6-2 s after the host closed it for writing (the VM snapshot), not necessarily at once.
@@ -618,7 +619,12 @@ public sealed class ArraySnapshotService(
         string.Equals(system.Name, system.Address, StringComparison.OrdinalIgnoreCase) ? system.Name : $"{system.Name} ({system.Address})";
 
     /// <summary>A connected proxy with SAN access whose iSCSI initiator a host object of the array lists.</summary>
-    private async Task<(ProxyInfo Proxy, string HostName)> ChooseProxyAsync(IStorageArraySession array, StorageSystemEntity system, CancellationToken ct)
+    /// <remarks>
+    /// Of those, one that reaches the array's iSCSI addresses (each proxy tries a TCP connection, seconds, no login); one
+    /// that cannot say (an older agent) comes next; one that reaches none is named in the log and not used.
+    /// </remarks>
+    private async Task<(ProxyInfo Proxy, string HostName)> ChooseProxyAsync(
+        IStorageArraySession array, StorageSystemEntity system, IReadOnlyList<string> portals, IOperationLog log, CancellationToken ct)
     {
         var connected = proxies.Connected();
         var san = connected.Where(p => p.Capabilities.Contains(ProxyAgentProtocol.CapabilitySan, StringComparer.Ordinal) && p.InitiatorName is { Length: > 0 }).ToList();
@@ -629,17 +635,46 @@ public sealed class ArraySnapshotService(
         }
 
         var hosts = await array.ListHostsAsync(ct).ConfigureAwait(false);
-        foreach (var proxy in san.OrderBy(p => Busy(p.Id)))
+        var listed = san.OrderBy(p => Busy(p.Id))
+            .Select(p => (Proxy: p, Host: hosts.FirstOrDefault(h => h.IscsiNames.Contains(p.InitiatorName!, StringComparer.OrdinalIgnoreCase))))
+            .Where(c => c.Host is not null).ToList();
+        if (listed.Count == 0)
         {
-            if (hosts.FirstOrDefault(h => h.IscsiNames.Contains(proxy.InitiatorName!, StringComparer.OrdinalIgnoreCase)) is { } host)
+            throw new ArrayPathException(
+                $"No host object on storage system {system.Name} ({system.Address}) lists the iSCSI initiator of a proxy with SAN access: " +
+                $"{string.Join(", ", san.Select(p => $"{p.Name} {p.InitiatorName}"))}.", "no_proxy");
+        }
+
+        var unknown = new List<(ProxyInfo Proxy, ArrayHost Host)>();
+        var unreachable = new List<string>();
+        foreach (var (proxy, host) in listed)
+        {
+            var reach = await proxies.ProbeIscsiAsync(proxy.Id, portals, ct).ConfigureAwait(false);
+            if (reach is null)
             {
-                return (proxy, host.Name);
+                unknown.Add((proxy, host!));
+            }
+            else if (reach.Reached.Count > 0)
+            {
+                if (unreachable.Count > 0)
+                {
+                    log.Info($"Proxy {proxy.Name} reads from {Where(system)}; not used: {string.Join("; ", unreachable)}.");
+                }
+
+                return (proxy, host!.Name);
+            }
+            else
+            {
+                unreachable.Add($"{proxy.Name} reaches none of its iSCSI addresses ({string.Join(", ", reach.Unreached)}; its own addresses: {string.Join(", ", reach.Addresses)})");
             }
         }
 
-        throw new ArrayPathException(
-            $"No host object on storage system {system.Name} ({system.Address}) lists the iSCSI initiator of a proxy with SAN access: " +
-            $"{string.Join(", ", san.Select(p => $"{p.Name} {p.InitiatorName}"))}.", "no_proxy");
+        if (unknown.Count > 0)
+        {
+            return (unknown[0].Proxy, unknown[0].Host.Name);
+        }
+
+        throw new ArrayPathException($"No proxy reaches the iSCSI addresses of {Where(system)}: {string.Join("; ", unreachable)}.", "no_proxy");
     }
 
     /// <summary>Batches currently reading through a proxy (the least busy proxy is chosen).</summary>

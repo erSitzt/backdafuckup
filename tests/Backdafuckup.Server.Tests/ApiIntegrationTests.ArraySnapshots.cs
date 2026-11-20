@@ -114,6 +114,31 @@ public sealed partial class ApiIntegrationTests
     }
 
     [Fact]
+    public async Task A_proxy_that_reaches_no_iscsi_address_is_not_chosen_and_says_why()
+    {
+        var (service, array, pool, srUuid, connectionId, _) = await ArraySetupAsync();
+        pool.Reach = new ProxyIscsiReach([], ["10.26.101.10:3260 (no TCP connection within 3 s)"], ["192.0.2.91/24 (ens192)"]);
+        var (leaf, baseVdi, image, _) = LvhdImage(srUuid);
+        var backup = new ArrayFakeSession(srUuid, leaf, baseVdi, image);
+        var log = new RecordingLog();
+
+        Assert.Null(await service.OnVmSnapshotCreatedAsync(Context(connectionId, backup), log, Ct));
+
+        Assert.Contains(log.Entries, e => e.Message.Contains(
+            "No proxy reaches the iSCSI addresses of Alletra (array01.corp.example): proxy01 reaches none of its iSCSI addresses " +
+            "(10.26.101.10:3260 (no TCP connection within 3 s); its own addresses: 192.0.2.91/24 (ens192)).", StringComparison.Ordinal));
+        // Nothing was presented: the proxy was refused before.
+        Assert.Empty(pool.Logins);
+        await WaitUntilAsync(() => array.Vluns.Count == 0 && !array.Volumes.Values.Any(v => v["copyOfID"] is not null));
+
+        // A proxy that reaches them is used.
+        pool.Reach = new ProxyIscsiReach(["10.26.101.10:3260"], [], ["192.0.2.91/24 (ens192)"]);
+        pool.Luns[SrWwn.ToLowerInvariant()] = image;
+        await using var lease = await service.OnVmSnapshotCreatedAsync(Context(connectionId, new ArrayFakeSession(srUuid, leaf, baseVdi, image)), log, Ct);
+        Assert.NotNull(lease);
+    }
+
+    [Fact]
     public async Task One_target_the_proxy_reaches_is_enough_and_the_others_are_named()
     {
         var (service, array, pool, srUuid, connectionId, _) = await ArraySetupAsync();
