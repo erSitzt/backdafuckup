@@ -302,6 +302,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.StorageNativeId).HasMaxLength(128);
             e.Property(x => x.StorageName).HasMaxLength(200);
             e.Property(x => x.Layout).HasConversion<string>().HasMaxLength(16);
+            e.Property(x => x.ReplicationRole).HasMaxLength(16);
             e.HasIndex(x => new { x.StorageSystemId, x.VolumeUid }).IsUnique();
             e.HasIndex(x => new { x.ConnectionId, x.StorageNativeId });
             e.HasOne<StorageSystemEntity>().WithMany().HasForeignKey(x => x.StorageSystemId).OnDelete(DeleteBehavior.Cascade);

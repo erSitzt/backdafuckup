@@ -21,10 +21,27 @@ public sealed record ArrayInfo(
 /// <summary>A volume of the array (a LUN of a datastore or SR, or a snapshot).</summary>
 /// <param name="Id">The array's numeric id (snapshots name their base by it).</param>
 /// <param name="CopyOfId">For a snapshot: the id of the volume it is a copy of.</param>
+/// <param name="ReplicationRole">
+/// For a volume replicated synchronously to another array (HPE Peer Persistence): <see cref="ArrayReplicationRoles"/>
+/// on this array; null if it is not replicated. Both arrays show such a volume with the same WWN.
+/// </param>
 public sealed record ArrayVolume(
-    string Uid, long Id, string Name, string Wwn, long SizeBytes, string Type, long? CopyOfId, string? Comment, bool ReadOnly, string? Domain)
+    string Uid, long Id, string Name, string Wwn, long SizeBytes, string Type, long? CopyOfId, string? Comment, bool ReadOnly, string? Domain,
+    string? ReplicationRole = null)
 {
     public bool IsSnapshot => Type == ArrayVolumeTypes.Snapshot;
+}
+
+/// <summary>
+/// The side of a replicated volume. A snapshot is taken only on the primary side: the secondary has the hosts' writes
+/// only while its group runs in sync, and a snapshot of a stopped group would be an older disk than its change tracking
+/// says.
+/// </summary>
+public static class ArrayReplicationRoles
+{
+    public const string Primary = "primary";
+
+    public const string Secondary = "secondary";
 }
 
 public static class ArrayVolumeTypes

@@ -335,10 +335,21 @@ public sealed class ArraySnapshotService(
         foreach (var storageId in storageIds)
         {
             var name = backup.Disks.First(d => disks[d.Key].StorageId == storageId).StorageName;
-            var mapping = mappings.FirstOrDefault(m => m.StorageNativeId == storageId);
-            if (mapping is null)
+            var candidates = mappings.Where(m => m.StorageNativeId == storageId).ToList();
+            if (candidates.Count == 0)
             {
                 return Plan.Refused($"storage {name} lies on no volume of a storage system (Storage systems → refresh the mapping)");
+            }
+
+            // A volume replicated to another array (Peer Persistence) lies on both with one WWN: only the side where it is
+            // primary may be snapshotted (the secondary is current only while its group runs in sync).
+            var mapping = candidates.FirstOrDefault(m => m.ReplicationRole == ArrayReplicationRoles.Primary)
+                ?? candidates.FirstOrDefault(m => m.ReplicationRole != ArrayReplicationRoles.Secondary);
+            if (mapping is null)
+            {
+                var secondary = candidates[0];
+                return Plan.Refused($"volume {secondary.VolumeName} (storage {name}) is the secondary copy of a replicated volume on the storage system(s) added here; " +
+                                    "snapshots are taken only where it is primary: add the array that holds the primary, refresh its mapping and turn the volume on there");
             }
 
             if (mapping.Refusal is { } refusal)
@@ -493,6 +504,14 @@ public sealed class ArraySnapshotService(
         {
             throw new ArrayPathException(
                 $"Volume(s) {string.Join(", ", missing.Select(m => $"{m.VolumeName} (WWN {m.Wwn})"))} not found on storage system {system.Name} ({system.Address}).", "not_found");
+        }
+
+        // The mapping said primary; replication may have switched sides since (a failover). Then nothing is taken here.
+        if (volumes.FirstOrDefault(v => v.ReplicationRole == ArrayReplicationRoles.Secondary && wanted.Any(w => Wwns.Normalize(v.Wwn) == w.Wwn)) is { } switched)
+        {
+            throw new ArrayPathException(
+                $"Volume {switched.Name} (WWN {Wwns.Normalize(switched.Wwn)}) is now the secondary copy on storage system {system.Name} ({system.Address}): its replication " +
+                "switched sides since the mapping was refreshed. Nothing was snapshotted; refresh the mappings and turn the volume on where it is primary.", "replication_secondary");
         }
 
         (state.Proxy, state.HostName) = await ChooseProxyAsync(state.Array, system, ct).ConfigureAwait(false);

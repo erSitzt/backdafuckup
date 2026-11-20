@@ -45,9 +45,10 @@ public sealed record CreateStorageSystemDto
 }
 
 /// <summary>A volume of the array with the datastore or SR of a connection on it.</summary>
+/// <param name="ReplicationRole">"primary" or "secondary" for a volume replicated to another array (Peer Persistence), else null.</param>
 public sealed record StorageVolumeDto(
     Guid Id, string VolumeUid, string VolumeName, string Wwn, long SizeBytes, Guid? ConnectionId, string? ConnectionName, string? StorageNativeId, string? StorageName,
-    string Layout, bool Enabled, string? Refusal, DateTimeOffset UpdatedUtc);
+    string Layout, bool Enabled, string? Refusal, DateTimeOffset UpdatedUtc, string? ReplicationRole = null);
 
 public sealed record SetStorageVolumeDto(bool Enabled);
 

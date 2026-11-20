@@ -131,7 +131,8 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
                     new XenOptions { XapiRetryAttempts = 1, XapiRetryDelay = TimeSpan.FromMilliseconds(10) },
                     (_, host) => new XapiTransport(new Uri($"https://{host}/"), _pool.CreateHandler())));
                 services.RemoveAll<Backdafuckup.Core.Arrays.IStorageArrayProvider>();
-                services.AddSingleton<Backdafuckup.Core.Arrays.IStorageArrayProvider>(new Backdafuckup.Arrays.Alletra.AlletraProvider(_ => Alletra.CreateHandler(), TimeSpan.FromSeconds(30)));
+                services.AddSingleton<Backdafuckup.Core.Arrays.IStorageArrayProvider>(new Backdafuckup.Arrays.Alletra.AlletraProvider(
+                    settings => settings.Address == "array02.corp.example" ? Alletra2.CreateHandler() : Alletra.CreateHandler(), TimeSpan.FromSeconds(30)));
                 services.AddSingleton(sp => new Backdafuckup.Server.Arrays.ArraySnapshotService(
                     sp.GetRequiredService<IDbContextFactory<Backdafuckup.Server.Data.AppDbContext>>(), sp.GetRequiredService<Backdafuckup.Server.Arrays.StorageSystems>(),
                     sp.GetRequiredService<Backdafuckup.Server.Arrays.ArrayReaderStates>(), SanProxies,
@@ -3116,6 +3117,15 @@ public sealed partial class ApiIntegrationTests : IAsyncLifetime
         client.DefaultRequestHeaders.Add(ApiHeaders.Csrf, "1");
         var token = _factory.Services.GetRequiredService<SetupTokenService>().EnsureToken();
         await Ok(client.PostAsJsonAsync("/api/setup", new SetupRequestDto(token, "admin", "correct horse battery"), Ct));
+        await Ok(client.PostAsJsonAsync("/api/auth/login", new LoginRequestDto("admin", "correct horse battery"), Ct));
+        return client;
+    }
+
+    /// <summary>Another client of the admin, after <see cref="SignedInClientAsync"/> has set the server up.</summary>
+    private async Task<HttpClient> SignedInAgainAsync()
+    {
+        var client = _factory!.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true, BaseAddress = new Uri("https://localhost") });
+        client.DefaultRequestHeaders.Add(ApiHeaders.Csrf, "1");
         await Ok(client.PostAsJsonAsync("/api/auth/login", new LoginRequestDto("admin", "correct horse battery"), Ct));
         return client;
     }

@@ -181,7 +181,7 @@ public sealed class StorageSystems(
         [
             .. (await db.StorageVolumes.AsNoTracking().Where(v => v.StorageSystemId == id).OrderBy(v => v.VolumeName).ToListAsync(cancellationToken).ConfigureAwait(false))
                 .Select(v => new StorageVolumeDto(v.Id, v.VolumeUid, v.VolumeName, v.Wwn, v.SizeBytes, v.ConnectionId, v.ConnectionId is { } c ? names.GetValueOrDefault(c) : null,
-                    v.StorageNativeId, v.StorageName, v.Layout.ToString(), v.Enabled, v.Refusal, v.UpdatedUtc)),
+                    v.StorageNativeId, v.StorageName, v.Layout.ToString(), v.Enabled, v.Refusal, v.UpdatedUtc, v.ReplicationRole)),
         ];
     }
 
@@ -310,6 +310,7 @@ public sealed class StorageSystems(
                 row.Layout = backing.Layout;
                 row.Refusal = backing.Refusal ?? (backing.Layout == StorageLayout.Other ? $"{storageName} has no layout that can be read from array snapshots." : null);
                 row.Enabled &= row.Refusal is null;
+                row.ReplicationRole = volume.ReplicationRole;
                 row.UpdatedUtc = now;
             }
 

@@ -53,8 +53,9 @@ public sealed partial class ApiIntegrationTests
             // Snapshot read-only, presented to the proxy's host only, logged in at the array's portal.
             var snapshot = Assert.Single(array.Volumes.Values, v => v["copyOfID"] is not null);
             Assert.StartsWith("bdfu-", snapshot["name"]!.GetValue<string>(), StringComparison.Ordinal);
-            var vlun = Assert.Single(array.Vluns.Values);
-            Assert.Equal("proxy01", vlun["hostName"]!.GetValue<string>());
+            // One presentation: a template and an entry per iSCSI port of the array, all to proxy01.
+            Assert.Single(array.Vluns.Values, v => v["portPos"] is null);
+            Assert.All(array.Vluns.Values, v => Assert.Equal("proxy01", v["hostName"]!.GetValue<string>()));
             Assert.Equal([("10.26.101.10", "iqn.2000-05.com.3pardata:20210002ac000001")], pool.Logins);
             Assert.Contains(log.Entries, e => e.Message.Contains("are read from array snapshot bdfu-", StringComparison.Ordinal));
         }
@@ -117,6 +118,55 @@ public sealed partial class ApiIntegrationTests
 
         Assert.Null(await service.OnVmSnapshotCreatedAsync(Context(connectionId, new ArrayFakeSession(srUuid, leaf, baseVdi, image)), log, Ct));
         Assert.Contains(log.Entries, e => e.Message.Contains("volume xcp-sr1 (storage LUN SR) is not turned on for storage snapshots", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_replicated_volume_is_snapshotted_only_where_it_is_primary()
+    {
+        var (service, array, _, srUuid, connectionId, systemId) = await ArraySetupAsync();
+        var client = await SignedInAgainAsync();
+        var (leaf, baseVdi, image, _) = LvhdImage(srUuid);
+        var volume = array.Volumes.Values.Single(v => v["name"]!.GetValue<string>() == "xcp-sr1");
+        bool Snapshotted(Testing.Arrays.FakeAlletra a) => a.Requests.Any(r => r.StartsWith("POST /api/v3/volumes/", StringComparison.Ordinal));
+
+        // Only the secondary side is known here: refused, nothing taken.
+        volume["rcopyStatus"] = "secondary";
+        var mapped = await Read<List<StorageVolumeDto>>(client.PostAsync($"/api/storage-systems/{systemId}/volumes/refresh", null, Ct));
+        Assert.Equal("secondary", Assert.Single(mapped).ReplicationRole);
+        var log = new RecordingLog();
+        Assert.Null(await service.OnVmSnapshotCreatedAsync(Context(connectionId, new ArrayFakeSession(srUuid, leaf, baseVdi, image)), log, Ct));
+        Assert.Contains(log.Entries, e => e.Message.Contains("volume xcp-sr1 (storage LUN SR) is the secondary copy of a replicated volume", StringComparison.Ordinal));
+        Assert.False(Snapshotted(array));
+
+        // Mapped as primary, but the group switched sides since (a failover): nothing taken, the reason logged.
+        volume["rcopyStatus"] = "primary";
+        await client.PostAsync($"/api/storage-systems/{systemId}/volumes/refresh", null, Ct);
+        volume["rcopyStatus"] = "secondary";
+        log = new RecordingLog();
+        Assert.Null(await service.OnVmSnapshotCreatedAsync(Context(connectionId, new ArrayFakeSession(srUuid, leaf, baseVdi, image)), log, Ct));
+        Assert.Contains(log.Entries, e => e.Message.Contains("Volume xcp-sr1 (WWN", StringComparison.Ordinal)
+                                          && e.Message.Contains("is now the secondary copy on storage system Alletra (array01.corp.example)", StringComparison.Ordinal));
+        Assert.False(Snapshotted(array));
+
+        // Both arrays of the pair added, the same WWN on each: only the one where it is primary is snapshotted.
+        var second = Alletra2;
+        second.AddVolume("xcp-sr1", SrWwn, 64)["rcopyStatus"] = "primary";
+        second.AddHost("proxy01", ProxyIqn);
+        second.AddIscsiPort("0:2:1", "10.26.102.10", "iqn.2000-05.com.3pardata:20210002ac000002");
+        var other = await Read<StorageSystemDto>(client.PostAsJsonAsync("/api/storage-systems", new CreateStorageSystemDto
+        {
+            Name = "Alletra 2", Address = "array02.corp.example", UserName = second.User, Password = second.Password,
+        }, Ct));
+        var otherVolume = Assert.Single((await client.GetFromJsonAsync<List<StorageVolumeDto>>($"/api/storage-systems/{other.Id}/volumes", Ct))!);
+        Assert.Equal(("xcp-sr1", "LUN SR", "primary"), (otherVolume.VolumeName, otherVolume.StorageName, otherVolume.ReplicationRole));
+        await client.PutAsJsonAsync($"/api/storage-systems/{other.Id}/volumes/{otherVolume.Id}", new SetStorageVolumeDto(true), Ct);
+        await client.PutAsJsonAsync($"/api/storage-systems/{other.Id}/options", other.Options with { ExperimentalReaders = true, BatchWindowSeconds = 0 }, Ct);
+        await client.PostAsync($"/api/storage-systems/{systemId}/volumes/refresh", null, Ct);
+
+        await service.OnVmSnapshotCreatedAsync(Context(connectionId, new ArrayFakeSession(srUuid, leaf, baseVdi, image)), new RecordingLog(), Ct);
+        Assert.True(Snapshotted(second));
+        Assert.False(Snapshotted(array));
+        await WaitUntilAsync(() => !second.Volumes.Values.Any(v => v["copyOfID"] is not null) && second.Vluns.Count == 0);
     }
 
     /// <summary>Keeps every line written to it.</summary>

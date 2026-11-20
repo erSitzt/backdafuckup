@@ -144,7 +144,17 @@ else
                             <MudSwitch T="bool" Value="@context.Enabled" ValueChanged="@(on => SetVolumeAsync(system, context, on))" Color="Color.Primary"
                                        Disabled="@(_busy || (context.Refusal is not null && !context.Enabled) || context.StorageName is null)" />
                         </MudTd>
-                        <MudTd>@context.VolumeName</MudTd>
+                        <MudTd>
+                            @context.VolumeName
+                            @if (context.ReplicationRole is { } role)
+                            {
+                                <MudTooltip Text="@(role == "primary"
+                                    ? "Replicated to another array (Peer Persistence); this array holds the primary side: snapshots are taken here."
+                                    : "Replicated from another array (Peer Persistence); this is the secondary side: snapshots are taken only on the array that holds the primary.")">
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Text" Color="@(role == "primary" ? Color.Info : Color.Default)">@role</MudChip>
+                                </MudTooltip>
+                            }
+                        </MudTd>
                         <MudTd>@Fmt.Bytes(context.SizeBytes)</MudTd>
                         <MudTd>
                             @if (context.StorageName is { } storage)

@@ -110,5 +110,11 @@ public sealed class StorageVolumeMapping
     /// <summary>Why the storage on this volume cannot be read from array snapshots (e.g. "spans 2 LUNs").</summary>
     public string? Refusal { get; set; }
 
+    /// <summary>
+    /// <see cref="ArrayReplicationRoles"/> of the volume on this storage system as of the last refresh (null: not
+    /// replicated). With both arrays of a pair added, a storage has a row on each; only the primary one is used.
+    /// </summary>
+    public string? ReplicationRole { get; set; }
+
     public DateTimeOffset UpdatedUtc { get; set; }
 }

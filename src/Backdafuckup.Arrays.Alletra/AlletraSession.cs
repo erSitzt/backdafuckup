@@ -170,16 +170,32 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
             throw new InvalidOperationException($"VLUN {presentation.Uid} presents {presentation.VolumeName}, which is not one of our snapshots; it stays.");
         }
 
-        try
+        // One presentation shows as a template (no port) and an active entry per array port (seen on a B10000): all of
+        // them go, the template first (which usually takes the others along), then whatever is left.
+        var entries = (await client.ListAsync("api/v3/vluns", cancellationToken).ConfigureAwait(false))
+            .Where(v => v["volumeName"]?.GetValue<string>() == presentation.VolumeName
+                        && (presentation.HostName.Length == 0 || v["hostName"]?.GetValue<string>() == presentation.HostName))
+            .OrderBy(v => IsTemplate(v) ? 0 : 1)
+            .Select(v => v["uid"]?.GetValue<string>()).OfType<string>().ToList();
+        if (!entries.Contains(presentation.Uid, StringComparer.Ordinal) && presentation.Uid.Length > 0)
         {
-            await client.ChangeAsync(HttpMethod.Delete, $"api/v3/vluns/{Uri.EscapeDataString(presentation.Uid)}", null, cancellationToken).ConfigureAwait(false);
+            entries.Insert(0, presentation.Uid);
         }
-        catch (AlletraException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+
+        foreach (var uid in entries)
         {
-        }
-        catch (AlletraException ex) when (ex.PermissionDenied)
-        {
-            throw Refused(ex, $"removing the presentation of {presentation.VolumeName} to {presentation.HostName}", domain: null);
+            try
+            {
+                await client.ChangeAsync(HttpMethod.Delete, $"api/v3/vluns/{Uri.EscapeDataString(uid)}", null, cancellationToken).ConfigureAwait(false);
+            }
+            catch (AlletraException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+            {
+                // Gone with its template.
+            }
+            catch (AlletraException ex) when (ex.PermissionDenied)
+            {
+                throw Refused(ex, $"removing the presentation of {presentation.VolumeName} to {presentation.HostName}", domain: null);
+            }
         }
     }
 
@@ -193,7 +209,7 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
         }
 
         var presented = (await client.ListAsync("api/v3/vluns", cancellationToken).ConfigureAwait(false))
-            .Where(v => v["volumeName"]?.GetValue<string>() == volume.Name).Select(v => v["hostName"]?.GetValue<string>()).ToList();
+            .Where(v => v["volumeName"]?.GetValue<string>() == volume.Name).Select(v => v["hostName"]?.GetValue<string>()).Distinct().ToList();
         if (presented.Count > 0)
         {
             throw new InvalidOperationException($"Snapshot {volume.Name} on {client.Endpoint} is still presented to {string.Join(", ", presented)}; it is deleted once that is removed.");
@@ -216,7 +232,11 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
         var result = ours.Select(v => new ProviderArtifact(Guid.Empty, ArrayArtifactKinds.Snapshot, v.Uid, v.Name, null, null, ArtifactState.Active,
             JsonSerializer.Serialize(new { name = v.Name, sourceId = v.CopyOfId, created = Created(v.Comment) }))).ToList();
         var created = ours.ToDictionary(v => v.Name, v => Created(v.Comment), StringComparer.Ordinal);
-        foreach (var vlun in await client.ListAsync("api/v3/vluns", cancellationToken).ConfigureAwait(false))
+        // One presentation per snapshot and host, by its template where there is one (the port entries go with it).
+        var presentations = (await client.ListAsync("api/v3/vluns", cancellationToken).ConfigureAwait(false))
+            .GroupBy(v => (Volume: v["volumeName"]?.GetValue<string>(), Host: v["hostName"]?.GetValue<string>()))
+            .Select(g => g.OrderBy(v => IsTemplate(v) ? 0 : 1).First());
+        foreach (var vlun in presentations)
         {
             if (vlun["volumeName"]?.GetValue<string>() is { } name && created.TryGetValue(name, out var when))
             {
@@ -315,6 +335,9 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
             $"(or a domain set with it), or map the proxy to a host object in {volumeDomain}. Nothing was presented.");
     }
 
+    /// <summary>A presentation's template: the entry without an array port (the active entries per port hang off it).</summary>
+    private static bool IsTemplate(JsonObject vlun) => vlun["portPos"] is null || vlun["portPos"] is JsonValue;
+
     /// <summary>A domain name, or null for none ("-" and empty mean none).</summary>
     private static string? Domain(string? domain) => domain is { Length: > 0 } and not "-" ? domain : null;
 
@@ -375,5 +398,12 @@ internal sealed class AlletraSession(AlletraClient client, ArrayConnectionSettin
         AlletraClient.Long(v["copyOfID"]),
         v["comment"]?.GetValue<string>(),
         AlletraClient.Bool(v["readOnly"]) ?? false,
-        v["domain"]?.GetValue<string>());
+        v["domain"]?.GetValue<string>(),
+        // rcopyStatus: "primary", "secondary" or "none" (seen on a B10000, OS 10.5).
+        AlletraClient.Text(v["rcopyStatus"])?.ToLowerInvariant() switch
+        {
+            "primary" => ArrayReplicationRoles.Primary,
+            "secondary" => ArrayReplicationRoles.Secondary,
+            _ => null,
+        });
 }

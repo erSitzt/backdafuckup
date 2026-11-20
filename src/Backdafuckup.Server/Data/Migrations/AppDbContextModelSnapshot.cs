@@ -2473,6 +2473,11 @@ namespace Backdafuckup.Server.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("refusal");
 
+                    b.Property<string>("ReplicationRole")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("replication_role");
+
                     b.Property<long>("SizeBytes")
                         .HasColumnType("bigint")
                         .HasColumnName("size_bytes");

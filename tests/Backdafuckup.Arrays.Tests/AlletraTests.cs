@@ -313,6 +313,48 @@ public sealed class AlletraTests
         Assert.Equal("Array array01.corp.example: there is no host object bdfu-proxy-99 (create it with the proxy's initiator name, or map the proxy to an existing one).", missing.Message);
     }
 
+    [Fact]
+    public async Task A_presentation_is_a_template_and_an_entry_per_port_and_goes_and_counts_as_one()
+    {
+        var array = new FakeAlletra();
+        var ds = Volume(array.AddVolume("vdi-ds1", "60002AC0000000000000002200019C45", 1024));
+        array.AddHost("bdfu-proxy-01", "iqn.2004-10.com.ubuntu:01:proxy01");
+        array.AddIscsiPort("0:4:1", "192.0.2.15", "iqn.2023-24.com.hpe:array01");
+        array.AddIscsiPort("1:4:1", "192.0.2.16", "iqn.2023-24.com.hpe:array01");
+        var (provider, settings) = Connect(array);
+        await using var session = await provider.OpenAsync(settings, Ct);
+        var ledger = new InMemoryArtifactLedger();
+        var snapshot = Assert.Single(await session.CreateSnapshotsAsync(new ArraySnapshotRequest([ds], "bdfu-e0000001", string.Empty, true, TimeSpan.FromHours(1)), ledger, NullOperationLog.Instance, Ct));
+
+        var presented = await session.PresentAsync(snapshot, "bdfu-proxy-01", ledger, Ct);
+        Assert.Equal(3, array.Vluns.Count);
+        Assert.Single(await session.FindTaggedAsync(Ct), a => a.Kind == ArrayArtifactKinds.Presentation);
+        await session.UnpresentAsync(presented, Ct);
+        Assert.Empty(array.Vluns);
+
+        // Left over without its template (port entries only): one presentation, and its cleanup removes them all.
+        await session.PresentAsync(snapshot, "bdfu-proxy-01", ledger, Ct);
+        array.Vluns.Remove(array.Vluns.Single(v => v.Value["portPos"] is null).Key);
+        var left = Assert.Single(await session.FindTaggedAsync(Ct), a => a.Kind == ArrayArtifactKinds.Presentation);
+        await session.CleanupArtifactAsync(left, NullOperationLog.Instance, Ct);
+        Assert.Empty(array.Vluns);
+        await session.DeleteSnapshotAsync(snapshot, Ct);
+        Assert.False(array.Volumes.ContainsKey(snapshot.Uid));
+    }
+
+    [Theory]
+    [InlineData("primary", ArrayReplicationRoles.Primary)]
+    [InlineData("secondary", ArrayReplicationRoles.Secondary)]
+    [InlineData("none", null)]
+    public async Task The_replication_role_comes_from_the_volumes_rcopy_status(string rcopyStatus, string? role)
+    {
+        var array = new FakeAlletra();
+        array.AddVolume("xcpng-ds01", "60002AC0000000000000002600019C45", 1024)["rcopyStatus"] = rcopyStatus;
+        var (provider, settings) = Connect(array);
+        await using var session = await provider.OpenAsync(settings, Ct);
+        Assert.Equal(role, Assert.Single(await session.FindVolumesByWwnAsync(["60002ac0000000000000002600019c45"], Ct)).ReplicationRole);
+    }
+
     private static ArrayVolume Volume(JsonObject volume) => AlletraSession.Volume(volume);
 
     private sealed class Lines : IOperationLog

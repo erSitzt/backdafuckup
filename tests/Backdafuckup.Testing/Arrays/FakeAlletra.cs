@@ -85,7 +85,7 @@ public sealed class FakeAlletra
             var volume = new JsonObject
             {
                 ["uid"] = $"vv{id:x8}", ["id"] = id, ["name"] = name, ["wwn"] = wwn, ["sizeMiB"] = sizeMiB, ["type"] = "VVTYPE_BASE", ["readOnly"] = false,
-                ["domain"] = "bdfu-test",
+                ["domain"] = "bdfu-test", ["rcopyStatus"] = "none",
             };
             Volumes[volume["uid"]!.GetValue<string>()] = volume;
             return volume;
@@ -222,15 +222,42 @@ public sealed class FakeAlletra
                         return (HttpStatusCode.Conflict, new JsonObject { ["message"] = $"Host {hostName} and volume {volumeName} are in different domains" }, null);
                     }
 
+                    // As a B10000 shows it: a template (no port, not active) and an active entry per iSCSI port.
+                    var lun = Vluns.Values.Select(v => v["lun"]!.GetValue<int>()).DefaultIfEmpty(0).Max() + 1;
                     var uid = $"vl{_next++:x8}";
                     Vluns[uid] = new JsonObject
                     {
-                        ["uid"] = uid, ["volumeName"] = volumeName, ["hostName"] = body["hostName"]!.GetValue<string>(), ["lun"] = Vluns.Count + 1,
-                        ["volumeWWN"] = target["wwn"]!.GetValue<string>(), ["active"] = true,
+                        ["uid"] = uid, ["volumeName"] = volumeName, ["hostName"] = hostName, ["lun"] = lun, ["volumeWWN"] = target["wwn"]!.GetValue<string>(),
+                        ["active"] = false, ["portPos"] = null,
                     };
+                    foreach (var port in Ports.Where(p => p["iscsiData"] is not null))
+                    {
+                        var portUid = $"vl{_next++:x8}";
+                        Vluns[portUid] = new JsonObject
+                        {
+                            ["uid"] = portUid, ["volumeName"] = volumeName, ["hostName"] = hostName, ["lun"] = lun, ["volumeWWN"] = target["wwn"]!.GetValue<string>(),
+                            ["active"] = true, ["portPos"] = new JsonObject { ["name"] = port["name"]!.GetValue<string>() },
+                        };
+                    }
+
                     return (HttpStatusCode.Created, null, $"/api/v3/vluns/{uid}");
                 case ("DELETE", "vluns", 4):
-                    return Vluns.Remove(parts[3]) ? (HttpStatusCode.OK, null, null) : (HttpStatusCode.NotFound, null, null);
+                    if (!Vluns.Remove(parts[3], out var removed))
+                    {
+                        return (HttpStatusCode.NotFound, null, null);
+                    }
+
+                    // The template takes its port entries along.
+                    if (removed["portPos"] is null)
+                    {
+                        foreach (var entry in Vluns.Where(v => v.Value["volumeName"]!.GetValue<string>() == removed["volumeName"]!.GetValue<string>()
+                                                              && v.Value["hostName"]!.GetValue<string>() == removed["hostName"]!.GetValue<string>()).Select(v => v.Key).ToList())
+                        {
+                            Vluns.Remove(entry);
+                        }
+                    }
+
+                    return (HttpStatusCode.OK, null, null);
                 case ("GET", "hosts", 3):
                     return (HttpStatusCode.OK, List(Hosts), null);
                 case ("GET", "domainsets", 3):

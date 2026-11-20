@@ -23,6 +23,11 @@ public sealed partial class ApiIntegrationTests
 
     private FakeAlletra Alletra => _alletra ??= new FakeAlletra();
 
+    private FakeAlletra? _alletra2;
+
+    /// <summary>The second array of a replicated pair (address array02.corp.example).</summary>
+    private FakeAlletra Alletra2 => _alletra2 ??= new FakeAlletra();
+
     [Fact]
     public async Task A_storage_system_maps_its_volumes_to_srs_and_datastores_by_wwn_and_cleans_up_only_its_own_objects()
     {
