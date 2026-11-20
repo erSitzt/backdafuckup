@@ -239,7 +239,7 @@ The user wrote **OpenVmfs** in a side project: a read-only VMFS6 and VMDK reader
 
 ### Tests
 - **Without the package:** the orchestration against a fake `IVmfsReader` whose files are byte ranges of the snapshot LUN (`FakeVmfsReader`): reading, refusals (`InUse`, missing, size), verify mode, format change, trust anchor, gap.
-- **With the adapter:** OpenVmfs's own fixtures (`fixture-zero-v1`, `fixture-chain-v1`, with ESXi's hashes) behind a `IDiskReader`; the format itself is tested in OpenVmfs.
+- **With the adapter:** OpenVmfs's own fixtures behind an `IDiskReader`, as partial images (only the captured ranges, a few MB in all): `fixture-chain-esxi8-v1` (three VM snapshots on ESXi 8.0 U3, every level against ESXi's consolidated clone), `fixture-big-v1` (a datastore over 16 TiB), `fixture-inuse-v1` (a disk a host was writing to, refused as in use). The format itself is tested in OpenVmfs.
 - **Lab differential test:** SHA-256 per MiB of whole disks read by (a) and by (b).
 
 ## XCP-ng path (LVHD, opt-in)
@@ -321,7 +321,7 @@ The user wrote **OpenVmfs** in a side project: a read-only VMFS6 and VMDK reader
 6. The Lvhd library.
 7. **XCP-ng integration plus lab rows: the first part that can ship.**
 8. vSphere method (a). Needs spec 1's vim25 client and HotAdd.
-9. Method (b) with OpenVmfs: verify mode and trip (done for LVHD and VMFS), the VMFS branch with a fake reader (done), then the OpenVmfs adapter once the package is published.
+9. Method (b) with OpenVmfs: verify mode and trip (done for LVHD and VMFS), the VMFS branch with a fake reader (done), the OpenVmfs adapter (done 2026-11-20: `src/Backdafuckup.Vmfs`, OpenVmfs 0.3.0 from nuget.org; data located with `VmdkDisk.Map` and read asynchronously from the LUN, metadata through the blocking device on threads of its own; the format text names the OpenVmfs version, so an update starts verify mode again).
 10. Console, metrics, alerts, Grafana row, documentation.
 
 **Metrics:**

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Backdafuckup.Core\Backdafuckup.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="OpenVmfs" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Backdafuckup.Vmfs.Tests" />
+  </ItemGroup>
+</Project>

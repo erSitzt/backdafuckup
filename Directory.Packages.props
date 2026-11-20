@@ -49,6 +49,9 @@
     <!-- Prometheus metrics at /metrics (Apache-2.0). The exporter is still labelled beta upstream; pull only, nothing is sent out. -->
     <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.20.1" />
     <PackageVersion Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.20.1-beta.1" />
+    <!-- VMFS6 reader for backup from array snapshots of vSphere datastores (Apache-2.0, native library inside). Pinned:
+         a new version starts verify mode again (the reader's format text names it). -->
+    <PackageVersion Include="OpenVmfs" Version="0.3.0" />
   </ItemGroup>
   <ItemGroup Label="Test">
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />

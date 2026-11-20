@@ -696,6 +696,7 @@ public static class EngineServiceCollectionExtensions
         services.TryAddSingleton<ILiveNotifier, NullLiveNotifier>();
         services.AddSingleton<BackupSessionRunner>();
         services.AddSingleton<Arrays.ArrayReaderStates>();
+        services.AddSingleton<Core.Arrays.IVmfsReader, Vmfs.OpenVmfsReader>();
         services.AddSingleton<Arrays.ArraySnapshotService>();
         services.AddSingleton<RestoreSessionRunner>();
         services.AddSingleton<MaintenanceSessionRunner>();

@@ -24,6 +24,7 @@
     <Project Path="src/Backdafuckup.VSphere/Backdafuckup.VSphere.csproj" />
     <Project Path="src/Backdafuckup.Arrays.Alletra/Backdafuckup.Arrays.Alletra.csproj" />
     <Project Path="src/Backdafuckup.Lvhd/Backdafuckup.Lvhd.csproj" />
+    <Project Path="src/Backdafuckup.Vmfs/Backdafuckup.Vmfs.csproj" />
     <Project Path="src/Backdafuckup.Web/Backdafuckup.Web.csproj" />
     <Project Path="src/Backdafuckup.Xen/Backdafuckup.Xen.csproj" />
   </Folder>
@@ -50,6 +51,7 @@
     <Project Path="tests/Backdafuckup.VSphere.Tests/Backdafuckup.VSphere.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Arrays.Tests/Backdafuckup.Arrays.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Lvhd.Tests/Backdafuckup.Lvhd.Tests.csproj" />
+    <Project Path="tests/Backdafuckup.Vmfs.Tests/Backdafuckup.Vmfs.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Proxy.Tests/Backdafuckup.Proxy.Tests.csproj" />
     <Project Path="tests/Backdafuckup.Xen.Tests/Backdafuckup.Xen.Tests.csproj" />
   </Folder>
